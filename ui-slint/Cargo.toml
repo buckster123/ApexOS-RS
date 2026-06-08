@@ -1,0 +1,21 @@
+[package]
+name = "ui-slint"
+version = "0.1.0"
+edition = "2021"
+description = "ApexOS-RS native UI — Slint frontend over agentd WebSocket"
+
+[dependencies]
+slint = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json"], default-features = false, optional = true }
+
+[features]
+default = []
+http-api = ["reqwest"]
+
+[build-dependencies]
+slint-build = "1"
