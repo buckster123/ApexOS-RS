@@ -69,6 +69,20 @@ The stack runs in a tiered configuration — the same binaries, different env va
 | **Standard** | Pi 5 4-8GB, x86 mini-PC, M1 Mac Mini | 4-8GB | `linuxkms` or `winit` | `bge-small` or `bge-base` | Ollama 7-13B | ~500 MB |
 | **Pro** | x86 + GPU (RTX/RX/M2+) | 8GB+ | `winit` | `bge-large` + GPU accel | Ollama 30-70B local | whatever you have |
 
+### Deployment modes
+
+Hardware tier (RAM/GPU) and deployment mode are independent — pick both:
+
+| Mode | Use case | UI | Interface |
+|------|----------|----|-----------|
+| **Kiosk** | Pi with dedicated HDMI display | apexos-rs-ui (KMS/DRM) | local display |
+| **Headless** | server, laptop, DGX Spark | none — skip apexos-rs-ui | browser + mobile PWA |
+| **Desktop** | x86 with a monitor you also use for other things | apexos-rs-ui (winit, windowed) | native window |
+
+**Headless is already fully supported** — agentd is a pure daemon, nothing requires a display. The mobile PWA (`/mobile`) and browser UI (`http://host:8787`) are the interface. Install path just skips the apexos-rs-ui service. This is the right mode for: old laptops, mini-PCs, Mac Minis, DGX Spark, anything you SSH into.
+
+**DGX Spark (GB10 Grace Blackwell):** arm64 Linux (same binary as Pi), 128 GB unified LPDDR5X, 1 PetaFLOP FP4. Ollama already runs on it. fastembed with CUDA/TensorRT ORT provider would be near-instant. Can serve 70B+ models to the whole mesh — the natural "Titan" tier ceiling. NVIDIA IGX OS = Ubuntu 22.04 ARM, same package ecosystem.
+
 **Motivation:** Pi 5 16GB boards now sell for $300+ due to AI demand eating RAM supply. The real opportunity is the hardware already sitting in drawers — last season's mini-PC, the Mac Mini that got replaced by a Studio, the Pi 4 2GB from the before-times. These machines often have GPUs that run far bigger models than the Pi 5 can touch natively.
 
 ### Mesh inference delegation

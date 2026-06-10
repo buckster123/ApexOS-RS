@@ -23,7 +23,17 @@ ApexOS-RS targets any spare device — not just Pi 5. Pi 5 16GB boards now cost 
 
 **Design rule:** build UI features for Nano constraints first — no assumption of fast inference, graceful when embedding is disabled, no hard-coded timeouts shorter than 30s for LLM calls. Faster tiers get the same UI, they just respond faster.
 
-**Mesh inference:** a Pro/GPU node in the agentd mesh can serve as inference backend for Nano/Micro nodes. agentd hot-swaps via `POST /api/backend` at runtime — no restart. The GPU node can run `dream_run` for the whole cluster's Cerebro memory consolidation.
+**Deployment mode** (orthogonal to hardware tier):
+
+| Mode | Device | apexos-rs-ui? | Interface |
+|------|--------|---------------|-----------|
+| Kiosk | Pi + HDMI | yes, `linuxkms` | local display |
+| Headless | server, laptop, DGX Spark | no | browser + mobile PWA |
+| Desktop | x86 with shared monitor | yes, `winit` | native window |
+
+Headless is already fully supported — agentd is a pure daemon. Mobile PWA and browser UI are the interfaces. Install flow asks "dedicated display?" and skips apexos-rs-ui on headless nodes. On a ROCm laptop: run agentd headless, access at `http://laptop:8787`, join the mesh — it's just an inference node.
+
+**Mesh inference:** a Pro/GPU node (CUDA/ROCm/Metal) hot-swaps as inference backend for the cluster. agentd `POST /api/backend` at runtime, no restart needed. DGX Spark = Titan tier: arm64 binary runs as-is, serves 70B+ models to whole mesh.
 
 ---
 
