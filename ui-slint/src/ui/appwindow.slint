@@ -1,73 +1,146 @@
-// ApexOS-RS — root window (scaffold)
-// Replace this with the full windowed desktop layout as each build step lands.
+import { Palette, Theme } from "palette.slint";
+import { MessageItem } from "types.slint";
+import { ChatView } from "components/chat_view.slint";
+import { InputBar } from "components/input_bar.slint";
 
-import { VerticalBox, HorizontalBox, Button, ScrollView } from "std-widgets.slint";
+export { Palette, Theme, MessageItem }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
-    width: 1280px;
-    height: 720px;
-    background: #0f172a;
+    background: Palette.bg;
+    preferred-width: 1280px;
+    preferred-height: 720px;
 
-    // ── Properties bound from Rust ──────────────────────────────────
-    in-out property <string> status: "Connecting…";
-    in-out property <string> agent-text: "";
-    in-out property <bool>   agent-busy: false;
+    // ── Properties bound from Rust ──────────────────────────────────────
+    in-out property <[MessageItem]> messages;
+    in-out property <string>        status: "Connecting…";
+    in-out property <bool>          agent-busy: false;
 
-    // ── Callbacks sent to Rust ──────────────────────────────────────
+    // ── Callbacks sent to Rust ──────────────────────────────────────────
     callback send-message(string);
+    callback scroll-to-bottom <=> chat.scroll-to-bottom;
 
-    VerticalBox {
-        padding: 16px;
-        spacing: 12px;
+    // ── Jarvis pulse animation ──────────────────────────────────────────
+    // Timer fires every 1 s; property animates smoothly between 0 and 1.
+    property <float> jarvis-pulse: 0.0;
+    property <bool>  jarvis-phase: false;
 
-        // Status bar
-        HorizontalBox {
-            Text {
-                text: "ApexOS-RS";
-                color: #38bdf8;
-                font-size: 14px;
-                font-weight: 700;
-            }
-            Rectangle { horizontal-stretch: 1; }
-            Text {
-                text: root.status;
-                color: root.agent-busy ? #f59e0b : #64748b;
-                font-size: 12px;
-            }
+    animate jarvis-pulse { duration: 1000ms; easing: ease-in-out; }
+
+    Timer {
+        interval: 1000ms;
+        running: Palette.scanlines;
+        triggered => {
+            root.jarvis-phase = !root.jarvis-phase;
+            root.jarvis-pulse = root.jarvis-phase ? Palette.glow-max-opacity : 0.0;
         }
+    }
 
-        // Agent output
-        ScrollView {
-            vertical-stretch: 1;
-            Text {
-                text: root.agent-text == "" ? "Say 'apex' or type below…" : root.agent-text;
-                color: root.agent-text == "" ? #475569 : #e2e8f0;
-                font-size: 13px;
-                wrap: word-wrap;
-            }
-        }
+    // ── Root layout ────────────────────────────────────────────────────
+    VerticalLayout {
+        // ── Title bar ────────────────────────────────────────────────
+        Rectangle {
+            height: 42px;
+            background: Palette.surface;
+            border-width: 0px;
 
-        // Input row (placeholder — wired in a later build step)
-        HorizontalBox {
-            spacing: 8px;
+            // Bottom border line
             Rectangle {
-                height: 36px;
-                border-radius: 6px;
-                background: #1e293b;
-                horizontal-stretch: 1;
+                y: parent.height - 1px;
+                height: 1px;
+                background: Palette.border-hi;
+            }
+
+            // Jarvis top-glow accent line
+            if Palette.scanlines: Rectangle {
+                y: 0px;
+                height: 2px;
+                background: rgba(0, 212, 255, root.jarvis-pulse * 0.8 + 0.2);
+            }
+
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 8px;
+
+                // Accent dot
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    y: (parent.height - self.height) / 2;
+                    background: root.agent-busy ? Palette.primary : Palette.text-dim;
+                    animate background { duration: 300ms; }
+                }
+
                 Text {
-                    x: 12px;
-                    y: 10px;
-                    text: "Input — TODO";
-                    color: #475569;
-                    font-size: 12px;
+                    text: "ApexOS";
+                    color: Palette.text-bright;
+                    font-size: 13px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                // Theme badge
+                Text {
+                    text: Palette.theme-name;
+                    color: Palette.secondary;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                    letter-spacing: 1.5px;
+                }
+
+                // Status
+                Text {
+                    text: root.status;
+                    color: root.agent-busy ? Palette.warning : Palette.text-dim;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    animate color { duration: 300ms; }
                 }
             }
-            Button {
-                text: "Send";
-                clicked => { root.send-message("hello"); }
+        }
+
+        // ── Chat area ────────────────────────────────────────────────
+        chat := ChatView {
+            vertical-stretch: 1;
+            messages: root.messages;
+            glow-alpha: root.jarvis-pulse;
+        }
+
+        // ── Jarvis ambient glow divider ───────────────────────────
+        if Palette.scanlines: Rectangle {
+            height: 1px;
+            background: rgba(0, 212, 255, root.jarvis-pulse * 0.5 + 0.1);
+        }
+
+        // ── Input bar ────────────────────────────────────────────────
+        Rectangle {
+            background: Palette.bg;
+            HorizontalLayout {
+                padding: 12px;
+                InputBar {
+                    busy: root.agent-busy;
+                    glow-alpha: root.jarvis-pulse;
+                    send(text) => {
+                        root.send-message(text);
+                    }
+                }
             }
         }
+    }
+
+    // ── Jarvis: full-window ambient overlay ────────────────────────────
+    // Gives that digi-glass depth without blocking interactions.
+    if Palette.scanlines: Rectangle {
+        x: 0px; y: 0px;
+        width: parent.width; height: parent.height;
+        background: @linear-gradient(160deg,
+            rgba(0, 212, 255, 0.025) 0%,
+            transparent 45%,
+            rgba(0, 128, 255, 0.018) 100%);
+        // No mouse interaction — it's just a veil
     }
 }

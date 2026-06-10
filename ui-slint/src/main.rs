@@ -1,39 +1,96 @@
 // ApexOS-RS: Slint native UI
 //
-// Architecture: thin WS renderer. agentd is unchanged. This binary connects to
-// ws://localhost:8787/ws (or AGENTD_WS env), subscribes to the Event stream,
-// and renders it natively via Slint + KMS/DRM.
-//
 // Thread model:
-//   main thread  — Slint event loop (required by Slint)
-//   tokio pool   — WebSocket I/O, HTTP API calls
+//   main thread — Slint event loop (never use #[tokio::main])
+//   tokio pool  — WebSocket I/O
 //
-// Bridge: tokio tasks push updates via slint::invoke_from_event_loop().
+// Cross-thread bridge:
+//   slint::invoke_from_event_loop() queues closures to the Slint thread.
+//   VecModel mutations happen on the Slint thread via MESSAGES thread-local.
+//   Outbound WS messages go through an unbounded mpsc channel.
 
 slint::include_modules!();
 
+use slint::Model; // row_count / row_data / set_row_data on VecModel
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+// ── Thread-local model access ─────────────────────────────────────────────────
+// VecModel is !Send, so it must only be touched on the Slint main thread.
+// invoke_from_event_loop closures run on the main thread and can access this.
+thread_local! {
+    static MESSAGES: RefCell<Option<Rc<slint::VecModel<MessageItem>>>> =
+        const { RefCell::new(None) };
+}
+
+fn push_message(item: MessageItem) {
+    MESSAGES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            model.push(item);
+        }
+    });
+}
+
+fn update_last_agent_message(delta: &str) {
+    MESSAGES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            let len = model.row_count();
+            if len > 0 {
+                let mut last = model.row_data(len - 1).unwrap();
+                if last.role.as_str() == "agent" {
+                    let new_text = last.text.as_str().to_string() + delta;
+                    last.text = new_text.into();
+                    model.set_row_data(len - 1, last);
+                }
+            }
+        }
+    });
+}
+
+fn finish_last_agent_message() {
+    MESSAGES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            let len = model.row_count();
+            if len > 0 {
+                let mut last = model.row_data(len - 1).unwrap();
+                if last.role.as_str() == "agent" {
+                    last.streaming = false;
+                    model.set_row_data(len - 1, last);
+                }
+            }
+        }
+    });
+}
+
+// ── App state (shared with WS task via Arc<Mutex>) ───────────────────────────
 #[derive(Default)]
 struct AppState {
     session_id: Option<u64>,
-    agent_text: String,
-    connected: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Tokio runtime on background threads — main thread stays for Slint.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
     let ui = AppWindow::new()?;
+
+    // Build message model and register it
+    let messages: Rc<slint::VecModel<MessageItem>> = Rc::new(slint::VecModel::default());
+    ui.set_messages(slint::ModelRc::from(messages.clone()));
+    MESSAGES.with(|m| *m.borrow_mut() = Some(messages.clone()));
+
     let state = Arc::new(Mutex::new(AppState::default()));
 
-    // ── WS client loop ────────────────────────────────────────────────
+    // Outbound WS channel
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+    // ── WS task ──────────────────────────────────────────────────────────────
     let ui_weak = ui.as_weak();
     let state_ws = state.clone();
     rt.spawn(async move {
@@ -46,77 +103,149 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(pair) => pair,
             Err(e) => {
                 eprintln!("[ui-slint] WS connect failed: {e}");
+                let w = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = w.upgrade() {
+                        ui.set_status("Connection failed — is agentd running?".into());
+                    }
+                })
+                .ok();
                 return;
             }
         };
 
         let (mut write, mut read) = ws.split();
 
-        // Send session_init (agentd assigns a session ID back)
         let init = serde_json::json!({"type": "session_init"});
         write.send(Message::Text(init.to_string().into())).await.ok();
 
         {
-            let mut s = state_ws.lock().unwrap();
-            s.connected = true;
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    ui.set_status("Connected".into());
+                }
+            })
+            .ok();
         }
 
-        let ui_weak2 = ui_weak.clone();
-        slint::invoke_from_event_loop(move || {
-            if let Some(ui) = ui_weak2.upgrade() {
-                ui.set_status("Connected to agentd".into());
-            }
-        })
-        .ok();
-
-        while let Some(Ok(msg)) = read.next().await {
-            if let Message::Text(text) = msg {
-                if let Ok(ev) = serde_json::from_str::<Value>(&text) {
-                    let ui_weak3 = ui_weak.clone();
-                    let state_ev = state_ws.clone();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui_weak3.upgrade() {
-                            handle_event(&ui, &ev, &state_ev);
+        loop {
+            tokio::select! {
+                msg = read.next() => {
+                    match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Ok(ev) = serde_json::from_str::<Value>(&text) {
+                                dispatch_event(ui_weak.clone(), ev, state_ws.clone());
+                            }
                         }
-                    })
-                    .ok();
+                        Some(Ok(_)) => {}
+                        _ => {
+                            eprintln!("[ui-slint] WS disconnected");
+                            let w = ui_weak.clone();
+                            slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = w.upgrade() {
+                                    ui.set_status("Disconnected".into());
+                                }
+                            })
+                            .ok();
+                            break;
+                        }
+                    }
+                }
+                out = rx.recv() => {
+                    if let Some(text) = out {
+                        write.send(Message::Text(text.into())).await.ok();
+                    }
                 }
             }
         }
+    });
 
-        eprintln!("[ui-slint] WS disconnected");
+    // ── send-message callback ─────────────────────────────────────────────────
+    let tx_send = tx.clone();
+    let messages_send = messages.clone();
+    ui.on_send_message(move |text| {
+        if text.is_empty() {
+            return;
+        }
+        messages_send.push(MessageItem {
+            role: "user".into(),
+            text: text.clone(),
+            streaming: false,
+        });
+        let payload = serde_json::json!({"type": "user_prompt", "text": text.as_str()}).to_string();
+        tx_send.send(payload).ok();
     });
 
     ui.run()?;
     Ok(())
 }
 
-/// Dispatch an agentd Event to the Slint UI.
-/// Called on the Slint main thread — safe to call any ui.set_*() here.
-fn handle_event(ui: &AppWindow, ev: &Value, state: &Arc<Mutex<AppState>>) {
-    let ev_type = ev["type"].as_str().unwrap_or("");
-    match ev_type {
+/// Queue a UI update on the Slint main thread for the given agentd event.
+fn dispatch_event(
+    ui_weak: slint::Weak<AppWindow>,
+    ev: Value,
+    state: Arc<Mutex<AppState>>,
+) {
+    let ev_type = ev["type"].as_str().unwrap_or("").to_string();
+
+    match ev_type.as_str() {
         "hello" => {
-            if let Some(id) = ev["session_id"].as_u64() {
-                state.lock().unwrap().session_id = Some(id);
-                ui.set_status(format!("Session {id}").into());
-            }
+            let id = ev["session_id"].as_u64();
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    if let Some(id) = id {
+                        state.lock().unwrap().session_id = Some(id);
+                        ui.set_status(format!("Session {id}").into());
+                    }
+                }
+            })
+            .ok();
         }
-        "agent_text" => {
-            if let Some(delta) = ev["delta"].as_str() {
-                let mut s = state.lock().unwrap();
-                s.agent_text.push_str(delta);
-                ui.set_agent_text(s.agent_text.clone().into());
-            }
-        }
-        "turn_complete" => {
-            ui.set_agent_busy(false);
-        }
+
         "turn_started" => {
-            state.lock().unwrap().agent_text.clear();
-            ui.set_agent_text("".into());
-            ui.set_agent_busy(true);
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    ui.set_agent_busy(true);
+                    push_message(MessageItem {
+                        role: "agent".into(),
+                        text: "".into(),
+                        streaming: true,
+                    });
+                    ui.invoke_scroll_to_bottom();
+                }
+            })
+            .ok();
         }
+
+        "agent_text" => {
+            let delta = ev["delta"].as_str().unwrap_or("").to_string();
+            if delta.is_empty() {
+                return;
+            }
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    update_last_agent_message(&delta);
+                    ui.invoke_scroll_to_bottom();
+                }
+            })
+            .ok();
+        }
+
+        "turn_complete" => {
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    finish_last_agent_message();
+                    ui.set_agent_busy(false);
+                }
+            })
+            .ok();
+        }
+
         _ => {}
     }
 }

@@ -1,0 +1,53 @@
+import { Palette, Theme } from "../palette.slint";
+
+// Single chat message bubble.
+// User messages: right-aligned, primary-tinted.
+// Agent messages: left-aligned, surface-tinted.
+// Streaming: shows a blinking block cursor.
+// Jarvis: agent bubble border glows with pulse passed from AppWindow.
+
+export component MessageBubble {
+    in property <string> role;
+    in property <string> text;
+    in property <bool>   streaming: false;
+    in property <float>  glow-alpha: 0.0;   // 0–1, driven by AppWindow Timer
+
+    property <bool> is-user: root.role == "user";
+
+    HorizontalLayout {
+        padding-left:  root.is-user ? 72px : 0px;
+        padding-right: root.is-user ? 0px  : 72px;
+        padding-top:   3px;
+        padding-bottom: 3px;
+
+        Rectangle {
+            background: root.is-user ? Palette.user-bubble : Palette.agent-bubble;
+            border-radius: Palette.radius-lg;
+            border-width: 1px;
+            border-color: root.is-user
+                ? Palette.border
+                : (Palette.scanlines && root.streaming
+                    ? rgba(0, 212, 255, root.glow-alpha * 0.7 + 0.15)
+                    : Palette.border);
+            drop-shadow-blur:   Palette.scanlines && root.streaming ? 8px : 0px;
+            drop-shadow-color:  rgba(0, 212, 255, root.glow-alpha * 0.5);
+            drop-shadow-offset-y: 0px;
+
+            VerticalLayout {
+                padding-top:    10px;
+                padding-bottom: 10px;
+                padding-left:   14px;
+                padding-right:  14px;
+
+                Text {
+                    text: root.text + (root.streaming ? "▊" : "");
+                    color: root.is-user
+                        ? Palette.user-bubble-text
+                        : Palette.agent-bubble-text;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,45 @@
+import { Palette } from "../palette.slint";
+import { MessageItem } from "../types.slint";
+import { MessageBubble } from "message_bubble.slint";
+
+// Scrollable message list.
+// Auto-scroll is triggered by AppWindow calling scroll-to-bottom().
+
+export component ChatView {
+    in property <[MessageItem]> messages;
+    in property <float>         glow-alpha: 0.0;
+
+    callback scroll-to-bottom();
+
+    // Expose the flickable for scroll control
+    property <length> flick-height: flick.viewport-height;
+
+    scroll-to-bottom => {
+        flick.viewport-y = min(0px, -(flick.viewport-height - flick.height));
+    }
+
+    flick := Flickable {
+        interactive: true;
+
+        VerticalLayout {
+            padding:  12px;
+            spacing:  6px;
+            alignment: start;
+
+            // Empty-state hint
+            if root.messages.length == 0: Text {
+                text: "Say 'apex' or type below…";
+                color: Palette.text-dim;
+                font-size: 13px;
+                horizontal-alignment: center;
+            }
+
+            for item in root.messages: MessageBubble {
+                role:       item.role;
+                text:       item.text;
+                streaming:  item.streaming;
+                glow-alpha: root.glow-alpha;
+            }
+        }
+    }
+}

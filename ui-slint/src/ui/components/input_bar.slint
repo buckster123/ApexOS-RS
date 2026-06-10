@@ -1,0 +1,96 @@
+import { Palette } from "../palette.slint";
+
+// Text input + send button.
+// Calls send(text) when user presses Enter or the send button.
+// Clears after send.
+
+export component InputBar {
+    callback send(string);
+
+    in property <bool>   busy: false;
+    in property <float>  glow-alpha: 0.0;
+
+    height: 52px;
+
+    Rectangle {
+        background: Palette.surface;
+        border-radius: Palette.radius;
+        border-width: 1px;
+        border-color: Palette.scanlines
+            ? rgba(0, 212, 255, root.glow-alpha * 0.4 + 0.1)
+            : Palette.border-hi;
+        drop-shadow-blur:  Palette.scanlines ? 6px : 0px;
+        drop-shadow-color: rgba(0, 212, 255, root.glow-alpha * 0.3);
+        drop-shadow-offset-y: 0px;
+
+        HorizontalLayout {
+            padding: 8px;
+            spacing: 8px;
+
+            // Input field with manual placeholder overlay
+            field-wrap := Rectangle {
+                horizontal-stretch: 1;
+
+                field := TextInput {
+                    width: parent.width;
+                    height: parent.height;
+                    font-size: 13px;
+                    color: Palette.text;
+                    selection-background-color: Palette.primary-dim;
+                    selection-foreground-color: Palette.text-bright;
+                    single-line: true;
+                    enabled: !root.busy;
+
+                    accepted => {
+                        if self.text != "" {
+                            root.send(self.text);
+                            self.text = "";
+                        }
+                    }
+                }
+
+                // Placeholder — shown when field is empty
+                if field.text == "": Text {
+                    x: 2px;
+                    width: parent.width - 4px;
+                    height: parent.height;
+                    text: root.busy ? "apex is responding…" : "Message apex…";
+                    color: Palette.text-dim;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Send button
+            send-btn := Rectangle {
+                width: 36px;
+                height: 36px;
+                border-radius: Palette.radius;
+                background: root.busy
+                    ? Palette.surface-hi
+                    : (send-area.has-hover ? Palette.primary : Palette.primary-dim);
+
+                animate background { duration: 150ms; easing: ease; }
+
+                Text {
+                    text: root.busy ? "…" : "↑";
+                    color: root.busy ? Palette.text-dim : Palette.bg;
+                    font-size: 16px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                send-area := TouchArea {
+                    enabled: !root.busy && field.text != "";
+                    clicked => {
+                        if field.text != "" {
+                            root.send(field.text);
+                            field.text = "";
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
