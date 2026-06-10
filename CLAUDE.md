@@ -154,7 +154,7 @@ SLINT_FULLSCREEN=1 AGENTD_WS=ws://192.168.0.158:8787/ws cargo run
 |------|---------|------|--------|
 | 0 | Scaffold | `cargo build` compiles, WS connects, events logged | ✓ |
 | 1 | Agent chat | Streaming text view, dark theme, send input | ✓ |
-| 2 | Tool call blocks | Collapsible cards, inline approval buttons | ⬜ |
+| 2 | Tool call blocks | Collapsible cards, inline approval buttons | ✓ |
 | 3 | Home dashboard | CPU/RAM/disk bars, IAQ badge (`/api/run` poll) | ⬜ |
 | 4 | Sensor window | IAQ stats + thermal heatmap (custom painter) | ⬜ |
 | 5 | Session management | Session init, picker, history replay | ⬜ |
