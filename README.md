@@ -79,6 +79,22 @@ Both distros share the same `agentd` backend. You choose your frontend.
 
 ## Architecture
 
+```mermaid
+graph LR
+    subgraph Pi["Raspberry Pi"]
+        agentd["agentd\n(unchanged)"]
+        WS["ws://localhost:8787/ws"]
+        UI["apexos-rs-ui\nSlint + KMS/DRM\n~10 MB RSS"]
+        HDMI["/dev/tty7\nHDMI out"]
+        Browser["Browser\n(any device)"]
+    end
+
+    agentd <-->|Event stream| WS
+    WS --> UI
+    WS --> Browser
+    UI -->|renders to| HDMI
+```
+
 See [`docs/architecture.md`](docs/architecture.md) — covers the WS renderer pattern,
 thread model (Slint main thread + tokio pool), KMS/DRM setup, and agentd protocol.
 
