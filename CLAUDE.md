@@ -2,10 +2,28 @@
 
 > Pure-Rust native UI distro of ApexOS. Slint frontend + KMS/DRM direct rendering.
 > Replaces Chromium kiosk with a single ~10 MB binary. agentd is unchanged.
+> Runs on any spare device — Pi Zero 2W to GPU workstation.
 
 See also: [docs/architecture.md](docs/architecture.md) | [docs/build-roadmap.md](docs/build-roadmap.md) | [docs/slint-notes.md](docs/slint-notes.md)
 
 Reference runtime: `../ApexOS` (Rust — **do NOT modify** during this port).
+
+---
+
+## Platform vision
+
+ApexOS-RS targets any spare device — not just Pi 5. Pi 5 16GB boards now cost $300+ due to AI demand on RAM supply. The real hardware base is what people already own: Pi 4 2GB, last-gen mini-PCs, old laptops, replaced Mac Minis, studios. Some of these have GPUs that run models far beyond what Pi native hardware can handle.
+
+| Tier | Example hardware | `SLINT_BACKEND` | cerebro RSS | LLM |
+|------|-----------------|-----------------|-------------|-----|
+| Nano | Pi Zero 2W, any 512MB Linux board | `linuxkms-femtovg` | 23 MB (FTS5 only) | API only |
+| Micro | Pi 4 1-2GB, older ARM64 | `linuxkms` | 275 MB (bge-small) | API or small local |
+| Standard | Pi 5, x86 mini-PC | `linuxkms` | 275 MB | Ollama 7-13B |
+| Pro | x86 + GPU (CUDA/ROCm/Metal) | `winit` | 500 MB+ (bge-large) | Ollama 30-70B local |
+
+**Design rule:** build UI features for Nano constraints first — no assumption of fast inference, graceful when embedding is disabled, no hard-coded timeouts shorter than 30s for LLM calls. Faster tiers get the same UI, they just respond faster.
+
+**Mesh inference:** a Pro/GPU node in the agentd mesh can serve as inference backend for Nano/Micro nodes. agentd hot-swaps via `POST /api/backend` at runtime — no restart. The GPU node can run `dream_run` for the whole cluster's Cerebro memory consolidation.
 
 ---
 

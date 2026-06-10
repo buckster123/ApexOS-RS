@@ -58,15 +58,60 @@ Both distros share the same `agentd` backend. You choose your frontend.
 
 ---
 
-## Hardware Compatibility
+## Platform tiers
 
-| Board | RAM | Status |
-|-------|-----|--------|
-| Raspberry Pi 5 (8GB / 4GB) | plenty | Primary target |
-| Raspberry Pi 4 (4GB / 2GB) | comfortable | Supported |
-| Raspberry Pi 4 (1GB) | tight (agentd + LLM calls are fine) | Likely works |
-| Raspberry Pi Zero 2W | 512MB — stretch | Soft renderer, limited models |
-| Other Linux/KMS boards | varies | Should work if v3d/vc4 present |
+The stack runs in a tiered configuration — the same binaries, different env vars. No special builds per device.
+
+| Tier | Hardware | RAM | Renderer | Embeddings | LLM | RSS target |
+|------|----------|-----|----------|-----------|-----|-----------|
+| **Nano** | Pi Zero 2W, any 512MB Linux board | 512MB | `linuxkms-femtovg` (software) | disabled (FTS5 only) | API only | ~60 MB total |
+| **Micro** | Pi 4 1-2GB, older ARM64 boards | 1-2GB | `linuxkms` | `bge-small` 384-dim | API or small local | ~350 MB |
+| **Standard** | Pi 5 4-8GB, x86 mini-PC, M1 Mac Mini | 4-8GB | `linuxkms` or `winit` | `bge-small` or `bge-base` | Ollama 7-13B | ~500 MB |
+| **Pro** | x86 + GPU (RTX/RX/M2+) | 8GB+ | `winit` | `bge-large` + GPU accel | Ollama 30-70B local | whatever you have |
+
+**Motivation:** Pi 5 16GB boards now sell for $300+ due to AI demand eating RAM supply. The real opportunity is the hardware already sitting in drawers — last season's mini-PC, the Mac Mini that got replaced by a Studio, the Pi 4 2GB from the before-times. These machines often have GPUs that run far bigger models than the Pi 5 can touch natively.
+
+### Mesh inference delegation
+
+```mermaid
+graph LR
+    subgraph Nano["Nano node\nPi Zero 2W"]
+        UI1["apexos-rs-ui\n7 MB"]
+        AG1["agentd\n~30 MB"]
+    end
+    subgraph Micro["Micro node\nPi 4 1GB"]
+        UI2["apexos-rs-ui\n10 MB"]
+        AG2["agentd\n~30 MB"]
+        CB2["cerebro-mcp\nFTS5 only"]
+    end
+    subgraph GPU["Pro node\nold RTX 2070 box"]
+        AG3["agentd"]
+        CB3["cerebro-mcp\nbge-large + GPU"]
+        OL["Ollama\n30B-70B models"]
+    end
+
+    AG1 -->|"AGENTD_BACKEND=ollama\nAGENTD_OAI_BASE_URL=gpu-node:11434"| OL
+    AG2 -->|send_to_agent| AG3
+    AG3 --> OL
+    CB2 -->|dream_run delegated| CB3
+```
+
+agentd's mesh (avahi discovery + `peers.toml`) already handles this. The GPU node joins the mesh, Nano/Micro nodes hot-swap their inference backend to point at it — no restart needed (`POST /api/backend`). The GPU node can also run `dream_run` for the whole cluster's Cerebro memory consolidation.
+
+### Hardware compatibility
+
+| Board | RAM | Tier | Notes |
+|-------|-----|------|-------|
+| Raspberry Pi 5 (8GB) | plenty | Standard/Pro | Current primary deploy target |
+| Raspberry Pi 5 (4GB) | comfortable | Standard | |
+| Raspberry Pi 4 (4GB / 2GB) | fine | Standard/Micro | BCM2711, `v3d` driver |
+| Raspberry Pi 4 (1GB) | tight | Micro | `bge-small` fits, keep swap off |
+| Raspberry Pi Zero 2W | 512MB | Nano | `linuxkms-femtovg` + FTS5 only |
+| x86 mini-PC (no GPU) | 4-16GB | Standard | Ollama 7-13B local inference |
+| x86 + NVIDIA GPU | 8GB+ | Pro | CUDA ORT provider, Ollama with full VRAM |
+| x86 + AMD GPU (RX 6xxx+) | 8GB+ | Pro | ROCm 7+, same as CUDA path |
+| Apple Silicon (M1/M2/M3) | 8-96GB | Pro | CoreML ORT provider, Ollama Metal |
+| Any Linux/KMS board | varies | Micro+ | Needs DRM driver (`/dev/dri/card0`) |
 
 ---
 
