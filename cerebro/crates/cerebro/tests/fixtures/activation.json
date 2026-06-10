@@ -1,0 +1,269 @@
+{
+  "meta": {
+    "now_unix": 1735732800.0,
+    "now_iso": "2025-01-01T12:00:00Z",
+    "actr_decay_default": 0.5,
+    "actr_noise_default": 0.4,
+    "actr_threshold_default": 0.0
+  },
+  "actr": [
+    {
+      "access_times_ago_secs": [
+        60
+      ],
+      "decay": 0.5,
+      "actr": -2.04717228111105
+    },
+    {
+      "access_times_ago_secs": [
+        60,
+        3600,
+        86400
+      ],
+      "decay": 0.5,
+      "actr": -1.902680880529103
+    },
+    {
+      "access_times_ago_secs": [
+        10,
+        10,
+        10
+      ],
+      "decay": 0.5,
+      "actr": -0.05268025782891318
+    },
+    {
+      "access_times_ago_secs": [
+        2592000
+      ],
+      "decay": 0.5,
+      "actr": -7.383970168227151
+    },
+    {
+      "access_times_ago_secs": [
+        3600,
+        7200
+      ],
+      "decay": 0.5,
+      "actr": -3.5595445654825304
+    },
+    {
+      "access_times_ago_secs": [
+        1
+      ],
+      "decay": 0.5,
+      "actr": 0.0
+    },
+    {
+      "access_times_ago_secs": [
+        60,
+        3600,
+        86400
+      ],
+      "decay": 0.3,
+      "actr": -0.8878133341470686
+    },
+    {
+      "access_times_ago_secs": [
+        60,
+        3600,
+        86400
+      ],
+      "decay": 0.7,
+      "actr": -2.8048730278895038
+    }
+  ],
+  "fsrs_retrievability": [
+    {
+      "elapsed_days": 0.0,
+      "stability": 1.0,
+      "retrievability": 1.0
+    },
+    {
+      "elapsed_days": 1.0,
+      "stability": 1.0,
+      "retrievability": 0.8999999999999999
+    },
+    {
+      "elapsed_days": 7.0,
+      "stability": 2.0,
+      "retrievability": 0.72
+    },
+    {
+      "elapsed_days": 30.0,
+      "stability": 5.0,
+      "retrievability": 0.6000000000000001
+    },
+    {
+      "elapsed_days": 30.0,
+      "stability": 10.0,
+      "retrievability": 0.75
+    },
+    {
+      "elapsed_days": 90.0,
+      "stability": 30.0,
+      "retrievability": 0.75
+    },
+    {
+      "elapsed_days": 0.5,
+      "stability": 1.0,
+      "retrievability": 0.9473684210526315
+    },
+    {
+      "elapsed_days": 365.0,
+      "stability": 365.0,
+      "retrievability": 0.8999999999999999
+    }
+  ],
+  "fsrs_update_recall": [
+    {
+      "stability": 1.0,
+      "difficulty": 5.0,
+      "retrievability": 0.9,
+      "new_stability": 365.0
+    },
+    {
+      "stability": 1.0,
+      "difficulty": 5.0,
+      "retrievability": 0.5,
+      "new_stability": 365.0
+    },
+    {
+      "stability": 1.0,
+      "difficulty": 5.0,
+      "retrievability": 0.1,
+      "new_stability": 365.0
+    },
+    {
+      "stability": 5.0,
+      "difficulty": 5.0,
+      "retrievability": 0.9,
+      "new_stability": 365.0
+    },
+    {
+      "stability": 5.0,
+      "difficulty": 8.0,
+      "retrievability": 0.5,
+      "new_stability": 365.0
+    },
+    {
+      "stability": 30.0,
+      "difficulty": 3.0,
+      "retrievability": 0.7,
+      "new_stability": 365.0
+    }
+  ],
+  "fsrs_update_lapse": [
+    {
+      "stability": 1.0,
+      "difficulty": 5.0,
+      "new_stability": 0.42929072433157667
+    },
+    {
+      "stability": 5.0,
+      "difficulty": 5.0,
+      "new_stability": 2.1464536216578836
+    },
+    {
+      "stability": 30.0,
+      "difficulty": 3.0,
+      "new_stability": 13.641449098593585
+    },
+    {
+      "stability": 10.0,
+      "difficulty": 8.0,
+      "new_stability": 3.737192818846552
+    }
+  ],
+  "fsrs_update_difficulty": [
+    {
+      "difficulty": 5.0,
+      "retrievability": 0.9,
+      "new_difficulty": 4.712
+    },
+    {
+      "difficulty": 5.0,
+      "retrievability": 0.1,
+      "new_difficulty": 5.288
+    },
+    {
+      "difficulty": 5.0,
+      "retrievability": 0.5,
+      "new_difficulty": 5.0
+    },
+    {
+      "difficulty": 2.0,
+      "retrievability": 0.9,
+      "new_difficulty": 2.012
+    },
+    {
+      "difficulty": 9.0,
+      "retrievability": 0.1,
+      "new_difficulty": 8.888
+    }
+  ],
+  "recall_probability": [
+    {
+      "activation": 0.0,
+      "threshold": 0.0,
+      "noise": 0.4,
+      "probability": 0.5
+    },
+    {
+      "activation": 1.0,
+      "threshold": 0.0,
+      "noise": 0.4,
+      "probability": 0.9241418199787566
+    },
+    {
+      "activation": -1.0,
+      "threshold": 0.0,
+      "noise": 0.4,
+      "probability": 0.07585818002124355
+    },
+    {
+      "activation": 0.5,
+      "threshold": 0.0,
+      "noise": 0.4,
+      "probability": 0.7772998611746911
+    },
+    {
+      "activation": -2.0,
+      "threshold": 0.0,
+      "noise": 0.4,
+      "probability": 0.0066928509242848554
+    }
+  ],
+  "link_decay": [
+    {
+      "stored_weight": 1.0,
+      "age_days": 0.0,
+      "halflife_days": 30.0,
+      "effective_weight": 1.0
+    },
+    {
+      "stored_weight": 1.0,
+      "age_days": 30.0,
+      "halflife_days": 30.0,
+      "effective_weight": 0.8999999999999999
+    },
+    {
+      "stored_weight": 1.0,
+      "age_days": 270.0,
+      "halflife_days": 30.0,
+      "effective_weight": 0.5
+    },
+    {
+      "stored_weight": 0.8,
+      "age_days": 7.0,
+      "halflife_days": 30.0,
+      "effective_weight": 0.779783393501805
+    },
+    {
+      "stored_weight": 0.5,
+      "age_days": 90.0,
+      "halflife_days": 30.0,
+      "effective_weight": 0.375
+    }
+  ]
+}

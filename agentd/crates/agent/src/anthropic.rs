@@ -1,0 +1,396 @@
+use crate::provider::{Chunk, ChunkStream, Provider};
+use apexos_core::{ContentBlock, Message, ToolSpec};
+use async_trait::async_trait;
+use futures_util::StreamExt;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+pub struct AnthropicProvider {
+    http:    reqwest::Client,
+    api_key: Arc<RwLock<String>>,
+    model:   Arc<RwLock<String>>,
+}
+
+impl AnthropicProvider {
+    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            http:    reqwest::Client::new(),
+            api_key: Arc::new(RwLock::new(api_key.into())),
+            model:   Arc::new(RwLock::new(model.into())),
+        }
+    }
+
+    /// Shares existing Arcs so gateway HTTP handlers can update key/model at runtime.
+    pub fn new_shared(api_key: Arc<RwLock<String>>, model: Arc<RwLock<String>>) -> Self {
+        Self { http: reqwest::Client::new(), api_key, model }
+    }
+
+    pub fn key_arc(&self)   -> Arc<RwLock<String>> { Arc::clone(&self.api_key) }
+    pub fn model_arc(&self) -> Arc<RwLock<String>> { Arc::clone(&self.model) }
+}
+
+#[async_trait]
+impl Provider for AnthropicProvider {
+    async fn messages_stream(
+        &self,
+        history: &[Message],
+        tools: &[ToolSpec],
+        system: Option<&str>,
+    ) -> anyhow::Result<ChunkStream> {
+        let api_key = self.api_key.read().await.clone();
+        let model   = self.model.read().await.clone();
+        let body = build_body(&model, history, tools, system);
+        if api_key.is_empty() {
+            return Err(anyhow::anyhow!("ANTHROPIC_API_KEY not set — enter it via the browser UI"));
+        }
+
+        let resp = self.http
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text   = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("Anthropic API {status}: {text}"));
+        }
+
+        Ok(Box::pin(sse_to_chunks(resp.bytes_stream())))
+    }
+}
+
+// ── request body ─────────────────────────────────────────────────────────────
+
+fn build_body(model: &str, history: &[Message], tools: &[ToolSpec], system: Option<&str>) -> Value {
+    let messages: Vec<Value> = history.iter().map(msg_to_json).collect();
+
+    let mut body = serde_json::json!({
+        "model":      model,
+        "max_tokens": 16000,
+        "messages":   messages,
+        "stream":     true,
+        "thinking":   { "type": "adaptive" },
+    });
+
+    if let Some(sys) = system {
+        body["system"] = Value::String(sys.to_string());
+    }
+
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools.iter().map(tool_to_json).collect());
+    }
+
+    body
+}
+
+fn msg_to_json(msg: &Message) -> Value {
+    match msg {
+        Message::User { content } => serde_json::json!({
+            "role":    "user",
+            "content": content.iter().map(block_to_json).collect::<Vec<_>>(),
+        }),
+        Message::Assistant { content } => serde_json::json!({
+            "role":    "assistant",
+            "content": content.iter().map(block_to_json).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+fn block_to_json(b: &ContentBlock) -> Value {
+    match b {
+        ContentBlock::Text { text } =>
+            serde_json::json!({ "type": "text", "text": text }),
+        ContentBlock::Thinking { thinking, signature } =>
+            serde_json::json!({ "type": "thinking", "thinking": thinking, "signature": signature }),
+        ContentBlock::ToolUse { id, name, input } =>
+            serde_json::json!({ "type": "tool_use", "id": id, "name": name, "input": input }),
+        ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+            // Anthropic requires content to be a string or list of content blocks,
+            // not a raw JSON object/number/etc. Coerce anything non-string here.
+            let safe_content = match content {
+                serde_json::Value::String(_) => content.clone(),
+                other => serde_json::Value::String(other.to_string()),
+            };
+            serde_json::json!({ "type": "tool_result", "tool_use_id": tool_use_id,
+                                "content": safe_content, "is_error": is_error })
+        }
+    }
+}
+
+fn tool_to_json(spec: &ToolSpec) -> Value {
+    serde_json::json!({
+        "name":         spec.name,
+        "description":  spec.description,
+        "input_schema": spec.input_schema,
+    })
+}
+
+// ── SSE stream parser ─────────────────────────────────────────────────────────
+
+#[derive(Default)]
+enum BlockKind { #[default] Text, Thinking, ToolUse }
+
+#[derive(Default)]
+struct BlockState {
+    kind:       BlockKind,
+    text:       String,
+    thinking:   String,
+    signature:  String,
+    tool_id:    String,
+    tool_name:  String,
+    input_json: String,
+}
+
+fn sse_to_chunks(
+    byte_stream: impl futures_core::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+) -> impl futures_core::Stream<Item = anyhow::Result<Chunk>> + Send + 'static {
+    async_stream::try_stream! {
+        let mut buf    = String::new();
+        let mut blocks: HashMap<usize, BlockState> = HashMap::new();
+        let mut stop   = false;
+
+        tokio::pin!(byte_stream);
+
+        while let Some(chunk) = byte_stream.next().await {
+            if stop { break; }
+            let bytes: bytes::Bytes = chunk.map_err(anyhow::Error::from)?;
+            buf.push_str(std::str::from_utf8(&bytes).unwrap_or(""));
+
+            while let Some(pos) = buf.find('\n') {
+                let line = buf[..pos].trim_end_matches('\r').to_owned();
+                buf.drain(..=pos);
+
+                let data = match line.strip_prefix("data: ") {
+                    Some(d) => d.to_owned(),
+                    None    => continue,
+                };
+
+                let val: Value = match serde_json::from_str(&data) {
+                    Ok(v)  => v,
+                    Err(_) => continue,
+                };
+
+                match val["type"].as_str().unwrap_or("") {
+                    "content_block_start" => {
+                        let idx = val["index"].as_u64().unwrap_or(0) as usize;
+                        let cb  = &val["content_block"];
+                        let state = match cb["type"].as_str().unwrap_or("") {
+                            "thinking" => BlockState { kind: BlockKind::Thinking, ..Default::default() },
+                            "tool_use" => BlockState {
+                                kind:      BlockKind::ToolUse,
+                                tool_id:   cb["id"].as_str().unwrap_or("").to_owned(),
+                                tool_name: cb["name"].as_str().unwrap_or("").to_owned(),
+                                ..Default::default()
+                            },
+                            _ => BlockState { kind: BlockKind::Text, ..Default::default() },
+                        };
+                        blocks.insert(idx, state);
+                    }
+
+                    "content_block_delta" => {
+                        let idx   = val["index"].as_u64().unwrap_or(0) as usize;
+                        let delta = val["delta"].clone();
+
+                        if let Some(s) = blocks.get_mut(&idx) {
+                            match delta["type"].as_str().unwrap_or("") {
+                                "text_delta" => {
+                                    let t = delta["text"].as_str().unwrap_or("").to_owned();
+                                    s.text.push_str(&t);
+                                    yield Chunk::TextDelta(t);
+                                }
+                                "thinking_delta" => {
+                                    let t = delta["thinking"].as_str().unwrap_or("").to_owned();
+                                    s.thinking.push_str(&t);
+                                    yield Chunk::ThinkingDelta(t);
+                                }
+                                "signature_delta" => {
+                                    // Signature arrives at end of thinking block — keep it.
+                                    let sig = delta["signature"].as_str().unwrap_or("").to_owned();
+                                    s.signature.push_str(&sig);
+                                }
+                                "input_json_delta" => {
+                                    let j = delta["partial_json"].as_str().unwrap_or("").to_owned();
+                                    s.input_json.push_str(&j);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    "content_block_stop" => {
+                        let idx = val["index"].as_u64().unwrap_or(0) as usize;
+                        if let Some(s) = blocks.remove(&idx) {
+                            match s.kind {
+                                BlockKind::Text => {
+                                    yield Chunk::TextBlock(s.text);
+                                }
+                                BlockKind::Thinking => {
+                                    yield Chunk::ThinkingBlock {
+                                        thinking:  s.thinking,
+                                        signature: s.signature,
+                                    };
+                                }
+                                BlockKind::ToolUse => {
+                                    let input: Value = if s.input_json.is_empty() {
+                                        Value::Object(Default::default())
+                                    } else {
+                                        serde_json::from_str(&s.input_json)?
+                                    };
+                                    yield Chunk::ToolUse {
+                                        id:    s.tool_id,
+                                        name:  s.tool_name,
+                                        input,
+                                    };
+                                }
+                            }
+                        }
+                    }
+
+                    "message_stop" => {
+                        stop = true;
+                        break;
+                    }
+
+                    _ => {}
+                }
+            }
+        }
+        yield Chunk::Done;
+    }
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+
+    fn make_sse(lines: &[&str]) -> impl futures_core::Stream<Item = Result<bytes::Bytes, reqwest::Error>> {
+        let payload: bytes::Bytes = lines.join("\n").into();
+        futures_util::stream::once(async move { Ok::<bytes::Bytes, reqwest::Error>(payload) })
+    }
+
+    #[tokio::test]
+    async fn parses_text_block() {
+        let sse = make_sse(&[
+            "event: content_block_start",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            "",
+            "event: content_block_delta",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+            "",
+            "event: content_block_stop",
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            "",
+            "event: message_stop",
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]);
+
+        let chunks: Vec<_> = sse_to_chunks(sse)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(chunks.iter().any(|c| matches!(c, Chunk::TextDelta(t) if t == "hi")));
+        assert!(chunks.iter().any(|c| matches!(c, Chunk::TextBlock(t) if t == "hi")));
+        assert!(chunks.iter().any(|c| matches!(c, Chunk::Done)));
+    }
+
+    #[tokio::test]
+    async fn parses_thinking_block_with_signature() {
+        let sse = make_sse(&[
+            "event: content_block_start",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            "",
+            "event: content_block_delta",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#,
+            "",
+            "event: content_block_delta",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"SIG123"}}"#,
+            "",
+            "event: content_block_stop",
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            "",
+            "event: message_stop",
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]);
+
+        let chunks: Vec<_> = sse_to_chunks(sse)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+
+        let thinking_block = chunks.iter().find(|c| {
+            matches!(c, Chunk::ThinkingBlock { thinking, signature }
+                if thinking == "hmm" && signature == "SIG123")
+        });
+        assert!(thinking_block.is_some(), "expected ThinkingBlock with signature");
+    }
+
+    #[tokio::test]
+    async fn parses_tool_use_block() {
+        let sse = make_sse(&[
+            "event: content_block_start",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tid1","name":"cerebro.recall","input":{}}}"#,
+            "",
+            "event: content_block_delta",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"test\"}"}}"#,
+            "",
+            "event: content_block_stop",
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            "",
+            "event: message_stop",
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]);
+
+        let chunks: Vec<_> = sse_to_chunks(sse)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+
+        let tool = chunks.iter().find(|c| {
+            matches!(c, Chunk::ToolUse { id, name, .. } if id == "tid1" && name == "cerebro.recall")
+        });
+        assert!(tool.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ANTHROPIC_API_KEY"]
+    async fn integration_live_stream() {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").expect("needs ANTHROPIC_API_KEY");
+        let provider = AnthropicProvider::new(api_key, "claude-opus-4-8");
+
+        let history = vec![apexos_core::Message::User {
+            content: vec![apexos_core::ContentBlock::Text {
+                text: "Say exactly: hello world".into(),
+            }],
+        }];
+
+        let mut stream = provider.messages_stream(&history, &[], None).await.unwrap();
+        let mut text = String::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk.unwrap() {
+                Chunk::TextDelta(t) => text.push_str(&t),
+                Chunk::Done => break,
+                _ => {}
+            }
+        }
+        assert!(text.to_lowercase().contains("hello world"), "got: {text}");
+    }
+}

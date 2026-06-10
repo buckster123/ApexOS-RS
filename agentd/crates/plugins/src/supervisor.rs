@@ -1,0 +1,1557 @@
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::path::PathBuf;
+use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
+use tokio::process::Command;
+use std::process::Stdio;
+use apexos_core::{ActionId, BusHandle, Event, EvolutionId, EvolutionProposal, PluginId, SessionId, ToolCall, ToolOutput};
+use crate::config::{PluginConfig, RestartPolicy};
+use crate::mcp::McpClient;
+use crate::policy::{Decision, PolicyEngine};
+use crate::vast::{VastState, VastPhase, VastInstance, vastai, load_recipes};
+
+struct Plugin {
+    client: Arc<McpClient>,
+}
+
+struct PendingApproval {
+    session: SessionId,
+    call:    ToolCall,
+}
+
+pub enum SupervisorCmd {
+    /// Internal: process watcher detected the child exited.
+    PluginDied  { id: PluginId },
+    /// Start a brand-new plugin (appended to plugins.toml by evolution applier).
+    SpawnPlugin { config: PluginConfig },
+    /// Kill a plugin and remove it from the registry; does NOT restart.
+    KillPlugin  { id: PluginId },
+    /// Kill a plugin and restart it (in-place upgrade / config change).
+    HotReload   { id: PluginId },
+    /// Direct tool call bypassing policy — reply arrives on the oneshot sender.
+    DirectCall  { tool: String, args: serde_json::Value, reply: oneshot::Sender<ToolOutput> },
+    /// Wire the live soul.md Arc so read_soul_md returns current content.
+    SetSoulArc  { arc: Arc<RwLock<String>> },
+    /// Wire the scheduler op channel so schedule_* tools route to the scheduler task.
+    SetScheduleTx { tx: mpsc::Sender<(SessionId, ActionId, String, serde_json::Value)> },
+    /// Wire the council op channel so convene_council routes to the council handler.
+    SetCouncilTx  { tx: mpsc::Sender<(SessionId, ActionId, serde_json::Value)> },
+    /// Wire the VastState Arc so vast_* virtual tools can read/write instance state.
+    SetVastState  { state: VastState },
+}
+
+/// Thin handle for calling plugin tools directly from non-agent code (e.g. the
+/// evolution applier calling Cerebro for episode tracking).
+#[derive(Clone)]
+pub struct ToolProxy {
+    tx: mpsc::Sender<SupervisorCmd>,
+}
+
+impl ToolProxy {
+    pub fn new(tx: mpsc::Sender<SupervisorCmd>) -> Self { Self { tx } }
+
+    pub async fn call(&self, tool: &str, args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx.send(SupervisorCmd::DirectCall {
+            tool:  tool.to_string(),
+            args,
+            reply: reply_tx,
+        }).await.map_err(|_| anyhow::anyhow!("supervisor channel closed"))?;
+        tokio::time::timeout(Duration::from_secs(10), reply_rx).await
+            .map_err(|_| anyhow::anyhow!("direct call timed out: {tool}"))?
+            .map_err(|_| anyhow::anyhow!("reply dropped"))
+    }
+}
+
+pub struct Supervisor {
+    bus:               BusHandle,
+    plugins:           HashMap<PluginId, Plugin>,
+    tool_registry:     HashMap<String, PluginId>,
+    configs:           HashMap<PluginId, PluginConfig>,
+    /// Shared with the evolution applier; writing here updates policy live.
+    policy:            Arc<RwLock<PolicyEngine>>,
+    pending_approvals: HashMap<ActionId, PendingApproval>,
+    sv_tx:             mpsc::Sender<SupervisorCmd>,
+    sv_rx:             Option<mpsc::Receiver<SupervisorCmd>>,
+    /// Set by main.rs so rollback_evolution can route to the applier task.
+    rollback_tx:       Option<mpsc::Sender<(SessionId, ActionId, EvolutionId)>>,
+    /// Set by main.rs so schedule_* tools route to the scheduler task.
+    schedule_tx:       Option<mpsc::Sender<(SessionId, ActionId, String, serde_json::Value)>>,
+    /// Set by main.rs so convene_council routes to the council handler.
+    council_tx:        Option<mpsc::Sender<(SessionId, ActionId, serde_json::Value)>>,
+    /// Shared with engine so read_soul_md returns the live system prompt.
+    soul_arc:          Option<Arc<RwLock<String>>>,
+    /// Path to the events log directory so query_event_log can read JSONL files.
+    events_dir:        Option<PathBuf>,
+    /// Vast.ai instance/tunnel state — shared with gateway for API routes.
+    vast_state:        Option<VastState>,
+}
+
+impl Supervisor {
+    pub fn new(bus: BusHandle, policy: Arc<RwLock<PolicyEngine>>) -> Self {
+        let (sv_tx, sv_rx) = mpsc::channel::<SupervisorCmd>(64);
+        Self {
+            bus,
+            plugins:           HashMap::new(),
+            tool_registry:     HashMap::new(),
+            configs:           HashMap::new(),
+            policy,
+            pending_approvals: HashMap::new(),
+            sv_tx,
+            sv_rx: Some(sv_rx),
+            rollback_tx:       None,
+            soul_arc:          None,
+            schedule_tx:       None,
+            council_tx:        None,
+            events_dir:        None,
+            vast_state:        None,
+        }
+    }
+
+    /// Returns a sender that main.rs can use to send hot-reload commands.
+    pub fn cmd_tx(&self) -> mpsc::Sender<SupervisorCmd> {
+        self.sv_tx.clone()
+    }
+
+    /// Wires the rollback channel so `rollback_evolution` can reach the applier.
+    pub fn set_rollback_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, EvolutionId)>) {
+        self.rollback_tx = Some(tx);
+    }
+
+    /// Wires the scheduler channel so schedule_* tools route to the scheduler task.
+    pub fn set_schedule_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, String, serde_json::Value)>) {
+        self.schedule_tx = Some(tx);
+    }
+
+    /// Wires the council channel so convene_council routes to the council handler.
+    pub fn set_council_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, serde_json::Value)>) {
+        self.council_tx = Some(tx);
+    }
+
+    /// Shares the live soul.md Arc so `read_soul_md` returns current content.
+    pub fn set_soul_arc(&mut self, arc: Arc<RwLock<String>>) {
+        self.soul_arc = Some(arc);
+    }
+
+    pub fn set_events_dir(&mut self, dir: PathBuf) {
+        self.events_dir = Some(dir);
+    }
+
+    pub fn set_vast_state(&mut self, state: VastState) {
+        self.vast_state = Some(state);
+    }
+
+    /// Boot all plugins from config then run the dispatch/supervision loop.
+    pub async fn run(
+        mut self,
+        plugin_configs: Vec<PluginConfig>,
+        mut bus_rx: broadcast::Receiver<Event>,
+    ) {
+        let mut sv_rx = self.sv_rx.take().expect("run() called twice");
+
+        for cfg in plugin_configs {
+            let tx = self.sv_tx.clone();
+            if let Err(e) = self.spawn_plugin(&cfg, tx).await {
+                eprintln!("[supervisor] failed to start plugin '{}': {e}", cfg.id);
+            }
+        }
+
+        loop {
+            tokio::select! {
+                result = bus_rx.recv() => match result {
+                    Ok(Event::ToolRequested { session, call }) => {
+                        let decision = self.policy.read().await.check(&call.tool);
+                        match decision {
+                            Decision::Allow => {
+                                self.dispatch_tool(session, call);
+                            }
+                            Decision::Ask => {
+                                eprintln!("[policy] approval required: '{}' (session {:?})",
+                                    call.tool, session);
+                                self.pending_approvals.insert(
+                                    call.id,
+                                    PendingApproval { session, call: call.clone() },
+                                );
+                                self.bus.emit(Event::ApprovalPending { session, call }).await;
+                            }
+                        }
+                    }
+
+                    Ok(Event::UserApproval { session, action, granted }) => {
+                        if let Some(pending) = self.pending_approvals.remove(&action) {
+                            if granted {
+                                eprintln!("[policy] approved: '{}' (session {:?})",
+                                    pending.call.tool, pending.session);
+                                self.dispatch_tool(pending.session, pending.call);
+                            } else {
+                                eprintln!("[policy] denied: '{}' (session {:?})",
+                                    pending.call.tool, pending.session);
+                                let bus = self.bus.clone();
+                                tokio::spawn(async move {
+                                    bus.emit(Event::ToolResult {
+                                        session,
+                                        call: action,
+                                        output: ToolOutput {
+                                            ok:      false,
+                                            content: serde_json::json!("denied by user"),
+                                        },
+                                    }).await;
+                                });
+                            }
+                        }
+                    }
+
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                },
+
+                Some(cmd) = sv_rx.recv() => {
+                    let tx = self.sv_tx.clone();
+                    match cmd {
+                        SupervisorCmd::PluginDied { id } => {
+                            self.handle_died(id, tx).await;
+                        }
+                        SupervisorCmd::SpawnPlugin { config } => {
+                            if let Err(e) = self.spawn_plugin(&config, tx).await {
+                                eprintln!("[supervisor] spawn failed for '{}': {e}", config.id);
+                            }
+                        }
+                        SupervisorCmd::KillPlugin { id } => {
+                            // Remove config first so handle_died (from dying process) won't restart.
+                            self.configs.remove(&id);
+                            self.tool_registry.retain(|_, owner| owner != &id);
+                            let had_plugin = self.plugins.remove(&id).is_some();
+                            if had_plugin {
+                                self.bus.emit(Event::PluginDown {
+                                    plugin: id,
+                                    reason: "killed by evolution".into(),
+                                }).await;
+                            }
+                        }
+                        SupervisorCmd::HotReload { id } => {
+                            // Kill the live instance (keep config so handle_died restarts it).
+                            self.tool_registry.retain(|_, owner| owner != &id);
+                            let had_plugin = self.plugins.remove(&id).is_some();
+                            if had_plugin {
+                                self.bus.emit(Event::PluginDown {
+                                    plugin: id.clone(),
+                                    reason: "hot-reload".into(),
+                                }).await;
+                            }
+                            // For non-Always policies: the process won't self-restart, so force it.
+                            if let Some(cfg) = self.configs.get(&id).cloned() {
+                                if cfg.restart != RestartPolicy::Always {
+                                    tokio::time::sleep(Duration::from_millis(300)).await;
+                                    if let Err(e) = self.spawn_plugin(&cfg, tx).await {
+                                        eprintln!("[supervisor] hot-reload '{}' failed: {e}", id.0);
+                                    }
+                                }
+                                // else: child exits → PluginDied fires → handle_died restarts
+                            }
+                        }
+                        SupervisorCmd::SetSoulArc { arc } => {
+                            self.soul_arc = Some(arc);
+                        }
+                        SupervisorCmd::SetScheduleTx { tx } => {
+                            self.schedule_tx = Some(tx);
+                        }
+                        SupervisorCmd::SetCouncilTx { tx } => {
+                            self.council_tx = Some(tx);
+                        }
+                        SupervisorCmd::SetVastState { state } => {
+                            self.vast_state = Some(state);
+                        }
+                        SupervisorCmd::DirectCall { tool, args, reply } => {
+                            if let Some(pid) = self.tool_registry.get(&tool).cloned() {
+                                if let Some(plugin) = self.plugins.get(&pid) {
+                                    let client = plugin.client.clone();
+                                    tokio::spawn(async move {
+                                        let out = match client.call_tool(&tool, &args).await {
+                                            Ok(o)  => o,
+                                            Err(e) => ToolOutput {
+                                                ok:      false,
+                                                content: serde_json::json!(e.to_string()),
+                                            },
+                                        };
+                                        let _ = reply.send(out);
+                                    });
+                                } else {
+                                    let _ = reply.send(ToolOutput {
+                                        ok: false,
+                                        content: serde_json::json!(format!("plugin for '{tool}' not live")),
+                                    });
+                                }
+                            } else {
+                                let _ = reply.send(ToolOutput {
+                                    ok: false,
+                                    content: serde_json::json!(format!("unknown tool: {tool}")),
+                                });
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    /// Dispatch a tool call immediately (policy already checked).
+    fn dispatch_tool(&self, session: SessionId, call: ToolCall) {
+        // Virtual tool: propose_evolution (Phase 0 stub — emits EvolutionProposed
+        // and acks immediately; apply logic handled by evolution applier in main.rs).
+        if call.tool == "propose_evolution" {
+            let evolution_id = EvolutionId(call.id.0);
+            let call_id      = call.id;
+            let bus          = self.bus.clone();
+            match serde_json::from_value::<EvolutionProposal>(call.args.clone()) {
+                Ok(proposal) => {
+                    tokio::spawn(async move {
+                        bus.emit(Event::EvolutionProposed {
+                            id: evolution_id,
+                            proposal,
+                            proposed_by: session,
+                        }).await;
+                        bus.emit(Event::ToolResult {
+                            session,
+                            call: call_id,
+                            output: ToolOutput {
+                                ok:      true,
+                                content: serde_json::json!({
+                                    "status":       "proposed",
+                                    "evolution_id": evolution_id.0,
+                                    "note":         "proposal queued for apply",
+                                }),
+                            },
+                        }).await;
+                    });
+                }
+                Err(e) => {
+                    let err = e.to_string();
+                    let bus = self.bus.clone();
+                    tokio::spawn(async move {
+                        bus.emit(Event::ToolResult {
+                            session,
+                            call: call_id,
+                            output: ToolOutput {
+                                ok:      false,
+                                content: serde_json::json!(
+                                    format!("invalid evolution proposal: {err}")
+                                ),
+                            },
+                        }).await;
+                    });
+                }
+            }
+            return;
+        }
+
+        // Virtual tool: rollback_evolution — routes to the applier via rollback channel.
+        if call.tool == "rollback_evolution" {
+            let evolution_id = call.args["evolution_id"].as_u64().map(EvolutionId);
+            let call_id      = call.id;
+            let bus          = self.bus.clone();
+            match (evolution_id, self.rollback_tx.as_ref()) {
+                (Some(eid), Some(tx)) => {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        if tx.send((session, call_id, eid)).await.is_err() {
+                            bus.emit(Event::ToolResult {
+                                session,
+                                call: call_id,
+                                output: ToolOutput {
+                                    ok:      false,
+                                    content: serde_json::json!("rollback channel closed"),
+                                },
+                            }).await;
+                        }
+                    });
+                }
+                (None, _) => {
+                    tokio::spawn(async move {
+                        bus.emit(Event::ToolResult {
+                            session,
+                            call: call_id,
+                            output: ToolOutput {
+                                ok:      false,
+                                content: serde_json::json!("missing evolution_id"),
+                            },
+                        }).await;
+                    });
+                }
+                (_, None) => {
+                    tokio::spawn(async move {
+                        bus.emit(Event::ToolResult {
+                            session,
+                            call: call_id,
+                            output: ToolOutput {
+                                ok:      false,
+                                content: serde_json::json!("rollback not available"),
+                            },
+                        }).await;
+                    });
+                }
+            }
+            return;
+        }
+
+        // Virtual tool: read_soul_md — returns live soul.md content so the agent can
+        // read the current system prompt before proposing update_system_prompt.
+        if call.tool == "read_soul_md" {
+            let call_id = call.id;
+            let bus     = self.bus.clone();
+            let soul    = self.soul_arc.clone();
+            tokio::spawn(async move {
+                let content = match soul {
+                    Some(arc) => arc.read().await.clone(),
+                    None      => String::from("soul.md not yet initialized"),
+                };
+                bus.emit(Event::ToolResult {
+                    session,
+                    call: call_id,
+                    output: ToolOutput {
+                        ok:      true,
+                        content: serde_json::json!(content),
+                    },
+                }).await;
+            });
+            return;
+        }
+
+        // Virtual tools: schedule_task / list_schedules / cancel_schedule — forwarded to scheduler task.
+        if matches!(call.tool.as_str(), "schedule_task" | "list_schedules" | "cancel_schedule") {
+            let call_id  = call.id;
+            let tool     = call.tool.clone();
+            let args     = call.args.clone();
+            let bus      = self.bus.clone();
+            match &self.schedule_tx {
+                Some(tx) => {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        if tx.send((session, call_id, tool, args)).await.is_err() {
+                            bus.emit(Event::ToolResult {
+                                session,
+                                call: call_id,
+                                output: ToolOutput { ok: false, content: serde_json::json!("scheduler not available") },
+                            }).await;
+                        }
+                    });
+                }
+                None => {
+                    tokio::spawn(async move {
+                        bus.emit(Event::ToolResult {
+                            session,
+                            call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!("scheduler not initialized") },
+                        }).await;
+                    });
+                }
+            }
+            return;
+        }
+
+        // Virtual tool: convene_council — routes to the council handler task.
+        if call.tool == "convene_council" {
+            let call_id = call.id;
+            let args    = call.args.clone();
+            let bus     = self.bus.clone();
+            match &self.council_tx {
+                Some(tx) => {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        if tx.send((session, call_id, args)).await.is_err() {
+                            bus.emit(Event::ToolResult {
+                                session,
+                                call: call_id,
+                                output: ToolOutput { ok: false, content: serde_json::json!("council handler not available") },
+                            }).await;
+                        }
+                    });
+                }
+                None => {
+                    tokio::spawn(async move {
+                        bus.emit(Event::ToolResult {
+                            session,
+                            call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!("council not initialized") },
+                        }).await;
+                    });
+                }
+            }
+            return;
+        }
+
+        // Virtual tool: query_event_log — reads recent JSONL events and returns
+        // human-readable summaries for agent analysis / Cerebro ingestion.
+        if call.tool == "query_event_log" {
+            let hours      = call.args["hours"].as_u64().unwrap_or(24).min(168);
+            let types_arg  = call.args["types"].as_str().map(str::to_owned);
+            let max_events = call.args["max"].as_u64().unwrap_or(500).min(2000) as usize;
+            let events_dir = self.events_dir.clone();
+            let bus        = self.bus.clone();
+            let call_id    = call.id;
+            tokio::spawn(async move {
+                let Some(dir) = events_dir else {
+                    bus.emit(Event::ToolResult {
+                        session, call: call_id,
+                        output: ToolOutput { ok: false, content: serde_json::json!("events_dir not configured") },
+                    }).await;
+                    return;
+                };
+
+                let type_filter: Option<std::collections::HashSet<String>> =
+                    types_arg.as_deref().map(|s| s.split(',').map(|t| t.trim().to_owned()).collect());
+
+                // Determine which date files to read based on hours window.
+                let days_back = ((hours as f64) / 24.0).ceil() as u64 + 1;
+                let today = chrono::Local::now().date_naive();
+                let mut date_files: Vec<std::path::PathBuf> = Vec::new();
+                for d in 0..days_back {
+                    let date = today - chrono::Duration::days(d as i64);
+                    let path = dir.join(format!("events-{}.jsonl", date.format("%Y-%m-%d")));
+                    if tokio::fs::metadata(&path).await.is_ok() {
+                        date_files.push(path);
+                    }
+                }
+                date_files.reverse(); // oldest first
+
+                let mut lines: Vec<String> = Vec::new();
+                for path in &date_files {
+                    let Ok(text) = tokio::fs::read_to_string(path).await else { continue };
+                    for line in text.lines() {
+                        let line = line.trim();
+                        if line.is_empty() { continue }
+                        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+                        let ev_type = val["type"].as_str().unwrap_or("").to_owned();
+                        if let Some(ref filter) = type_filter {
+                            if !filter.contains(&ev_type) { continue }
+                        }
+                        if let Some(summary) = format_event_line(&val) {
+                            lines.push(summary);
+                        }
+                    }
+                }
+
+                // Take the last max_events lines (most recent).
+                let total = lines.len();
+                if lines.len() > max_events {
+                    lines = lines.split_off(lines.len() - max_events);
+                }
+
+                let text = if lines.is_empty() {
+                    format!("No matching events found in the last {hours}h.")
+                } else {
+                    format!("Last {hours}h event log ({} events, showing {}):\n\n{}",
+                        total, lines.len(), lines.join("\n"))
+                };
+
+                bus.emit(Event::ToolResult {
+                    session, call: call_id,
+                    output: ToolOutput { ok: true, content: serde_json::json!(text) },
+                }).await;
+            });
+            return;
+        }
+
+        // Virtual tool: send_to_agent — local or cross-node A2A message.
+        // With node: routes via HTTP to a registered peer's /api/sessions/{id}/message.
+        if call.tool == "send_to_agent" {
+            let to_id    = call.args["session_id"].as_u64().map(SessionId);
+            let body     = call.args["message"].as_str().unwrap_or("").to_owned();
+            let node_arg = call.args["node"].as_str().map(str::to_owned);
+            let call_id  = call.id;
+            let msg_id   = call.id.0;
+            let bus      = self.bus.clone();
+
+            // Cross-node: look up peer, proxy via HTTP.
+            if let Some(node_id) = node_arg {
+                let sid = to_id.unwrap_or(SessionId(0)).0;
+                tokio::spawn(async move {
+                    let peer_ws_url = find_peer_ws_url(&node_id).await;
+                    match peer_ws_url {
+                        None => {
+                            bus.emit(Event::ToolResult {
+                                session, call: call_id,
+                                output: ToolOutput {
+                                    ok:      false,
+                                    content: serde_json::json!(format!("send_to_agent: peer '{node_id}' not found in peers.toml")),
+                                },
+                            }).await;
+                        }
+                        Some(ws_url) => {
+                            let http_base = ws_url.replacen("ws://", "http://", 1)
+                                                  .replacen("wss://", "https://", 1);
+                            let url      = format!("{http_base}/api/sessions/{sid}/message");
+                            let payload  = serde_json::json!({ "text": body }).to_string();
+                            let result   = tokio::process::Command::new("curl")
+                                .args(["-s", "-f", "-X", "POST",
+                                       "-H", "Content-Type: application/json",
+                                       "-d", &payload, &url])
+                                .output().await;
+                            let ok = result.map(|o| o.status.success()).unwrap_or(false);
+                            bus.emit(Event::ToolResult {
+                                session, call: call_id,
+                                output: ToolOutput {
+                                    ok,
+                                    content: serde_json::json!({
+                                        "status": if ok { "sent" } else { "error" },
+                                        "node": node_id,
+                                        "target_session": sid,
+                                    }),
+                                },
+                            }).await;
+                        }
+                    }
+                });
+                return;
+            }
+
+            // Local: emit AgentMessage on bus.
+            match to_id {
+                Some(to) => {
+                    tokio::spawn(async move {
+                        bus.emit(Event::AgentMessage { from: session, to, body, msg_id }).await;
+                        bus.emit(Event::ToolResult {
+                            session,
+                            call: call_id,
+                            output: ToolOutput {
+                                ok:      true,
+                                content: serde_json::json!({ "status": "sent", "msg_id": msg_id }),
+                            },
+                        }).await;
+                    });
+                }
+                None => {
+                    tokio::spawn(async move {
+                        bus.emit(Event::ToolResult {
+                            session,
+                            call: call_id,
+                            output: ToolOutput {
+                                ok:      false,
+                                content: serde_json::json!("send_to_agent: missing or invalid session_id"),
+                            },
+                        }).await;
+                    });
+                }
+            }
+            return;
+        }
+
+        // Virtual tool: list_mesh_peers — returns current peers.toml as JSON.
+        if call.tool == "list_mesh_peers" {
+            let call_id = call.id;
+            let bus     = self.bus.clone();
+            tokio::spawn(async move {
+                let path = std::env::var("PEERS_TOML")
+                    .unwrap_or_else(|_| "/etc/agentd/peers.toml".into());
+                let content = tokio::fs::read_to_string(&path).await
+                    .unwrap_or_else(|_| "# no peers registered\n".into());
+                bus.emit(Event::ToolResult {
+                    session, call: call_id,
+                    output: ToolOutput { ok: true, content: serde_json::json!(content) },
+                }).await;
+            });
+            return;
+        }
+
+        // Virtual tool: bootstrap_node — SSH to target, clone ApexOS repo, background install.sh.
+        // Returns quickly; install takes 15-20 min and node appears in mesh via mDNS.
+        if call.tool == "bootstrap_node" {
+            let target_ip   = call.args["target_ip"].as_str().unwrap_or("").to_owned();
+            let ssh_password = call.args["ssh_password"].as_str().unwrap_or("").to_owned();
+            let ssh_user    = call.args["ssh_user"].as_str().unwrap_or("apexos").to_owned();
+            let api_key     = call.args["api_key"].as_str().unwrap_or("").to_owned();
+            let repo_url    = call.args["repo_url"].as_str()
+                .unwrap_or("https://github.com/buckster123/ApexOS.git").to_owned();
+            let call_id     = call.id;
+            let bus         = self.bus.clone();
+
+            if target_ip.is_empty() || ssh_password.is_empty() {
+                tokio::spawn(async move {
+                    bus.emit(Event::ToolResult {
+                        session, call: call_id,
+                        output: ToolOutput {
+                            ok:      false,
+                            content: serde_json::json!("bootstrap_node: target_ip and ssh_password are required"),
+                        },
+                    }).await;
+                });
+                return;
+            }
+
+            tokio::spawn(async move {
+                let ssh_base = vec![
+                    "sshpass".to_string(),
+                    format!("-p{ssh_password}"),
+                    "ssh".into(),
+                    "-o".into(), "StrictHostKeyChecking=no".into(),
+                    "-o".into(), "ConnectTimeout=5".into(),
+                    format!("{ssh_user}@{target_ip}"),
+                ];
+
+                // Step 1: connectivity check
+                let ok = tokio::process::Command::new(&ssh_base[0])
+                    .args(&ssh_base[1..])
+                    .arg("echo OK")
+                    .output().await;
+                match ok {
+                    Err(e) => {
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput {
+                                ok:      false,
+                                content: serde_json::json!(format!("SSH to {target_ip} failed: {e}")),
+                            },
+                        }).await;
+                        return;
+                    }
+                    Ok(o) if !o.status.success() => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput {
+                                ok:      false,
+                                content: serde_json::json!(format!("SSH auth failed for {ssh_user}@{target_ip}: {stderr}")),
+                            },
+                        }).await;
+                        return;
+                    }
+                    _ => {}
+                }
+
+                // Step 2: check if already an ApexOS node
+                let check = tokio::process::Command::new(&ssh_base[0])
+                    .args(&ssh_base[1..])
+                    .arg("systemctl is-active agentd 2>/dev/null || echo inactive")
+                    .output().await;
+                if let Ok(o) = check {
+                    let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if out == "active" {
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput {
+                                ok:      true,
+                                content: serde_json::json!(format!(
+                                    "{target_ip} is already running agentd. Register it manually with POST /api/mesh/peers."
+                                )),
+                            },
+                        }).await;
+                        return;
+                    }
+                }
+
+                // Step 3: install git if needed, clone repo
+                let prep_cmd = format!(
+                    "apt-get install -y -q git 2>/dev/null; \
+                     git clone {repo_url} /home/{ssh_user}/ApexOS 2>/dev/null || \
+                     git -C /home/{ssh_user}/ApexOS pull"
+                );
+                let prep = tokio::time::timeout(
+                    tokio::time::Duration::from_secs(60),
+                    tokio::process::Command::new(&ssh_base[0])
+                        .args(&ssh_base[1..])
+                        .arg(format!("echo '{ssh_password}' | sudo -S bash -c {prep_cmd:?}"))
+                        .output(),
+                ).await;
+                if prep.is_err() {
+                    bus.emit(Event::ToolResult {
+                        session, call: call_id,
+                        output: ToolOutput {
+                            ok:      false,
+                            content: serde_json::json!("bootstrap_node: git clone timed out"),
+                        },
+                    }).await;
+                    return;
+                }
+
+                // Step 4: inject API key (if provided) and background install.sh
+                let api_key_export = if api_key.is_empty() {
+                    String::new()
+                } else {
+                    format!("export ANTHROPIC_API_KEY={api_key:?}; ")
+                };
+                let install_cmd = format!(
+                    "cd /home/{ssh_user}/ApexOS && \
+                     {api_key_export}\
+                     nohup bash install.sh > /tmp/apex-install.log 2>&1 &\
+                     echo $!"
+                );
+                let launch = tokio::process::Command::new(&ssh_base[0])
+                    .args(&ssh_base[1..])
+                    .arg(format!("echo '{ssh_password}' | sudo -S bash -c {install_cmd:?}"))
+                    .output().await;
+
+                let pid_line = launch.as_ref().ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+
+                let msg = format!(
+                    "Bootstrap of {ssh_user}@{target_ip} started (PID {pid_line}). \
+                     install.sh is running in background — takes 15-20 min. \
+                     Monitor: ssh {ssh_user}@{target_ip} tail -f /tmp/apex-install.log. \
+                     The node will appear in the mesh automatically once Avahi starts."
+                );
+                bus.emit(Event::ToolResult {
+                    session, call: call_id,
+                    output: ToolOutput { ok: true, content: serde_json::json!(msg) },
+                }).await;
+            });
+            return;
+        }
+
+        // ── Vast.ai virtual tools ──────────────────────────────────────────────
+
+        // vast_list_recipes — read recipes.toml, return JSON array (no Vast API).
+        if call.tool == "vast_list_recipes" {
+            let call_id = call.id;
+            let bus     = self.bus.clone();
+            tokio::spawn(async move {
+                let result = load_recipes();
+                match result {
+                    Ok(rf) => {
+                        let summary: Vec<serde_json::Value> = rf.recipes.iter().map(|r| {
+                            let tier = rf.gpu_tiers.get(&r.gpu);
+                            serde_json::json!({
+                                "name":        r.name,
+                                "label":       r.label,
+                                "gpu":         r.gpu,
+                                "gpu_label":   tier.map(|t| t.label.as_str()).unwrap_or(&r.gpu),
+                                "model_repo":  r.model_repo,
+                                "model_quant": r.model_quant,
+                                "ctx":         r.ctx,
+                                "parallel":    r.parallel,
+                                "description": r.description,
+                            })
+                        }).collect();
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput { ok: true, content: serde_json::json!(summary) },
+                        }).await;
+                    }
+                    Err(e) => {
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!(e.to_string()) },
+                        }).await;
+                    }
+                }
+            });
+            return;
+        }
+
+        // vast_status — return current VastState as JSON.
+        if call.tool == "vast_status" {
+            let call_id    = call.id;
+            let bus        = self.bus.clone();
+            let vast_state = self.vast_state.clone();
+            tokio::spawn(async move {
+                let Some(vs) = vast_state else {
+                    bus.emit(Event::ToolResult {
+                        session, call: call_id,
+                        output: ToolOutput { ok: true, content: serde_json::json!({ "status": "idle", "note": "vast not configured" }) },
+                    }).await;
+                    return;
+                };
+                let inst  = vs.instance.read().await.clone();
+                let phase = vs.phase.read().await.clone();
+                let status = match &phase {
+                    VastPhase::Idle       => "idle",
+                    VastPhase::Launching { .. } => "launching",
+                    VastPhase::Ready      => "ready",
+                    VastPhase::Destroying => "destroying",
+                };
+                let mut val = serde_json::json!({ "status": status });
+                if let VastPhase::Launching { phase: p } = &phase {
+                    val["phase"] = serde_json::json!(p);
+                }
+                if let Some(i) = inst {
+                    val["instance"] = serde_json::json!({
+                        "id":          i.id,
+                        "recipe":      i.recipe,
+                        "local_port":  i.local_port,
+                        "cost_per_hr": i.cost_per_hr,
+                        "launched_at": i.launched_at,
+                    });
+                }
+                bus.emit(Event::ToolResult {
+                    session, call: call_id,
+                    output: ToolOutput { ok: true, content: val },
+                }).await;
+            });
+            return;
+        }
+
+        // vast_launch — full async lifecycle: find offer → create → tunnel → health → hot-swap.
+        if call.tool == "vast_launch" {
+            let recipe_name = call.args["recipe"].as_str().unwrap_or("qwen36-27b-q6-5090").to_owned();
+            let geo         = call.args["geo"].as_str()
+                .map(str::to_owned)
+                .or_else(|| std::env::var("VAST_DEFAULT_GEO").ok())
+                .unwrap_or_else(|| "EU_NORDIC".into());
+            let call_id     = call.id;
+            let bus         = self.bus.clone();
+            let vast_state  = self.vast_state.clone();
+
+            let Some(vs) = vast_state else {
+                tokio::spawn(async move {
+                    bus.emit(Event::ToolResult {
+                        session, call: call_id,
+                        output: ToolOutput { ok: false, content: serde_json::json!("vast not configured") },
+                    }).await;
+                });
+                return;
+            };
+
+            tokio::spawn(async move {
+                // Step 1: check for existing instance
+                if vs.instance.read().await.is_some() {
+                    let phase_str = match *vs.phase.read().await {
+                        VastPhase::Launching { ref phase } => format!("launching ({})", phase),
+                        VastPhase::Ready      => "ready".into(),
+                        VastPhase::Destroying => "destroying".into(),
+                        VastPhase::Idle       => "idle".into(),
+                    };
+                    bus.emit(Event::ToolResult {
+                        session, call: call_id,
+                        output: ToolOutput {
+                            ok: false,
+                            content: serde_json::json!(format!(
+                                "vast_launch: instance already exists (status: {}). Call vast_destroy first.",
+                                phase_str
+                            )),
+                        },
+                    }).await;
+                    return;
+                }
+
+                // Step 2: load recipe
+                let rf = match load_recipes() {
+                    Ok(r)  => r,
+                    Err(e) => {
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!(e.to_string()) },
+                        }).await;
+                        return;
+                    }
+                };
+                let recipe = match rf.recipes.iter().find(|r| r.name == recipe_name) {
+                    Some(r) => r.clone(),
+                    None => {
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput {
+                                ok: false,
+                                content: serde_json::json!(format!("recipe '{}' not found", recipe_name)),
+                            },
+                        }).await;
+                        return;
+                    }
+                };
+                let tier = match rf.gpu_tiers.get(&recipe.gpu) {
+                    Some(t) => t.clone(),
+                    None => {
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput {
+                                ok: false,
+                                content: serde_json::json!(format!("gpu tier '{}' not found", recipe.gpu)),
+                            },
+                        }).await;
+                        return;
+                    }
+                };
+                let docker_image = rf.docker.prebuilt.clone();
+                let local_port: u16 = std::env::var("VAST_LOCAL_PORT")
+                    .ok().and_then(|s| s.parse().ok()).unwrap_or(8000);
+
+                *vs.phase.write().await = VastPhase::Launching { phase: "searching for offer".into() };
+                eprintln!("[vast] launching recipe={} geo={}", recipe.name, geo);
+
+                // Step 3: search offers
+                let gpu_filter = tier.vast_names.iter()
+                    .map(|n| format!("gpu_name={}", n))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                let query = format!(
+                    "({gpu_filter}) reliability>0.99 inet_down>300 \
+                     dph_total<{} disk_space>{}",
+                    tier.max_price, tier.min_disk_gb
+                );
+                eprintln!("[vast] offer search: {query}");
+                let offers_out = match vastai(&["search", "offers", &query, "--order", "dph_total", "--raw"]).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        *vs.phase.write().await = VastPhase::Idle;
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!(format!("offer search failed: {e}")) },
+                        }).await;
+                        return;
+                    }
+                };
+
+                // Parse JSON array from offers — filter by geo, take cheapest
+                let offers: Vec<serde_json::Value> = serde_json::from_str(&offers_out)
+                    .unwrap_or_default();
+                let geo_re = match geo.as_str() {
+                    "EU_NORDIC" => vec!["SE", "NO", "FI", "DK", "IS"],
+                    "EU"        => vec!["SE", "NO", "FI", "DK", "IS", "DE", "NL", "FR", "GB", "PL"],
+                    "US"        => vec!["US"],
+                    _           => vec![],
+                };
+                let offer = offers.iter().find(|o| {
+                    if geo_re.is_empty() { return true; }
+                    let geo_str = o["geolocation"].as_str().unwrap_or("");
+                    geo_re.iter().any(|code| geo_str.contains(code))
+                }).or_else(|| offers.first());
+
+                let offer_id = match offer.and_then(|o| o["id"].as_u64()) {
+                    Some(id) => id.to_string(),
+                    None => {
+                        *vs.phase.write().await = VastPhase::Idle;
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!("no matching offers found") },
+                        }).await;
+                        return;
+                    }
+                };
+                let cost_per_hr = offer
+                    .and_then(|o| o["dph_total"].as_f64())
+                    .unwrap_or(0.0);
+                eprintln!("[vast] selected offer {offer_id} at ${cost_per_hr:.3}/hr");
+                *vs.phase.write().await = VastPhase::Launching { phase: "creating instance".into() };
+
+                // Step 4: create instance
+                let onstart = format!(
+                    "MODEL_REPO={} MODEL_QUANT={} CTX={} KV_TYPE={} MODE=thinking PARALLEL={} HOST=127.0.0.1 bash /app/launch.sh > /var/log/launch.log 2>&1 &",
+                    recipe.model_repo, recipe.model_quant, recipe.ctx, recipe.kv_type, recipe.parallel
+                );
+                let env_str = format!(
+                    "MODEL_REPO={} MODEL_QUANT={} CTX={} KV_TYPE=q8_0 MODE=thinking PARALLEL={} HOST=127.0.0.1",
+                    recipe.model_repo, recipe.model_quant, recipe.ctx, recipe.parallel
+                );
+                let create_out = match vastai(&[
+                    "create", "instance", &offer_id,
+                    "--image", &docker_image,
+                    "--disk",  &tier.min_disk_gb.to_string(),
+                    "--env",   &env_str,
+                    "--onstart-cmd", &onstart,
+                    "--raw",
+                ]).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        *vs.phase.write().await = VastPhase::Idle;
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!(format!("create failed: {e}")) },
+                        }).await;
+                        return;
+                    }
+                };
+                let create_json: serde_json::Value = serde_json::from_str(&create_out).unwrap_or_default();
+                let instance_id = match create_json["new_contract"].as_u64()
+                    .or_else(|| create_json["id"].as_u64())
+                {
+                    Some(id) => id.to_string(),
+                    None => {
+                        *vs.phase.write().await = VastPhase::Idle;
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!(format!("create returned unexpected JSON: {create_out}")) },
+                        }).await;
+                        return;
+                    }
+                };
+                eprintln!("[vast] instance created: {instance_id}");
+                bus.emit(Event::VastInstanceLaunched {
+                    instance_id: instance_id.clone(),
+                    recipe:      recipe.name.clone(),
+                    cost_per_hr,
+                }).await;
+                *vs.phase.write().await = VastPhase::Launching { phase: "waiting for SSH".into() };
+
+                // Step 5: poll until running + SSH available (5 min timeout)
+                let (ssh_host, ssh_port) = {
+                    let mut attempts = 0u32;
+                    let mut found = None;
+                    while attempts < 30 {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        attempts += 1;
+                        let show = match vastai(&["show", "instance", &instance_id, "--raw"]).await {
+                            Ok(o) => o,
+                            Err(_) => continue,
+                        };
+                        let info: serde_json::Value = serde_json::from_str(&show).unwrap_or_default();
+                        let arr = if info.is_array() { &info } else { &serde_json::json!([info]) };
+                        if let Some(inst_info) = arr.as_array().and_then(|a| a.first()) {
+                            let status = inst_info["actual_status"].as_str().unwrap_or("");
+                            let host   = inst_info["ssh_host"].as_str().unwrap_or("");
+                            let port   = inst_info["ssh_port"].as_u64().unwrap_or(0) as u16;
+                            if status == "running" && !host.is_empty() && port > 0 {
+                                found = Some((host.to_owned(), port));
+                                break;
+                            }
+                            eprintln!("[vast] waiting for SSH: status={status} attempt={attempts}/30");
+                        }
+                    }
+                    match found {
+                        Some(v) => v,
+                        None => {
+                            // cleanup orphaned instance
+                            let _ = vastai(&["destroy", "instance", &instance_id]).await;
+                            *vs.phase.write().await = VastPhase::Idle;
+                            bus.emit(Event::ToolResult {
+                                session, call: call_id,
+                                output: ToolOutput { ok: false, content: serde_json::json!("timed out waiting for instance to come up (5 min)") },
+                            }).await;
+                            return;
+                        }
+                    }
+                };
+                eprintln!("[vast] SSH ready: {ssh_host}:{ssh_port}");
+
+                // Step 6: write instance state + persist
+                let now = chrono::Utc::now().to_rfc3339();
+                let inst = VastInstance {
+                    id:          instance_id.clone(),
+                    recipe:      recipe.name.clone(),
+                    ssh_host:    ssh_host.clone(),
+                    ssh_port,
+                    local_port,
+                    cost_per_hr,
+                    launched_at: now,
+                };
+                *vs.instance.write().await = Some(inst.clone());
+                vs.persist_instance().await;
+                *vs.phase.write().await = VastPhase::Launching { phase: "opening tunnel".into() };
+
+                // Step 7: open SSH tunnel
+                let cm_path = format!("/tmp/apex-vast-cm-{instance_id}");
+                let mut ssh = tokio::process::Command::new("ssh");
+                ssh.args([
+                    "-f", "-N",
+                    "-o", "StrictHostKeyChecking=no",
+                    "-o", "ControlMaster=auto",
+                    "-o", &format!("ControlPath={cm_path}"),
+                    "-o", "ControlPersist=5m",
+                    "-o", "ServerAliveInterval=30",
+                    "-o", "ExitOnForwardFailure=yes",
+                    "-L", &format!("{local_port}:127.0.0.1:8000"),
+                    "-p", &ssh_port.to_string(),
+                    &format!("root@{ssh_host}"),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+                let tunnel_child = match ssh.spawn() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = vastai(&["destroy", "instance", &instance_id]).await;
+                        vs.clear_instance().await;
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!(format!("SSH tunnel spawn failed: {e}")) },
+                        }).await;
+                        return;
+                    }
+                };
+                {
+                    use crate::vast::TunnelHandle;
+                    *vs.tunnel.lock().await = Some(TunnelHandle { child: tunnel_child, local_port });
+                }
+                // Give SSH a moment to establish
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                *vs.phase.write().await = VastPhase::Launching { phase: "waiting for model load".into() };
+
+                // Step 8: poll health until model ready (20 min timeout)
+                let health_url = format!("http://127.0.0.1:{local_port}/health");
+                let client = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap_or_default();
+                let mut ready = false;
+                for attempt in 0..80 {
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    match client.get(&health_url).send().await {
+                        Ok(r) if r.status().is_success() => {
+                            ready = true;
+                            break;
+                        }
+                        _ => {
+                            if attempt % 4 == 0 {
+                                eprintln!("[vast] waiting for model (attempt {}/80)", attempt + 1);
+                            }
+                        }
+                    }
+                }
+                if !ready {
+                    let _ = vastai(&["destroy", "instance", &instance_id]).await;
+                    vs.clear_instance().await;
+                    bus.emit(Event::ToolResult {
+                        session, call: call_id,
+                        output: ToolOutput { ok: false, content: serde_json::json!("model failed to load in 20 minutes") },
+                    }).await;
+                    return;
+                }
+
+                // Step 9: ready — emit event for main.rs to hot-swap backend
+                *vs.phase.write().await = VastPhase::Ready;
+                eprintln!("[vast] model ready on port {local_port}");
+                bus.emit(Event::VastInstanceReady { instance_id: instance_id.clone(), local_port }).await;
+
+                // Spawn keepalive loop
+                let vs_ka  = vs.clone();
+                let bus_ka = bus.clone();
+                let id_ka  = instance_id.clone();
+                tokio::spawn(async move {
+                    let c = reqwest::Client::builder()
+                        .timeout(Duration::from_secs(5))
+                        .build()
+                        .unwrap_or_default();
+                    let url = format!("http://127.0.0.1:{local_port}/health");
+                    let mut fails: u32 = 0;
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        let alive = vs_ka.instance.read().await.is_some();
+                        if !alive { break; }
+                        match c.get(&url).send().await {
+                            Ok(r) if r.status().is_success() => { fails = 0; }
+                            _ => {
+                                fails += 1;
+                                eprintln!("[vast] keepalive fail {fails}/3");
+                                if fails >= 3 {
+                                    eprintln!("[vast] tunnel lost after 3 failures");
+                                    bus_ka.emit(Event::VastTunnelLost { instance_id: id_ka.clone() }).await;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+
+                bus.emit(Event::ToolResult {
+                    session, call: call_id,
+                    output: ToolOutput {
+                        ok: true,
+                        content: serde_json::json!({
+                            "status":      "ready",
+                            "instance_id": instance_id,
+                            "recipe":      recipe.name,
+                            "model":       recipe.model_repo,
+                            "quant":       recipe.model_quant,
+                            "ctx":         recipe.ctx,
+                            "parallel":    recipe.parallel,
+                            "cost_per_hr": cost_per_hr,
+                            "local_port":  local_port,
+                            "message":     "Backend hot-swapped to Vast.ai instance. Agent will now use this model."
+                        }),
+                    },
+                }).await;
+            });
+            return;
+        }
+
+        // vast_destroy — tear down instance + tunnel + revert backend.
+        if call.tool == "vast_destroy" {
+            let call_id    = call.id;
+            let bus        = self.bus.clone();
+            let vast_state = self.vast_state.clone();
+
+            let Some(vs) = vast_state else {
+                tokio::spawn(async move {
+                    bus.emit(Event::ToolResult {
+                        session, call: call_id,
+                        output: ToolOutput { ok: true, content: serde_json::json!("no vast state") },
+                    }).await;
+                });
+                return;
+            };
+
+            tokio::spawn(async move {
+                let inst = vs.instance.read().await.clone();
+                let Some(i) = inst else {
+                    bus.emit(Event::ToolResult {
+                        session, call: call_id,
+                        output: ToolOutput { ok: true, content: serde_json::json!("no active instance") },
+                    }).await;
+                    return;
+                };
+                *vs.phase.write().await = VastPhase::Destroying;
+                let instance_id = i.id.clone();
+
+                // Kill tunnel
+                {
+                    let mut guard = vs.tunnel.lock().await;
+                    if let Some(mut t) = guard.take() {
+                        let _ = t.child.kill().await;
+                        let _ = tokio::fs::remove_file(
+                            format!("/tmp/apex-vast-cm-{instance_id}")
+                        ).await;
+                    }
+                }
+
+                // Destroy Vast instance
+                match vastai(&["destroy", "instance", &instance_id]).await {
+                    Ok(_)  => eprintln!("[vast] instance {instance_id} destroyed"),
+                    Err(e) => eprintln!("[vast] destroy error (continuing): {e}"),
+                }
+
+                vs.clear_instance().await;
+                bus.emit(Event::VastInstanceDestroyed { instance_id: instance_id.clone() }).await;
+
+                bus.emit(Event::ToolResult {
+                    session, call: call_id,
+                    output: ToolOutput {
+                        ok: true,
+                        content: serde_json::json!({
+                            "status":      "destroyed",
+                            "instance_id": instance_id,
+                            "message":     "Instance destroyed. Backend reverted to default."
+                        }),
+                    },
+                }).await;
+            });
+            return;
+        }
+
+        // ── end Vast.ai virtual tools ──────────────────────────────────────────
+
+        // Virtual tool: agent_spawn is handled by the async router, not an MCP plugin.
+        if call.tool == "agent_spawn" {
+            let prompt  = call.args["prompt"].as_str().unwrap_or("").to_owned();
+            let system  = call.args["system"].as_str().map(str::to_owned);
+            let bus     = self.bus.clone();
+            let call_id = call.id;
+            tokio::spawn(async move {
+                bus.emit(Event::SpawnAgent { parent: session, call_id, prompt, system }).await;
+            });
+            return;
+        }
+
+        let tool_name = call.tool.clone();
+        if let Some(pid) = self.tool_registry.get(&tool_name).cloned() {
+            if let Some(plugin) = self.plugins.get(&pid) {
+                let client   = plugin.client.clone();
+                let bus      = self.bus.clone();
+                tokio::spawn(async move {
+                    let output = match client.call_tool(&call.tool, &call.args).await {
+                        Ok(o)  => o,
+                        Err(e) => ToolOutput {
+                            ok:      false,
+                            content: serde_json::json!(e.to_string()),
+                        },
+                    };
+                    bus.emit(Event::ToolResult { session, call: call.id, output }).await;
+                });
+                return;
+            }
+        }
+        // Unknown tool or plugin not live → return error so the turn loop unblocks.
+        let bus     = self.bus.clone();
+        let call_id = call.id;
+        tokio::spawn(async move {
+            bus.emit(Event::ToolResult {
+                session,
+                call: call_id,
+                output: ToolOutput {
+                    ok:      false,
+                    content: serde_json::json!(format!("unknown tool: {tool_name}")),
+                },
+            }).await;
+        });
+    }
+
+    async fn spawn_plugin(
+        &mut self,
+        cfg: &PluginConfig,
+        sv_tx: mpsc::Sender<SupervisorCmd>,
+    ) -> anyhow::Result<()> {
+        let plugin_id = PluginId(cfg.id.clone());
+
+        let mut cmd = Command::new(&cfg.cmd);
+        cmd.args(&cfg.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        if let Some(cwd) = &cfg.cwd {
+            cmd.current_dir(cwd);
+        }
+        if let Some(env) = &cfg.env {
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+        }
+
+        let mut child = cmd.spawn()?;
+
+        if let Some(stderr) = child.stderr.take() {
+            let id = plugin_id.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    eprintln!("[plugin:{id}] {line}");
+                }
+            });
+        }
+
+        let client = Arc::new(McpClient::attach(&mut child).await?);
+        client.initialize().await?;
+        let tools = client.list_tools().await?;
+
+        for spec in &tools {
+            self.tool_registry.insert(spec.name.clone(), plugin_id.clone());
+        }
+
+        eprintln!("[supervisor] plugin '{}' up — {} tools", plugin_id.0, tools.len());
+        self.bus.emit(Event::PluginUp { plugin: plugin_id.clone(), tools }).await;
+
+        let id_w = plugin_id.clone();
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+            let _ = sv_tx.send(SupervisorCmd::PluginDied { id: id_w }).await;
+        });
+
+        self.configs.insert(plugin_id.clone(), cfg.clone());
+        self.plugins.insert(plugin_id, Plugin { client });
+        Ok(())
+    }
+
+    async fn handle_died(&mut self, id: PluginId, sv_tx: mpsc::Sender<SupervisorCmd>) {
+        self.tool_registry.retain(|_, owner| owner != &id);
+        // Only emit PluginDown if the plugin was still in our live set.
+        // HotReload removes it first, so this avoids a duplicate PluginDown event.
+        let was_live = self.plugins.remove(&id).is_some();
+
+        if was_live {
+            eprintln!("[supervisor] plugin '{}' died", id.0);
+            self.bus.emit(Event::PluginDown {
+                plugin: id.clone(),
+                reason: "process exited".into(),
+            }).await;
+        }
+
+        let cfg = match self.configs.get(&id) {
+            Some(c) => c.clone(),
+            None    => return,
+        };
+
+        if cfg.restart == RestartPolicy::Always {
+            eprintln!("[supervisor] restarting '{}' in 1s…", id.0);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if let Err(e) = self.spawn_plugin(&cfg, sv_tx).await {
+                eprintln!("[supervisor] restart of '{}' failed: {e}", id.0);
+            }
+        }
+    }
+}
+
+/// Convert a raw event JSON object into a concise human-readable sentence.
+/// Returns None for high-frequency noise events (agent_text, tool_result, etc.)
+fn format_event_line(v: &serde_json::Value) -> Option<String> {
+    let t = v["type"].as_str()?;
+    let line = match t {
+        // Skip streaming noise
+        "agent_text" | "agent_thinking" | "tool_result" | "turn_complete" => return None,
+
+        "user_prompt" => {
+            let session = v["session"].as_u64().unwrap_or(0);
+            let text    = v["text"].as_str().unwrap_or("").chars().take(120).collect::<String>();
+            format!("Session {session}: user said '{text}'")
+        }
+        "tool_requested" => {
+            let session = v["session"].as_u64().unwrap_or(0);
+            let tool    = v["call"]["tool"].as_str().unwrap_or("?");
+            format!("Session {session}: tool '{tool}' called")
+        }
+        "approval_pending" => {
+            let session = v["session"].as_u64().unwrap_or(0);
+            let tool    = v["call"]["tool"].as_str().unwrap_or("?");
+            format!("Session {session}: tool '{tool}' awaiting approval")
+        }
+        "user_approval" => {
+            let session = v["session"].as_u64().unwrap_or(0);
+            let granted = v["granted"].as_bool().unwrap_or(false);
+            format!("Session {session}: approval {}", if granted { "granted" } else { "denied" })
+        }
+        "evolution_proposed" => {
+            let kind   = v["proposal"]["kind"].as_str().unwrap_or("?");
+            let reason = v["proposal"]["reason"].as_str().unwrap_or("");
+            format!("Evolution proposed: {kind} — '{reason}'")
+        }
+        "evolution_applied" => {
+            let kind   = v["proposal"]["kind"].as_str().unwrap_or("?");
+            let reason = v["proposal"]["reason"].as_str().unwrap_or("");
+            format!("Evolution applied: {kind} — '{reason}'")
+        }
+        "evolution_rolled_back" => {
+            format!("Evolution rolled back (id={})", v["id"].as_u64().unwrap_or(0))
+        }
+        "plugin_up" => {
+            let plugin = v["plugin"].as_str().unwrap_or("?");
+            let n      = v["tools"].as_array().map(|a| a.len()).unwrap_or(0);
+            format!("Plugin '{plugin}' started ({n} tools)")
+        }
+        "plugin_down" => {
+            let plugin = v["plugin"].as_str().unwrap_or("?");
+            format!("Plugin '{plugin}' stopped")
+        }
+        "wake_triggered"   => "Wake word triggered".into(),
+        "spawn_agent"      => {
+            let parent = v["parent"].as_u64().unwrap_or(0);
+            let prompt = v["prompt"].as_str().unwrap_or("").chars().take(80).collect::<String>();
+            format!("Session {parent}: spawned sub-agent — '{prompt}'")
+        }
+        "sub_agent_started" => {
+            let child  = v["child"].as_u64().unwrap_or(0);
+            let parent = v["parent"].as_u64().unwrap_or(0);
+            format!("Sub-agent {child} started (parent: {parent})")
+        }
+        "sensor_reading" => {
+            let node    = v["node_id"].as_str().unwrap_or("?");
+            let reading = &v["reading"];
+            if let Some(iaq) = reading["iaq"].as_f64() {
+                let temp = reading["temperature"].as_f64().unwrap_or(0.0);
+                let rh   = reading["humidity"].as_f64().unwrap_or(0.0);
+                format!("Sensor {node}: IAQ={iaq:.0} Temp={temp:.1}°C RH={rh:.0}%")
+            } else {
+                format!("Sensor {node}: {reading}")
+            }
+        }
+        "council_started" => {
+            let id    = v["id"].as_str().unwrap_or("?");
+            let topic = v["topic"].as_str().unwrap_or("");
+            format!("Council '{id}' started: topic='{topic}'")
+        }
+        "council_complete" => {
+            let id    = v["id"].as_str().unwrap_or("?");
+            let synth = v["synthesis"].as_str().unwrap_or("").chars().take(100).collect::<String>();
+            format!("Council '{id}' complete: '{synth}'")
+        }
+        "agent_message" => {
+            let from = v["from"].as_u64().unwrap_or(0);
+            let to   = v["to"].as_u64().unwrap_or(0);
+            let body = v["body"].as_str().unwrap_or("").chars().take(80).collect::<String>();
+            format!("Agent {from} → Agent {to}: '{body}'")
+        }
+        // Unknown event types: show the type name so they appear in results
+        other => format!("[{other}]"),
+    };
+    Some(line)
+}
+
+// ── mesh helpers ──────────────────────────────────────────────────────────────
+
+/// Look up a peer's ws_url by node_id in peers.toml. Async because it reads a file.
+async fn find_peer_ws_url(node_id: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct PeersFile { #[serde(default)] peer: Vec<PeerEntry> }
+    #[derive(serde::Deserialize)]
+    struct PeerEntry { node_id: String, ws_url: String }
+
+    let path = std::env::var("PEERS_TOML").unwrap_or_else(|_| "/etc/agentd/peers.toml".into());
+    let raw  = tokio::fs::read_to_string(&path).await.ok()?;
+    let file: PeersFile = toml::from_str(&raw).ok()?;
+    file.peer.into_iter().find(|p| p.node_id == node_id).map(|p| p.ws_url)
+}

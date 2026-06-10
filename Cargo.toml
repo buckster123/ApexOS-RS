@@ -1,3 +1,68 @@
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["buckster123"]
+repository = "https://github.com/buckster123/ApexOS-RS"
+
 [workspace]
-members = ["ui-slint"]
+members = [
+    # ── Agent daemon ──────────────────────────────────────────────────────────
+    "agentd/crates/core",
+    "agentd/crates/gateway",
+    "agentd/crates/plugins",
+    "agentd/crates/agent",
+    "agentd/crates/store",
+    "agentd/crates/agentd",
+    # ── Cognitive memory (CerebroCortex-RS) ──────────────────────────────────
+    "cerebro/crates/cerebro",
+    "cerebro/crates/cerebro-mcp",
+    "cerebro/crates/cerebro-api",
+    "cerebro/crates/cerebro-cli",
+    # ── System tool plugins ───────────────────────────────────────────────────
+    "tools/crates/apexos-tools",
+    "tools/crates/apex-sensor-bridge",
+    # ── Native UI ─────────────────────────────────────────────────────────────
+    "ui-slint",
+]
 resolver = "2"
+
+[workspace.dependencies]
+# Async
+tokio         = { version = "1", features = ["full"] }
+futures-util  = "0.3"
+# Serialization
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+# Error handling
+anyhow        = "1"
+thiserror     = "1"
+# HTTP / Web
+reqwest       = { version = "0.12", features = ["json"] }
+axum          = { version = "0.8", features = ["ws"] }
+tower         = "0.5"
+# Storage
+rusqlite      = { version = "0.31", features = ["bundled", "blob"] }
+sqlite-vec    = "0.1"
+petgraph      = "0.6"
+# Embeddings (ONNX, no GPU required)
+fastembed     = "4"
+# CLI
+clap          = { version = "4", features = ["derive", "env"] }
+# Utils
+uuid          = { version = "1", features = ["v4", "serde"] }
+chrono        = { version = "0.4", features = ["serde"] }
+rand          = "0.8"
+dirs-next     = "2"
+notify        = "6"
+# Logging
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
+# Testing / Benchmarks
+tempfile  = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[profile.release]
+opt-level = 3
+lto       = "thin"
+strip     = true

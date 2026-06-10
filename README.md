@@ -17,22 +17,28 @@
 
 ## What is this?
 
-ApexOS-RS is the pure-Rust alternate distro of [ApexOS](https://github.com/buckster123/ApexOS).
+ApexOS-RS is the pure-Rust distro of [ApexOS](https://github.com/buckster123/ApexOS). One repo, one `cargo build --release --workspace`, one `install.sh`. Everything runs.
 
-It replaces the Chromium kiosk + Wayland compositor + HTML/JS frontend with a single native binary built with [Slint](https://slint.dev/). The UI renders directly to the framebuffer via Linux KMS/DRM — no cage, no seatd, no browser engine.
+Where canonical ApexOS bundles Chromium, Python plugins, and a JS frontend, ApexOS-RS replaces all of it with Rust:
 
-The `agentd` daemon is **unchanged**. ApexOS-RS is a thin WS renderer: it connects to the same `ws://localhost:8787/ws` endpoint as the browser, consumes the same Event stream, and sends the same Intent JSON.
+| Canonical ApexOS | ApexOS-RS |
+|-----------------|-----------|
+| Chromium kiosk | Slint native UI (KMS/DRM) |
+| Python cerebro-mcp | cerebro-mcp (Rust, 66 tools) |
+| JS/HTML frontend | Slint `.slint` components |
+| cage + seatd + Wayland | direct KMS/DRM, zero compositor |
+
+The Slint UI connects to `ws://localhost:8787/ws` — the same protocol as the browser frontend. agentd is unchanged.
 
 ```
-┌──────────────────────── Raspberry Pi ──────────────────────────┐
-│                                                                  │
-│  agentd (unchanged) ──── ws://localhost:8787/ws                  │
-│                                    │                             │
-│                            apexos-rs-ui                         │
-│                         (Slint + KMS/DRM)                       │
-│                        renders to /dev/tty7                      │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────── ApexOS-RS workspace ─────────────────────────────┐
+│                                                                           │
+│  agentd        ──── ws://localhost:8787/ws ──┬──→ Browser / PWA          │
+│  cerebro-mcp   (MCP plugins over stdio)      │                            │
+│  apexos-tools  (MCP plugins over stdio)      apexos-rs-ui                │
+│  sensor-bridge (WS events → agentd)       (Slint + KMS/DRM)              │
+│                                           renders to /dev/tty7            │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -131,8 +137,17 @@ agentd's mesh (avahi discovery + `peers.toml`) already handles this. The GPU nod
 
 ## Status
 
-> **Pre-alpha — planning + scaffold stage.**
-> The WS client skeleton is in place. Feature implementation begins at step 1 of the [build roadmap](docs/build-roadmap.md).
+> **Alpha — workspace assembled, UI in progress.**
+
+| Component | Status |
+|-----------|--------|
+| agentd | ✓ production (Pi 5) |
+| cerebro-mcp (66 tools) | ✓ production (Pi 5) |
+| apexos-tools | ✓ production (Pi 5) |
+| apex-sensor-bridge | ✓ production (Pi 5) |
+| cerebro-api (REST) | ✓ implemented |
+| `install.sh` | ✓ first draft |
+| ui-slint | step 1 / 9 — agent chat in progress |
 
 ---
 
@@ -140,43 +155,63 @@ agentd's mesh (avahi discovery + `peers.toml`) already handles this. The GPU nod
 
 ```mermaid
 graph LR
-    subgraph Pi["Raspberry Pi"]
-        agentd["agentd\n(unchanged)"]
+    subgraph Workspace["ApexOS-RS workspace"]
+        agentd["agentd\nagentd/crates/"]
+        cerebro["cerebro-mcp\ncerebro/crates/"]
+        tools["apexos-tools\ntools/crates/"]
+        bridge["apex-sensor-bridge\ntools/crates/"]
+        ui["apexos-rs-ui\nui-slint/"]
+    end
+
+    subgraph Runtime["Runtime on device"]
         WS["ws://localhost:8787/ws"]
-        UI["apexos-rs-ui\nSlint + KMS/DRM\n~10 MB RSS"]
-        HDMI["/dev/tty7\nHDMI out"]
+        HDMI["/dev/tty7\nHDMI / KMS"]
         Browser["Browser\n(any device)"]
     end
 
+    agentd <-->|MCP stdio| cerebro
+    agentd <-->|MCP stdio| tools
+    bridge -->|sensor events| agentd
     agentd <-->|Event stream| WS
-    WS --> UI
+    WS --> ui
     WS --> Browser
-    UI -->|renders to| HDMI
+    ui -->|renders to| HDMI
 ```
 
-See [`docs/architecture.md`](docs/architecture.md) — covers the WS renderer pattern,
-thread model (Slint main thread + tokio pool), KMS/DRM setup, and agentd protocol.
+See [`docs/architecture.md`](docs/architecture.md) for the full component graph,
+thread model, KMS/DRM setup, and agentd protocol.
 
-## Build Roadmap
+## Install
 
-10 steps, ~10-12 sessions to a fully functional native desktop:
+```bash
+# Fresh device (Pi or x86) — auto-detects tier and mode:
+curl -fsSL https://raw.githubusercontent.com/buckster123/ApexOS-RS/main/install.sh | sudo bash
 
-| # | Feature |
-|---|---------|
-| 1 | WS skeleton — connects to agentd, session handshake |
-| 2 | Agent chat — streaming text, dark theme, send input |
-| 3 | Tool call blocks — collapsible cards, inline approval |
-| 4 | Home dashboard — CPU/RAM/disk bars, IAQ badge |
-| 5 | Sensor window — IAQ stats + thermal heatmap (custom painter) |
-| 6 | Session management — init, picker, history replay |
-| 7 | Voice controls — mic → `/api/record/start`, speaker → `/api/speak` |
-| 8 | Settings — soul.md editor, policy mode, plugin list |
-| 9 | Power modal + model/policy selectors |
-| 10 | KMS/DRM deploy — `linuxkms` backend, systemd service, remove cage |
+# Options
+sudo bash install.sh --no-ui             # headless / server node
+sudo bash install.sh --tier=nano         # Pi Zero 2W, embedding disabled
+sudo bash install.sh --api-key=sk-...    # set Anthropic key non-interactively
+```
 
-Post-v1: PTY terminal (alacritty_terminal), sub-agent windows, sketchpad.
+## Build Roadmap (UI)
 
-Full detail: [`docs/build-roadmap.md`](docs/build-roadmap.md)
+The non-UI stack is production. The Slint UI ships in 9 steps:
+
+| # | Feature | Status |
+|---|---------|--------|
+| 1 | Agent chat — streaming message list, send input | ⬜ next |
+| 2 | Tool call blocks — collapsible cards, inline approval | ⬜ |
+| 3 | Home dashboard — CPU/RAM/disk bars, IAQ badge | ⬜ |
+| 4 | Sensor window — IAQ stats + thermal heatmap (custom painter) | ⬜ |
+| 5 | Session management — init, picker, history replay | ⬜ |
+| 6 | Voice controls — mic → `/api/record/start`, speaker → `/api/speak` | ⬜ |
+| 7 | Settings — soul.md editor, policy mode, plugin list | ⬜ |
+| 8 | Power modal + model/policy selectors | ⬜ |
+| 9 | KMS/DRM deploy — `linuxkms` backend, systemd, retire cage | ⬜ |
+
+Post-v1: PTY terminal, sub-agent windows, Cerebro dashboard, sketchpad.
+
+Full per-step detail: [`docs/build-roadmap.md`](docs/build-roadmap.md)
 
 ---
 

@@ -1,0 +1,22 @@
+[package]
+name        = "cerebro-cli"
+description = "CerebroCortex command-line interface"
+version.workspace = true
+edition     = "2021"
+license.workspace = true
+
+[[bin]]
+name = "cerebro"
+path = "src/main.rs"
+
+[dependencies]
+cerebro          = { path = "../cerebro" }
+tokio.workspace  = true
+clap.workspace   = true
+serde.workspace  = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+uuid.workspace   = true

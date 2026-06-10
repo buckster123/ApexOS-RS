@@ -39,39 +39,47 @@ Headless is already fully supported — agentd is a pure daemon. Mobile PWA and 
 
 ## What this is
 
-ApexOS-RS is a **thin WebSocket renderer** that connects to the same `ws://localhost:8787/ws`
-endpoint as the browser UI, consuming the same Event JSON stream and sending the same Intent JSON.
-It is not a fork of agentd. It does not import agentd as a Rust library.
+ApexOS-RS is a **pure-Rust distro** — a single Cargo workspace containing the full stack:
+the agent daemon, cognitive memory system, system tool plugins, and native Slint UI.
+One `cargo build --release --workspace`. One `install.sh`.
 
 ```
-agentd (UNCHANGED) ──── ws://localhost:8787/ws ──┬──→ Browser (any device)
-                                                  │
-                                              apexos-rs-ui
-                                           (Slint + KMS/DRM)
-                                           renders to /dev/tty7
+┌─────────────────────── ApexOS-RS workspace ──────────────────────────┐
+│                                                                        │
+│  agentd         ──── ws://localhost:8787/ws ──┬──→ Browser / PWA      │
+│  (agentd/)                                    │                        │
+│                                         apexos-rs-ui                  │
+│  cerebro-mcp   (cerebro/)            (Slint + KMS/DRM)                │
+│  apexos-tools  (tools/)              renders to /dev/tty7              │
+│  sensor-bridge (tools/)                                                │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-Single crate workspace (for now):
+Workspace layout:
 
 ```
-ui-slint/
-  src/
-    main.rs               # runtime + WS client loop + event dispatch
-    ui/appwindow.slint    # root Slint window + all components
-  Cargo.toml
+agentd/crates/       # agent daemon (core · gateway · plugins · agent · store · agentd)
+cerebro/crates/      # cognitive memory (cerebro lib · cerebro-mcp · cerebro-api · cerebro-cli)
+tools/crates/        # system tool plugins (apexos-tools · apex-sensor-bridge)
+ui-slint/            # Slint native UI (the unique contribution of this repo)
+config/              # default plugins.toml, policy.toml
+deploy/              # systemd service units
+install.sh           # one-shot installer
 ```
 
 ---
 
 ## Locked decisions
 
-- **Language**: Rust
+- **Language**: Rust — every binary in the workspace
+- **Repo model**: copy-and-diverge distro (no git submodules); canonical ApexOS stays Chromium
 - **UI framework**: Slint (`.slint` declarative, compiles to native GL)
 - **Rendering**: `SLINT_BACKEND=linuxkms` on Pi (KMS/DRM, no Wayland, no cage)
 - **Thread model**: tokio on background threads, Slint event loop owns main thread — **never** `#[tokio::main]`
 - **Cross-thread UI**: `slint::invoke_from_event_loop()` only — never touch UI handles from tokio tasks directly
-- **agentd dependency**: none — protocol is stable JSON over WS, no shared Rust types needed
-- **Memory target**: ~10 MB RSS at idle (no GPU buffers counted)
+- **Memory (cerebro Nano)**: `CEREBRO_EMBED_MODEL=""` → ~23 MB RSS, FTS5-only search
+- **Memory (cerebro Micro+)**: `BAAI/bge-small-en-v1.5` → ~275 MB RSS, cosine ANN
 - **Pi Zero 2W support**: `SLINT_BACKEND=linuxkms-femtovg` (software renderer, ~7 MB)
 
 ---
@@ -94,23 +102,29 @@ ui-slint/
 
 ```bash
 # 1. Dev machine
-cargo test
+cargo test --workspace --exclude ui-slint   # ui-slint needs fontconfig; skip on headless dev
 git add -p && git commit -m "short imperative description"
 git push
 
-# 2. On Pi
+# 2. On Pi — build the whole workspace
 cd ~/ApexOS-RS
 git pull
-cargo build --release -p ui-slint
+cargo build --release --workspace
 
-# 3. Hot-swap
+# 3. Hot-swap a single binary (e.g. cerebro-mcp)
+sudo systemctl stop agentd
+sudo cp target/release/cerebro-mcp /usr/local/bin/cerebro-mcp
+sudo systemctl start agentd
+sudo journalctl -u agentd -n 20 --no-pager
+
+# 4. Hot-swap the UI
 sudo systemctl stop apexos-rs-ui
 sudo cp target/release/ui-slint /usr/local/bin/apexos-rs-ui
 sudo systemctl start apexos-rs-ui
-sudo journalctl -u apexos-rs-ui -n 20 --no-pager
+sudo journalctl -u apexos-rs-ui -n 10 --no-pager
 ```
 
-On Pi the binary is not yet running as a service during early development — run directly:
+During UI development — run apexos-rs-ui directly (no service needed):
 ```bash
 AGENTD_WS=ws://localhost:8787/ws SLINT_BACKEND=linuxkms ./target/release/ui-slint
 ```
@@ -247,6 +261,7 @@ Full event list: `../ApexOS/agentd/crates/core/src/types.rs` — `Event` enum.
 
 ## Gotchas
 
+- **`libfontconfig1-dev` required for ui-slint** — `sudo apt-get install -y libfontconfig1-dev` on both Pi and dev machine. Without it `cargo check -p ui-slint` panics. Use `--exclude ui-slint` to check the rest of the workspace on a headless machine.
 - **Never `#[tokio::main]`** — Slint requires the main thread. `#[tokio::main]` hijacks it. Build the runtime manually with `Builder::new_multi_thread()`.
 - **`invoke_from_event_loop` is fire-and-forget** — it queues a closure and returns immediately. The closure runs asynchronously on the Slint thread. Do not assume immediate effect.
 - **Slint strings are `SharedString`** — convert with `.into()`. Never pass a `&str` or `String` directly where Slint expects `SharedString`.

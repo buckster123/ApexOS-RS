@@ -1,0 +1,18 @@
+[Unit]
+Description=CerebroCortex-RS REST API + dashboard (port 8767)
+After=network.target agentd.service
+Requires=agentd.service
+
+[Service]
+Type=simple
+User=agentd
+Group=agentd
+ExecStart=/usr/local/bin/cerebro-api
+Restart=always
+RestartSec=10
+Environment=CEREBRO_DATA_DIR=/var/lib/agentd/cerebro
+Environment=FASTEMBED_CACHE_DIR=/var/lib/agentd/cerebro/models
+EnvironmentFile=-/etc/agentd/env
+
+[Install]
+WantedBy=multi-user.target

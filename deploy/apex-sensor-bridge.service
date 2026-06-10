@@ -1,0 +1,18 @@
+[Unit]
+Description=ApexOS sensor bridge daemon
+After=network.target agentd.service
+Requires=agentd.service
+
+[Service]
+Type=simple
+User=agentd
+Group=agentd
+EnvironmentFile=-/etc/agentd/env
+Environment=SENSOR_INTERVAL_SECS=30
+Environment=SENSOR_BRIDGE_HOST=localhost:8787
+ExecStart=/usr/local/bin/apex-sensor-bridge
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,28 @@
+# /etc/agentd/plugins.toml  (ApexOS-RS — pure Rust edition)
+#
+# All plugins are Rust binaries built from this workspace.
+# install.sh places them at /usr/local/bin/.
+
+[[plugin]]
+id      = "cerebro"
+cmd     = "/usr/local/bin/cerebro-mcp"
+args    = []
+restart = "always"
+[plugin.env]
+CEREBRO_DATA_DIR    = "/var/lib/agentd/cerebro"
+FASTEMBED_CACHE_DIR = "/var/lib/agentd/cerebro/models"
+RUST_LOG            = "warn"
+
+[[plugin]]
+id      = "apexos-tools"
+cmd     = "/usr/local/bin/apexos-tools"
+args    = []
+restart = "always"
+
+# Sonus — music generation (Python, optional — uncomment when deployed)
+# [[plugin]]
+# id      = "sonus"
+# cmd     = "/usr/local/bin/sonus-mcp"
+# restart = "always"
+# [plugin.env]
+# SUNO_DOWNLOAD_DIR = "/var/lib/agentd/workspace/sonus"

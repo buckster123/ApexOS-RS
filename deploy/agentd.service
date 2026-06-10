@@ -1,0 +1,29 @@
+[Unit]
+Description=Agent OS daemon (agentd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/agentd
+Restart=on-failure
+RestartSec=2
+
+User=agentd
+Group=agentd
+
+Environment=AGENTD_PLUGINS_TOML=/etc/agentd/plugins.toml
+Environment=AGENTD_POLICY_TOML=/etc/agentd/policy.toml
+Environment=AGENTD_WORKSPACE=/var/lib/agentd/workspace
+Environment=AGENTD_LOG=/var/lib/agentd/events
+Environment=AGENTD_UI=/var/lib/agentd/ui
+EnvironmentFile=-/etc/agentd/env
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agentd /etc/agentd
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

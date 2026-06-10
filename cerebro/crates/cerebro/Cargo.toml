@@ -1,0 +1,33 @@
+[package]
+name        = "cerebro"
+description = "CerebroCortex cognitive engine — pure Rust library"
+version.workspace = true
+edition     = "2021"
+license.workspace = true
+
+[dependencies]
+tokio.workspace     = true
+serde.workspace     = true
+serde_json.workspace = true
+rusqlite.workspace  = true
+sqlite-vec.workspace = true
+petgraph.workspace  = true
+fastembed.workspace = true
+reqwest.workspace   = true
+uuid.workspace      = true
+chrono.workspace    = true
+anyhow.workspace    = true
+thiserror.workspace = true
+tracing.workspace   = true
+rand.workspace      = true
+notify.workspace    = true
+dirs-next.workspace = true
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name    = "activation_bench"
+harness = false
