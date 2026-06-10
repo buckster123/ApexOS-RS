@@ -1,7 +1,15 @@
 // Shared struct definitions — exported for Rust and all components.
 
 export struct MessageItem {
-    role: string,       // "user" | "agent"
+    role: string,             // "user" | "agent" | "tool"
     text: string,
     streaming: bool,
+
+    // Tool-card fields (only used when role == "tool")
+    call-id: string,          // matches tool_requested / tool_result call_id
+    tool-name: string,        // e.g. "read_file", "run_command"
+    tool-args: string,        // JSON args, shown collapsed
+    tool-output: string,      // populated on tool_result
+    tool-status: string,      // "running" | "done" | "error"
+    awaiting-approval: bool,  // true while approval_pending, false after
 }

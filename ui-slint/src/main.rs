@@ -67,6 +67,32 @@ fn finish_last_agent_message() {
     });
 }
 
+fn find_tool_row(call_id: &str) -> Option<usize> {
+    MESSAGES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            for i in 0..model.row_count() {
+                if let Some(item) = model.row_data(i) {
+                    if item.role.as_str() == "tool" && item.call_id.as_str() == call_id {
+                        return Some(i);
+                    }
+                }
+            }
+        }
+        None
+    })
+}
+
+fn update_tool_row(row: usize, f: impl FnOnce(&mut MessageItem)) {
+    MESSAGES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            if let Some(mut item) = model.row_data(row) {
+                f(&mut item);
+                model.set_row_data(row, item);
+            }
+        }
+    });
+}
+
 // ── App state (shared with WS task via Arc<Mutex>) ───────────────────────────
 #[derive(Default)]
 struct AppState {
@@ -161,6 +187,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // ── approve / reject callbacks ────────────────────────────────────────────
+    let tx_approve = tx.clone();
+    ui.on_approve_tool(move |call_id| {
+        if let Some(row) = find_tool_row(call_id.as_str()) {
+            update_tool_row(row, |item| item.awaiting_approval = false);
+        }
+        let payload = serde_json::json!({
+            "type": "user_approval",
+            "call_id": call_id.as_str(),
+            "approved": true
+        })
+        .to_string();
+        tx_approve.send(payload).ok();
+    });
+
+    let tx_reject = tx.clone();
+    ui.on_reject_tool(move |call_id| {
+        if let Some(row) = find_tool_row(call_id.as_str()) {
+            update_tool_row(row, |item| {
+                item.awaiting_approval = false;
+                item.tool_status = "error".into();
+            });
+        }
+        let payload = serde_json::json!({
+            "type": "user_approval",
+            "call_id": call_id.as_str(),
+            "approved": false
+        })
+        .to_string();
+        tx_reject.send(payload).ok();
+    });
+
     // ── send-message callback ─────────────────────────────────────────────────
     let tx_send = tx.clone();
     let messages_send = messages.clone();
@@ -172,6 +230,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             role: "user".into(),
             text: text.clone(),
             streaming: false,
+            call_id: "".into(),
+            tool_name: "".into(),
+            tool_args: "".into(),
+            tool_output: "".into(),
+            tool_status: "".into(),
+            awaiting_approval: false,
         });
         let payload = serde_json::json!({"type": "user_prompt", "text": text.as_str()}).to_string();
         tx_send.send(payload).ok();
@@ -213,6 +277,12 @@ fn dispatch_event(
                         role: "agent".into(),
                         text: "".into(),
                         streaming: true,
+                        call_id: "".into(),
+                        tool_name: "".into(),
+                        tool_args: "".into(),
+                        tool_output: "".into(),
+                        tool_status: "".into(),
+                        awaiting_approval: false,
                     });
                     ui.invoke_scroll_to_bottom();
                 }
@@ -241,6 +311,72 @@ fn dispatch_event(
                 if let Some(ui) = w.upgrade() {
                     finish_last_agent_message();
                     ui.set_agent_busy(false);
+                }
+            })
+            .ok();
+        }
+
+        "tool_requested" => {
+            let call_id   = ev["call_id"].as_str().unwrap_or("").to_string();
+            let tool_name = ev["name"].as_str().unwrap_or("").to_string();
+            let tool_args = ev["input"]
+                .as_object()
+                .map(|o| serde_json::to_string_pretty(o).unwrap_or_default())
+                .unwrap_or_default();
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    push_message(MessageItem {
+                        role: "tool".into(),
+                        text: "".into(),
+                        streaming: false,
+                        call_id: call_id.into(),
+                        tool_name: tool_name.into(),
+                        tool_args: tool_args.into(),
+                        tool_output: "".into(),
+                        tool_status: "running".into(),
+                        awaiting_approval: false,
+                    });
+                    ui.invoke_scroll_to_bottom();
+                }
+            })
+            .ok();
+        }
+
+        "tool_result" => {
+            let call_id = ev["call_id"].as_str().unwrap_or("").to_string();
+            let output  = ev["output"].as_str().unwrap_or("").to_string();
+            slint::invoke_from_event_loop(move || {
+                if let Some(row) = find_tool_row(&call_id) {
+                    update_tool_row(row, |item| {
+                        item.tool_output = output.into();
+                        item.tool_status = "done".into();
+                    });
+                }
+            })
+            .ok();
+        }
+
+        "approval_pending" => {
+            let call_id   = ev["call_id"].as_str().unwrap_or("").to_string();
+            let tool_name = ev["name"].as_str().unwrap_or("").to_string();
+            slint::invoke_from_event_loop(move || {
+                // If the card is already in the list, mark it awaiting
+                if let Some(row) = find_tool_row(&call_id) {
+                    update_tool_row(row, |item| item.awaiting_approval = true);
+                } else {
+                    // Card not yet pushed (rare race) — create one
+                    push_message(MessageItem {
+                        role: "tool".into(),
+                        text: "".into(),
+                        streaming: false,
+                        call_id: call_id.into(),
+                        tool_name: tool_name.into(),
+                        tool_args: "".into(),
+                        tool_output: "".into(),
+                        tool_status: "running".into(),
+                        awaiting_approval: true,
+                    });
                 }
             })
             .ok();

@@ -19,6 +19,8 @@ export component AppWindow inherits Window {
     // ── Callbacks sent to Rust ──────────────────────────────────────────
     callback send-message(string);
     callback scroll-to-bottom <=> chat.scroll-to-bottom;
+    callback approve-tool <=> chat.approve-tool;
+    callback reject-tool  <=> chat.reject-tool;
 
     // ── Jarvis pulse animation ──────────────────────────────────────────
     // Timer fires every 1 s; property animates smoothly between 0 and 1.

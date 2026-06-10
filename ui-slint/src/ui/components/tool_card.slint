@@ -1,0 +1,202 @@
+import { Palette } from "../palette.slint";
+
+// Tool call card — rendered in the chat stream for role == "tool".
+// States: running (spinner dots), done (checkmark), error (✗).
+// Approval pending: shows approve/reject buttons.
+// Collapsible: click header to show/hide args+output body.
+
+export component ToolCard {
+    in property <string> tool-name;
+    in property <string> tool-args;
+    in property <string> tool-output;
+    in property <string> tool-status;   // "running" | "done" | "error"
+    in property <bool>   awaiting-approval: false;
+    in property <float>  glow-alpha: 0.0;
+
+    callback approve();
+    callback reject();
+
+    property <bool> expanded: false;
+    property <bool> has-output: root.tool-output != "";
+
+    // Status icon
+    property <string> status-icon:
+        root.tool-status == "running"  ? "⋯" :
+        root.tool-status == "done"     ? "✓" :
+        /*error*/                        "✗";
+
+    property <color> status-color:
+        root.tool-status == "running"  ? Palette.text-dim :
+        root.tool-status == "done"     ? Palette.primary :
+        /*error*/                        Palette.error;
+
+    // Jarvis: glow on the card when running
+    property <bool> is-live: root.tool-status == "running" || root.awaiting-approval;
+
+    VerticalLayout {
+        padding-top: 3px;
+        padding-bottom: 3px;
+        padding-left: 0px;
+        padding-right: 72px;   // mirror agent bubble right-padding
+
+        Rectangle {
+            background: Palette.tool-bg;
+            border-radius: Palette.radius;
+            border-width: 1px;
+            border-color: root.is-live && Palette.scanlines
+                ? rgba(0, 212, 255, root.glow-alpha * 0.5 + 0.15)
+                : Palette.tool-border;
+            drop-shadow-blur:  root.is-live && Palette.scanlines ? 6px : 0px;
+            drop-shadow-color: rgba(0, 212, 255, root.glow-alpha * 0.4);
+            drop-shadow-offset-y: 0px;
+
+            VerticalLayout {
+
+                // ── Header row ──────────────────────────────────────────
+                header-area := TouchArea {
+                    height: 32px;
+                    clicked => { root.expanded = !root.expanded; }
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+
+                        // Status indicator
+                        Text {
+                            text: root.status-icon;
+                            color: root.status-color;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            animate color { duration: 300ms; }
+                        }
+
+                        // Tool name
+                        Text {
+                            text: root.tool-name;
+                            color: Palette.tool-fg;
+                            font-size: 12px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            letter-spacing: root.tool-name != "" && Palette.scanlines ? 0.5px : 0px;
+                        }
+
+                        // Expand chevron (only when there's something to show)
+                        if root.tool-args != "" || root.has-output: Text {
+                            text: root.expanded ? "▲" : "▼";
+                            color: Palette.text-dim;
+                            font-size: 9px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // ── Approval buttons ────────────────────────────────────
+                if root.awaiting-approval: HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    padding-bottom: 8px;
+                    spacing: 8px;
+
+                    // Approve
+                    approve-rect := Rectangle {
+                        height: 26px;
+                        horizontal-stretch: 1;
+                        border-radius: Palette.radius-sm;
+                        background: approve-ta.has-hover ? Palette.primary : Palette.primary-dim;
+                        animate background { duration: 120ms; }
+                        Text {
+                            text: "Approve";
+                            color: Palette.bg;
+                            font-size: 11px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        approve-ta := TouchArea {
+                            clicked => { root.approve(); }
+                        }
+                    }
+
+                    // Reject
+                    reject-rect := Rectangle {
+                        height: 26px;
+                        horizontal-stretch: 1;
+                        border-radius: Palette.radius-sm;
+                        background: reject-ta.has-hover ? Palette.error : rgba(255, 107, 107, 0.15);
+                        animate background { duration: 120ms; }
+                        Text {
+                            text: "Reject";
+                            color: reject-ta.has-hover ? #ffffff : Palette.error;
+                            font-size: 11px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        reject-ta := TouchArea {
+                            clicked => { root.reject(); }
+                        }
+                    }
+                }
+
+                // ── Expanded body ───────────────────────────────────────
+                if root.expanded && (root.tool-args != "" || root.has-output): VerticalLayout {
+                    spacing: 0px;
+
+                    // Divider
+                    Rectangle {
+                        height: 1px;
+                        background: Palette.tool-border;
+                    }
+
+                    // Args section
+                    if root.tool-args != "": VerticalLayout {
+                        padding: 8px;
+                        padding-left: 10px;
+
+                        Text {
+                            text: "INPUT";
+                            color: Palette.text-dim;
+                            font-size: 9px;
+                            letter-spacing: 1.2px;
+                        }
+                        Text {
+                            text: root.tool-args;
+                            color: Palette.text-dim;
+                            font-size: 11px;
+                            font-family: "monospace";
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    // Output section
+                    if root.has-output: VerticalLayout {
+                        padding: 8px;
+                        padding-left: 10px;
+
+                        // Divider before output if args also present
+                        if root.tool-args != "": Rectangle {
+                            height: 1px;
+                            background: Palette.tool-border;
+                        }
+
+                        Text {
+                            text: "OUTPUT";
+                            color: root.tool-status == "error" ? Palette.error : Palette.text-dim;
+                            font-size: 9px;
+                            letter-spacing: 1.2px;
+                        }
+                        Text {
+                            text: root.tool-output;
+                            color: root.tool-status == "error" ? Palette.error : Palette.text;
+                            font-size: 11px;
+                            font-family: "monospace";
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

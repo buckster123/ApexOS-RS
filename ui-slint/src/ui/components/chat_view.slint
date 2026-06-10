@@ -1,6 +1,7 @@
 import { Palette } from "../palette.slint";
 import { MessageItem } from "../types.slint";
 import { MessageBubble } from "message_bubble.slint";
+import { ToolCard } from "tool_card.slint";
 
 // Scrollable message list.
 // Auto-scroll is triggered by AppWindow calling scroll-to-bottom().
@@ -10,6 +11,8 @@ export component ChatView {
     in property <float>         glow-alpha: 0.0;
 
     callback scroll-to-bottom();
+    callback approve-tool(string);   // call_id
+    callback reject-tool(string);    // call_id
 
     // Expose the flickable for scroll control
     property <length> flick-height: flick.viewport-height;
@@ -34,11 +37,24 @@ export component ChatView {
                 horizontal-alignment: center;
             }
 
-            for item in root.messages: MessageBubble {
-                role:       item.role;
-                text:       item.text;
-                streaming:  item.streaming;
-                glow-alpha: root.glow-alpha;
+            for item in root.messages: Rectangle {
+                // Route to tool card or chat bubble based on role
+                if item.role == "tool": ToolCard {
+                    tool-name:          item.tool-name;
+                    tool-args:          item.tool-args;
+                    tool-output:        item.tool-output;
+                    tool-status:        item.tool-status;
+                    awaiting-approval:  item.awaiting-approval;
+                    glow-alpha:         root.glow-alpha;
+                    approve => { root.approve-tool(item.call-id); }
+                    reject  => { root.reject-tool(item.call-id); }
+                }
+                if item.role != "tool": MessageBubble {
+                    role:       item.role;
+                    text:       item.text;
+                    streaming:  item.streaming;
+                    glow-alpha: root.glow-alpha;
+                }
             }
         }
     }
