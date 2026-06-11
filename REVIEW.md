@@ -251,3 +251,56 @@ Most `unwrap/expect/panic` sites are in `#[cfg(test)]` code (safe). **Production
 - `cargo check --workspace --exclude ui-slint` → compiles clean, ~9 minor warnings.
 - `cargo clippy` → unavailable (F007).
 - ui-slint not checked locally (fontconfig); build truth is on Pi.
+
+---
+
+## Verification pass — 2026-06-11 (session 2, Opus 4.8)
+
+All 6 fix waves (`a4a2c51` → `f69b656`) verified against actual code, not just the report.
+**Result: 30/33 original findings genuinely resolved + F029 folded into Wave 2 + F014/F018 excluded by design.**
+Full workspace (incl. ui-slint) **compiles clean**, zero warnings. Spot-verified correct: auth route
+coverage (all 41 routes gated, `/sensor-bridge` keeps own token), default `127.0.0.1` bind, F009 UTF-8
+carry buffer, F011 broadcast-lagged synthesis, F020 FTS5 per-token quoting, F005 PTY reap + abort,
+F008 connect-timeout, F025 reconnect loop, F021 `.transpose()?`, F028 UI service hardening.
+
+The second pass found **4 new items** — one HIGH regression introduced by the auth work, plus residuals:
+
+#### F034 🟠 [Security/Correctness] — REGRESSION: UI REST calls omit the bearer token → 401 on every default install
+**Location:** `ui-slint/src/main.rs:452` (`reqwest::Client::new()`, no default auth header); token is appended
+to the WS URL only at `:444-445`.
+**Problem:** Wave 1 added `?token=` to the **WebSocket** URL but the UI's shared HTTP client carries no token.
+`install.sh` now **always** generates `AGENTD_TOKEN`, and `apexos-rs-ui.service` loads `/etc/agentd/env`, so on
+every fresh install the token is set and **all ~15 UI REST calls return 401**: `/api/run` (home sys-stats),
+`/api/sessions` (picker), `/api/soul` `/api/policy` `/api/model` (settings load+save), `/api/power` (power modal),
+`/api/speak` `/api/record/start` `/api/record/stop` `/api/transcribe` (voice). WS chat still works, masking it.
+This will surface immediately in a fresh-Pi noob-mode test: chat works, the rest of the UI is dead.
+**Recommendation:** Build the UI's client with a default header when the token is set —
+`reqwest::Client::builder().default_headers({Authorization: Bearer <AGENTD_TOKEN>})`. One change, all calls fixed.
+
+#### F035 🟡 [Security] — Workspace confinement bypassable via `..` on a non-existent write target
+**Location:** `agentd/crates/plugins/src/policy.rs` `workspace_decision()` (~`:120-140`); `write_file`/`create_dir`
+have no own path guard (only `delete_path` got `..` rejection in Wave 2).
+**Problem:** `workspace_decision` canonicalizes the target, but `write_file`/`create_dir` target paths that don't
+exist yet → `canonicalize()` fails → falls back to the **raw** path. `PathBuf::starts_with` is component-wise, so
+`<workspace>/../../../etc/cron.d/x` still "starts with" the workspace prefix → returns `Allow` (no confirmation).
+Mitigated in production by `agentd.service` `ProtectSystem=strict` + `ReadWritePaths` (the OS write fails), but the
+policy decision itself is wrong and a non-systemd dev run is unprotected.
+**Recommendation:** Reject any `..` component (mirror `delete_path`), or normalize lexically / canonicalize the
+**parent** dir + join the filename before the `starts_with` check.
+
+#### F036 🟢 [Security] — Auth fail-open when token empty + non-loopback bind (operator footgun)
+**Location:** `agentd/crates/gateway/src/lib.rs` `require_token` (empty token → pass-through); bind
+`agentd/crates/agentd/src/main.rs` (`AGENTD_BIND`); same for cerebro-api / `CEREBRO_API_ADDR`.
+**Problem:** Empty `AGENTD_TOKEN` disables auth by design (safe on localhost). But setting `AGENTD_BIND=0.0.0.0`
+without a token binds all interfaces with **no auth** and only a stderr warning — re-opens F001 by misconfiguration.
+**Recommendation:** Hard-refuse to bind a non-loopback address when the token is empty (fail closed, not a warning).
+
+#### F037 🔵 [Security/UX] — cerebro-api auth also gates its own static dashboard
+**Location:** `cerebro/crates/cerebro-api/src/main.rs` (`.layer()` wraps the whole app, including dashboard routes).
+**Problem:** Opening `http://host:8765/` in the documented "external browser" returns 401 — a browser can't send a
+bearer header, only `?token=`. Minor (localhost-bound), noted in case the dashboard is meant to be browsable.
+**Recommendation:** Either accept `?token=` for dashboard navigation (already supported by the middleware) and
+document it, or leave the static dashboard public while gating only `/api/*` + destructive routes.
+
+> Tally after verification: original 33 resolved/excluded; **4 new (1 🟠 regression, 1 🟡, 1 🟢, 1 🔵)**.
+> F034 is the only must-fix-before-ship — it breaks half the kiosk UI on a default install.
