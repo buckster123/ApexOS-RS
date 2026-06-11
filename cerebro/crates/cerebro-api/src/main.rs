@@ -6,7 +6,7 @@ use axum::{
     http::{header, StatusCode},
     middleware::Next,
     response::IntoResponse,
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
     Json, Router,
 };
 use cerebro::{
@@ -78,6 +78,7 @@ struct RememberReq {
     tags:        Option<Vec<String>>,
     salience:    Option<f64>,
     agent_id:    Option<String>,
+    #[allow(dead_code)]
     visibility:  Option<String>,
 }
 
@@ -216,7 +217,7 @@ async fn health() -> Json<Value> {
 }
 
 async fn stats(
-    Query(q): Query<AgentQuery>,
+    Query(_q): Query<AgentQuery>,
     State(brain): State<Brain>,
 ) -> AppResult {
     let v = brain.storage.read().await.sqlite.memory_stats().await?;
@@ -515,7 +516,7 @@ async fn graph_stats(State(brain): State<Brain>) -> AppResult {
 
 async fn graph_neighbors(
     Path(memory_id): Path<String>,
-    Query(q): Query<AgentQuery>,
+    Query(_q): Query<AgentQuery>,
     State(brain): State<Brain>,
 ) -> AppResult {
     let storage   = brain.storage.read().await;
@@ -821,7 +822,7 @@ async fn dream_run(
 }
 
 async fn dream_status(
-    Query(q): Query<AgentQuery>,
+    Query(_q): Query<AgentQuery>,
     State(brain): State<Brain>,
 ) -> AppResult {
     let v = brain.storage.read().await.sqlite

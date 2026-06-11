@@ -6,7 +6,7 @@
 
 *Slint frontend · KMS/DRM direct rendering · No Chromium · No Wayland · ~10 MB RAM*
 
-[![Status](https://img.shields.io/badge/status-planning-yellow?style=flat-square)]()
+[![Status](https://img.shields.io/badge/status-mk1_complete-green?style=flat-square)]()
 [![Rust](https://img.shields.io/badge/built_with-Rust-orange?style=flat-square)](https://www.rust-lang.org/)
 [![UI](https://img.shields.io/badge/UI-Slint-blueviolet?style=flat-square)](https://slint.dev/)
 [![Platform](https://img.shields.io/badge/platform-Pi_4_·_Pi_5_·_Zero_2W-red?style=flat-square)](https://www.raspberrypi.com/)
@@ -182,6 +182,8 @@ See [`docs/architecture.md`](docs/architecture.md) for the full component graph,
 thread model, KMS/DRM setup, and agentd protocol.
 
 ## Install
+
+> **Security note:** The install script is piped directly into `sudo bash`. You are trusting the integrity of GitHub's CDN and TLS. Review the script first at the URL above if your threat model requires it.
 
 ```bash
 # Fresh device (Pi or x86) — auto-detects tier and mode:

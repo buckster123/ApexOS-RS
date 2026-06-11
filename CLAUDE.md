@@ -339,7 +339,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 
 ## Deferred / post-v1
 
-- PTY terminal — `alacritty_terminal` crate, replaces xterm.js
+- ~~PTY terminal~~ — shipped (libc `openpty`, `/terminal-ws` WebSocket endpoint in agentd gateway)
 - Monaco / code editor — SSH/vim or embedded webkit2gtk webview for soul.md heavy editing
 - Sub-agent windows — `Popup` per child session, maps to `SubAgentStarted` events
 - Sketchpad — Slint custom painter, post-v1 complexity

@@ -879,10 +879,12 @@ async fn snapshot_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let night = params.get("night").map(|v| v == "true" || v == "1").unwrap_or(false);
-    let out = "/tmp/apex_snapshot.jpg";
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_micros();
+    let out = format!("/tmp/apex_snapshot_{stamp}.jpg");
 
     let mut cmd = tokio::process::Command::new("rpicam-jpeg");
-    cmd.args(["--output", out, "--timeout", "3000",
+    cmd.args(["--output", &out, "--timeout", "3000",
               "--width",  "1280", "--height", "720",
               "--nopreview", "--camera", "0", "-q", "85"]);
     if night {
@@ -896,12 +898,11 @@ async fn snapshot_handler(
 
     match result {
         Ok(Ok(o)) if o.status.success() => {
-            match tokio::fs::read(out).await {
-                Ok(bytes) => (
-                    StatusCode::OK,
-                    [(header::CONTENT_TYPE, "image/jpeg")],
-                    bytes,
-                ).into_response(),
+            match tokio::fs::read(&out).await {
+                Ok(bytes) => {
+                    let _ = tokio::fs::remove_file(&out).await;
+                    (StatusCode::OK, [(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response()
+                }
                 Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
             }
         }
@@ -1046,7 +1047,10 @@ async fn wake_handler(State(state): State<GatewayState>) -> impl IntoResponse {
         // 1. Piper "yes?" — wait for it to finish so mic captures after the ding
         let model = std::env::var("PIPER_MODEL").unwrap_or_default();
         if !model.is_empty() {
-            let wav = "/tmp/apex_wake_ding.wav";
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_micros();
+            let wav = format!("/tmp/apex_wake_ding_{stamp}.wav");
+            let wav = wav.as_str();
             if let Ok(mut child) = tokio::process::Command::new("piper")
                 .args(["--model", &model, "--output_file", wav])
                 .stdin(std::process::Stdio::piped())

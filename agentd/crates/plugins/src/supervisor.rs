@@ -683,7 +683,7 @@ impl Supervisor {
                     "sshpass".to_string(),
                     format!("-p{ssh_password}"),
                     "ssh".into(),
-                    "-o".into(), "StrictHostKeyChecking=no".into(),
+                    "-o".into(), "StrictHostKeyChecking=accept-new".into(),
                     "-o".into(), "ConnectTimeout=5".into(),
                     format!("{ssh_user}@{target_ip}"),
                 ];
@@ -1131,7 +1131,7 @@ impl Supervisor {
                 let mut ssh = tokio::process::Command::new("ssh");
                 ssh.args([
                     "-f", "-N",
-                    "-o", "StrictHostKeyChecking=no",
+                    "-o", "StrictHostKeyChecking=accept-new",
                     "-o", "ControlMaster=auto",
                     "-o", &format!("ControlPath={cm_path}"),
                     "-o", "ControlPersist=5m",

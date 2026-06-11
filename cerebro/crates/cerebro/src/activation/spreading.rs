@@ -15,7 +15,7 @@ use crate::{
 pub fn spread(
     graph: &Graph<MemoryId, AssociativeLink>,
     seeds: &[NodeIndex],
-    scope: &VisibilityScope,
+    _scope: &VisibilityScope,
     visible_nodes: &HashMap<NodeIndex, bool>, // pre-computed visibility for speed
 ) -> HashMap<NodeIndex, f32> {
     let max_nodes    = SPREADING_MAX_ACTIVATED;

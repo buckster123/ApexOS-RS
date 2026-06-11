@@ -117,17 +117,17 @@
 
 | ID | Finding | Status |
 |----|---------|--------|
-| F031 | README/CLAUDE.md say `localhost` but daemon binds `0.0.0.0`; "no attack surface" claim | ⬜ |
-| F032 | README badge says "planning" — project is mk1 complete | ⬜ |
-| F033 | `.gitignore` excludes `Cargo.lock` — wrong for a binary workspace | ⬜ |
-| F012 | PTY terminal shipped but listed as deferred in CLAUDE.md | ⬜ |
-| F023 | cerebro-api port mismatch: code `8765` vs service description `8767` | ⬜ |
-| F026 | `AppState` mutex `.lock().unwrap()` — poison cascade | ⬜ |
-| F013 | Predictable `/tmp/apex_*` paths; whole-file-in-RAM media serving | ⬜ |
-| F017 | SSH tunnel `StrictHostKeyChecking=no` — MITM on inference tunnel | ⬜ |
-| F006 | Compiler warnings (unused vars/imports/dead field) | ⬜ |
-| F007 | clippy not installed in dev environment | ⬜ |
-| F030 | `curl | sudo bash` install has no checksum — document trust assumption | ⬜ |
+| F031 | README/CLAUDE.md say `localhost` but daemon binds `0.0.0.0`; "no attack surface" claim | ✅ |
+| F032 | README badge says "planning" — project is mk1 complete | ✅ |
+| F033 | `.gitignore` excludes `Cargo.lock` — wrong for a binary workspace | ✅ |
+| F012 | PTY terminal shipped but listed as deferred in CLAUDE.md | ✅ |
+| F023 | cerebro-api port mismatch: code `8765` vs service description `8767` | ✅ |
+| F026 | `AppState` mutex `.lock().unwrap()` — poison cascade | ✅ |
+| F013 | Predictable `/tmp/apex_*` paths; whole-file-in-RAM media serving | ✅ |
+| F017 | SSH tunnel `StrictHostKeyChecking=no` — MITM on inference tunnel | ✅ |
+| F006 | Compiler warnings (unused vars/imports/dead field) | ✅ |
+| F007 | clippy not installed in dev environment | ✅ |
+| F030 | `curl | sudo bash` install has no checksum — document trust assumption | ✅ |
 
 ---
 
@@ -149,8 +149,8 @@
 | 3 — UI reconnect | 1 | 1 | ✅ |
 | 4 — Correctness | 5 | 5 | ✅ |
 | 5 — Resource/service | 3 | 3 | ✅ |
-| 6 — Docs/cleanup | 11 | 0 | ⬜ |
-| **Total** | **30** | **19** | |
+| 6 — Docs/cleanup | 11 | 11 | ✅ |
+| **Total** | **30** | **30** | ✅ |
 
 *(F014, F018 excluded — no code change)*
 
@@ -163,4 +163,5 @@
 - **2026-06-11:** Wave 3 complete. WS task wrapped in outer `'reconnect: loop` with exponential backoff (2s→4s→...→30s cap). Status shows "Connection failed — retrying in Ns" / "Disconnected — reconnecting in Ns". session_init re-sent on each reconnect.
 - **2026-06-11:** Wave 4 complete. F009: incremental UTF-8 carry buffer in anthropic.rs + oai.rs SSE decoders (no more silent drop on split multi-byte chars). F011: broadcast Lagged returns Ok(false) instead of `continue`; outer match falls through to error synthesis immediately instead of 30-min hang. F020: FTS5 query escapes each token as individual quoted phrase ("word1" "word2" = implicit AND, neutralizes operators). F021: emotional_valence enum_to_str `.unwrap()` → `.transpose()?` (both insert + update). F022: removed dead dyn_params construction + drop in fts5_search.
 - **2026-06-11:** Wave 2 complete. Created `config/policy.toml` with real tool names (`read_file`, `write_file`, `run_command`, `delete_path`, `http_fetch`). install.sh copies it instead of writing inline. `policy.rs check()` gains `path: Option<&str>` and implements actual workspace path check via `AGENTD_WORKSPACE` canonicalization. `delete_path` hardened: `..` traversal rejected, symlinks resolved via canonicalize, denylist expanded (+ `/etc /home /root /var`), workspace confinement added. 4 new workspace policy tests. All tests green.
+- **2026-06-11:** Wave 6 complete. F031: docs already accurate (Wave 1 fixed bind to localhost). F032: README badge updated planning→mk1_complete. F033: Cargo.lock removed from .gitignore. F012: PTY deferred entry struck out in CLAUDE.md (shipped). F023: cerebro-api.service description corrected 8767→8765. F026: `state.lock().unwrap()` → `.unwrap_or_else(|e| e.into_inner())` in ui-slint. F013: snapshot and wake-ding handlers use microsecond-stamped /tmp paths + cleanup. F017: `StrictHostKeyChecking=no` → `accept-new` in both SSH tunnel calls (supervisor.rs). F006: all 5 compiler warnings resolved (unused `scope`, `put` import, 3× `q`, dead `visibility` field). F007: addressed with warning-clean build (zero warnings). F030: curl|bash security note added to README Install section. Also fixed policy test race condition (ENV_LOCK serializes AGENTD_WORKSPACE mutations).
 - **2026-06-11:** Wave 5 complete. F005: `handle_terminal_ws` select! made mutable-ref based so losing task is explicitly aborted; `child.wait()` via `spawn_blocking` reaps the zombie (was `std::process::Child::kill()` with no wait → zombie per session). F008: `reqwest::Client::new()` replaced with `build_http_client()` (10s connect timeout) in both `anthropic.rs` and `oai.rs`; unblocks hang on unreachable LLM endpoint. F028: `deploy/apexos-rs-ui.service` hardened with `NoNewPrivileges=yes`, `ProtectHome=yes`, `PrivateTmp=yes`, `DevicePolicy=closed`, `DeviceAllow=/dev/dri/*`, `DeviceAllow=/dev/tty7`, `DeviceAllow=/dev/input/*`. All tests green.

@@ -855,7 +855,7 @@ fn dispatch_event(
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
                     if let Some(id) = id {
-                        state.lock().unwrap().session_id = Some(id);
+                        state.lock().unwrap_or_else(|e| e.into_inner()).session_id = Some(id);
                         ui.set_status(format!("Session {id}").into());
                         ui.set_current_session_id(id as i32);
                     }

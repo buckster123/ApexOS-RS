@@ -1,5 +1,5 @@
 [Unit]
-Description=CerebroCortex-RS REST API + dashboard (port 8767)
+Description=CerebroCortex-RS REST API + dashboard (port 8765)
 After=network.target agentd.service
 Requires=agentd.service
 

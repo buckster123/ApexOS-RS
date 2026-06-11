@@ -152,6 +152,10 @@ fn matches_wildcard(pattern: &str, tool: &str) -> bool {
 mod tests {
     use super::*;
 
+    // Serialize tests that mutate AGENTD_WORKSPACE — env vars are process-global
+    // and Rust runs tests in parallel by default.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn engine(mode: PolicyMode, rules: &[(&str, Rule)]) -> PolicyEngine {
         PolicyEngine::new(PolicyConfig {
             mode,
@@ -212,6 +216,7 @@ mod tests {
 
     #[test]
     fn workspace_rule_no_env_var_asks() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("AGENTD_WORKSPACE");
         let e = engine(PolicyMode::Suggest, &[("write_file", Rule::Workspace)]);
         assert_eq!(e.check("write_file", Some("/tmp/file.txt")), Decision::Ask);
@@ -219,6 +224,7 @@ mod tests {
 
     #[test]
     fn workspace_rule_inside_workspace_allows() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("AGENTD_WORKSPACE", "/tmp");
         let e = engine(PolicyMode::Suggest, &[("write_file", Rule::Workspace)]);
         // /tmp exists so canonicalize succeeds
@@ -228,6 +234,7 @@ mod tests {
 
     #[test]
     fn workspace_rule_outside_workspace_asks() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("AGENTD_WORKSPACE", "/tmp");
         let e = engine(PolicyMode::Suggest, &[("write_file", Rule::Workspace)]);
         assert_eq!(e.check("write_file", Some("/etc/passwd")), Decision::Ask);
