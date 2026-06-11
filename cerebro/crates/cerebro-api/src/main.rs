@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{Path, Query, Request, State},
+    http::{header, StatusCode},
+    middleware::Next,
+    response::IntoResponse,
     routing::{delete, get, post, put},
     Json, Router,
 };
@@ -900,8 +902,36 @@ async fn main() -> Result<()> {
         .route("/dream/status",    get(dream_status))
         .with_state(brain);
 
+    // Token auth — reads AGENTD_TOKEN (same shared secret as the agentd gateway).
+    // Binds 127.0.0.1 by default; use CEREBRO_API_ADDR=0.0.0.0:8765 for LAN exposure.
+    let api_token = Arc::new(std::env::var("AGENTD_TOKEN").unwrap_or_default());
+    if api_token.is_empty() {
+        info!("cerebro-api: AGENTD_TOKEN not set — auth disabled (127.0.0.1 only)");
+    }
+    let token_mw = api_token.clone();
+    let app = app.layer(axum::middleware::from_fn(
+        move |req: Request, next: Next| {
+            let tok = token_mw.clone();
+            async move {
+                if tok.is_empty() { return next.run(req).await; }
+                let from_header = req.headers()
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+                    .unwrap_or("");
+                if from_header == tok.as_str() { return next.run(req).await; }
+                let from_query = req.uri().query().unwrap_or("")
+                    .split('&')
+                    .find_map(|p| p.strip_prefix("token="))
+                    .unwrap_or("");
+                if from_query == tok.as_str() { return next.run(req).await; }
+                (StatusCode::UNAUTHORIZED, "invalid or missing token").into_response()
+            }
+        }
+    ));
+
     let addr = std::env::var("CEREBRO_API_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:8765".into());
+        .unwrap_or_else(|_| "127.0.0.1:8765".into());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("cerebro-api listening on {addr}");
     axum::serve(listener, app).await?;

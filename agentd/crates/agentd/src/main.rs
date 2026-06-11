@@ -165,6 +165,12 @@ async fn main() -> anyhow::Result<()> {
     let sensor_bridge_token = Arc::new(
         std::env::var("SENSOR_BRIDGE_TOKEN").unwrap_or_default()
     );
+    let api_token = Arc::new(
+        std::env::var("AGENTD_TOKEN").unwrap_or_default()
+    );
+    if api_token.is_empty() {
+        eprintln!("[agentd] AGENTD_TOKEN not set — API auth disabled (safe only on 127.0.0.1)");
+    }
 
     // Load soul early so we can share the path with both the gateway (settings UI) and
     // the turn engine below.
@@ -219,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
         histories:            Arc::clone(&histories),
         next_session_id:      Arc::clone(&next_session_id),
         sensor_bridge_token:  sensor_bridge_token,
+        api_token,
         soul_path:            soul_path.clone(),
         policy_arc:           Arc::clone(&policy_arc),
         council_start_tx,
@@ -229,7 +236,8 @@ async fn main() -> anyhow::Result<()> {
         node_id:              Arc::clone(&node_id),
         vast_state:           vast_state.clone(),
     };
-    let gw_addr: std::net::SocketAddr = "0.0.0.0:8787".parse()?;
+    let gw_bind = std::env::var("AGENTD_BIND").unwrap_or_else(|_| "127.0.0.1:8787".into());
+    let gw_addr: std::net::SocketAddr = gw_bind.parse()?;
     tokio::spawn(async move {
         if let Err(e) = serve(gw_state, gw_addr).await {
             eprintln!("[gateway] error: {e}");
@@ -397,7 +405,7 @@ async fn main() -> anyhow::Result<()> {
     // Event log
     tokio::spawn(run_log_writer(log_dir, bcast.subscribe()));
 
-    eprintln!("[agentd] ready — gateway ws://0.0.0.0:8787/ws");
+    eprintln!("[agentd] ready — gateway ws://{gw_bind}/ws");
     tokio::signal::ctrl_c().await?;
     eprintln!("[agentd] shutting down");
     Ok(())

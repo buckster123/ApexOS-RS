@@ -484,6 +484,13 @@ write_env_key() {
     || echo "${key}=${val}" >> "$ENV_FILE"
 }
 
+# Generate gateway token once — never overwrite an existing one
+if ! grep -q "^AGENTD_TOKEN=" "$ENV_FILE" 2>/dev/null; then
+  _tok=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 64 | head -c 64)
+  write_env_key "AGENTD_TOKEN" "$_tok"
+  ok "AGENTD_TOKEN generated (bearer auth enabled)"
+fi
+
 write_env_key "ANTHROPIC_API_KEY"  "$API_KEY"
 write_env_key "OPENROUTER_API_KEY" "$OPENROUTER_KEY"
 
@@ -573,8 +580,12 @@ check() {
   fi
 }
 
-# agentd WebSocket responds
+# agentd WebSocket responds — pass token if set
+_hc_token=$(grep "^AGENTD_TOKEN=" "$ENV_FILE" 2>/dev/null | cut -d= -f2 || true)
+_hc_auth=()
+[[ -n "$_hc_token" ]] && _hc_auth=(-H "Authorization: Bearer $_hc_token")
 if curl -sf --max-time 4 -o /dev/null \
+    "${_hc_auth[@]}" \
     -H "Upgrade: websocket" -H "Connection: Upgrade" \
     -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
     -H "Sec-WebSocket-Version: 13" \

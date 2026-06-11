@@ -438,8 +438,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Outbound WS channel
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    let ws_url = std::env::var("AGENTD_WS")
-        .unwrap_or_else(|_| "ws://localhost:8787/ws".to_string());
+    let ws_url = {
+        let base = std::env::var("AGENTD_WS")
+            .unwrap_or_else(|_| "ws://localhost:8787/ws".to_string());
+        match std::env::var("AGENTD_TOKEN") {
+            Ok(t) if !t.is_empty() => format!("{base}?token={t}"),
+            _ => base,
+        }
+    };
     let http_base = ws_to_http(&ws_url);
 
     // Shared HTTP client — created before WS task so it can be cloned in

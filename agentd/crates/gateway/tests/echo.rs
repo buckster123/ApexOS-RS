@@ -29,6 +29,7 @@ fn make_state(handle: apexos_core::BusHandle, bcast: tokio::sync::broadcast::Sen
         histories:            Arc::new(Mutex::new(HashMap::new())),
         next_session_id:      Arc::new(AtomicU64::new(1)),
         sensor_bridge_token:  Arc::new(String::new()),
+        api_token:            Arc::new(String::new()),
         soul_path:            PathBuf::from("."),
         policy_arc:           Arc::new(tokio::sync::RwLock::new(PolicyEngine::new(PolicyConfig::default()))),
         council_start_tx:     tokio::sync::mpsc::channel::<(SessionId, ActionId, serde_json::Value)>(1).0,

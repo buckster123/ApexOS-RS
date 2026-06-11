@@ -1,7 +1,7 @@
 use axum::{
-    Json, Router,
+    Json, Router, middleware,
     extract::{
-        Path, Query, State,
+        Path, Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{header, StatusCode},
@@ -61,6 +61,10 @@ pub struct GatewayState {
     pub next_session_id:       Arc<AtomicU64>,
     /// Shared secret for /sensor-bridge WS connections. Empty = no auth required.
     pub sensor_bridge_token:   Arc<String>,
+    /// Bearer token for all other API + WS routes. Empty = auth disabled.
+    /// Set via AGENTD_TOKEN env var; clients pass as "Authorization: Bearer <token>"
+    /// or as "?token=<token>" query param (for WebSocket upgrades).
+    pub api_token:             Arc<String>,
     pub soul_path:             PathBuf,
     pub policy_arc:            Arc<RwLock<PolicyEngine>>,
     /// Council: start a new council session (shared with supervisor for agent-tool calls)
@@ -79,19 +83,52 @@ pub struct GatewayState {
     pub vast_state:        VastState,
 }
 
+/// Check Bearer token on all gated routes.
+/// Accepts "Authorization: Bearer <token>" header or "?token=<token>" query param.
+/// No-op when AGENTD_TOKEN is unset (empty string).
+async fn require_token(
+    State(state): State<GatewayState>,
+    req: Request,
+    next: middleware::Next,
+) -> Response {
+    let token = state.api_token.as_str();
+    if token.is_empty() {
+        return next.run(req).await;
+    }
+    let from_header = req.headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if from_header == token {
+        return next.run(req).await;
+    }
+    let from_query = req.uri().query().unwrap_or("")
+        .split('&')
+        .find_map(|p| p.strip_prefix("token="))
+        .unwrap_or("");
+    if from_query == token {
+        return next.run(req).await;
+    }
+    (StatusCode::UNAUTHORIZED, "invalid or missing token").into_response()
+}
+
 pub fn router(state: GatewayState) -> Router {
-    Router::new()
+    // All API + WS routes are gated by the bearer token middleware.
+    // /sensor-bridge has its own SENSOR_BRIDGE_TOKEN scheme — kept outside.
+    // Static fallback (dashboard HTML/JS) is public — no secrets in those files.
+    let gated = Router::new()
         .route("/ws",              get(ws_handler))
-        .route("/sensor-bridge",   get(sensor_bridge_ws_handler))
+        .route("/terminal-ws",     get(terminal_ws_handler))
         .route("/api/status",      get(status_handler))
-        .route("/api/key",      post(set_key_handler))
-        .route("/api/keys",     get(get_keys_handler).post(set_keys_handler))
-        .route("/api/model",    get(get_model_handler).post(set_model_handler))
-        .route("/api/models",   get(get_models_handler))
-        .route("/api/backend",  get(get_backend_handler).post(set_backend_handler))
+        .route("/api/key",         post(set_key_handler))
+        .route("/api/keys",        get(get_keys_handler).post(set_keys_handler))
+        .route("/api/model",       get(get_model_handler).post(set_model_handler))
+        .route("/api/models",      get(get_models_handler))
+        .route("/api/backend",     get(get_backend_handler).post(set_backend_handler))
         .route("/api/policy",         post(set_policy_handler))
         .route("/api/policy/rules",   get(get_policy_rules_handler))
-        .route("/api/soul",     get(get_soul_handler).post(set_soul_handler))
+        .route("/api/soul",           get(get_soul_handler).post(set_soul_handler))
         .route("/api/power",              post(power_handler))
         .route("/api/evolution/history",  get(evolution_history_handler))
         .route("/api/evolution/stats",    get(evolution_stats_handler))
@@ -111,7 +148,6 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/council",               get(council_list_handler).post(council_start_handler))
         .route("/api/council/{id}",          get(council_detail_handler))
         .route("/api/council/{id}/butt-in",  post(council_butt_in_handler))
-        .route("/terminal-ws",            get(terminal_ws_handler))
         .route("/api/mesh/nodes",         get(mesh_nodes_handler))
         .route("/api/mesh/peers",         get(mesh_peers_get_handler).post(mesh_peers_post_handler))
         .route("/api/mesh/peers/{id}",    delete(mesh_peers_delete_handler))
@@ -123,6 +159,11 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/audio/analyze",      post(audio_analyze_handler))
         .route("/api/audio/waveform",     post(audio_waveform_handler))
         .route("/api/audio/process",      post(audio_process_handler))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
+
+    Router::new()
+        .merge(gated)
+        .route("/sensor-bridge",   get(sensor_bridge_ws_handler))
         .fallback(static_handler)
         .with_state(state)
 }
