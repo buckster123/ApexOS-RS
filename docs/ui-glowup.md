@@ -232,6 +232,10 @@ small"). The 32×24 grid therefore requires a data path, not just a UI widget.
    nobody's looking. Keeps the WS events small (preserves the original design intent).
 Alternative: render the colormap server-side to a small PNG and serve it (UI just shows `Image`) — simpler
 UI, less "live." Prefer the raw-array path for smoothness.
+**Priority: LOW / niche — bottom of the list.** The full grid is eye-candy. The existing summary data
+(min/mean/max) already drives the desired outcome: a temp-reactive **"breathing" wallpaper** that shifts as
+the room temperature fluctuates. That effect is the real want; the 32×24 grid is optional and only worth the
+cross-crate plumbing if a build-craze itch demands it. Do not block any phase on it.
 
 ### Council badge + read-only terminal (cheap opportunistic adds)
 - **Council badge**: a title-bar (Focus) / taskbar (Desktop) "N sub-agents running" indicator from the
@@ -241,5 +245,5 @@ UI, less "live." Prefer the raw-array path for smoothness.
 
 ### Revised near-term ordering (post Pi e2e test)
 1. **Feedback/toast core** — top pick: fixes a real silent-failure UX defect *and* is glowup plumbing.
-2. **Thermal grid** — delight piece, built on the on-demand-frame design above.
-3. **G0 router fix** → glowup proper (G1…). Council badge + read-only terminal slot in opportunistically.
+2. **G0 router fix** → glowup proper (G1…). Council badge + read-only terminal slot in opportunistically.
+3. **Thermal grid** — niche eye-candy, bottom of the list (see priority note above); never a blocker.
