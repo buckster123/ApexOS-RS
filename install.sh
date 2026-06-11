@@ -463,6 +463,25 @@ if [[ ! -f /etc/agentd/policy.toml ]]; then
   install -m 644 "$REPO_DIR/config/policy.toml" /etc/agentd/policy.toml
 fi
 
+# soul.md — APEX's identity / system prompt (created from the default if missing).
+if [[ ! -f /etc/agentd/soul.md ]]; then
+  install -m 644 "$REPO_DIR/config/soul.md" /etc/agentd/soul.md
+fi
+
+# peers.toml — mesh registry (agentd writes it at runtime; seed empty if missing).
+if [[ ! -f /etc/agentd/peers.toml ]]; then
+  echo "# ApexOS mesh peers" > /etc/agentd/peers.toml
+fi
+
+# Agent-mutable configs must be owned by the agentd user so the daemon can rewrite
+# them: Settings save (soul), and self-evolution (update_system_prompt / update_policy_rule
+# / register_mcp_server) writing soul.md, policy.toml, plugins.toml, peers.toml.
+# /etc/agentd itself stays root-owned so the env file (auth token, 600 root:root) is
+# protected — we chown the individual files, not the directory. (write_atomic falls
+# back to an in-place write when the root-owned dir blocks the temp+rename path.)
+chown agentd:agentd /etc/agentd/soul.md /etc/agentd/policy.toml \
+                    /etc/agentd/plugins.toml /etc/agentd/peers.toml
+
 # env file — API keys (don't overwrite existing keys)
 ENV_FILE=/etc/agentd/env
 touch "$ENV_FILE"; chmod 600 "$ENV_FILE"; chown root:root "$ENV_FILE"

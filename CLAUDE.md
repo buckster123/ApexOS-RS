@@ -278,6 +278,7 @@ Full event list: `../ApexOS/agentd/crates/core/src/types.rs` — `Event` enum.
 - **KMS build deps on Pi** — `libssl-dev libgbm-dev libegl-dev libudev-dev libinput-dev libxkbcommon-dev libfontconfig1-dev` all required; missing any fails the build or link step.
 - **`text file busy`** — always `systemctl stop apexos-rs-ui` before `cp`. A running binary cannot be overwritten.
 - **`fontconfig` missing on Pi** — `sudo apt-get install -y libfontconfig1-dev` if build fails.
+- **`/etc/agentd` config writes (os error 13)** — agentd self-writes `soul.md` (Settings save + `update_system_prompt`) and `policy.toml`/`plugins.toml`/`peers.toml` (self-evolution). `/etc/agentd` stays root-owned (the `env` token file must be `600 root:root`), so install.sh chowns those four *files* to `agentd`. Atomic writes (temp+rename) need dir-write the agentd user lacks, so `write_atomic` falls back to an in-place write. Re-run `install.sh` to fix ownership on an already-deployed Pi.
 - **Slint build step** — `.slint` files are compiled by `build.rs` at build time. If you change a `.slint` file but `cargo build` doesn't recompile, `touch ui-slint/build.rs`.
 - **Pi Zero 2W rendering** — BCM2837 uses `vc4` not `v3d`. Set `SLINT_BACKEND=linuxkms-femtovg` for software rendering; no GPU required.
 - **agentd must be running** — the UI will retry the WS connection on disconnect. In dev, agentd can be on a remote Pi; just set `AGENTD_WS`.

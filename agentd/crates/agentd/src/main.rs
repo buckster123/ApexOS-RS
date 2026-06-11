@@ -766,15 +766,42 @@ async fn compute_undo(
 /// Write bytes to `path` atomically: write a sibling temp file, then rename over
 /// the target. Prevents a partial/corrupt config from ever being observed by a
 /// concurrent read or a daemon restart mid-write.
+///
+/// The sibling-temp + rename trick needs write permission on the *parent
+/// directory*. Our configs live in `/etc/agentd`, which stays root-owned while
+/// only the individual mutable files (soul.md, policy.toml, ...) are chowned to
+/// the agentd user. So when the daemon self-evolves a config, the temp create or
+/// the rename fails with EACCES even though it can write the target file itself.
+/// In that case we fall back to a direct in-place write of the (agentd-owned)
+/// target — non-atomic, but the only option short of making the dir writable,
+/// and the same durability the plain soul.md write already accepts.
 async fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
     let tmp = path.with_extension(format!(
         "tmp.{}",
         std::process::id() // unique-enough per running daemon; renamed immediately
     ));
-    tokio::fs::write(&tmp, bytes).await
-        .map_err(|e| anyhow::anyhow!("write {}: {e}", tmp.display()))?;
-    tokio::fs::rename(&tmp, path).await
-        .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+    let atomic = async {
+        tokio::fs::write(&tmp, bytes).await
+            .map_err(|e| anyhow::anyhow!("write {}: {e}", tmp.display()))?;
+        tokio::fs::rename(&tmp, path).await
+            .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+        Ok::<(), anyhow::Error>(())
+    };
+    if let Err(e) = atomic.await {
+        // Clean up a possibly-orphaned temp file, then fall back to in-place write.
+        let _ = tokio::fs::remove_file(&tmp).await;
+        let is_perm = e.downcast_ref::<std::io::Error>()
+            .map(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+            .unwrap_or_else(|| e.to_string().contains("Permission denied")
+                                || e.to_string().contains("os error 13"));
+        if !is_perm {
+            return Err(e);
+        }
+        eprintln!("[evolution] atomic write to {} denied at dir level — \
+                   falling back to in-place write", path.display());
+        tokio::fs::write(path, bytes).await
+            .map_err(|e| anyhow::anyhow!("in-place write {}: {e}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -1808,5 +1835,43 @@ mod tests {
         let required = spec.input_schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v.as_str() == Some("kind")));
         assert!(required.iter().any(|v| v.as_str() == Some("reason")));
+    }
+
+    #[tokio::test]
+    async fn write_atomic_writes_when_dir_is_writable() {
+        let dir = std::env::temp_dir().join(format!("apexrs-wa-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("policy.toml");
+        write_atomic(&target, b"hello").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
+        // No stray temp file left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file not cleaned up");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Regression for the soul/policy EACCES bug: /etc/agentd is root-owned, only the
+    // individual config files are agentd-writable. The temp+rename path fails at the
+    // dir level, so write_atomic must fall back to an in-place write of the file.
+    #[tokio::test]
+    async fn write_atomic_falls_back_in_place_when_dir_readonly() {
+        use std::os::unix::fs::PermissionsExt;
+        // Under non-root the read-only dir blocks the temp+rename and forces the
+        // in-place fallback (the real bug's path). Under root the dir perms are
+        // ignored and the atomic path runs — either way the final content must win.
+        let dir = std::env::temp_dir().join(format!("apexrs-wa-ro-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("policy.toml");
+        std::fs::write(&target, b"old").unwrap();           // pre-existing writable file
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap(); // read-only dir
+        let res = write_atomic(&target, b"new").await;
+        // Restore perms before asserting so cleanup always works.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        res.expect("fallback in-place write should succeed");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
