@@ -17,6 +17,7 @@ use serde_json::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -282,6 +283,32 @@ async fn fetch_sessions(client: &reqwest::Client, base_url: &str) -> Vec<Session
     }).collect()
 }
 
+// POST /api/record/stop → run whisper → return transcribed text (or empty on error).
+async fn stop_and_transcribe(client: &reqwest::Client, base_url: &str) -> String {
+    match client
+        .post(format!("{base_url}/api/record/stop"))
+        .timeout(std::time::Duration::from_secs(35))
+        .send()
+        .await
+    {
+        Ok(resp) => resp
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v["text"].as_str().map(|s| s.trim().to_string()))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+// Context shared between the WS task and dispatch_event.
+struct DispatchCtx {
+    rt_handle:   tokio::runtime::Handle,
+    http_client: Arc<reqwest::Client>,
+    http_base:   String,
+    tts_enabled: Arc<AtomicBool>,
+}
+
 // POST /api/run to fetch CPU / RAM / disk percentages from the server.
 // Returns (cpu_pct, ram_pct, disk_pct) on success.
 async fn fetch_sys_stats(client: &reqwest::Client, base_url: &str) -> Option<(f32, f32, f32)> {
@@ -341,6 +368,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = Arc::new(Mutex::new(AppState::default()));
 
+    // Voice state
+    let tts_enabled = Arc::new(AtomicBool::new(false));
+
     // Outbound WS channel
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
@@ -348,9 +378,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "ws://localhost:8787/ws".to_string());
     let http_base = ws_to_http(&ws_url);
 
+    // Shared HTTP client — created before WS task so it can be cloned in
+    let http_client = Arc::new(reqwest::Client::new());
+
     // ── WS task ──────────────────────────────────────────────────────────────
     let ui_weak = ui.as_weak();
-    let state_ws = state.clone();
+    let state_ws    = state.clone();
+    let tts_ws      = Arc::clone(&tts_enabled);
+    let client_ws   = Arc::clone(&http_client);
+    let base_ws     = http_base.clone();
     rt.spawn(async move {
         eprintln!("[ui-slint] connecting to {ws_url}");
 
@@ -384,13 +420,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok();
         }
 
+        let rt_current = tokio::runtime::Handle::current();
+
         loop {
             tokio::select! {
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             if let Ok(ev) = serde_json::from_str::<Value>(&text) {
-                                dispatch_event(ui_weak.clone(), ev, state_ws.clone());
+                                let ctx = DispatchCtx {
+                                    rt_handle:   rt_current.clone(),
+                                    http_client: Arc::clone(&client_ws),
+                                    http_base:   base_ws.clone(),
+                                    tts_enabled: Arc::clone(&tts_ws),
+                                };
+                                dispatch_event(ui_weak.clone(), ev, state_ws.clone(), ctx);
                             }
                         }
                         Some(Ok(_)) => {}
@@ -416,12 +460,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Shared HTTP client for polling + session fetch
-    let http_client = std::sync::Arc::new(reqwest::Client::new());
-
     // ── System stats polling (every 5 s) ─────────────────────────────────────
     let ui_weak_poll = ui.as_weak();
-    let client_poll  = std::sync::Arc::clone(&http_client);
+    let client_poll  = Arc::clone(&http_client);
     let http_base_poll = http_base.clone();
     rt.spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -500,11 +541,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── refresh-sessions callback ─────────────────────────────────────────────
     let rt_handle     = rt.handle().clone();
-    let client_sess   = std::sync::Arc::clone(&http_client);
+    let client_sess   = Arc::clone(&http_client);
     let http_base_sess = http_base.clone();
     ui.on_refresh_sessions(move || {
         let base   = http_base_sess.clone();
-        let client = std::sync::Arc::clone(&client_sess);
+        let client = Arc::clone(&client_sess);
         rt_handle.spawn(async move {
             let items = fetch_sessions(&client, &base).await;
             slint::invoke_from_event_loop(move || {
@@ -534,6 +575,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tx_restore.send(payload).ok();
     });
 
+    // ── toggle-recording callback ─────────────────────────────────────────────
+    // First tap  → POST /api/record/start → set recording=true
+    // Second tap → POST /api/record/stop  → whisper transcription → auto-send
+    let rt_h_rec     = rt.handle().clone();
+    let client_rec   = Arc::clone(&http_client);
+    let base_rec     = http_base.clone();
+    let ui_weak_rec  = ui.as_weak();
+    let tx_rec       = tx.clone();
+    ui.on_toggle_recording(move || {
+        let currently_recording = ui_weak_rec.upgrade()
+            .map(|u| u.get_recording())
+            .unwrap_or(false);
+        let client = Arc::clone(&client_rec);
+        let base   = base_rec.clone();
+        let ui_w   = ui_weak_rec.clone();
+        let tx     = tx_rec.clone();
+        let rt_h   = rt_h_rec.clone();
+        if !currently_recording {
+            rt_h.spawn(async move {
+                let ok = client
+                    .post(format!("{base}/api/record/start"))
+                    .timeout(std::time::Duration::from_secs(8))
+                    .send().await
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false);
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_w.upgrade() {
+                        if ok { ui.set_recording(true); }
+                    }
+                }).ok();
+            });
+        } else {
+            rt_h.spawn(async move {
+                let text = stop_and_transcribe(&client, &base).await;
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_w.upgrade() {
+                        ui.set_recording(false);
+                        if !text.is_empty() {
+                            push_message(MessageItem {
+                                role: "user".into(),
+                                text: text.clone().into(),
+                                streaming: false,
+                                call_id: "".into(),
+                                tool_name: "".into(),
+                                tool_args: "".into(),
+                                tool_output: "".into(),
+                                tool_status: "".into(),
+                                awaiting_approval: false,
+                            });
+                            let payload = serde_json::json!({"type":"user_prompt","text":&text}).to_string();
+                            tx.send(payload).ok();
+                            ui.invoke_scroll_to_bottom();
+                        }
+                    }
+                }).ok();
+            });
+        }
+    });
+
+    // ── toggle-tts callback ───────────────────────────────────────────────────
+    let tts_flag    = Arc::clone(&tts_enabled);
+    let ui_weak_tts = ui.as_weak();
+    ui.on_toggle_tts(move || {
+        let new_val = !tts_flag.load(Ordering::SeqCst);
+        tts_flag.store(new_val, Ordering::SeqCst);
+        if let Some(ui) = ui_weak_tts.upgrade() {
+            ui.set_tts_enabled(new_val);
+        }
+    });
+
     ui.run()?;
     Ok(())
 }
@@ -543,6 +654,7 @@ fn dispatch_event(
     ui_weak: slint::Weak<AppWindow>,
     ev: Value,
     state: Arc<Mutex<AppState>>,
+    ctx: DispatchCtx,
 ) {
     let ev_type = ev["type"].as_str().unwrap_or("").to_string();
 
@@ -632,14 +744,68 @@ fn dispatch_event(
         }
 
         "turn_complete" => {
+            let tts    = ctx.tts_enabled.load(Ordering::SeqCst);
+            let rt_h   = ctx.rt_handle.clone();
+            let client = Arc::clone(&ctx.http_client);
+            let base   = ctx.http_base.clone();
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
                     finish_last_agent_message();
                     ui.set_agent_busy(false);
+                    if tts {
+                        // Grab last agent bubble text for TTS
+                        let text = MESSAGES.with(|m| {
+                            m.borrow().as_ref().and_then(|model| {
+                                let len = model.row_count();
+                                (0..len).rev().find_map(|i| {
+                                    model.row_data(i)
+                                        .filter(|item| item.role.as_str() == "agent")
+                                        .map(|item| item.text.to_string())
+                                })
+                            }).unwrap_or_default()
+                        });
+                        if !text.is_empty() {
+                            rt_h.spawn(async move {
+                                client.post(format!("{base}/api/speak"))
+                                    .json(&serde_json::json!({"text": text}))
+                                    .timeout(std::time::Duration::from_secs(5))
+                                    .send().await.ok();
+                            });
+                        }
+                    }
                 }
             })
             .ok();
+        }
+
+        "wake_triggered" => {
+            // Wake word detected — switch to chat and auto-start recording
+            let rt_h   = ctx.rt_handle.clone();
+            let client = Arc::clone(&ctx.http_client);
+            let base   = ctx.http_base.clone();
+            let ui_w1  = ui_weak.clone();
+            let ui_w2  = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w1.upgrade() {
+                    if !ui.get_recording() {
+                        ui.set_current_view(0);
+                        rt_h.spawn(async move {
+                            let ok = client
+                                .post(format!("{base}/api/record/start"))
+                                .timeout(std::time::Duration::from_secs(8))
+                                .send().await
+                                .map(|r| r.status().is_success())
+                                .unwrap_or(false);
+                            slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = ui_w2.upgrade() {
+                                    if ok { ui.set_recording(true); }
+                                }
+                            }).ok();
+                        });
+                    }
+                }
+            }).ok();
         }
 
         "tool_requested" => {

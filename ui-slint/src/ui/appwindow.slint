@@ -22,11 +22,15 @@ export component AppWindow inherits Window {
     in-out property <[SessionItem]>  sessions;
     in-out property <int>            current-session-id: 0;
     in-out property <int>            current-view: 0;   // 0=chat  1=system  2=sensor  3=sessions
+    in-out property <bool>           recording: false;
+    in-out property <bool>           tts-enabled: false;
 
     // ── Callbacks sent to Rust ──────────────────────────────────────────
     callback send-message(string);
     callback refresh-sessions();
     callback restore-session(int);
+    callback toggle-recording();
+    callback toggle-tts();
     // chat always instantiated — aliases always valid
     callback scroll-to-bottom <=> chat.scroll-to-bottom;
     callback approve-tool <=> chat.approve-tool;
@@ -90,6 +94,27 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle { horizontal-stretch: 1; }
+
+                // TTS toggle (♪ = speak agent responses aloud)
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: root.tts-enabled ? Palette.primary-dim : transparent;
+                    y: (parent.height - self.height) / 2;
+                    animate background { duration: 150ms; }
+
+                    TouchArea { clicked => { root.toggle-tts(); } }
+
+                    Text {
+                        text: "♪";
+                        color: root.tts-enabled ? Palette.primary : Palette.text-dim;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        animate color { duration: 150ms; }
+                    }
+                }
 
                 Text {
                     text: Palette.theme-name;
@@ -281,6 +306,8 @@ export component AppWindow inherits Window {
                 InputBar {
                     busy: root.agent-busy;
                     glow-alpha: root.jarvis-pulse;
+                    recording: root.recording;
+                    toggle-recording => { root.toggle-recording(); }
                     send(text) => {
                         root.send-message(text);
                     }

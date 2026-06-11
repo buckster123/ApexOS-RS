@@ -6,9 +6,11 @@ import { Palette } from "../palette.slint";
 
 export component InputBar {
     callback send(string);
+    callback toggle-recording();
 
     in property <bool>   busy: false;
     in property <float>  glow-alpha: 0.0;
+    in property <bool>   recording: false;
 
     height: 52px;
 
@@ -54,10 +56,43 @@ export component InputBar {
                     x: 2px;
                     width: parent.width - 4px;
                     height: parent.height;
-                    text: root.busy ? "apex is responding…" : "Message apex…";
+                    text: root.busy ? "apex is responding…"
+                        : root.recording ? "listening…"
+                        : "Message apex…";
                     color: Palette.text-dim;
                     font-size: 13px;
                     vertical-alignment: center;
+                }
+            }
+
+            // Mic button — tap to start/stop server-side recording
+            mic-btn := Rectangle {
+                width: 36px;
+                height: 36px;
+                border-radius: Palette.radius;
+                background: root.recording
+                    ? rgba(239, 68, 68, 0.15)
+                    : Palette.surface-hi;
+                border-width: 1px;
+                border-color: root.recording
+                    ? rgba(239, 68, 68, 0.7)
+                    : Palette.border;
+                animate background    { duration: 150ms; }
+                animate border-color  { duration: 150ms; }
+
+                Text {
+                    text: root.recording ? "■" : "●";
+                    color: root.recording ? #ef4444 : Palette.text-dim;
+                    font-size: 12px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    animate color { duration: 150ms; }
+                }
+
+                TouchArea {
+                    enabled: !root.busy;
+                    clicked => { root.toggle-recording(); }
                 }
             }
 
