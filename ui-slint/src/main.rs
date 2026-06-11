@@ -29,6 +29,46 @@ thread_local! {
         const { RefCell::new(None) };
     static MODELS: RefCell<Option<Rc<slint::VecModel<ModelItem>>>> =
         const { RefCell::new(None) };
+    static TOASTS: RefCell<Option<Rc<slint::VecModel<ToastItem>>>> =
+        const { RefCell::new(None) };
+}
+
+// ── Feedback subsystem (toasts) ───────────────────────────────────────────────
+static TOAST_SEQ: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
+
+/// Push a toast. Must run on the Slint thread (touches the TOASTS thread-local).
+fn toast(kind: ToastKind, text: &str) {
+    let timeout_ms = match kind {
+        ToastKind::Error => 7000,
+        ToastKind::Warn  => 6000,
+        _                => 4000,
+    };
+    let id = TOAST_SEQ.fetch_add(1, Ordering::SeqCst);
+    TOASTS.with(|t| {
+        if let Some(model) = t.borrow().as_ref() {
+            model.push(ToastItem { id, kind, text: text.into(), timeout_ms });
+        }
+    });
+}
+
+/// Remove a toast by id (called by the card Timer / click, and on dismiss()).
+fn dismiss_toast(id: i32) {
+    TOASTS.with(|t| {
+        if let Some(model) = t.borrow().as_ref() {
+            for i in 0..model.row_count() {
+                if model.row_data(i).map(|it| it.id) == Some(id) {
+                    model.remove(i);
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Raise a toast from any thread — marshals onto the Slint event loop.
+fn notify(kind: ToastKind, text: impl Into<String>) {
+    let text = text.into();
+    slint::invoke_from_event_loop(move || toast(kind, &text)).ok();
 }
 
 fn push_message(item: MessageItem) {
@@ -164,10 +204,33 @@ fn iaq_label(score: f32) -> &'static str {
 
 // Derive HTTP base from WS URL: "ws://host:port/ws" → "http://host:port"
 fn ws_to_http(ws_url: &str) -> String {
+    // Strip any query string first (e.g. "?token=…" appended for WS auth),
+    // otherwise the trailing "/ws" is no longer at the end and survives,
+    // producing a malformed REST base ("http://host/ws?token=…/api/…").
     ws_url
+        .split('?').next().unwrap_or(ws_url)
         .trim_end_matches("/ws")
         .replacen("ws://", "http://", 1)
         .replacen("wss://", "https://", 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ws_to_http;
+
+    #[test]
+    fn rest_base_strips_token_query_and_ws_suffix() {
+        // Regression: with AGENTD_TOKEN set the WS URL carries "?token=…",
+        // which used to leave "/ws" mid-string so the REST base was mangled.
+        assert_eq!(
+            ws_to_http("ws://192.168.0.158:8787/ws?token=abc123"),
+            "http://192.168.0.158:8787"
+        );
+        // No token (default) still works.
+        assert_eq!(ws_to_http("ws://localhost:8787/ws"), "http://localhost:8787");
+        // TLS scheme + token.
+        assert_eq!(ws_to_http("wss://host:8787/ws?token=x"), "https://host:8787");
+    }
 }
 
 fn format_time_ago(unix_secs: u64) -> String {
@@ -426,6 +489,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let models_vec: Rc<slint::VecModel<ModelItem>> = Rc::new(slint::VecModel::default());
     ui.set_available_models(slint::ModelRc::from(models_vec.clone()));
     MODELS.with(|m| *m.borrow_mut() = Some(models_vec.clone()));
+
+    // Feedback subsystem: bind the toast model + global callbacks.
+    let toasts_vec: Rc<slint::VecModel<ToastItem>> = Rc::new(slint::VecModel::default());
+    ui.global::<Notifications>().set_toasts(slint::ModelRc::from(toasts_vec.clone()));
+    TOASTS.with(|t| *t.borrow_mut() = Some(toasts_vec.clone()));
+    ui.global::<Notifications>().on_show(|kind, text| toast(kind, text.as_str()));
+    ui.global::<Notifications>().on_dismiss(dismiss_toast);
 
     // Initial sys stats (all zeros, offline)
     ui.set_sys_stats(empty_sys_stats());
@@ -704,6 +774,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_w.upgrade() {
                         if ok { ui.set_recording(true); }
+                        else  { toast(ToastKind::Error, "Microphone unavailable"); }
                     }
                 }).ok();
             });
@@ -778,10 +849,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let base    = base_soul.clone();
         let content = text.to_string();
         rt_h_soul.spawn(async move {
-            client.post(format!("{base}/api/soul"))
+            let ok = client.post(format!("{base}/api/soul"))
                 .json(&serde_json::json!({"content": content}))
                 .timeout(std::time::Duration::from_secs(8))
-                .send().await.ok();
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok { notify(ToastKind::Success, "Soul saved"); }
+            else  { notify(ToastKind::Error, "Failed to save soul"); }
         });
     });
 
@@ -799,10 +874,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = Arc::clone(&client_pol);
         let base   = base_pol.clone();
         rt_h_pol.spawn(async move {
-            client.post(format!("{base}/api/policy"))
+            let ok = client.post(format!("{base}/api/policy"))
                 .json(&serde_json::json!({"mode": mode_str}))
                 .timeout(std::time::Duration::from_secs(8))
-                .send().await.ok();
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok { notify(ToastKind::Info, "Policy updated"); }
+            else  { notify(ToastKind::Error, "Failed to update policy"); }
         });
     });
 
@@ -820,10 +899,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = Arc::clone(&client_mod);
         let base   = base_mod.clone();
         rt_h_mod.spawn(async move {
-            client.post(format!("{base}/api/model"))
+            let ok = client.post(format!("{base}/api/model"))
                 .json(&serde_json::json!({"model": id}))
                 .timeout(std::time::Duration::from_secs(8))
-                .send().await.ok();
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok { notify(ToastKind::Info, "Model switched"); }
+            else  { notify(ToastKind::Error, "Failed to switch model"); }
         });
     });
 
@@ -833,6 +916,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_pwr   = http_base.clone();
     ui.on_power_action(move |action| {
         let action_str = action.to_string();
+        // Callback runs on the Slint thread → toast directly. The box may go
+        // down before the POST returns, so confirm optimistically on click.
+        toast(ToastKind::Warn,
+            if action_str == "reboot" { "Rebooting…" } else { "Shutting down…" });
         let client = Arc::clone(&client_pwr);
         let base   = base_pwr.clone();
         rt_h_pwr.spawn(async move {

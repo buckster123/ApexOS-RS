@@ -1,0 +1,95 @@
+// Feedback subsystem — transient toast notifications.
+//
+// `Notifications` is a global so any component can raise a toast directly
+// (`Notifications.show(ToastKind.success, "Saved")`) without threading a
+// callback through every view. Rust implements show/dismiss and owns the
+// backing model (a VecModel<ToastItem>). Each card auto-dismisses via its
+// own Timer; cards are also click-to-dismiss.
+
+import { Palette } from "../palette.slint";
+import { ToastItem, ToastKind } from "../types.slint";
+
+export global Notifications {
+    in-out property <[ToastItem]> toasts;
+    callback show(ToastKind, string);  // implemented in Rust (assigns id, pushes)
+    callback dismiss(int);             // implemented in Rust (removes by id)
+}
+
+component ToastCard inherits Rectangle {
+    in property <ToastItem> item;
+
+    property <color> accent:
+        item.kind == ToastKind.success ? #22c55e :
+        item.kind == ToastKind.warn    ? #eab308 :
+        item.kind == ToastKind.error   ? #ef4444 :
+        Palette.primary;
+    property <string> glyph:
+        item.kind == ToastKind.success ? "✓" :
+        item.kind == ToastKind.warn    ? "⚠" :
+        item.kind == ToastKind.error   ? "✕" :
+        "ℹ";
+
+    height: row.preferred-height;
+    background: Palette.surface;
+    border-radius: Palette.radius;
+    border-width: 1px;
+    border-color: Palette.border-hi;
+    opacity: 0.0;
+    // fade/slide in
+    property <length> slide: 12px;
+    x: self.slide;
+    init => { self.opacity = 1.0; self.slide = 0px; }
+    animate opacity { duration: 200ms; easing: ease-out; }
+    animate x { duration: 200ms; easing: ease-out; }
+
+    // left accent bar
+    Rectangle {
+        x: 0px;
+        width: 3px;
+        height: parent.height;
+        background: accent;
+        border-top-left-radius: Palette.radius;
+        border-bottom-left-radius: Palette.radius;
+    }
+
+    row := HorizontalLayout {
+        padding: 12px;
+        padding-left: 14px;
+        spacing: 10px;
+
+        Text {
+            text: glyph;
+            color: accent;
+            font-size: 14px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: item.text;
+            color: Palette.text-bright;
+            font-size: 12px;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+
+    TouchArea { clicked => { Notifications.dismiss(item.id); } }
+
+    // auto-dismiss
+    Timer {
+        interval: item.timeout-ms * 1ms;
+        running: item.timeout-ms > 0;
+        triggered => { Notifications.dismiss(item.id); }
+    }
+}
+
+// Top-right stack of active toasts. Position/width set by the caller.
+// Plain elements (no full-window TouchArea) so input passes through to the UI.
+export component ToastHost {
+    VerticalLayout {
+        spacing: 8px;
+        for t in Notifications.toasts: ToastCard { item: t; }
+    }
+}

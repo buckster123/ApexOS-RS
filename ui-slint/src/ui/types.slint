@@ -22,6 +22,17 @@ export struct ModelItem {
     model-name: string,   // e.g. "Sonnet 4.6"
 }
 
+// ── Feedback subsystem ──────────────────────────────────────────────────
+// Transient toast notifications. Severity drives accent colour + icon.
+export enum ToastKind { info, success, warn, error }
+
+export struct ToastItem {
+    id:         int,     // monotonic, assigned by Rust; used for dismiss()
+    kind:       ToastKind,
+    text:       string,
+    timeout-ms: int,     // auto-dismiss after this many ms; 0 = sticky
+}
+
 export struct SessionItem {
     session-id:    int,
     time-ago:      string,   // "2 min ago", "3 hr ago", etc.

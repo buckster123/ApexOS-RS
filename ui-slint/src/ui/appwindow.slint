@@ -1,13 +1,14 @@
 import { Palette, Theme } from "palette.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind } from "types.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
 import { Dashboard } from "components/dashboard.slint";
 import { SensorView } from "components/sensor_view.slint";
 import { SessionView } from "components/session_view.slint";
 import { SettingsView } from "components/settings_view.slint";
+import { ToastHost, Notifications } from "components/toast.slint";
 
-export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem }
+export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, Notifications }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -321,8 +322,9 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ── Chat view — always instantiated for callback aliases ───────
-        // Collapses to 0 px when system view is active (max-height: 0).
+        // ── Chat view — ALWAYS instantiated: its callback aliases
+        //    (scroll-to-bottom / approve-tool / reject-tool) require the
+        //    `chat` element to exist. Collapses to 0 px when inactive. ───
         chat := ChatView {
             vertical-stretch: root.current-view == 0 ? 1 : 0;
             max-height: root.current-view == 0 ? 999999px : 0px;
@@ -330,35 +332,31 @@ export component AppWindow inherits Window {
             glow-alpha: root.jarvis-pulse;
         }
 
-        // ── System dashboard — collapses when not active ─────────────
-        dash := Dashboard {
-            vertical-stretch: root.current-view == 1 ? 1 : 0;
-            max-height: root.current-view == 1 ? 999999px : 0px;
+        // ── G0 router: the other views are CONDITIONALLY instantiated.
+        //    An inactive view leaves the tree entirely — no zero-height
+        //    overpaint (the old layout bug) and no 5-tree thrash on switch.
+        //    Exactly one of these exists at a time; it stretches to fill. ─
+        if root.current-view == 1: Dashboard {
+            vertical-stretch: 1;
             stats: root.sys-stats;
             glow-alpha: root.jarvis-pulse;
         }
 
-        // ── Sensor view — collapses when not active ───────────────────
-        sensor := SensorView {
-            vertical-stretch: root.current-view == 2 ? 1 : 0;
-            max-height: root.current-view == 2 ? 999999px : 0px;
+        if root.current-view == 2: SensorView {
+            vertical-stretch: 1;
             stats: root.sys-stats;
         }
 
-        // ── Session picker — collapses when not active ────────────────
-        sess := SessionView {
-            vertical-stretch: root.current-view == 3 ? 1 : 0;
-            max-height: root.current-view == 3 ? 999999px : 0px;
+        if root.current-view == 3: SessionView {
+            vertical-stretch: 1;
             sessions: root.sessions;
             active-session-id: root.current-session-id;
             restore-session(id) => { root.restore-session(id); }
             refresh => { root.refresh-sessions(); }
         }
 
-        // ── Settings — collapses when not active ──────────────────────
-        stg := SettingsView {
-            vertical-stretch: root.current-view == 4 ? 1 : 0;
-            max-height: root.current-view == 4 ? 999999px : 0px;
+        if root.current-view == 4: SettingsView {
+            vertical-stretch: 1;
             soul-text <=> root.soul-text;
             policy-mode: root.settings-policy;
             current-model: root.settings-model;
@@ -520,5 +518,12 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
+
+    // ── Feedback: toast stack (top-right, above everything) ────────────
+    ToastHost {
+        x: root.width - self.width - 16px;
+        y: 52px;
+        width: 340px;
     }
 }

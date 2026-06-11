@@ -88,7 +88,7 @@ install.sh           # one-shot installer
 
 | Detail | Value |
 |--------|-------|
-| SSH | `ssh apexos@192.168.0.158` (LAN only, pw: `abnudc1337`) |
+| SSH | `ssh apex1@192.168.0.158` (LAN only, pw: `abnudc1337`) — borrowed board, separate drive for RS (the `apexos` user is the original ApexOS dev board) |
 | OS | Debian trixie headless |
 | Binary | `/usr/local/bin/apexos-rs-ui` |
 | Service | `/etc/systemd/system/apexos-rs-ui.service` (from `deploy/apexos-rs-ui.service`) |
@@ -133,9 +133,15 @@ AGENTD_WS=ws://localhost:8787/ws SLINT_BACKEND=linuxkms ./target/release/ui-slin
 
 ## Dev on desktop (x86)
 
-No Pi needed for steps 1–9. Connect to the Pi's agentd over LAN:
+One-time setup: `sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libinput-dev libgbm-dev libegl-dev libudev-dev`.
+These are **link-time** deps of the `backend-linuxkms-noseat` feature (compiled in even on desktop). `cargo check` passes without them; `cargo run`/`build` fails at link (`cannot find -lxkbcommon/-linput/-lgbm`).
+
+No Pi needed for steps 1–9. Connect to the Pi's agentd over LAN — the post-hardening agentd
+**defaults to a loopback-only bind**, so for LAN dev set `AGENTD_BIND=0.0.0.0:8787` in the Pi's
+`/etc/agentd/env` (safe: a token is required for any non-loopback bind — see F036) and pass the token:
 
 ```bash
+AGENTD_TOKEN=$(ssh apex1@192.168.0.158 'sudo grep -oP "(?<=AGENTD_TOKEN=).*" /etc/agentd/env') \
 AGENTD_WS=ws://192.168.0.158:8787/ws cargo run
 ```
 
