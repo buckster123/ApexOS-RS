@@ -124,9 +124,9 @@ ok "Repo at $REPO_DIR"
 # ── System deps ────────────────────────────────────────────────────────────────
 hdr "System dependencies"
 
-PKGS=(curl git pkg-config build-essential)
+PKGS=(curl git pkg-config build-essential libssl-dev)
 if ! $NO_UI; then
-  PKGS+=(libfontconfig1-dev)
+  PKGS+=(libfontconfig1-dev libgbm-dev libegl-dev libudev-dev libinput-dev libxkbcommon-dev)
 fi
 
 apt-get update -qq
@@ -195,7 +195,12 @@ else
 fi
 
 sudo -u "$BUILD_USER" "$CARGO" build --release --workspace $EXCLUDE 2>&1 \
+  | tee /tmp/apexos-cargo-build.log \
   | grep -E "(Compiling agentd|Compiling cerebro|Compiling apexos|Finished|^error)" || true
+
+grep -q "^error" /tmp/apexos-cargo-build.log \
+  && die "Build failed — run: cat /tmp/apexos-cargo-build.log | grep '^error'" \
+  || true
 
 ok "Build complete"
 

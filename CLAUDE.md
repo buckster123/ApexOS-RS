@@ -161,7 +161,7 @@ SLINT_FULLSCREEN=1 AGENTD_WS=ws://192.168.0.158:8787/ws cargo run
 | 6 | Voice controls | Mic → `/api/record/start`, speaker → `/api/speak` | ✓ |
 | 7 | Settings | Soul.md editor (`TextEdit`), policy mode, plugin list | ✓ |
 | 8 | Power + model/policy | Power modal, model/policy `ComboBox` | ✓ |
-| 9 | KMS/DRM deploy | `SLINT_BACKEND=linuxkms`, systemd service, retire cage | ⬜ |
+| 9 | KMS/DRM deploy | `SLINT_BACKEND=linuxkms`, systemd service, retire cage | ✓ |
 
 Full per-step detail in [docs/build-roadmap.md](docs/build-roadmap.md).
 
@@ -266,6 +266,10 @@ Full event list: `../ApexOS/agentd/crates/core/src/types.rs` — `Event` enum.
 - **`invoke_from_event_loop` is fire-and-forget** — it queues a closure and returns immediately. The closure runs asynchronously on the Slint thread. Do not assume immediate effect.
 - **Slint strings are `SharedString`** — convert with `.into()`. Never pass a `&str` or `String` directly where Slint expects `SharedString`.
 - **Pi KMS groups** — `agentd` user needs `render`, `video`, `input` groups: `sudo usermod -aG render,video,input agentd`. Only done once.
+- **`apexos-rs-ui` runs as root** — `drmSetMaster` + `drmModePageFlip` require DRM master; on Pi without logind seat management, only root wins reliably. Service uses `User=root`, `PAMName=login`, `TTYPath=/dev/tty7`.
+- **`WantedBy=multi-user.target`** — Pi boots to `multi-user.target` by default, not `graphical.target`. Service must be in `multi-user.target.wants` or it never starts.
+- **`slint` needs `backend-linuxkms-noseat` feature** — default `slint = "1"` only compiles winit. Add `features = ["backend-linuxkms-noseat", "backend-winit"]`.
+- **KMS build deps on Pi** — `libssl-dev libgbm-dev libegl-dev libudev-dev libinput-dev libxkbcommon-dev libfontconfig1-dev` all required; missing any fails the build or link step.
 - **`text file busy`** — always `systemctl stop apexos-rs-ui` before `cp`. A running binary cannot be overwritten.
 - **`fontconfig` missing on Pi** — `sudo apt-get install -y libfontconfig1-dev` if build fails.
 - **Slint build step** — `.slint` files are compiled by `build.rs` at build time. If you change a `.slint` file but `cargo build` doesn't recompile, `touch ui-slint/build.rs`.
