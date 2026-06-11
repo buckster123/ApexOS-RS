@@ -22,7 +22,7 @@ impl OaiProvider {
         api_key: Arc<RwLock<String>>,
         model: Arc<RwLock<String>>,
     ) -> Self {
-        Self { http: reqwest::Client::new(), base_url, api_key, model }
+        Self { http: build_http_client(), base_url, api_key, model }
     }
 
     pub fn base_url_arc(&self) -> Arc<RwLock<String>> { Arc::clone(&self.base_url) }
@@ -62,6 +62,15 @@ impl Provider for OaiProvider {
 
         Ok(Box::pin(sse_to_chunks(resp.bytes_stream())))
     }
+}
+
+// ── HTTP client ──────────────────────────────────────────────────────────────
+
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default()
 }
 
 // ── request body ─────────────────────────────────────────────────────────────

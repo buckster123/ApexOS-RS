@@ -1327,13 +1327,13 @@ async fn handle_terminal_ws(socket: WebSocket) {
 
     let (mut sink, mut stream) = socket.split();
 
-    let ws_write = tokio::spawn(async move {
+    let mut ws_write = tokio::spawn(async move {
         while let Some(data) = from_pty_rx.recv().await {
             if sink.send(Message::Binary(data.into())).await.is_err() { break; }
         }
     });
 
-    let ws_read = tokio::spawn(async move {
+    let mut ws_read = tokio::spawn(async move {
         while let Some(Ok(msg)) = stream.next().await {
             match msg {
                 Message::Text(text) => {
@@ -1364,8 +1364,13 @@ async fn handle_terminal_ws(socket: WebSocket) {
         drop(to_pty_tx);
     });
 
-    tokio::select! { _ = ws_write => {} _ = ws_read => {} }
+    tokio::select! {
+        _ = &mut ws_write => { ws_read.abort(); }
+        _ = &mut ws_read  => { ws_write.abort(); }
+    }
     let _ = child.kill();
+    // Reap the child so it doesn't become a zombie process.
+    let _ = tokio::task::spawn_blocking(move || child.wait()).await;
     eprintln!("[terminal] session closed");
 }
 

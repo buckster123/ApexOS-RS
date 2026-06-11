@@ -19,6 +19,14 @@ StandardOutput=journal
 StandardError=journal
 Restart=on-failure
 RestartSec=3
+# Hardening — limit blast radius while still allowing KMS/DRM rendering
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+DevicePolicy=closed
+DeviceAllow=/dev/dri/* rw
+DeviceAllow=/dev/tty7 rw
+DeviceAllow=/dev/input/* rw
 
 [Install]
 WantedBy=multi-user.target

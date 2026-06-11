@@ -16,7 +16,7 @@ pub struct AnthropicProvider {
 impl AnthropicProvider {
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
-            http:    reqwest::Client::new(),
+            http:    build_http_client(),
             api_key: Arc::new(RwLock::new(api_key.into())),
             model:   Arc::new(RwLock::new(model.into())),
         }
@@ -24,7 +24,7 @@ impl AnthropicProvider {
 
     /// Shares existing Arcs so gateway HTTP handlers can update key/model at runtime.
     pub fn new_shared(api_key: Arc<RwLock<String>>, model: Arc<RwLock<String>>) -> Self {
-        Self { http: reqwest::Client::new(), api_key, model }
+        Self { http: build_http_client(), api_key, model }
     }
 
     pub fn key_arc(&self)   -> Arc<RwLock<String>> { Arc::clone(&self.api_key) }
@@ -63,6 +63,15 @@ impl Provider for AnthropicProvider {
 
         Ok(Box::pin(sse_to_chunks(resp.bytes_stream())))
     }
+}
+
+// ── HTTP client ──────────────────────────────────────────────────────────────
+
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default()
 }
 
 // ── request body ─────────────────────────────────────────────────────────────
