@@ -933,8 +933,18 @@ async fn main() -> Result<()> {
 
     let addr = std::env::var("CEREBRO_API_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:8765".into());
+    if api_token.is_empty() {
+        if let Ok(sa) = addr.parse::<std::net::SocketAddr>() {
+            if !sa.ip().is_loopback() {
+                anyhow::bail!("refusing to bind {addr} without AGENTD_TOKEN");
+            }
+        }
+    }
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("cerebro-api listening on {addr}");
+    if !api_token.is_empty() {
+        info!("cerebro-api dashboard: http://{addr}/?token=<AGENTD_TOKEN>  (bearer token required)");
+    }
     axum::serve(listener, app).await?;
     Ok(())
 }

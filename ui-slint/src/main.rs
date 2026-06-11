@@ -448,8 +448,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let http_base = ws_to_http(&ws_url);
 
-    // Shared HTTP client — created before WS task so it can be cloned in
-    let http_client = Arc::new(reqwest::Client::new());
+    // Shared HTTP client — carries the bearer token (if set) on every REST call,
+    // mirroring the ?token= already on the WS URL. Without this, every /api/* call
+    // 401s whenever AGENTD_TOKEN is set (which install.sh now always does).
+    let http_client = Arc::new({
+        let mut builder = reqwest::Client::builder();
+        if let Ok(t) = std::env::var("AGENTD_TOKEN") {
+            if !t.is_empty() {
+                let mut headers = reqwest::header::HeaderMap::new();
+                if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {t}")) {
+                    headers.insert(reqwest::header::AUTHORIZATION, val);
+                }
+                builder = builder.default_headers(headers);
+            }
+        }
+        builder.build().unwrap_or_default()
+    });
 
     // ── WS task ──────────────────────────────────────────────────────────────
     let ui_weak = ui.as_weak();

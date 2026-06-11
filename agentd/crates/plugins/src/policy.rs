@@ -117,6 +117,10 @@ impl PolicyEngine {
 
     fn workspace_decision(&self, path: Option<&str>) -> Decision {
         let Some(p) = path else { return Decision::Ask };
+        // Reject traversal: a non-existent write target with `..` would otherwise
+        // canonicalize-fail and slip past the component-prefix check below.
+        // Mirrors the guard delete_path already applies.
+        if p.contains("..") { return Decision::Ask; }
         let Ok(ws) = std::env::var("AGENTD_WORKSPACE") else { return Decision::Ask };
         if ws.is_empty() { return Decision::Ask; }
 
@@ -238,6 +242,20 @@ mod tests {
         std::env::set_var("AGENTD_WORKSPACE", "/tmp");
         let e = engine(PolicyMode::Suggest, &[("write_file", Rule::Workspace)]);
         assert_eq!(e.check("write_file", Some("/etc/passwd")), Decision::Ask);
+        std::env::remove_var("AGENTD_WORKSPACE");
+    }
+
+    #[test]
+    fn workspace_rule_dotdot_traversal_asks() {
+        // A non-existent path with `..` would canonicalize-fail and slip past the
+        // starts_with check without the explicit `..` rejection guard.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("AGENTD_WORKSPACE", "/tmp");
+        let e = engine(PolicyMode::Suggest, &[("write_file", Rule::Workspace)]);
+        assert_eq!(
+            e.check("write_file", Some("/tmp/../etc/cron.d/x")),
+            Decision::Ask
+        );
         std::env::remove_var("AGENTD_WORKSPACE");
     }
 

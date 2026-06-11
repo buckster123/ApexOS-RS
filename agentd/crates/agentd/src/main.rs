@@ -168,7 +168,8 @@ async fn main() -> anyhow::Result<()> {
     let api_token = Arc::new(
         std::env::var("AGENTD_TOKEN").unwrap_or_default()
     );
-    if api_token.is_empty() {
+    let api_token_empty = api_token.is_empty();
+    if api_token_empty {
         eprintln!("[agentd] AGENTD_TOKEN not set — API auth disabled (safe only on 127.0.0.1)");
     }
 
@@ -238,6 +239,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let gw_bind = std::env::var("AGENTD_BIND").unwrap_or_else(|_| "127.0.0.1:8787".into());
     let gw_addr: std::net::SocketAddr = gw_bind.parse()?;
+    if api_token_empty && !gw_addr.ip().is_loopback() {
+        anyhow::bail!(
+            "refusing to bind {gw_addr} without AGENTD_TOKEN — set a token or bind 127.0.0.1"
+        );
+    }
     tokio::spawn(async move {
         if let Err(e) = serve(gw_state, gw_addr).await {
             eprintln!("[gateway] error: {e}");
