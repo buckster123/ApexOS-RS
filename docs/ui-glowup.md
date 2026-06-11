@@ -152,7 +152,7 @@ Focus + static accents. Heavy assets (wallpapers, fonts, sounds) are tier-gated 
 
 | Phase | Deliverable | Gate |
 |-------|-------------|------|
-| **G0** | View router fix | tab switch shows exactly one view, no overlap, no jank; chat aliases intact |
+| **G0** ✓ | View router fix | tab switch shows exactly one view, no overlap, no jank; chat aliases intact — **DONE** (commit e32ae46, verified live: stacking fixed) |
 | **G1** | Shell scaffold | `shell-mode` toggles Desktop⇄Focus; Desktop shows wallpaper + dock + Chat in one window |
 | **G2** | Window manager core | launch/close/focus/min/maximize + smooth drag + resize + z-order; ≥3 windows |
 | **G3** | App catalog | all existing views run as windows; launcher/start menu + taskbar functional |
@@ -201,7 +201,7 @@ Five items surfaced during the mk1 build that weren't captured anywhere. Classif
 
 | Item | Class | Effort (corrected) | Lands |
 |------|-------|--------------------|-------|
-| **Feedback subsystem** (toasts + notifications, unified) | **Foundational** | core = small; center = medium | core **first** (pre-G0); desktop center at G3 |
+| **Feedback subsystem** (toasts + notifications, unified) | **Foundational** | core = small; center = medium | toast core **DONE** (e32ae46, verified live); notification center still at G3 |
 | **Thermal pixel grid** (MLX90640 32×24 heatmap) | Feature / delight | **medium** (not 2h — see below) | focused feature, early for demo value |
 | **Council / sub-agent visibility** | Surface | badge = small; app = medium | badge anytime; **Council app** in G3 catalog |
 | **PTY terminal** | App | read-only = small; interactive = large | read-only intermediate early; full in G3+ |
