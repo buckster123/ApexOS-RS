@@ -17,6 +17,11 @@ export struct SysStats {
     thermal-active: bool,
 }
 
+export struct ModelItem {
+    model-id:   string,   // e.g. "claude-sonnet-4-6"
+    model-name: string,   // e.g. "Sonnet 4.6"
+}
+
 export struct SessionItem {
     session-id:    int,
     time-ago:      string,   // "2 min ago", "3 hr ago", etc.

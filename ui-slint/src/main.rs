@@ -27,6 +27,8 @@ thread_local! {
         const { RefCell::new(None) };
     static SESSIONS: RefCell<Option<Rc<slint::VecModel<SessionItem>>>> =
         const { RefCell::new(None) };
+    static MODELS: RefCell<Option<Rc<slint::VecModel<ModelItem>>>> =
+        const { RefCell::new(None) };
 }
 
 fn push_message(item: MessageItem) {
@@ -81,6 +83,19 @@ fn clear_messages() {
 fn replace_sessions(items: Vec<SessionItem>) {
     SESSIONS.with(|s| {
         if let Some(model) = s.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+            for item in items {
+                model.push(item);
+            }
+        }
+    });
+}
+
+fn replace_models(items: Vec<ModelItem>) {
+    MODELS.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
             while model.row_count() > 0 {
                 model.remove(model.row_count() - 1);
             }
@@ -326,19 +341,31 @@ struct SettingsData {
     policy_mode:   String,
     current_model: String,
     api_key_set:   bool,
+    models:        Vec<ModelItem>,
 }
 
-// Fetch /api/status and /api/soul in parallel.
+// Fetch /api/status, /api/soul, and /api/models in parallel.
 async fn fetch_settings(client: &reqwest::Client, base_url: &str) -> SettingsData {
-    let (status, soul) = tokio::join!(
+    let (status, soul, models_resp) = tokio::join!(
         json_get(client, format!("{base_url}/api/status")),
         json_get(client, format!("{base_url}/api/soul")),
+        json_get(client, format!("{base_url}/api/models")),
     );
+    let models: Vec<ModelItem> = models_resp["models"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(|m| ModelItem {
+            model_id:   m["id"].as_str().unwrap_or("").into(),
+            model_name: m["name"].as_str().unwrap_or("").into(),
+        })
+        .collect();
     SettingsData {
         soul_text:     soul["content"].as_str().unwrap_or("").to_string(),
         policy_mode:   status["policy_mode"].as_str().unwrap_or("suggest").to_string(),
         current_model: status["model"].as_str().unwrap_or("").to_string(),
         api_key_set:   status["api_key_set"].as_bool().unwrap_or(false),
+        models,
     }
 }
 
@@ -395,6 +422,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sessions: Rc<slint::VecModel<SessionItem>> = Rc::new(slint::VecModel::default());
     ui.set_sessions(slint::ModelRc::from(sessions.clone()));
     SESSIONS.with(|s| *s.borrow_mut() = Some(sessions.clone()));
+
+    let models_vec: Rc<slint::VecModel<ModelItem>> = Rc::new(slint::VecModel::default());
+    ui.set_available_models(slint::ModelRc::from(models_vec.clone()));
+    MODELS.with(|m| *m.borrow_mut() = Some(models_vec.clone()));
 
     // Initial sys stats (all zeros, offline)
     ui.set_sys_stats(empty_sys_stats());
@@ -695,6 +726,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_settings_policy(data.policy_mode.into());
                     ui.set_settings_model(data.current_model.into());
                     ui.set_settings_api_key_set(data.api_key_set);
+                    replace_models(data.models);
                 }
             }).ok();
         });
@@ -733,6 +765,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             client.post(format!("{base}/api/policy"))
                 .json(&serde_json::json!({"mode": mode_str}))
                 .timeout(std::time::Duration::from_secs(8))
+                .send().await.ok();
+        });
+    });
+
+    // ── set-model callback ────────────────────────────────────────────────────
+    let rt_h_mod    = rt.handle().clone();
+    let client_mod  = Arc::clone(&http_client);
+    let base_mod    = http_base.clone();
+    let ui_weak_mod = ui.as_weak();
+    ui.on_set_model(move |model_id| {
+        let id = model_id.to_string();
+        // Optimistic: update current-model display and highlight
+        if let Some(ui) = ui_weak_mod.upgrade() {
+            ui.set_settings_model(id.clone().into());
+        }
+        let client = Arc::clone(&client_mod);
+        let base   = base_mod.clone();
+        rt_h_mod.spawn(async move {
+            client.post(format!("{base}/api/model"))
+                .json(&serde_json::json!({"model": id}))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await.ok();
+        });
+    });
+
+    // ── power-action callback ─────────────────────────────────────────────────
+    let rt_h_pwr   = rt.handle().clone();
+    let client_pwr = Arc::clone(&http_client);
+    let base_pwr   = http_base.clone();
+    ui.on_power_action(move |action| {
+        let action_str = action.to_string();
+        let client = Arc::clone(&client_pwr);
+        let base   = base_pwr.clone();
+        rt_h_pwr.spawn(async move {
+            client.post(format!("{base}/api/power"))
+                .json(&serde_json::json!({"action": action_str}))
+                .timeout(std::time::Duration::from_secs(10))
                 .send().await.ok();
         });
     });

@@ -1,4 +1,5 @@
 import { Palette } from "../palette.slint";
+import { ModelItem } from "../types.slint";
 
 // ── SettingsView ───────────────────────────────────────────────────────────────
 //
@@ -10,13 +11,15 @@ export component SettingsView {
     preferred-height: 0px;
     min-height: 0px;
 
-    in-out property <string> soul-text: "";
-    in property <string>     policy-mode: "suggest";
-    in property <string>     current-model: "";
-    in property <bool>       api-key-set: false;
+    in-out property <string>     soul-text: "";
+    in property <string>         policy-mode: "suggest";
+    in property <string>         current-model: "";
+    in property <bool>           api-key-set: false;
+    in property <[ModelItem]>    models;
 
     callback save-soul(string);
     callback set-policy(string);
+    callback set-model(string);
     callback refresh();
 
     VerticalLayout {
@@ -160,6 +163,68 @@ export component SettingsView {
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                                 animate color { duration: 150ms; }
+                            }
+                        }
+                    }
+                }
+
+                // ── Model picker ──────────────────────────────────────────
+                VerticalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: "MODEL";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 2px;
+                    }
+
+                    if root.models.length == 0: Text {
+                        text: "Loading models…";
+                        color: Palette.text-dim;
+                        font-size: 12px;
+                    }
+
+                    for m in root.models: Rectangle {
+                        height: 38px;
+                        border-radius: Palette.radius;
+                        background: m.model-id == root.current-model
+                            ? Palette.primary-dim
+                            : Palette.surface;
+                        border-width: 1px;
+                        border-color: m.model-id == root.current-model
+                            ? Palette.primary
+                            : Palette.border;
+                        animate background   { duration: 150ms; }
+                        animate border-color { duration: 150ms; }
+
+                        TouchArea {
+                            clicked => { root.set-model(m.model-id); }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 8px;
+
+                            Text {
+                                text: m.model-name;
+                                color: m.model-id == root.current-model
+                                    ? Palette.text-bright
+                                    : Palette.text;
+                                font-size: 12px;
+                                font-weight: m.model-id == root.current-model ? 700 : 400;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+
+                            if m.model-id == root.current-model: Text {
+                                text: "active";
+                                color: Palette.primary;
+                                font-size: 10px;
+                                letter-spacing: 0.5px;
+                                vertical-alignment: center;
                             }
                         }
                     }

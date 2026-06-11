@@ -1,5 +1,5 @@
 import { Palette, Theme } from "palette.slint";
-import { MessageItem, SysStats, SessionItem } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem } from "types.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
 import { Dashboard } from "components/dashboard.slint";
@@ -7,7 +7,7 @@ import { SensorView } from "components/sensor_view.slint";
 import { SessionView } from "components/session_view.slint";
 import { SettingsView } from "components/settings_view.slint";
 
-export { Palette, Theme, MessageItem, SysStats, SessionItem }
+export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -29,6 +29,8 @@ export component AppWindow inherits Window {
     in-out property <string>         settings-policy: "suggest";
     in-out property <string>         settings-model: "";
     in-out property <bool>           settings-api-key-set: false;
+    in-out property <[ModelItem]>    available-models;
+    in-out property <bool>           power-modal-open: false;
 
     // ── Callbacks sent to Rust ──────────────────────────────────────────
     callback send-message(string);
@@ -39,6 +41,8 @@ export component AppWindow inherits Window {
     callback refresh-settings();
     callback save-soul(string);
     callback set-policy(string);
+    callback set-model(string);
+    callback power-action(string);
     // chat always instantiated — aliases always valid
     callback scroll-to-bottom <=> chat.scroll-to-bottom;
     callback approve-tool <=> chat.approve-tool;
@@ -102,6 +106,27 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle { horizontal-stretch: 1; }
+
+                // Power button (⏻ = open power modal)
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: root.power-modal-open ? rgba(239, 68, 68, 0.15) : transparent;
+                    y: (parent.height - self.height) / 2;
+                    animate background { duration: 150ms; }
+
+                    TouchArea { clicked => { root.power-modal-open = !root.power-modal-open; } }
+
+                    Text {
+                        text: "⏻";
+                        color: root.power-modal-open ? #ef4444 : Palette.text-dim;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        animate color { duration: 150ms; }
+                    }
+                }
 
                 // TTS toggle (♪ = speak agent responses aloud)
                 Rectangle {
@@ -338,8 +363,10 @@ export component AppWindow inherits Window {
             policy-mode: root.settings-policy;
             current-model: root.settings-model;
             api-key-set: root.settings-api-key-set;
+            models: root.available-models;
             save-soul(text) => { root.save-soul(text); }
             set-policy(mode) => { root.set-policy(mode); }
+            set-model(id) => { root.set-model(id); }
             refresh => { root.refresh-settings(); }
         }
 
@@ -375,5 +402,123 @@ export component AppWindow inherits Window {
             rgba(0, 212, 255, 0.025) 0%,
             transparent 45%,
             rgba(0, 128, 255, 0.018) 100%);
+    }
+
+    // ── Power modal (full-screen dim + centered card) ──────────────────
+    if root.power-modal-open: Rectangle {
+        x: 0px; y: 0px;
+        width: parent.width; height: parent.height;
+        background: rgba(0, 0, 0, 0.75);
+
+        // Modal card
+        Rectangle {
+            width: 268px;
+            height: 160px;
+            x: (parent.width  - self.width)  / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.surface;
+            border-radius: Palette.radius;
+            border-width: 1px;
+            border-color: Palette.border-hi;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 20px;
+                alignment: center;
+
+                Text {
+                    text: "POWER";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 2px;
+                    horizontal-alignment: center;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: center;
+
+                    // REBOOT
+                    Rectangle {
+                        width: 72px; height: 34px;
+                        border-radius: Palette.radius;
+                        background: reboot-area.has-hover
+                            ? rgba(234, 179, 8, 0.2) : Palette.surface-hi;
+                        border-width: 1px;
+                        border-color: rgba(234, 179, 8, 0.6);
+                        animate background { duration: 150ms; }
+
+                        reboot-area := TouchArea {
+                            clicked => {
+                                root.power-modal-open = false;
+                                root.power-action("reboot");
+                            }
+                        }
+
+                        Text {
+                            text: "REBOOT";
+                            color: #eab308;
+                            font-size: 9px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // SHUTDOWN
+                    Rectangle {
+                        width: 80px; height: 34px;
+                        border-radius: Palette.radius;
+                        background: shutdown-area.has-hover
+                            ? rgba(239, 68, 68, 0.2) : Palette.surface-hi;
+                        border-width: 1px;
+                        border-color: rgba(239, 68, 68, 0.6);
+                        animate background { duration: 150ms; }
+
+                        shutdown-area := TouchArea {
+                            clicked => {
+                                root.power-modal-open = false;
+                                root.power-action("shutdown");
+                            }
+                        }
+
+                        Text {
+                            text: "SHUTDOWN";
+                            color: #ef4444;
+                            font-size: 9px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // CANCEL
+                    Rectangle {
+                        width: 60px; height: 34px;
+                        border-radius: Palette.radius;
+                        background: cancel-area.has-hover
+                            ? Palette.surface-hi : Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        animate background { duration: 150ms; }
+
+                        cancel-area := TouchArea {
+                            clicked => { root.power-modal-open = false; }
+                        }
+
+                        Text {
+                            text: "CANCEL";
+                            color: Palette.text-dim;
+                            font-size: 9px;
+                            letter-spacing: 1px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
     }
 }

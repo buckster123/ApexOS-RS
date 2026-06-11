@@ -160,7 +160,7 @@ SLINT_FULLSCREEN=1 AGENTD_WS=ws://192.168.0.158:8787/ws cargo run
 | 5 | Session management | Session init, picker, history replay | ✓ |
 | 6 | Voice controls | Mic → `/api/record/start`, speaker → `/api/speak` | ✓ |
 | 7 | Settings | Soul.md editor (`TextEdit`), policy mode, plugin list | ✓ |
-| 8 | Power + model/policy | Power modal, model/policy `ComboBox` | ⬜ |
+| 8 | Power + model/policy | Power modal, model/policy `ComboBox` | ✓ |
 | 9 | KMS/DRM deploy | `SLINT_BACKEND=linuxkms`, systemd service, retire cage | ⬜ |
 
 Full per-step detail in [docs/build-roadmap.md](docs/build-roadmap.md).
