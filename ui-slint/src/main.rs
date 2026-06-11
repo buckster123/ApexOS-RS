@@ -24,6 +24,8 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 thread_local! {
     static MESSAGES: RefCell<Option<Rc<slint::VecModel<MessageItem>>>> =
         const { RefCell::new(None) };
+    static SESSIONS: RefCell<Option<Rc<slint::VecModel<SessionItem>>>> =
+        const { RefCell::new(None) };
 }
 
 fn push_message(item: MessageItem) {
@@ -60,6 +62,29 @@ fn finish_last_agent_message() {
                     last.streaming = false;
                     model.set_row_data(len - 1, last);
                 }
+            }
+        }
+    });
+}
+
+fn clear_messages() {
+    MESSAGES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+        }
+    });
+}
+
+fn replace_sessions(items: Vec<SessionItem>) {
+    SESSIONS.with(|s| {
+        if let Some(model) = s.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+            for item in items {
+                model.push(item);
             }
         }
     });
@@ -129,6 +154,134 @@ fn ws_to_http(ws_url: &str) -> String {
         .replacen("wss://", "https://", 1)
 }
 
+fn format_time_ago(unix_secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let diff = now.saturating_sub(unix_secs);
+    match diff {
+        0..=59       => "just now".into(),
+        60..=3599    => format!("{} min ago", diff / 60),
+        3600..=86399 => format!("{} hr ago", diff / 3600),
+        _            => format!("{} days ago", diff / 86400),
+    }
+}
+
+// Parse agentd session history (Anthropic API format) into MessageItems.
+// Two-pass: collect tool outputs first, then build items in order.
+fn replay_history(history: &[Value]) -> Vec<MessageItem> {
+    // Pass 1: collect tool_result outputs keyed by tool_use_id
+    let mut tool_outputs: std::collections::HashMap<String, String> = Default::default();
+    for msg in history {
+        if msg["role"].as_str() != Some("user") { continue; }
+        if let Some(content) = msg["content"].as_array() {
+            for block in content {
+                if block["type"].as_str() != Some("tool_result") { continue; }
+                let id = block["tool_use_id"].as_str().unwrap_or("").to_string();
+                let output = match &block["content"] {
+                    Value::String(s) => s.clone(),
+                    Value::Array(arr) => arr.iter()
+                        .filter(|b| b["type"].as_str() == Some("text"))
+                        .filter_map(|b| b["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    v => v.to_string(),
+                };
+                tool_outputs.insert(id, output);
+            }
+        }
+    }
+
+    // Pass 2: build MessageItems in conversation order
+    let mut items = Vec::new();
+    for msg in history {
+        match msg["role"].as_str() {
+            Some("user") => {
+                if let Some(content) = msg["content"].as_array() {
+                    for block in content {
+                        if block["type"].as_str() == Some("text") {
+                            let text = block["text"].as_str().unwrap_or("").to_string();
+                            if !text.is_empty() {
+                                items.push(MessageItem {
+                                    role: "user".into(), text: text.into(), streaming: false,
+                                    call_id: "".into(), tool_name: "".into(),
+                                    tool_args: "".into(), tool_output: "".into(),
+                                    tool_status: "".into(), awaiting_approval: false,
+                                });
+                            }
+                        }
+                        // tool_result blocks handled via tool_outputs map — skip here
+                    }
+                }
+            }
+            Some("assistant") => {
+                if let Some(content) = msg["content"].as_array() {
+                    // Collect text across all text blocks in this message
+                    let text: String = content.iter()
+                        .filter(|b| b["type"].as_str() == Some("text"))
+                        .filter_map(|b| b["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if !text.is_empty() {
+                        items.push(MessageItem {
+                            role: "agent".into(), text: text.into(), streaming: false,
+                            call_id: "".into(), tool_name: "".into(),
+                            tool_args: "".into(), tool_output: "".into(),
+                            tool_status: "".into(), awaiting_approval: false,
+                        });
+                    }
+                    // Tool-use blocks become tool cards (with output filled in)
+                    for block in content {
+                        if block["type"].as_str() != Some("tool_use") { continue; }
+                        let id    = block["id"].as_str().unwrap_or("").to_string();
+                        let name  = block["name"].as_str().unwrap_or("").to_string();
+                        let args  = block["input"].as_object()
+                            .map(|o| serde_json::to_string_pretty(o).unwrap_or_default())
+                            .unwrap_or_default();
+                        let output = tool_outputs.get(&id).cloned().unwrap_or_default();
+                        items.push(MessageItem {
+                            role: "tool".into(), text: "".into(), streaming: false,
+                            call_id: id.into(), tool_name: name.into(),
+                            tool_args: args.into(), tool_output: output.into(),
+                            tool_status: "done".into(), awaiting_approval: false,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    items
+}
+
+// GET /api/sessions → Vec<SessionItem> sorted newest-first.
+async fn fetch_sessions(client: &reqwest::Client, base_url: &str) -> Vec<SessionItem> {
+    let resp = match client
+        .get(format!("{base_url}/api/sessions"))
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    let body: Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let arr = match body.as_array() {
+        Some(a) => a,
+        None => return vec![],
+    };
+    arr.iter().map(|item| SessionItem {
+        session_id:    item["session_id"].as_u64().unwrap_or(0) as i32,
+        time_ago:      format_time_ago(item["last_active"].as_u64().unwrap_or(0)).into(),
+        message_count: item["message_count"].as_u64().unwrap_or(0) as i32,
+        preview:       item["preview"].as_str().unwrap_or("").into(),
+    }).collect()
+}
+
 // POST /api/run to fetch CPU / RAM / disk percentages from the server.
 // Returns (cpu_pct, ram_pct, disk_pct) on success.
 async fn fetch_sys_stats(client: &reqwest::Client, base_url: &str) -> Option<(f32, f32, f32)> {
@@ -177,6 +330,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let messages: Rc<slint::VecModel<MessageItem>> = Rc::new(slint::VecModel::default());
     ui.set_messages(slint::ModelRc::from(messages.clone()));
     MESSAGES.with(|m| *m.borrow_mut() = Some(messages.clone()));
+
+    // Session model
+    let sessions: Rc<slint::VecModel<SessionItem>> = Rc::new(slint::VecModel::default());
+    ui.set_sessions(slint::ModelRc::from(sessions.clone()));
+    SESSIONS.with(|s| *s.borrow_mut() = Some(sessions.clone()));
 
     // Initial sys stats (all zeros, offline)
     ui.set_sys_stats(empty_sys_stats());
@@ -258,14 +416,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Shared HTTP client for polling + session fetch
+    let http_client = std::sync::Arc::new(reqwest::Client::new());
+
     // ── System stats polling (every 5 s) ─────────────────────────────────────
     let ui_weak_poll = ui.as_weak();
+    let client_poll  = std::sync::Arc::clone(&http_client);
+    let http_base_poll = http_base.clone();
     rt.spawn(async move {
-        let client = reqwest::Client::new();
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
-            if let Some((cpu, ram, disk)) = fetch_sys_stats(&client, &http_base).await {
+            if let Some((cpu, ram, disk)) = fetch_sys_stats(&client_poll, &http_base_poll).await {
                 let w = ui_weak_poll.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = w.upgrade() {
@@ -336,6 +498,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tx_send.send(payload).ok();
     });
 
+    // ── refresh-sessions callback ─────────────────────────────────────────────
+    let rt_handle     = rt.handle().clone();
+    let client_sess   = std::sync::Arc::clone(&http_client);
+    let http_base_sess = http_base.clone();
+    ui.on_refresh_sessions(move || {
+        let base   = http_base_sess.clone();
+        let client = std::sync::Arc::clone(&client_sess);
+        rt_handle.spawn(async move {
+            let items = fetch_sessions(&client, &base).await;
+            slint::invoke_from_event_loop(move || {
+                replace_sessions(items);
+            })
+            .ok();
+        });
+    });
+
+    // ── restore-session callback ──────────────────────────────────────────────
+    let tx_restore       = tx.clone();
+    let ui_weak_restore  = ui.as_weak();
+    ui.on_restore_session(move |session_id| {
+        // Clear current message list and switch to chat view
+        clear_messages();
+        if let Some(ui) = ui_weak_restore.upgrade() {
+            ui.set_current_view(0);
+            ui.set_current_session_id(session_id);
+            ui.set_status("Restoring…".into());
+        }
+        // Ask agentd to replay the session (Rust agentd: hello + resume_session field)
+        let payload = serde_json::json!({
+            "type": "hello",
+            "resume_session": session_id as u64
+        })
+        .to_string();
+        tx_restore.send(payload).ok();
+    });
+
     ui.run()?;
     Ok(())
 }
@@ -349,14 +547,28 @@ fn dispatch_event(
     let ev_type = ev["type"].as_str().unwrap_or("").to_string();
 
     match ev_type.as_str() {
-        "hello" => {
-            let id = ev["session_id"].as_u64();
+        // Server greeting: sent on connect (empty history) and on session resume
+        // (with full history). Rust agentd: type="session_init".
+        // Python agentd: type="hello". Handle both for compatibility.
+        "session_init" | "hello" => {
+            let id      = ev["session_id"].as_u64();
+            let history = ev["history"].as_array().cloned().unwrap_or_default();
+            let items   = replay_history(&history);
+            let has_history = !items.is_empty();
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
                     if let Some(id) = id {
                         state.lock().unwrap().session_id = Some(id);
                         ui.set_status(format!("Session {id}").into());
+                        ui.set_current_session_id(id as i32);
+                    }
+                    clear_messages();
+                    for item in items {
+                        push_message(item);
+                    }
+                    if has_history {
+                        ui.invoke_scroll_to_bottom();
                     }
                 }
             })
@@ -393,6 +605,25 @@ fn dispatch_event(
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
+                    // Lazily create an agent bubble if none is in progress.
+                    // The Rust agentd has no TurnStarted event; Python agentd does.
+                    let needs_bubble = MESSAGES.with(|m| {
+                        m.borrow().as_ref().map(|model| {
+                            let len = model.row_count();
+                            len == 0 || model.row_data(len - 1)
+                                .map(|last| last.role.as_str() != "agent" || !last.streaming)
+                                .unwrap_or(true)
+                        }).unwrap_or(true)
+                    });
+                    if needs_bubble {
+                        push_message(MessageItem {
+                            role: "agent".into(), text: "".into(), streaming: true,
+                            call_id: "".into(), tool_name: "".into(), tool_args: "".into(),
+                            tool_output: "".into(), tool_status: "".into(),
+                            awaiting_approval: false,
+                        });
+                        ui.set_agent_busy(true);
+                    }
                     update_last_agent_message(&delta);
                     ui.invoke_scroll_to_bottom();
                 }

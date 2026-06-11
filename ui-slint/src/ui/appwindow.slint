@@ -1,11 +1,12 @@
 import { Palette, Theme } from "palette.slint";
-import { MessageItem, SysStats } from "types.slint";
+import { MessageItem, SysStats, SessionItem } from "types.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
 import { Dashboard } from "components/dashboard.slint";
 import { SensorView } from "components/sensor_view.slint";
+import { SessionView } from "components/session_view.slint";
 
-export { Palette, Theme, MessageItem, SysStats }
+export { Palette, Theme, MessageItem, SysStats, SessionItem }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -14,15 +15,19 @@ export component AppWindow inherits Window {
     preferred-height: 720px;
 
     // ── Properties bound from Rust ──────────────────────────────────────
-    in-out property <[MessageItem]> messages;
-    in-out property <string>        status: "Connecting…";
-    in-out property <bool>          agent-busy: false;
-    in-out property <SysStats>      sys-stats;
-    in-out property <int>           current-view: 0;   // 0=chat  1=system  2=sensor
+    in-out property <[MessageItem]>  messages;
+    in-out property <string>         status: "Connecting…";
+    in-out property <bool>           agent-busy: false;
+    in-out property <SysStats>       sys-stats;
+    in-out property <[SessionItem]>  sessions;
+    in-out property <int>            current-session-id: 0;
+    in-out property <int>            current-view: 0;   // 0=chat  1=system  2=sensor  3=sessions
 
     // ── Callbacks sent to Rust ──────────────────────────────────────────
     callback send-message(string);
-    // Both views always instantiated — aliases always valid
+    callback refresh-sessions();
+    callback restore-session(int);
+    // chat always instantiated — aliases always valid
     callback scroll-to-bottom <=> chat.scroll-to-bottom;
     callback approve-tool <=> chat.approve-tool;
     callback reject-tool  <=> chat.reject-tool;
@@ -194,6 +199,36 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // SESSIONS tab
+                Rectangle {
+                    width: 80px;
+
+                    if root.current-view == 3: Rectangle {
+                        y: parent.height - 2px;
+                        height: 2px;
+                        background: Palette.primary;
+                        border-radius: 1px;
+                    }
+
+                    TouchArea {
+                        clicked => {
+                            root.current-view = 3;
+                            root.refresh-sessions();  // auto-fetch on tab open
+                        }
+                    }
+
+                    Text {
+                        text: "SESSIONS";
+                        y: (parent.height - self.height) / 2;
+                        color: root.current-view == 3 ? Palette.primary : Palette.text-dim;
+                        font-size: 10px;
+                        font-weight: root.current-view == 3 ? 700 : 400;
+                        horizontal-alignment: center;
+                        letter-spacing: 1.2px;
+                        animate color { duration: 200ms; }
+                    }
+                }
+
                 Rectangle { horizontal-stretch: 1; }
             }
         }
@@ -220,6 +255,16 @@ export component AppWindow inherits Window {
             vertical-stretch: root.current-view == 2 ? 1 : 0;
             max-height: root.current-view == 2 ? 999999px : 0px;
             stats: root.sys-stats;
+        }
+
+        // ── Session picker — collapses when not active ────────────────
+        sess := SessionView {
+            vertical-stretch: root.current-view == 3 ? 1 : 0;
+            max-height: root.current-view == 3 ? 999999px : 0px;
+            sessions: root.sessions;
+            active-session-id: root.current-session-id;
+            restore-session(id) => { root.restore-session(id); }
+            refresh => { root.refresh-sessions(); }
         }
 
         // ── Glow divider (chat view + Jarvis only) ────────────────────
