@@ -638,3 +638,7 @@ if ! $YES && $HAVE_WHIPTAIL; then
   STATUS_BODY+="\n\nInstall log: $LOG"
   tui_msg "Installation Complete" "$STATUS_BODY"
 fi
+
+echo "── ApexOS-RS install finished $(date) ──"
+# Give the tee pipe time to flush before the process exits
+sleep 1
