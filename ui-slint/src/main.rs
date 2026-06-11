@@ -309,6 +309,39 @@ struct DispatchCtx {
     tts_enabled: Arc<AtomicBool>,
 }
 
+// GET a URL and parse the JSON body; returns Value::Null on any error.
+async fn json_get(client: &reqwest::Client, url: String) -> Value {
+    match client.get(&url)
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await
+    {
+        Ok(resp) => resp.json::<Value>().await.unwrap_or(Value::Null),
+        Err(_)   => Value::Null,
+    }
+}
+
+struct SettingsData {
+    soul_text:     String,
+    policy_mode:   String,
+    current_model: String,
+    api_key_set:   bool,
+}
+
+// Fetch /api/status and /api/soul in parallel.
+async fn fetch_settings(client: &reqwest::Client, base_url: &str) -> SettingsData {
+    let (status, soul) = tokio::join!(
+        json_get(client, format!("{base_url}/api/status")),
+        json_get(client, format!("{base_url}/api/soul")),
+    );
+    SettingsData {
+        soul_text:     soul["content"].as_str().unwrap_or("").to_string(),
+        policy_mode:   status["policy_mode"].as_str().unwrap_or("suggest").to_string(),
+        current_model: status["model"].as_str().unwrap_or("").to_string(),
+        api_key_set:   status["api_key_set"].as_bool().unwrap_or(false),
+    }
+}
+
 // POST /api/run to fetch CPU / RAM / disk percentages from the server.
 // Returns (cpu_pct, ram_pct, disk_pct) on success.
 async fn fetch_sys_stats(client: &reqwest::Client, base_url: &str) -> Option<(f32, f32, f32)> {
@@ -643,6 +676,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ui) = ui_weak_tts.upgrade() {
             ui.set_tts_enabled(new_val);
         }
+    });
+
+    // ── refresh-settings callback ─────────────────────────────────────────────
+    let rt_h_stg   = rt.handle().clone();
+    let client_stg = Arc::clone(&http_client);
+    let base_stg   = http_base.clone();
+    let ui_weak_stg = ui.as_weak();
+    ui.on_refresh_settings(move || {
+        let client = Arc::clone(&client_stg);
+        let base   = base_stg.clone();
+        let ui_w   = ui_weak_stg.clone();
+        rt_h_stg.spawn(async move {
+            let data = fetch_settings(&client, &base).await;
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    ui.set_soul_text(data.soul_text.into());
+                    ui.set_settings_policy(data.policy_mode.into());
+                    ui.set_settings_model(data.current_model.into());
+                    ui.set_settings_api_key_set(data.api_key_set);
+                }
+            }).ok();
+        });
+    });
+
+    // ── save-soul callback ────────────────────────────────────────────────────
+    let rt_h_soul   = rt.handle().clone();
+    let client_soul = Arc::clone(&http_client);
+    let base_soul   = http_base.clone();
+    ui.on_save_soul(move |text| {
+        let client  = Arc::clone(&client_soul);
+        let base    = base_soul.clone();
+        let content = text.to_string();
+        rt_h_soul.spawn(async move {
+            client.post(format!("{base}/api/soul"))
+                .json(&serde_json::json!({"content": content}))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await.ok();
+        });
+    });
+
+    // ── set-policy callback ───────────────────────────────────────────────────
+    let rt_h_pol    = rt.handle().clone();
+    let client_pol  = Arc::clone(&http_client);
+    let base_pol    = http_base.clone();
+    let ui_weak_pol = ui.as_weak();
+    ui.on_set_policy(move |mode| {
+        let mode_str = mode.to_string();
+        // Optimistic UI update
+        if let Some(ui) = ui_weak_pol.upgrade() {
+            ui.set_settings_policy(mode_str.clone().into());
+        }
+        let client = Arc::clone(&client_pol);
+        let base   = base_pol.clone();
+        rt_h_pol.spawn(async move {
+            client.post(format!("{base}/api/policy"))
+                .json(&serde_json::json!({"mode": mode_str}))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await.ok();
+        });
     });
 
     ui.run()?;

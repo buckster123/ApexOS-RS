@@ -1,0 +1,211 @@
+import { Palette } from "../palette.slint";
+
+// ── SettingsView ───────────────────────────────────────────────────────────────
+//
+// Three sections: soul.md editor, policy mode picker, status readout.
+// preferred-height / min-height: 0 so parent VerticalLayout doesn't derive
+// its layoutinfo from our content — we fill via vertical-stretch.
+
+export component SettingsView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in-out property <string> soul-text: "";
+    in property <string>     policy-mode: "suggest";
+    in property <string>     current-model: "";
+    in property <bool>       api-key-set: false;
+
+    callback save-soul(string);
+    callback set-policy(string);
+    callback refresh();
+
+    VerticalLayout {
+        // ── Header ────────────────────────────────────────────────────────
+        Rectangle {
+            height: 48px;
+            background: Palette.surface;
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 14px;
+
+                Text {
+                    text: "SETTINGS";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 2px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Scrollable content ─────────────────────────────────────────────
+        Flickable {
+            vertical-stretch: 1;
+            interactive: true;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 24px;
+                alignment: start;
+
+                // ── Soul.md editor ─────────────────────────────────────────
+                VerticalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: "SOUL.MD";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 2px;
+                    }
+
+                    Rectangle {
+                        height: 240px;
+                        border-radius: Palette.radius;
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.border-hi;
+                        clip: true;
+
+                        Flickable {
+                            x: 10px; y: 10px;
+                            width: parent.width - 20px;
+                            height: parent.height - 20px;
+                            interactive: true;
+                            viewport-height: soul-field.preferred-height + 20px;
+
+                            soul-field := TextInput {
+                                width: parent.width;
+                                height: self.preferred-height;
+                                single-line: false;
+                                wrap: TextWrap.word-wrap;
+                                font-size: 12px;
+                                color: Palette.text;
+                                selection-background-color: Palette.primary-dim;
+                                selection-foreground-color: Palette.text-bright;
+                                text <=> root.soul-text;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 72px;
+                        height: 30px;
+                        border-radius: Palette.radius;
+                        background: save-area.has-hover ? Palette.primary : Palette.primary-dim;
+                        animate background { duration: 150ms; }
+
+                        save-area := TouchArea {
+                            clicked => { root.save-soul(root.soul-text); }
+                        }
+
+                        Text {
+                            text: "SAVE";
+                            color: Palette.bg;
+                            font-size: 10px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // ── Policy mode ────────────────────────────────────────────
+                VerticalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: "POLICY MODE";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 2px;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+
+                        for mode in ["suggest", "auto-edit", "yolo"]: Rectangle {
+                            width: 90px;
+                            height: 34px;
+                            border-radius: Palette.radius;
+                            background: root.policy-mode == mode
+                                ? Palette.primary-dim
+                                : Palette.surface;
+                            border-width: 1px;
+                            border-color: root.policy-mode == mode
+                                ? Palette.primary
+                                : Palette.border;
+                            animate background   { duration: 150ms; }
+                            animate border-color { duration: 150ms; }
+
+                            TouchArea {
+                                clicked => { root.set-policy(mode); }
+                            }
+
+                            Text {
+                                text: mode;
+                                color: root.policy-mode == mode
+                                    ? Palette.primary
+                                    : Palette.text-dim;
+                                font-size: 10px;
+                                letter-spacing: 0.5px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                animate color { duration: 150ms; }
+                            }
+                        }
+                    }
+                }
+
+                // ── Status readout ─────────────────────────────────────────
+                VerticalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: "STATUS";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 2px;
+                    }
+
+                    Rectangle {
+                        height: 56px;
+                        border-radius: Palette.radius;
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.border;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            Text {
+                                text: "Model: " + (root.current-model == "" ? "unknown" : root.current-model);
+                                color: Palette.text;
+                                font-size: 12px;
+                            }
+
+                            Text {
+                                text: root.api-key-set
+                                    ? "Anthropic API key: set"
+                                    : "Anthropic API key: not set";
+                                color: root.api-key-set ? Palette.primary : Palette.warning;
+                                font-size: 11px;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

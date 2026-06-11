@@ -5,6 +5,7 @@ import { InputBar } from "components/input_bar.slint";
 import { Dashboard } from "components/dashboard.slint";
 import { SensorView } from "components/sensor_view.slint";
 import { SessionView } from "components/session_view.slint";
+import { SettingsView } from "components/settings_view.slint";
 
 export { Palette, Theme, MessageItem, SysStats, SessionItem }
 
@@ -24,6 +25,10 @@ export component AppWindow inherits Window {
     in-out property <int>            current-view: 0;   // 0=chat  1=system  2=sensor  3=sessions
     in-out property <bool>           recording: false;
     in-out property <bool>           tts-enabled: false;
+    in-out property <string>         soul-text: "";
+    in-out property <string>         settings-policy: "suggest";
+    in-out property <string>         settings-model: "";
+    in-out property <bool>           settings-api-key-set: false;
 
     // ── Callbacks sent to Rust ──────────────────────────────────────────
     callback send-message(string);
@@ -31,6 +36,9 @@ export component AppWindow inherits Window {
     callback restore-session(int);
     callback toggle-recording();
     callback toggle-tts();
+    callback refresh-settings();
+    callback save-soul(string);
+    callback set-policy(string);
     // chat always instantiated — aliases always valid
     callback scroll-to-bottom <=> chat.scroll-to-bottom;
     callback approve-tool <=> chat.approve-tool;
@@ -254,6 +262,36 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // SETTINGS tab
+                Rectangle {
+                    width: 88px;
+
+                    if root.current-view == 4: Rectangle {
+                        y: parent.height - 2px;
+                        height: 2px;
+                        background: Palette.primary;
+                        border-radius: 1px;
+                    }
+
+                    TouchArea {
+                        clicked => {
+                            root.current-view = 4;
+                            root.refresh-settings();
+                        }
+                    }
+
+                    Text {
+                        text: "SETTINGS";
+                        y: (parent.height - self.height) / 2;
+                        color: root.current-view == 4 ? Palette.primary : Palette.text-dim;
+                        font-size: 10px;
+                        font-weight: root.current-view == 4 ? 700 : 400;
+                        horizontal-alignment: center;
+                        letter-spacing: 1.2px;
+                        animate color { duration: 200ms; }
+                    }
+                }
+
                 Rectangle { horizontal-stretch: 1; }
             }
         }
@@ -290,6 +328,19 @@ export component AppWindow inherits Window {
             active-session-id: root.current-session-id;
             restore-session(id) => { root.restore-session(id); }
             refresh => { root.refresh-sessions(); }
+        }
+
+        // ── Settings — collapses when not active ──────────────────────
+        stg := SettingsView {
+            vertical-stretch: root.current-view == 4 ? 1 : 0;
+            max-height: root.current-view == 4 ? 999999px : 0px;
+            soul-text <=> root.soul-text;
+            policy-mode: root.settings-policy;
+            current-model: root.settings-model;
+            api-key-set: root.settings-api-key-set;
+            save-soul(text) => { root.save-soul(text); }
+            set-policy(mode) => { root.set-policy(mode); }
+            refresh => { root.refresh-settings(); }
         }
 
         // ── Glow divider (chat view + Jarvis only) ────────────────────
