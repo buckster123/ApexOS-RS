@@ -83,13 +83,14 @@ impl PolicyEngine {
     pub fn new(config: PolicyConfig) -> Self { Self { config } }
 
     /// Evaluate whether `tool_name` may proceed without user confirmation.
+    /// `path` is the filesystem path argument from the tool call, if any.
     /// Returns `Decision::Allow` or `Decision::Ask`.
-    pub fn check(&self, tool_name: &str) -> Decision {
+    pub fn check(&self, tool_name: &str, path: Option<&str>) -> Decision {
         if self.config.mode == PolicyMode::Yolo {
             return Decision::Allow;
         }
         let rule = self.find_rule(tool_name);
-        self.apply_rule(rule)
+        self.apply_rule(rule, path)
     }
 
     fn find_rule(&self, tool_name: &str) -> Option<&Rule> {
@@ -105,15 +106,30 @@ impl PolicyEngine {
         None
     }
 
-    fn apply_rule(&self, rule: Option<&Rule>) -> Decision {
+    fn apply_rule(&self, rule: Option<&Rule>, path: Option<&str>) -> Decision {
         match rule {
             None                  => Decision::Ask,   // unknown tool → safe default
             Some(Rule::Allow)     => Decision::Allow,
             Some(Rule::Ask)       => Decision::Ask,
-            Some(Rule::Workspace) => match self.config.mode {
-                PolicyMode::AutoEdit => Decision::Allow, // path check deferred
-                _              => Decision::Ask,
-            },
+            Some(Rule::Workspace) => self.workspace_decision(path),
+        }
+    }
+
+    fn workspace_decision(&self, path: Option<&str>) -> Decision {
+        let Some(p) = path else { return Decision::Ask };
+        let Ok(ws) = std::env::var("AGENTD_WORKSPACE") else { return Decision::Ask };
+        if ws.is_empty() { return Decision::Ask; }
+
+        let ws_canon = std::fs::canonicalize(&ws)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&ws));
+        // Canonicalize the target; if it doesn't exist yet, use it as-is.
+        let tgt_canon = std::fs::canonicalize(p)
+            .unwrap_or_else(|_| std::path::PathBuf::from(p));
+
+        if tgt_canon.starts_with(&ws_canon) {
+            Decision::Allow
+        } else {
+            Decision::Ask
         }
     }
 }
@@ -147,35 +163,35 @@ mod tests {
     #[test]
     fn yolo_allows_everything() {
         let e = engine(PolicyMode::Yolo, &[("shell.exec", Rule::Ask)]);
-        assert_eq!(e.check("shell.exec"), Decision::Allow);
-        assert_eq!(e.check("anything"),   Decision::Allow);
+        assert_eq!(e.check("shell.exec", None), Decision::Allow);
+        assert_eq!(e.check("anything", None),   Decision::Allow);
     }
 
     #[test]
     fn suggest_allow_rule_passes() {
         let e = engine(PolicyMode::Suggest, &[("fs.read", Rule::Allow)]);
-        assert_eq!(e.check("fs.read"), Decision::Allow);
+        assert_eq!(e.check("fs.read", None), Decision::Allow);
     }
 
     #[test]
     fn suggest_ask_rule_blocks() {
         let e = engine(PolicyMode::Suggest, &[("shell.exec", Rule::Ask)]);
-        assert_eq!(e.check("shell.exec"), Decision::Ask);
+        assert_eq!(e.check("shell.exec", None), Decision::Ask);
     }
 
     #[test]
     fn suggest_unknown_tool_blocks() {
         let e = engine(PolicyMode::Suggest, &[]);
-        assert_eq!(e.check("unknown.tool"), Decision::Ask);
+        assert_eq!(e.check("unknown.tool", None), Decision::Ask);
     }
 
     #[test]
     fn wildcard_matches_prefixed_tools() {
         let e = engine(PolicyMode::Suggest, &[("cerebro.*", Rule::Allow)]);
-        assert_eq!(e.check("cerebro.recall"), Decision::Allow);
-        assert_eq!(e.check("cerebro.store"),  Decision::Allow);
-        assert_eq!(e.check("cerebro"),        Decision::Ask);  // bare name, no dot
-        assert_eq!(e.check("cerebro_other"),  Decision::Ask);  // wrong separator
+        assert_eq!(e.check("cerebro.recall", None), Decision::Allow);
+        assert_eq!(e.check("cerebro.store", None),  Decision::Allow);
+        assert_eq!(e.check("cerebro", None),        Decision::Ask);  // bare name, no dot
+        assert_eq!(e.check("cerebro_other", None),  Decision::Ask);  // wrong separator
     }
 
     #[test]
@@ -184,20 +200,38 @@ mod tests {
             ("cerebro.*",    Rule::Allow),
             ("cerebro.exec", Rule::Ask),
         ]);
-        assert_eq!(e.check("cerebro.exec"),   Decision::Ask);
-        assert_eq!(e.check("cerebro.recall"), Decision::Allow);
+        assert_eq!(e.check("cerebro.exec", None),   Decision::Ask);
+        assert_eq!(e.check("cerebro.recall", None), Decision::Allow);
     }
 
     #[test]
-    fn auto_edit_workspace_rule_allows() {
-        let e = engine(PolicyMode::AutoEdit, &[("fs.write", Rule::Workspace)]);
-        assert_eq!(e.check("fs.write"), Decision::Allow);
+    fn workspace_rule_no_path_asks() {
+        let e = engine(PolicyMode::AutoEdit, &[("write_file", Rule::Workspace)]);
+        assert_eq!(e.check("write_file", None), Decision::Ask);
     }
 
     #[test]
-    fn suggest_workspace_rule_blocks() {
-        let e = engine(PolicyMode::Suggest, &[("fs.write", Rule::Workspace)]);
-        assert_eq!(e.check("fs.write"), Decision::Ask);
+    fn workspace_rule_no_env_var_asks() {
+        std::env::remove_var("AGENTD_WORKSPACE");
+        let e = engine(PolicyMode::Suggest, &[("write_file", Rule::Workspace)]);
+        assert_eq!(e.check("write_file", Some("/tmp/file.txt")), Decision::Ask);
+    }
+
+    #[test]
+    fn workspace_rule_inside_workspace_allows() {
+        std::env::set_var("AGENTD_WORKSPACE", "/tmp");
+        let e = engine(PolicyMode::Suggest, &[("write_file", Rule::Workspace)]);
+        // /tmp exists so canonicalize succeeds
+        assert_eq!(e.check("write_file", Some("/tmp/file.txt")), Decision::Allow);
+        std::env::remove_var("AGENTD_WORKSPACE");
+    }
+
+    #[test]
+    fn workspace_rule_outside_workspace_asks() {
+        std::env::set_var("AGENTD_WORKSPACE", "/tmp");
+        let e = engine(PolicyMode::Suggest, &[("write_file", Rule::Workspace)]);
+        assert_eq!(e.check("write_file", Some("/etc/passwd")), Decision::Ask);
+        std::env::remove_var("AGENTD_WORKSPACE");
     }
 
     #[test]

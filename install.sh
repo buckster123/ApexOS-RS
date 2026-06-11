@@ -460,16 +460,7 @@ fi
 
 # policy.toml (don't overwrite an existing policy)
 if [[ ! -f /etc/agentd/policy.toml ]]; then
-  cat > /etc/agentd/policy.toml << 'EOF'
-mode = "suggest"
-
-[rules]
-"fs.read"   = "allow"
-"fs.write"  = "workspace"
-"fs.delete" = "ask"
-"shell.run" = "ask"
-"network"   = "ask"
-EOF
+  install -m 644 "$REPO_DIR/config/policy.toml" /etc/agentd/policy.toml
 fi
 
 # env file — API keys (don't overwrite existing keys)

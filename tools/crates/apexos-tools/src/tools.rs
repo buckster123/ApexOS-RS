@@ -609,11 +609,41 @@ fn delete_path(args: &Value) -> Value {
         None => return tool_error("path is required"),
     };
 
-    // Denylist check on path directly
-    let protected = ["/", "/usr", "/bin", "/lib", "/sbin", "/boot", "/etc/passwd", "/etc/shadow"];
-    for p in &protected {
-        if path == *p || path.starts_with(&format!("{}/", p)) {
-            return tool_error(format!("deletion of {} is blocked", p));
+    // Reject traversal before any stat
+    if path.contains("..") {
+        return tool_error("path traversal (..) is not allowed");
+    }
+
+    // Resolve symlinks — prevents symlink-redirect attacks
+    let canonical = fs::canonicalize(path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(path));
+    let c = canonical.to_string_lossy();
+
+    // Workspace confinement: when set, only allow deletions inside workspace.
+    // Inside workspace → skip system denylist (workspace owner accepts responsibility).
+    // Outside workspace → hard block.
+    if let Ok(ws) = std::env::var("AGENTD_WORKSPACE") {
+        if !ws.is_empty() {
+            let ws_canon = fs::canonicalize(&ws)
+                .unwrap_or_else(|_| std::path::PathBuf::from(&ws));
+            if !canonical.starts_with(&ws_canon) {
+                return tool_error(format!(
+                    "deletion outside workspace ({}) is blocked",
+                    ws_canon.display()
+                ));
+            }
+            // Inside workspace — skip denylist, proceed to deletion.
+        }
+    } else {
+        // No workspace configured — apply system directory denylist.
+        let blocked = [
+            "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
+            "/proc", "/root", "/run", "/sbin", "/snap", "/sys", "/usr", "/var",
+        ];
+        for &dir in &blocked {
+            if c == dir || c.starts_with(&format!("{}/", dir)) {
+                return tool_error(format!("deletion of {} is blocked", c));
+            }
         }
     }
 

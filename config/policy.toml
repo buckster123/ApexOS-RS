@@ -1,0 +1,43 @@
+# ApexOS default policy — deployed to /etc/agentd/policy.toml by install.sh.
+# Modes: suggest (confirm everything not listed) | auto-edit | yolo (no gates)
+mode = "suggest"
+
+[rules]
+# Built-in apexos-tools -------------------------------------------------------
+"read_file"    = "allow"       # safe, read-only
+"list_dir"     = "allow"       # safe, read-only
+"cpu_temp"     = "allow"
+"disk_usage"   = "allow"
+"memory_info"  = "allow"
+"uptime"       = "allow"
+"notify"       = "allow"
+
+"write_file"   = "workspace"   # allow inside AGENTD_WORKSPACE, ask outside
+"create_dir"   = "workspace"
+
+"delete_path"  = "ask"         # always confirm deletions
+"run_command"  = "ask"         # always confirm shell execution
+"http_fetch"   = "ask"         # always confirm outbound requests
+
+# Audio / display / GPIO — hardware; operator may loosen to "allow"
+"audio_analyze"      = "allow"
+"audio_trim_silence" = "allow"
+"audio_normalize"    = "allow"
+"audio_peak_limit"   = "allow"
+"audio_trim"         = "allow"
+"audio_clean"        = "allow"
+"display_face"       = "allow"
+"gpio_read"          = "allow"
+"gpio_info"          = "allow"
+"gpio_write"         = "ask"
+"gpio_pulse"         = "ask"
+"gpio_pwm"           = "ask"
+"gpio_servo"         = "ask"
+
+# Cerebro plugin tools --------------------------------------------------------
+"remember"     = "allow"
+"recall"       = "allow"
+"associate"    = "allow"
+"get_memory"   = "allow"
+"memory_store" = "allow"
+"memory_search"= "allow"

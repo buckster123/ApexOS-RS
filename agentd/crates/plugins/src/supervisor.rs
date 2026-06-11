@@ -159,7 +159,8 @@ impl Supervisor {
             tokio::select! {
                 result = bus_rx.recv() => match result {
                     Ok(Event::ToolRequested { session, call }) => {
-                        let decision = self.policy.read().await.check(&call.tool);
+                        let path = call.args["path"].as_str();
+                        let decision = self.policy.read().await.check(&call.tool, path);
                         match decision {
                             Decision::Allow => {
                                 self.dispatch_tool(session, call);

@@ -44,9 +44,9 @@
 
 | ID | Finding | Status |
 |----|---------|--------|
-| F027 | Policy rule keys (`fs.read`, `shell.run`) don't match real tool names (`read_file`, `run_command`) — allowlist inert | ⬜ |
-| F010 | `Workspace` rule returns `Allow` unconditionally — path confinement never enforced | ⬜ |
-| F024 | `delete_path` protection list incomplete; no path canonicalization; no workspace confinement on file tools | ⬜ |
+| F027 | Policy rule keys (`fs.read`, `shell.run`) don't match real tool names (`read_file`, `run_command`) — allowlist inert | ✅ |
+| F010 | `Workspace` rule returns `Allow` unconditionally — path confinement never enforced | ✅ |
+| F024 | `delete_path` protection list incomplete; no path canonicalization; no workspace confinement on file tools | ✅ |
 
 **Approach:**
 - F027: align rule names in `config/policy.toml` (new canonical file) + `install.sh` with actual tool names: `run_command`, `read_file`, `write_file`, `delete_path`, `http_fetch`; add cerebro wildcard `recall`, `memory_store`, etc. Add startup warning when a policy rule references an unknown tool.
@@ -145,7 +145,7 @@
 | Wave | Findings | Done | Status |
 |------|----------|------|--------|
 | 1 — Auth layer | 7 | 7 | ✅ |
-| 2 — Policy | 3 | 0 | ⬜ |
+| 2 — Policy | 3 | 3 | ✅ |
 | 3 — UI reconnect | 1 | 0 | ⬜ |
 | 4 — Correctness | 5 | 0 | ⬜ |
 | 5 — Resource/service | 3 | 0 | ⬜ |
@@ -160,3 +160,4 @@
 
 - **2026-06-11:** Action plan created from REVIEW.md (33 findings, Opus 4.8). Waves 1–6 defined.
 - **2026-06-11:** Wave 1 complete. Both daemons default-bind `127.0.0.1`. `AGENTD_TOKEN` bearer middleware on all agentd API+WS routes (gated router split); same token on cerebro-api. UI appends `?token=` to WS URL. install.sh generates token once at install. All 162 tests green.
+- **2026-06-11:** Wave 2 complete. Created `config/policy.toml` with real tool names (`read_file`, `write_file`, `run_command`, `delete_path`, `http_fetch`). install.sh copies it instead of writing inline. `policy.rs check()` gains `path: Option<&str>` and implements actual workspace path check via `AGENTD_WORKSPACE` canonicalization. `delete_path` hardened: `..` traversal rejected, symlinks resolved via canonicalize, denylist expanded (+ `/etc /home /root /var`), workspace confinement added. 4 new workspace policy tests. All tests green.
