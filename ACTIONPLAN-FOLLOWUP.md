@@ -147,12 +147,11 @@ gated. Low priority — skip unless the dashboard is a shipped mk1 feature.
 
 ## Definition of done
 
-- [ ] F034, F035, F036 applied; F037 decided (fix or document).
-- [ ] `cargo check --workspace` clean, no new warnings.
-- [ ] `cargo test -p apexos-plugins` passes (incl. new F035 `..` case).
+- [x] F034, F035, F036 applied; F037 decided (documented — log line at startup).
+- [x] `cargo check --workspace` clean, no new warnings.
+- [x] `cargo test -p apexos-plugins` passes (incl. new F035 `..` case — 16/16).
 - [ ] Manual UI smoke with `AGENTD_TOKEN` set: dashboard stats + settings + power + voice all work (no 401s).
-- [ ] One commit per fix (or one `wave 7` commit), pushed. Update `REVIEW.md` verification section to mark
-      F034–F037 resolved, and tick the `AUDIT-PLAN.md` session log.
-- [ ] `session_save` (FORGE, HIGH): note F034 was the UI-token regression and that the fresh-Pi e2e test is next.
+- [x] Wave 7 commit `3b2a1cd` pushed. REVIEW.md + AUDIT-PLAN.md session log updated.
+- [x] `session_save` (FORGE, HIGH) complete.
 
 Then Andre wipes the testing Pi → full fresh-OS `sudo bash install.sh` end-to-end noob-mode run.
