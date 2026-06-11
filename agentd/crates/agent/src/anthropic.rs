@@ -152,6 +152,7 @@ fn sse_to_chunks(
 ) -> impl futures_core::Stream<Item = anyhow::Result<Chunk>> + Send + 'static {
     async_stream::try_stream! {
         let mut buf    = String::new();
+        let mut carry: Vec<u8> = Vec::new(); // partial multi-byte chars between chunks
         let mut blocks: HashMap<usize, BlockState> = HashMap::new();
         let mut stop   = false;
 
@@ -160,7 +161,15 @@ fn sse_to_chunks(
         while let Some(chunk) = byte_stream.next().await {
             if stop { break; }
             let bytes: bytes::Bytes = chunk.map_err(anyhow::Error::from)?;
-            buf.push_str(std::str::from_utf8(&bytes).unwrap_or(""));
+            carry.extend_from_slice(&bytes);
+            match std::str::from_utf8(&carry) {
+                Ok(s)  => { buf.push_str(s); carry.clear(); }
+                Err(e) => {
+                    let n = e.valid_up_to();
+                    buf.push_str(&String::from_utf8_lossy(&carry[..n]));
+                    carry.drain(..n);
+                }
+            }
 
             while let Some(pos) = buf.find('\n') {
                 let line = buf[..pos].trim_end_matches('\r').to_owned();

@@ -67,7 +67,7 @@
 
 | ID | Finding | Status |
 |----|---------|--------|
-| F025 | UI WebSocket never reconnects after disconnect or initial failure | ⬜ |
+| F025 | UI WebSocket never reconnects after disconnect or initial failure | ✅ |
 
 **Approach:** Wrap the connect + read loop in an outer `loop` with exponential backoff (start 2s, cap 30s). Re-send `session_init` on each reconnect. Update CLAUDE.md claim only after behavior matches.
 
@@ -81,11 +81,11 @@
 
 | ID | Finding | Status |
 |----|---------|--------|
-| F009 | UTF-8 chunk-split drops streamed text silently | ⬜ |
-| F011 | Broadcast `Lagged` drop reports successful tool as failure; 30-min hang | ⬜ |
-| F020 | FTS5 query not escaped — any query with operators errors and returns nothing | ⬜ |
-| F021 | `enum_to_str(v).unwrap()` latent panic on DB write path | ⬜ |
-| F022 | Dead `dyn_params` construction in `fts5_search` | ⬜ |
+| F009 | UTF-8 chunk-split drops streamed text silently | ✅ |
+| F011 | Broadcast `Lagged` drop reports successful tool as failure; 30-min hang | ✅ |
+| F020 | FTS5 query not escaped — any query with operators errors and returns nothing | ✅ |
+| F021 | `enum_to_str(v).unwrap()` latent panic on DB write path | ✅ |
+| F022 | Dead `dyn_params` construction in `fts5_search` | ✅ |
 
 **Files:**
 - `agentd/crates/agent/src/anthropic.rs` — incremental UTF-8 decode (F009)
@@ -146,8 +146,8 @@
 |------|----------|------|--------|
 | 1 — Auth layer | 7 | 7 | ✅ |
 | 2 — Policy | 3 | 3 | ✅ |
-| 3 — UI reconnect | 1 | 0 | ⬜ |
-| 4 — Correctness | 5 | 0 | ⬜ |
+| 3 — UI reconnect | 1 | 1 | ✅ |
+| 4 — Correctness | 5 | 5 | ✅ |
 | 5 — Resource/service | 3 | 0 | ⬜ |
 | 6 — Docs/cleanup | 11 | 0 | ⬜ |
 | **Total** | **30** | **7** | |
@@ -160,4 +160,6 @@
 
 - **2026-06-11:** Action plan created from REVIEW.md (33 findings, Opus 4.8). Waves 1–6 defined.
 - **2026-06-11:** Wave 1 complete. Both daemons default-bind `127.0.0.1`. `AGENTD_TOKEN` bearer middleware on all agentd API+WS routes (gated router split); same token on cerebro-api. UI appends `?token=` to WS URL. install.sh generates token once at install. All 162 tests green.
+- **2026-06-11:** Wave 3 complete. WS task wrapped in outer `'reconnect: loop` with exponential backoff (2s→4s→...→30s cap). Status shows "Connection failed — retrying in Ns" / "Disconnected — reconnecting in Ns". session_init re-sent on each reconnect.
+- **2026-06-11:** Wave 4 complete. F009: incremental UTF-8 carry buffer in anthropic.rs + oai.rs SSE decoders (no more silent drop on split multi-byte chars). F011: broadcast Lagged returns Ok(false) instead of `continue`; outer match falls through to error synthesis immediately instead of 30-min hang. F020: FTS5 query escapes each token as individual quoted phrase ("word1" "word2" = implicit AND, neutralizes operators). F021: emotional_valence enum_to_str `.unwrap()` → `.transpose()?` (both insert + update). F022: removed dead dyn_params construction + drop in fts5_search.
 - **2026-06-11:** Wave 2 complete. Created `config/policy.toml` with real tool names (`read_file`, `write_file`, `run_command`, `delete_path`, `http_fetch`). install.sh copies it instead of writing inline. `policy.rs check()` gains `path: Option<&str>` and implements actual workspace path check via `AGENTD_WORKSPACE` canonicalization. `delete_path` hardened: `..` traversal rejected, symlinks resolved via canonicalize, denylist expanded (+ `/etc /home /root /var`), workspace confinement added. 4 new workspace policy tests. All tests green.

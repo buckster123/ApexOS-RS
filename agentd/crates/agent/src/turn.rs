@@ -167,17 +167,24 @@ async fn collect_tool_results(
                     }
                 }
                 Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    eprintln!(
+                        "[agent:{session:?}] broadcast lagged by {n} — {} tool result(s) may have been dropped; synthesizing",
+                        remaining.len()
+                    );
+                    return Ok(false);  // signal: lagged, need synthesis
+                }
                 Err(_) => return Err(anyhow::anyhow!("bus closed while awaiting tool results")),
             }
         }
-        Ok::<(), anyhow::Error>(())
+        Ok::<bool, anyhow::Error>(true)
     };
 
     match tokio::time::timeout(timeout, collect).await {
-        Ok(Ok(()))  => {}
-        Ok(Err(e))  => return Err(e),   // bus closed
-        Err(_)      => eprintln!(
+        Ok(Ok(true))  => {}           // all tool results collected
+        Ok(Ok(false)) => {}           // lagged — remaining tools get synthesized errors below
+        Ok(Err(e))    => return Err(e),   // bus closed
+        Err(_)        => eprintln!(
             "[agent:{session:?}] tool result(s) timed out after {}s — synthesizing errors for {} call(s)",
             timeout.as_secs(), remaining.len(),
         ),

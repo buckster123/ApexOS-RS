@@ -458,72 +458,89 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_ws   = Arc::clone(&http_client);
     let base_ws     = http_base.clone();
     rt.spawn(async move {
-        eprintln!("[ui-slint] connecting to {ws_url}");
+        let mut backoff_secs: u64 = 2;
 
-        let (ws, _) = match connect_async(&ws_url).await {
-            Ok(pair) => pair,
-            Err(e) => {
-                eprintln!("[ui-slint] WS connect failed: {e}");
+        'reconnect: loop {
+            eprintln!("[ui-slint] connecting to {ws_url}");
+
+            let (ws, _) = match connect_async(&ws_url).await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    eprintln!("[ui-slint] WS connect failed: {e}");
+                    let w = ui_weak.clone();
+                    let b = backoff_secs;
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = w.upgrade() {
+                            ui.set_status(
+                                format!("Connection failed — retrying in {b}s").into()
+                            );
+                        }
+                    })
+                    .ok();
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(30);
+                    continue 'reconnect;
+                }
+            };
+
+            backoff_secs = 2; // reset on successful connect
+            let (mut write, mut read) = ws.split();
+
+            let init = serde_json::json!({"type": "session_init"});
+            write.send(Message::Text(init.to_string().into())).await.ok();
+
+            {
                 let w = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = w.upgrade() {
-                        ui.set_status("Connection failed — is agentd running?".into());
+                        ui.set_status("Connected".into());
                     }
                 })
                 .ok();
-                return;
             }
-        };
 
-        let (mut write, mut read) = ws.split();
+            let rt_current = tokio::runtime::Handle::current();
 
-        let init = serde_json::json!({"type": "session_init"});
-        write.send(Message::Text(init.to_string().into())).await.ok();
-
-        {
-            let w = ui_weak.clone();
-            slint::invoke_from_event_loop(move || {
-                if let Some(ui) = w.upgrade() {
-                    ui.set_status("Connected".into());
-                }
-            })
-            .ok();
-        }
-
-        let rt_current = tokio::runtime::Handle::current();
-
-        loop {
-            tokio::select! {
-                msg = read.next() => {
-                    match msg {
-                        Some(Ok(Message::Text(text))) => {
-                            if let Ok(ev) = serde_json::from_str::<Value>(&text) {
-                                let ctx = DispatchCtx {
-                                    rt_handle:   rt_current.clone(),
-                                    http_client: Arc::clone(&client_ws),
-                                    http_base:   base_ws.clone(),
-                                    tts_enabled: Arc::clone(&tts_ws),
-                                };
-                                dispatch_event(ui_weak.clone(), ev, state_ws.clone(), ctx);
+            loop {
+                tokio::select! {
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(Message::Text(text))) => {
+                                if let Ok(ev) = serde_json::from_str::<Value>(&text) {
+                                    let ctx = DispatchCtx {
+                                        rt_handle:   rt_current.clone(),
+                                        http_client: Arc::clone(&client_ws),
+                                        http_base:   base_ws.clone(),
+                                        tts_enabled: Arc::clone(&tts_ws),
+                                    };
+                                    dispatch_event(ui_weak.clone(), ev, state_ws.clone(), ctx);
+                                }
+                            }
+                            Some(Ok(_)) => {}
+                            _ => {
+                                eprintln!("[ui-slint] WS disconnected — reconnecting in {backoff_secs}s");
+                                let w = ui_weak.clone();
+                                let b = backoff_secs;
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = w.upgrade() {
+                                        ui.set_status(
+                                            format!("Disconnected — reconnecting in {b}s").into()
+                                        );
+                                    }
+                                })
+                                .ok();
+                                tokio::time::sleep(
+                                    std::time::Duration::from_secs(backoff_secs)
+                                ).await;
+                                backoff_secs = (backoff_secs * 2).min(30);
+                                break; // inner loop → outer 'reconnect loop
                             }
                         }
-                        Some(Ok(_)) => {}
-                        _ => {
-                            eprintln!("[ui-slint] WS disconnected");
-                            let w = ui_weak.clone();
-                            slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = w.upgrade() {
-                                    ui.set_status("Disconnected".into());
-                                }
-                            })
-                            .ok();
-                            break;
-                        }
                     }
-                }
-                out = rx.recv() => {
-                    if let Some(text) = out {
-                        write.send(Message::Text(text.into())).await.ok();
+                    out = rx.recv() => {
+                        if let Some(text) = out {
+                            write.send(Message::Text(text.into())).await.ok();
+                        }
                     }
                 }
             }

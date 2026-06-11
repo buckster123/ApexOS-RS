@@ -192,9 +192,15 @@ impl VectorStore {
         scope_sql:    &str,
         scope_params: &[String],
     ) -> Result<Vec<(MemoryId, f32)>> {
-        // FTS5 MATCH requires the query to be a valid FTS5 expression.
-        // Wrap in quotes to treat as a phrase for safety; strip existing quotes.
-        let safe_query = query.replace('"', " ");
+        // Quote each token individually — FTS5 treats "word1" "word2" as implicit
+        // AND with no positional constraint, which matches the original semantics
+        // while safely neutralizing any FTS5 operators in the raw query string.
+        let safe_query: String = query
+            .split_whitespace()
+            .map(|w| format!("\"{}\"", w.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let safe_query = if safe_query.is_empty() { return Ok(Vec::new()); } else { safe_query };
         let k_i64 = k as i64;
 
         let sql = format!(
@@ -205,12 +211,6 @@ impl VectorStore {
         );
 
         let conn = self.conn.lock().await;
-        let mut dyn_params: Vec<&dyn rusqlite::ToSql> = vec![&safe_query, &k_i64];
-        // scope_params go between safe_query and k — but they're already inserted via scope_sql
-        // which uses ? placeholders too. Push scope_params before k_i64.
-        // Rebuild correctly:
-        drop(dyn_params);
-
         let mut all_params: Vec<&dyn rusqlite::ToSql> = vec![&safe_query];
         for s in scope_params { all_params.push(s); }
         all_params.push(&k_i64);
