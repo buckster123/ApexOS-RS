@@ -1,0 +1,195 @@
+import { Palette } from "../palette.slint";
+import { SysStats } from "../types.slint";
+
+// Horizontal stat bar: label on left, pct on right, colored fill track below.
+component StatBar {
+    in property <string> label;
+    in property <float>  value: 0;     // 0–100
+    in property <color>  bar-color: Palette.primary;
+
+    VerticalLayout {
+        spacing: 5px;
+
+        HorizontalLayout {
+            Text {
+                text: root.label;
+                color: Palette.text-dim;
+                font-size: 10px;
+                letter-spacing: 1.2px;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: round(root.value) + "%";
+                color: Palette.text;
+                font-size: 10px;
+                font-weight: 600;
+            }
+        }
+
+        // Track
+        Rectangle {
+            height: 5px;
+            border-radius: 3px;
+            background: Palette.surface-hi;
+
+            // Fill
+            Rectangle {
+                x: 0px;
+                y: 0px;
+                height: 5px;
+                width: root.value / 100 * parent.width;
+                border-radius: 3px;
+                background: root.bar-color;
+                animate width { duration: 700ms; easing: ease-out; }
+                animate background { duration: 400ms; }
+            }
+        }
+    }
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────────────────
+//
+// Shows live system telemetry in two sections:
+//   • Compute — CPU / RAM / Disk bars
+//   • Environment — IAQ badge + temperature (when sensor_reading data arrives)
+
+export component Dashboard {
+    // Declare 0 preferred/min height so the parent VerticalLayout does not
+    // derive its layoutinfo from our internal content — we fill via vertical-stretch.
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <SysStats> stats;
+    in property <float>    glow-alpha: 0.0;
+
+    // IAQ colour — universal semantic scale, independent of theme
+    property <color> iaq-color:
+        root.stats.iaq-score <= 50  ? #22c55e :   // Good
+        root.stats.iaq-score <= 100 ? #eab308 :   // Moderate
+        root.stats.iaq-score <= 150 ? #f97316 :   // Unhealthy (sensitive)
+        root.stats.iaq-score <= 200 ? #ef4444 :   // Unhealthy
+                                      #a855f7;    // Very Unhealthy / Hazardous
+
+    property <color> cpu-color:
+        root.stats.cpu-pct < 60 ? Palette.primary :
+        root.stats.cpu-pct < 85 ? Palette.warning :
+                                   Palette.error;
+
+    property <color> ram-color:
+        root.stats.ram-pct < 70 ? Palette.primary :
+        root.stats.ram-pct < 90 ? Palette.warning :
+                                   Palette.error;
+
+    VerticalLayout {
+        padding: 28px;
+        spacing: 0px;
+        alignment: start;
+
+        // ── COMPUTE section ────────────────────────────────────────────────
+        Text {
+            text: "COMPUTE";
+            color: Palette.text-dim;
+            font-size: 9px;
+            letter-spacing: 2px;
+        }
+
+        Rectangle { height: 14px; }
+
+        VerticalLayout {
+            spacing: 16px;
+            StatBar { label: "CPU";  value: root.stats.cpu-pct;  bar-color: root.cpu-color; }
+            StatBar { label: "RAM";  value: root.stats.ram-pct;  bar-color: root.ram-color; }
+            StatBar { label: "DISK"; value: root.stats.disk-pct; bar-color: Palette.primary; }
+        }
+
+        Rectangle { height: 32px; }
+
+        // ── ENVIRONMENT section (only when sensor data is present) ─────────
+        if root.stats.iaq-score > 0: VerticalLayout {
+            spacing: 0px;
+
+            Text {
+                text: "ENVIRONMENT";
+                color: Palette.text-dim;
+                font-size: 9px;
+                letter-spacing: 2px;
+            }
+
+            Rectangle { height: 14px; }
+
+            HorizontalLayout {
+                spacing: 16px;
+                alignment: start;
+
+                // IAQ badge
+                Rectangle {
+                    width: 110px;
+                    height: 60px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: root.iaq-color;
+
+                    VerticalLayout {
+                        alignment: center;
+                        padding: 8px;
+                        spacing: 3px;
+
+                        Text {
+                            text: "IAQ";
+                            color: Palette.text-dim;
+                            font-size: 9px;
+                            letter-spacing: 1.5px;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: round(root.stats.iaq-score) + "";
+                            color: root.iaq-color;
+                            font-size: 22px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: root.stats.iaq-label;
+                            color: root.iaq-color;
+                            font-size: 9px;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                // Temperature badge
+                if root.stats.temp-c > 0: Rectangle {
+                    width: 90px;
+                    height: 60px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border-hi;
+
+                    VerticalLayout {
+                        alignment: center;
+                        padding: 8px;
+                        spacing: 3px;
+
+                        Text {
+                            text: "TEMP";
+                            color: Palette.text-dim;
+                            font-size: 9px;
+                            letter-spacing: 1.5px;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: round(root.stats.temp-c) + "°C";
+                            color: Palette.text;
+                            font-size: 20px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+    }
+}

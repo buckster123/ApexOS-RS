@@ -7,6 +7,9 @@ import { ToolCard } from "tool_card.slint";
 // Auto-scroll is triggered by AppWindow calling scroll-to-bottom().
 
 export component ChatView {
+    preferred-height: 0px;
+    min-height: 0px;
+
     in property <[MessageItem]> messages;
     in property <float>         glow-alpha: 0.0;
 

@@ -1,9 +1,10 @@
 import { Palette, Theme } from "palette.slint";
-import { MessageItem } from "types.slint";
+import { MessageItem, SysStats } from "types.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
+import { Dashboard } from "components/dashboard.slint";
 
-export { Palette, Theme, MessageItem }
+export { Palette, Theme, MessageItem, SysStats }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -15,15 +16,17 @@ export component AppWindow inherits Window {
     in-out property <[MessageItem]> messages;
     in-out property <string>        status: "Connecting…";
     in-out property <bool>          agent-busy: false;
+    in-out property <SysStats>      sys-stats;
+    in-out property <int>           current-view: 0;   // 0=chat  1=system
 
     // ── Callbacks sent to Rust ──────────────────────────────────────────
     callback send-message(string);
+    // Both views always instantiated — aliases always valid
     callback scroll-to-bottom <=> chat.scroll-to-bottom;
     callback approve-tool <=> chat.approve-tool;
     callback reject-tool  <=> chat.reject-tool;
 
     // ── Jarvis pulse animation ──────────────────────────────────────────
-    // Timer fires every 1 s; property animates smoothly between 0 and 1.
     property <float> jarvis-pulse: 0.0;
     property <bool>  jarvis-phase: false;
 
@@ -40,20 +43,18 @@ export component AppWindow inherits Window {
 
     // ── Root layout ────────────────────────────────────────────────────
     VerticalLayout {
-        // ── Title bar ────────────────────────────────────────────────
+
+        // ── Title bar (42 px) ─────────────────────────────────────────
         Rectangle {
             height: 42px;
             background: Palette.surface;
-            border-width: 0px;
 
-            // Bottom border line
             Rectangle {
                 y: parent.height - 1px;
                 height: 1px;
                 background: Palette.border-hi;
             }
 
-            // Jarvis top-glow accent line
             if Palette.scanlines: Rectangle {
                 y: 0px;
                 height: 2px;
@@ -65,7 +66,6 @@ export component AppWindow inherits Window {
                 padding-right: 16px;
                 spacing: 8px;
 
-                // Accent dot
                 Rectangle {
                     width: 8px;
                     height: 8px;
@@ -85,7 +85,6 @@ export component AppWindow inherits Window {
 
                 Rectangle { horizontal-stretch: 1; }
 
-                // Theme badge
                 Text {
                     text: Palette.theme-name;
                     color: Palette.secondary;
@@ -94,7 +93,6 @@ export component AppWindow inherits Window {
                     letter-spacing: 1.5px;
                 }
 
-                // Status
                 Text {
                     text: root.status;
                     color: root.agent-busy ? Palette.warning : Palette.text-dim;
@@ -105,21 +103,100 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ── Chat area ────────────────────────────────────────────────
+        // ── Tab strip (36 px) ─────────────────────────────────────────
+        Rectangle {
+            height: 36px;
+            background: Palette.surface;
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Palette.border;
+            }
+
+            HorizontalLayout {
+                padding-left: 8px;
+                spacing: 0px;
+
+                // CHAT tab
+                Rectangle {
+                    width: 80px;
+
+                    if root.current-view == 0: Rectangle {
+                        y: parent.height - 2px;
+                        height: 2px;
+                        background: Palette.primary;
+                        border-radius: 1px;
+                    }
+
+                    TouchArea { clicked => { root.current-view = 0; } }
+
+                    Text {
+                        text: "CHAT";
+                        y: (parent.height - self.height) / 2;
+                        color: root.current-view == 0 ? Palette.primary : Palette.text-dim;
+                        font-size: 10px;
+                        font-weight: root.current-view == 0 ? 700 : 400;
+                        horizontal-alignment: center;
+                        letter-spacing: 1.2px;
+                        animate color { duration: 200ms; }
+                    }
+                }
+
+                // SYSTEM tab
+                Rectangle {
+                    width: 80px;
+
+                    if root.current-view == 1: Rectangle {
+                        y: parent.height - 2px;
+                        height: 2px;
+                        background: Palette.primary;
+                        border-radius: 1px;
+                    }
+
+                    TouchArea { clicked => { root.current-view = 1; } }
+
+                    Text {
+                        text: "SYSTEM";
+                        y: (parent.height - self.height) / 2;
+                        color: root.current-view == 1 ? Palette.primary : Palette.text-dim;
+                        font-size: 10px;
+                        font-weight: root.current-view == 1 ? 700 : 400;
+                        horizontal-alignment: center;
+                        letter-spacing: 1.2px;
+                        animate color { duration: 200ms; }
+                    }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+
+        // ── Chat view — always instantiated for callback aliases ───────
+        // Collapses to 0 px when system view is active (max-height: 0).
         chat := ChatView {
-            vertical-stretch: 1;
+            vertical-stretch: root.current-view == 0 ? 1 : 0;
+            max-height: root.current-view == 0 ? 999999px : 0px;
             messages: root.messages;
             glow-alpha: root.jarvis-pulse;
         }
 
-        // ── Jarvis ambient glow divider ───────────────────────────
-        if Palette.scanlines: Rectangle {
+        // ── System dashboard — collapses when chat is active ──────────
+        dash := Dashboard {
+            vertical-stretch: root.current-view == 1 ? 1 : 0;
+            max-height: root.current-view == 1 ? 999999px : 0px;
+            stats: root.sys-stats;
+            glow-alpha: root.jarvis-pulse;
+        }
+
+        // ── Glow divider (chat view + Jarvis only) ────────────────────
+        if Palette.scanlines && root.current-view == 0: Rectangle {
             height: 1px;
             background: rgba(0, 212, 255, root.jarvis-pulse * 0.5 + 0.1);
         }
 
-        // ── Input bar ────────────────────────────────────────────────
-        Rectangle {
+        // ── Input bar (chat view only) ────────────────────────────────
+        if root.current-view == 0: Rectangle {
             background: Palette.bg;
             HorizontalLayout {
                 padding: 12px;
@@ -135,7 +212,6 @@ export component AppWindow inherits Window {
     }
 
     // ── Jarvis: full-window ambient overlay ────────────────────────────
-    // Gives that digi-glass depth without blocking interactions.
     if Palette.scanlines: Rectangle {
         x: 0px; y: 0px;
         width: parent.width; height: parent.height;
@@ -143,6 +219,5 @@ export component AppWindow inherits Window {
             rgba(0, 212, 255, 0.025) 0%,
             transparent 45%,
             rgba(0, 128, 255, 0.018) 100%);
-        // No mouse interaction — it's just a veil
     }
 }

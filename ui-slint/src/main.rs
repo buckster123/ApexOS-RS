@@ -2,7 +2,7 @@
 //
 // Thread model:
 //   main thread — Slint event loop (never use #[tokio::main])
-//   tokio pool  — WebSocket I/O
+//   tokio pool  — WebSocket I/O + HTTP polling
 //
 // Cross-thread bridge:
 //   slint::invoke_from_event_loop() queues closures to the Slint thread.
@@ -21,8 +21,6 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 // ── Thread-local model access ─────────────────────────────────────────────────
-// VecModel is !Send, so it must only be touched on the Slint main thread.
-// invoke_from_event_loop closures run on the main thread and can access this.
 thread_local! {
     static MESSAGES: RefCell<Option<Rc<slint::VecModel<MessageItem>>>> =
         const { RefCell::new(None) };
@@ -93,7 +91,71 @@ fn update_tool_row(row: usize, f: impl FnOnce(&mut MessageItem)) {
     });
 }
 
-// ── App state (shared with WS task via Arc<Mutex>) ───────────────────────────
+// ── SysStats helpers ──────────────────────────────────────────────────────────
+
+fn empty_sys_stats() -> SysStats {
+    SysStats {
+        cpu_pct:   0.0,
+        ram_pct:   0.0,
+        disk_pct:  0.0,
+        iaq_score: 0.0,
+        iaq_label: "—".into(),
+        temp_c:    0.0,
+        online:    false,
+    }
+}
+
+fn iaq_label(score: f32) -> &'static str {
+    match score as u32 {
+        0..=50   => "Good",
+        51..=100 => "Moderate",
+        101..=150 => "Unhealthy (Sensitive)",
+        151..=200 => "Unhealthy",
+        201..=300 => "Very Unhealthy",
+        _         => "Hazardous",
+    }
+}
+
+// Derive HTTP base from WS URL: "ws://host:port/ws" → "http://host:port"
+fn ws_to_http(ws_url: &str) -> String {
+    ws_url
+        .trim_end_matches("/ws")
+        .replacen("ws://", "http://", 1)
+        .replacen("wss://", "https://", 1)
+}
+
+// POST /api/run to fetch CPU / RAM / disk percentages from the server.
+// Returns (cpu_pct, ram_pct, disk_pct) on success.
+async fn fetch_sys_stats(client: &reqwest::Client, base_url: &str) -> Option<(f32, f32, f32)> {
+    // One command: mem_pct on line 1, disk_pct on line 2, nproc on line 3, load_1m on line 4
+    let cmd = concat!(
+        "awk '/^MemTotal/{t=$2}/^MemAvailable/{a=$2}END{printf \"%.0f\\n\",100*(t-a)/t}' /proc/meminfo",
+        " && df / | awk 'NR==2{gsub(/%/,\"\",$5);print $5}'",
+        " && nproc",
+        " && awk '{print $1}' /proc/loadavg",
+    );
+    let resp = client
+        .post(format!("{base_url}/api/run"))
+        .json(&serde_json::json!({"command": cmd}))
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await
+        .ok()?;
+    let body: Value = resp.json().await.ok()?;
+    if body["ok"].as_bool() != Some(true) {
+        return None;
+    }
+    let stdout = body["stdout"].as_str()?;
+    let lines: Vec<&str> = stdout.lines().collect();
+    let ram_pct:  f32 = lines.first()?.trim().parse().ok()?;
+    let disk_pct: f32 = lines.get(1)?.trim().parse().ok()?;
+    let nproc:    f32 = lines.get(2)?.trim().parse::<f32>().ok()?.max(1.0);
+    let loadavg:  f32 = lines.get(3)?.trim().parse().ok()?;
+    let cpu_pct = (loadavg / nproc * 100.0).min(100.0);
+    Some((cpu_pct, ram_pct, disk_pct))
+}
+
+// ── App state ─────────────────────────────────────────────────────────────────
 #[derive(Default)]
 struct AppState {
     session_id: Option<u64>,
@@ -106,26 +168,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ui = AppWindow::new()?;
 
-    // Build message model and register it
+    // Message model
     let messages: Rc<slint::VecModel<MessageItem>> = Rc::new(slint::VecModel::default());
     ui.set_messages(slint::ModelRc::from(messages.clone()));
     MESSAGES.with(|m| *m.borrow_mut() = Some(messages.clone()));
+
+    // Initial sys stats (all zeros, offline)
+    ui.set_sys_stats(empty_sys_stats());
 
     let state = Arc::new(Mutex::new(AppState::default()));
 
     // Outbound WS channel
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
+    let ws_url = std::env::var("AGENTD_WS")
+        .unwrap_or_else(|_| "ws://localhost:8787/ws".to_string());
+    let http_base = ws_to_http(&ws_url);
+
     // ── WS task ──────────────────────────────────────────────────────────────
     let ui_weak = ui.as_weak();
     let state_ws = state.clone();
     rt.spawn(async move {
-        let url = std::env::var("AGENTD_WS")
-            .unwrap_or_else(|_| "ws://localhost:8787/ws".to_string());
+        eprintln!("[ui-slint] connecting to {ws_url}");
 
-        eprintln!("[ui-slint] connecting to {url}");
-
-        let (ws, _) = match connect_async(&url).await {
+        let (ws, _) = match connect_async(&ws_url).await {
             Ok(pair) => pair,
             Err(e) => {
                 eprintln!("[ui-slint] WS connect failed: {e}");
@@ -183,6 +249,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         write.send(Message::Text(text.into())).await.ok();
                     }
                 }
+            }
+        }
+    });
+
+    // ── System stats polling (every 5 s) ─────────────────────────────────────
+    let ui_weak_poll = ui.as_weak();
+    rt.spawn(async move {
+        let client = reqwest::Client::new();
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            if let Some((cpu, ram, disk)) = fetch_sys_stats(&client, &http_base).await {
+                let w = ui_weak_poll.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = w.upgrade() {
+                        let mut s = ui.get_sys_stats();
+                        s.cpu_pct  = cpu;
+                        s.ram_pct  = ram;
+                        s.disk_pct = disk;
+                        s.online   = true;
+                        ui.set_sys_stats(s);
+                    }
+                })
+                .ok();
             }
         }
     });
@@ -361,11 +451,9 @@ fn dispatch_event(
             let call_id   = ev["call_id"].as_str().unwrap_or("").to_string();
             let tool_name = ev["name"].as_str().unwrap_or("").to_string();
             slint::invoke_from_event_loop(move || {
-                // If the card is already in the list, mark it awaiting
                 if let Some(row) = find_tool_row(&call_id) {
                     update_tool_row(row, |item| item.awaiting_approval = true);
                 } else {
-                    // Card not yet pushed (rare race) — create one
                     push_message(MessageItem {
                         role: "tool".into(),
                         text: "".into(),
@@ -380,6 +468,27 @@ fn dispatch_event(
                 }
             })
             .ok();
+        }
+
+        // IAQ + temperature from BME688 sensor bridge
+        "sensor_reading" => {
+            let reading = &ev["reading"];
+            if reading["kind"].as_str() == Some("air_quality") {
+                let iaq  = reading["iaq"].as_f64().unwrap_or(0.0) as f32;
+                let temp = reading["temperature_c"].as_f64().unwrap_or(0.0) as f32;
+                let label = iaq_label(iaq).to_string();
+                let w = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = w.upgrade() {
+                        let mut s = ui.get_sys_stats();
+                        s.iaq_score = iaq;
+                        s.iaq_label = label.into();
+                        s.temp_c    = temp;
+                        ui.set_sys_stats(s);
+                    }
+                })
+                .ok();
+            }
         }
 
         _ => {}

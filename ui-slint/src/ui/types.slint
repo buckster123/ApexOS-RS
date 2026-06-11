@@ -1,5 +1,16 @@
 // Shared struct definitions — exported for Rust and all components.
 
+// System stats polled from agentd /api/run + sensor_reading WS events.
+export struct SysStats {
+    cpu-pct:   float,     // 0–100  (load avg / nproc * 100, capped)
+    ram-pct:   float,     // 0–100
+    disk-pct:  float,     // 0–100
+    iaq-score: float,     // IAQ index 0–500 (BSEC2 scale)
+    iaq-label: string,    // "Good" | "Moderate" | "Unhealthy" | "Hazardous" | "—"
+    temp-c:    float,     // ambient temperature °C from BME688
+    online:    bool,      // true once first successful poll
+}
+
 export struct MessageItem {
     role: string,             // "user" | "agent" | "tool"
     text: string,

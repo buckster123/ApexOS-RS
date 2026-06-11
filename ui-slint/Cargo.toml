@@ -11,11 +11,7 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json"], default-features = false, optional = true }
-
-[features]
-default = []
-http-api = ["reqwest"]
+reqwest = { version = "0.12", features = ["json"], default-features = false }
 
 [build-dependencies]
 slint-build = "1"
