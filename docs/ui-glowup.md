@@ -191,3 +191,55 @@ Discipline unchanged: gate passes → commit + push; docs travel with code; `ses
 3. Asset strategy: embedded vs `/usr/share` install (binary-size budget).
 4. Default persona on a fresh install: Apex/Desktop, or force the first-boot wizard before first use.
 5. Win-98 sound: ship the chime or stay silent by default (kiosk-friendliness).
+
+---
+
+## 12. Feature & feedback backlog (folded in from the mk1 deferred-scan)
+
+Five items surfaced during the mk1 build that weren't captured anywhere. Classified and slotted here —
+**not a separate plan.** Two are reclassified from the original scan; read the notes.
+
+| Item | Class | Effort (corrected) | Lands |
+|------|-------|--------------------|-------|
+| **Feedback subsystem** (toasts + notifications, unified) | **Foundational** | core = small; center = medium | core **first** (pre-G0); desktop center at G3 |
+| **Thermal pixel grid** (MLX90640 32×24 heatmap) | Feature / delight | **medium** (not 2h — see below) | focused feature, early for demo value |
+| **Council / sub-agent visibility** | Surface | badge = small; app = medium | badge anytime; **Council app** in G3 catalog |
+| **PTY terminal** | App | read-only = small; interactive = large | read-only intermediate early; full in G3+ |
+| (Notifications folded into Feedback subsystem above) | — | — | — |
+
+### Feedback subsystem (elevated — the glowup depends on it)
+Today settings saves, voice failures, and power actions are **fire-and-forget with no visible result** — a
+real UX defect, not just missing polish. Build **one** subsystem:
+- **Toast primitive** *(quick win, do first)*: a `Notifications` global + a transient timed overlay
+  component (`info | success | warn | error`, auto-dismiss). Reused everywhere — settings/voice/power
+  feedback now; persona-switch confirms, window events, and background events later.
+- **Notification center / tray** *(desktop expression, G3)*: persisted history of background events
+  (dream-cycle complete, sensor threshold crossed, plugin crash, council updates) surfaced via a taskbar
+  tray + a center panel. Same data model as toasts; transient ones can also persist to the center.
+
+### Thermal pixel grid — corrected scope (IMPORTANT)
+**Not half-done — the pixel data never leaves the sensor bridge.** `apex-sensor-bridge` reads SensorHead
+`/api/thermal/data` but forwards only `min_c/max_c/avg_c` (`main.rs:162-164`); agentd's `thermal_frame`
+Event **deliberately** carries no array (`agentd/.../core/src/types.rs:139` — "no raw array — keep events
+small"). The 32×24 grid therefore requires a data path, not just a UI widget.
+**Recommended design — on-demand frame fetch (don't bloat the broadcast):**
+1. Confirm SensorHead `/api/thermal/data` already returns the raw 768-float array (the OG ApexOS heatmap
+   used it — likely yes).
+2. agentd exposes `GET /api/thermal/frame` returning the latest raw array (bridge pushes latest frame to
+   agentd, or agentd proxies SensorHead). Mirrors the existing `/api/snapshot` on-demand pattern.
+3. The Sensors surface polls it (~2–4 Hz) **only while visible**; UI maps array → `Image`
+   (`SharedPixelBuffer` / `Image::from_rgba8`) with a thermal colormap. Live, interpolatable, cheap when
+   nobody's looking. Keeps the WS events small (preserves the original design intent).
+Alternative: render the colormap server-side to a small PNG and serve it (UI just shows `Image`) — simpler
+UI, less "live." Prefer the raw-array path for smoothness.
+
+### Council badge + read-only terminal (cheap opportunistic adds)
+- **Council badge**: a title-bar (Focus) / taskbar (Desktop) "N sub-agents running" indicator from the
+  existing council subsystem — small, do whenever. Full **Council app** (session tree, butt-in) → G3.
+- **Read-only terminal**: an output-only pane over `/terminal-ws` (no input/VTE) is a cheap intermediate
+  toward the full interactive Terminal app — useful for log-watching before the hard ANSI-grid version.
+
+### Revised near-term ordering (post Pi e2e test)
+1. **Feedback/toast core** — top pick: fixes a real silent-failure UX defect *and* is glowup plumbing.
+2. **Thermal grid** — delight piece, built on the on-demand-frame design above.
+3. **G0 router fix** → glowup proper (G1…). Council badge + read-only terminal slot in opportunistically.
