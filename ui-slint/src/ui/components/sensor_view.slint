@@ -1,0 +1,339 @@
+import { Palette } from "../palette.slint";
+import { SysStats } from "../types.slint";
+
+// ── SensorView ─────────────────────────────────────────────────────────────────
+//
+// Full-screen sensor telemetry panel. Two sections:
+//   • Environment  — IAQ quality band, temperature, humidity (BME688)
+//   • Thermal      — min / mean / max badges + scale bar (MLX90640, when active)
+//
+// preferred-height / min-height declared at 0 so parent VerticalLayout does not
+// derive its layoutinfo from our content — we fill via vertical-stretch.
+
+export component SensorView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <SysStats> stats;
+
+    // IAQ colour (universal semantic scale)
+    property <color> iaq-color:
+        root.stats.iaq-score <= 50  ? #22c55e :
+        root.stats.iaq-score <= 100 ? #eab308 :
+        root.stats.iaq-score <= 150 ? #f97316 :
+        root.stats.iaq-score <= 200 ? #ef4444 :
+                                      #a855f7;
+
+    // Fractional position of current IAQ on the 0-500 band
+    property <float> iaq-pct: min(root.stats.iaq-score / 500.0, 1.0);
+
+    // Thermal scale helpers
+    property <float> thermal-range: max(root.stats.thermal-max-c - root.stats.thermal-min-c, 0.1);
+    property <float> thermal-mean-pct: (root.stats.thermal-mean-c - root.stats.thermal-min-c) / root.thermal-range;
+
+    VerticalLayout {
+        padding: 28px;
+        spacing: 0px;
+        alignment: start;
+
+        // ── ENVIRONMENT ────────────────────────────────────────────────────
+        Text {
+            text: "ENVIRONMENT";
+            color: Palette.text-dim;
+            font-size: 9px;
+            letter-spacing: 2px;
+        }
+
+        Rectangle { height: 20px; }
+
+        // ── No-data placeholder ────────────────────────────────────────────
+        if root.stats.iaq-score == 0: Text {
+            text: "Waiting for BME688 sensor data…";
+            color: Palette.text-dim;
+            font-size: 13px;
+        }
+
+        // ── IAQ detail (shown once sensor data arrives) ────────────────────
+        if root.stats.iaq-score > 0: VerticalLayout {
+            spacing: 0px;
+
+            // Hero row: large IAQ number + ambient stats
+            HorizontalLayout {
+                spacing: 32px;
+                alignment: start;
+
+                // Large IAQ score
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 4px;
+
+                    Text {
+                        text: round(root.stats.iaq-score) + "";
+                        color: root.iaq-color;
+                        font-size: 56px;
+                        font-weight: 800;
+                        animate color { duration: 600ms; }
+                    }
+                    Text {
+                        text: root.stats.iaq-label;
+                        color: root.iaq-color;
+                        font-size: 12px;
+                        letter-spacing: 0.5px;
+                        animate color { duration: 600ms; }
+                    }
+                    Text {
+                        text: "IAQ INDEX";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 1.5px;
+                    }
+                }
+
+                // Temperature badge
+                if root.stats.temp-c > 0: Rectangle {
+                    width: 90px;
+                    height: 70px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border-hi;
+
+                    VerticalLayout {
+                        alignment: center;
+                        padding: 8px;
+                        spacing: 3px;
+
+                        Text {
+                            text: "TEMP";
+                            color: Palette.text-dim;
+                            font-size: 9px;
+                            letter-spacing: 1.5px;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: round(root.stats.temp-c) + "°C";
+                            color: Palette.text;
+                            font-size: 22px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                // Humidity badge
+                if root.stats.humidity-pct > 0: Rectangle {
+                    width: 90px;
+                    height: 70px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border-hi;
+
+                    VerticalLayout {
+                        alignment: center;
+                        padding: 8px;
+                        spacing: 3px;
+
+                        Text {
+                            text: "HUMIDITY";
+                            color: Palette.text-dim;
+                            font-size: 9px;
+                            letter-spacing: 1.5px;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: round(root.stats.humidity-pct) + "%";
+                            color: Palette.text;
+                            font-size: 22px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 28px; }
+
+            // IAQ quality band bar with current-score marker
+            Text {
+                text: "AIR QUALITY INDEX";
+                color: Palette.text-dim;
+                font-size: 9px;
+                letter-spacing: 1.5px;
+            }
+
+            Rectangle { height: 8px; }
+
+            // Segmented colour band
+            Rectangle {
+                height: 14px;
+                border-radius: 7px;
+                clip: true;
+
+                HorizontalLayout {
+                    spacing: 0px;
+                    Rectangle { horizontal-stretch: 10; background: #22c55e; }  // 0-50   Good
+                    Rectangle { horizontal-stretch: 10; background: #eab308; }  // 51-100 Moderate
+                    Rectangle { horizontal-stretch: 10; background: #f97316; }  // 101-150
+                    Rectangle { horizontal-stretch: 10; background: #ef4444; }  // 151-200
+                    Rectangle { horizontal-stretch: 60; background: #a855f7; }  // 201-500
+                }
+
+                // Score marker — white line at fractional position
+                Rectangle {
+                    x: clamp(root.iaq-pct, 0.0, 1.0) * (parent.width - 2px);
+                    y: 0px;
+                    width: 2px;
+                    height: parent.height;
+                    background: white;
+                }
+            }
+
+            Rectangle { height: 5px; }
+
+            HorizontalLayout {
+                spacing: 0px;
+                Text { horizontal-stretch: 10; text: "Good"; color: #22c55e; font-size: 8px; }
+                Text { horizontal-stretch: 10; text: "Mod"; color: #eab308; font-size: 8px; horizontal-alignment: center; }
+                Text { horizontal-stretch: 10; text: "Sensitive"; color: #f97316; font-size: 8px; horizontal-alignment: center; }
+                Text { horizontal-stretch: 10; text: "Bad"; color: #ef4444; font-size: 8px; horizontal-alignment: center; }
+                Text { horizontal-stretch: 60; text: "Hazardous"; color: #a855f7; font-size: 8px; horizontal-alignment: right; }
+            }
+        }
+
+        Rectangle { height: 36px; }
+
+        // ── THERMAL ────────────────────────────────────────────────────────
+        if root.stats.thermal-active: VerticalLayout {
+            spacing: 0px;
+
+            Text {
+                text: "THERMAL";
+                color: Palette.text-dim;
+                font-size: 9px;
+                letter-spacing: 2px;
+            }
+
+            Rectangle { height: 16px; }
+
+            // Min / Mean / Max badges
+            HorizontalLayout {
+                spacing: 16px;
+                alignment: start;
+
+                Rectangle {
+                    width: 80px;
+                    height: 60px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: #3b82f6;
+
+                    VerticalLayout {
+                        alignment: center;
+                        padding: 6px;
+                        spacing: 2px;
+                        Text { text: "MIN"; color: Palette.text-dim; font-size: 9px; letter-spacing: 1.5px; horizontal-alignment: center; }
+                        Text { text: round(root.stats.thermal-min-c) + "°"; color: #3b82f6; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
+                    }
+                }
+
+                Rectangle {
+                    width: 80px;
+                    height: 60px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: #22c55e;
+
+                    VerticalLayout {
+                        alignment: center;
+                        padding: 6px;
+                        spacing: 2px;
+                        Text { text: "MEAN"; color: Palette.text-dim; font-size: 9px; letter-spacing: 1.5px; horizontal-alignment: center; }
+                        Text { text: round(root.stats.thermal-mean-c) + "°"; color: #22c55e; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
+                    }
+                }
+
+                Rectangle {
+                    width: 80px;
+                    height: 60px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: #ef4444;
+
+                    VerticalLayout {
+                        alignment: center;
+                        padding: 6px;
+                        spacing: 2px;
+                        Text { text: "MAX"; color: Palette.text-dim; font-size: 9px; letter-spacing: 1.5px; horizontal-alignment: center; }
+                        Text { text: round(root.stats.thermal-max-c) + "°"; color: #ef4444; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
+                    }
+                }
+            }
+
+            Rectangle { height: 20px; }
+
+            // Temperature range gradient bar with mean marker
+            Text {
+                text: "TEMPERATURE RANGE";
+                color: Palette.text-dim;
+                font-size: 9px;
+                letter-spacing: 1.5px;
+            }
+
+            Rectangle { height: 8px; }
+
+            Rectangle {
+                height: 16px;
+                border-radius: 8px;
+                clip: true;
+                background: @linear-gradient(90deg,
+                    #3b82f6 0%,
+                    #22c55e 30%,
+                    #f97316 65%,
+                    #ef4444 100%);
+
+                // Mean position marker
+                Rectangle {
+                    x: clamp(root.thermal-mean-pct, 0.0, 1.0) * (parent.width - 3px);
+                    y: 0px;
+                    width: 3px;
+                    height: parent.height;
+                    background: rgba(255, 255, 255, 0.9);
+                }
+            }
+
+            Rectangle { height: 6px; }
+
+            HorizontalLayout {
+                Text { text: round(root.stats.thermal-min-c) + "°C"; color: #3b82f6; font-size: 9px; }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: "mean " + round(root.stats.thermal-mean-c) + "°C"; color: Palette.text-dim; font-size: 9px; }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: round(root.stats.thermal-max-c) + "°C"; color: #ef4444; font-size: 9px; }
+            }
+        }
+
+        // Thermal waiting text (shown when IAQ present but no thermal yet)
+        if root.stats.iaq-score > 0 && !root.stats.thermal-active: VerticalLayout {
+            spacing: 0px;
+
+            Text {
+                text: "THERMAL";
+                color: Palette.text-dim;
+                font-size: 9px;
+                letter-spacing: 2px;
+            }
+
+            Rectangle { height: 12px; }
+
+            Text {
+                text: "No MLX90640 detected";
+                color: Palette.text-dim;
+                font-size: 12px;
+            }
+        }
+    }
+}

@@ -3,6 +3,7 @@ import { MessageItem, SysStats } from "types.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
 import { Dashboard } from "components/dashboard.slint";
+import { SensorView } from "components/sensor_view.slint";
 
 export { Palette, Theme, MessageItem, SysStats }
 
@@ -17,7 +18,7 @@ export component AppWindow inherits Window {
     in-out property <string>        status: "Connecting…";
     in-out property <bool>          agent-busy: false;
     in-out property <SysStats>      sys-stats;
-    in-out property <int>           current-view: 0;   // 0=chat  1=system
+    in-out property <int>           current-view: 0;   // 0=chat  1=system  2=sensor
 
     // ── Callbacks sent to Rust ──────────────────────────────────────────
     callback send-message(string);
@@ -168,6 +169,31 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // SENSOR tab
+                Rectangle {
+                    width: 80px;
+
+                    if root.current-view == 2: Rectangle {
+                        y: parent.height - 2px;
+                        height: 2px;
+                        background: Palette.primary;
+                        border-radius: 1px;
+                    }
+
+                    TouchArea { clicked => { root.current-view = 2; } }
+
+                    Text {
+                        text: "SENSOR";
+                        y: (parent.height - self.height) / 2;
+                        color: root.current-view == 2 ? Palette.primary : Palette.text-dim;
+                        font-size: 10px;
+                        font-weight: root.current-view == 2 ? 700 : 400;
+                        horizontal-alignment: center;
+                        letter-spacing: 1.2px;
+                        animate color { duration: 200ms; }
+                    }
+                }
+
                 Rectangle { horizontal-stretch: 1; }
             }
         }
@@ -181,12 +207,19 @@ export component AppWindow inherits Window {
             glow-alpha: root.jarvis-pulse;
         }
 
-        // ── System dashboard — collapses when chat is active ──────────
+        // ── System dashboard — collapses when not active ─────────────
         dash := Dashboard {
             vertical-stretch: root.current-view == 1 ? 1 : 0;
             max-height: root.current-view == 1 ? 999999px : 0px;
             stats: root.sys-stats;
             glow-alpha: root.jarvis-pulse;
+        }
+
+        // ── Sensor view — collapses when not active ───────────────────
+        sensor := SensorView {
+            vertical-stretch: root.current-view == 2 ? 1 : 0;
+            max-height: root.current-view == 2 ? 999999px : 0px;
+            stats: root.sys-stats;
         }
 
         // ── Glow divider (chat view + Jarvis only) ────────────────────

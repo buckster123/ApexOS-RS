@@ -2,13 +2,19 @@
 
 // System stats polled from agentd /api/run + sensor_reading WS events.
 export struct SysStats {
-    cpu-pct:   float,     // 0–100  (load avg / nproc * 100, capped)
-    ram-pct:   float,     // 0–100
-    disk-pct:  float,     // 0–100
-    iaq-score: float,     // IAQ index 0–500 (BSEC2 scale)
-    iaq-label: string,    // "Good" | "Moderate" | "Unhealthy" | "Hazardous" | "—"
-    temp-c:    float,     // ambient temperature °C from BME688
-    online:    bool,      // true once first successful poll
+    cpu-pct:      float,   // 0–100  (load avg / nproc * 100, capped)
+    ram-pct:      float,   // 0–100
+    disk-pct:     float,   // 0–100
+    iaq-score:    float,   // IAQ index 0–500 (BSEC2 scale)
+    iaq-label:    string,  // "Good" | "Moderate" | "Unhealthy" | "Hazardous" | "—"
+    temp-c:       float,   // ambient temperature °C from BME688
+    humidity-pct: float,   // relative humidity % from BME688
+    online:       bool,    // true once first successful poll
+    // Thermal camera (MLX90640) — populated by thermal_frame sensor_reading events
+    thermal-min-c:  float,
+    thermal-max-c:  float,
+    thermal-mean-c: float,
+    thermal-active: bool,
 }
 
 export struct MessageItem {

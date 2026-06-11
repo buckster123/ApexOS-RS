@@ -95,13 +95,18 @@ fn update_tool_row(row: usize, f: impl FnOnce(&mut MessageItem)) {
 
 fn empty_sys_stats() -> SysStats {
     SysStats {
-        cpu_pct:   0.0,
-        ram_pct:   0.0,
-        disk_pct:  0.0,
-        iaq_score: 0.0,
-        iaq_label: "—".into(),
-        temp_c:    0.0,
-        online:    false,
+        cpu_pct:       0.0,
+        ram_pct:       0.0,
+        disk_pct:      0.0,
+        iaq_score:     0.0,
+        iaq_label:     "—".into(),
+        temp_c:        0.0,
+        humidity_pct:  0.0,
+        online:        false,
+        thermal_min_c:  0.0,
+        thermal_max_c:  0.0,
+        thermal_mean_c: 0.0,
+        thermal_active: false,
     }
 }
 
@@ -470,24 +475,50 @@ fn dispatch_event(
             .ok();
         }
 
-        // IAQ + temperature from BME688 sensor bridge
+        // Sensor bridge events: BME688 (air_quality) + MLX90640 (thermal_frame)
         "sensor_reading" => {
-            let reading = &ev["reading"];
-            if reading["kind"].as_str() == Some("air_quality") {
-                let iaq  = reading["iaq"].as_f64().unwrap_or(0.0) as f32;
-                let temp = reading["temperature_c"].as_f64().unwrap_or(0.0) as f32;
-                let label = iaq_label(iaq).to_string();
-                let w = ui_weak.clone();
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = w.upgrade() {
-                        let mut s = ui.get_sys_stats();
-                        s.iaq_score = iaq;
-                        s.iaq_label = label.into();
-                        s.temp_c    = temp;
-                        ui.set_sys_stats(s);
-                    }
-                })
-                .ok();
+            let reading = ev["reading"].clone();
+            match reading["kind"].as_str() {
+                Some("air_quality") => {
+                    let iaq   = reading["iaq"].as_f64().unwrap_or(0.0) as f32;
+                    let temp  = reading["temperature_c"].as_f64().unwrap_or(0.0) as f32;
+                    // sensor bridge may use "humidity" or "humidity_pct"
+                    let humid = reading["humidity_pct"]
+                        .as_f64()
+                        .or_else(|| reading["humidity"].as_f64())
+                        .unwrap_or(0.0) as f32;
+                    let label = iaq_label(iaq).to_string();
+                    let w = ui_weak.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = w.upgrade() {
+                            let mut s = ui.get_sys_stats();
+                            s.iaq_score    = iaq;
+                            s.iaq_label    = label.into();
+                            s.temp_c       = temp;
+                            s.humidity_pct = humid;
+                            ui.set_sys_stats(s);
+                        }
+                    })
+                    .ok();
+                }
+                Some("thermal_frame") => {
+                    let min_c  = reading["min_c"].as_f64().unwrap_or(0.0) as f32;
+                    let max_c  = reading["max_c"].as_f64().unwrap_or(0.0) as f32;
+                    let mean_c = reading["mean_c"].as_f64().unwrap_or(0.0) as f32;
+                    let w = ui_weak.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = w.upgrade() {
+                            let mut s = ui.get_sys_stats();
+                            s.thermal_min_c  = min_c;
+                            s.thermal_max_c  = max_c;
+                            s.thermal_mean_c = mean_c;
+                            s.thermal_active = true;
+                            ui.set_sys_stats(s);
+                        }
+                    })
+                    .ok();
+                }
+                _ => {}
             }
         }
 
