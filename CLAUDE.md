@@ -287,23 +287,49 @@ Full event list: `../ApexOS/agentd/crates/core/src/types.rs` — `Event` enum.
 
 ## Cerebro agent
 
-All Cerebro MCP calls in this project use agent `FORGE` (agent_id=`"FORGE"`, ⚒, #B7410E).
+All Cerebro MCP calls use agent `FORGE` (agent_id=`"FORGE"`, ⚒, #B7410E).
 
 ## Cerebro session protocol (mandatory)
 
-**Session START** — always call `session_recall` before diving in:
+**Session START** — call `session_recall` before touching any code:
 ```
 session_recall(query="ApexOS-RS Slint UI build status step progress", agent_id="FORGE")
 ```
+This pulls prior session summaries, unfinished business, and stored procedures — instant
+hotstart even after a context reset, reboot, or compaction.
 
-**Session END** — always call `session_save` plus supporting saves:
+**Session END** — always save before closing:
 ```
-session_save(session_summary="...", key_discoveries=[...], unfinished_business=[...], agent_id="FORGE", priority="HIGH")
+session_save(
+  session_summary="one paragraph: what was built, what broke, what was learned",
+  key_discoveries=["Slint gotcha X", "agentd protocol detail Y"],
+  unfinished_business=["step 6 voice half done — POST /api/record/start wired, TTS pending"],
+  agent_id="FORGE",
+  priority="HIGH"
+)
 ```
 Then as needed:
-- `store_procedure` — Slint patterns, Pi gotchas, WS protocol quirks
-- `store_intention` — next steps / deferred work (salience 0.8–0.95)
-- `episode_start` / `episode_add_step` / `episode_end` — multi-step implementation sequences
+- `store_procedure` — Slint patterns, Pi gotchas, WS/agentd protocol quirks
+- `store_intention` — next concrete action (salience 0.8–0.95); one intention per deferred item
+- `episode_start` / `episode_add_step` / `episode_end` — wrap any multi-step implementation sequence
+
+The three vaults:
+- **CLAUDE.md** — static project blueprint; locked decisions, architecture, critical patterns
+- **docs/*.md** — dynamic per-topic detail; evolve as the project progresses, grow without limit
+- **cerebro** — session memory, discoveries, intentions, procedures; survives compaction and cold starts
+- **git** — code truth; commit messages are the implementation log
+
+---
+
+## Docs
+
+Load only the relevant doc when entering a subsystem — do not load all of them.
+
+| File | Load when working on |
+|------|----------------------|
+| `docs/architecture.md` | System layout, workspace crate structure, dependency graph |
+| `docs/build-roadmap.md` | Build order, step-by-step detail, deferred items |
+| `docs/slint-notes.md` | Slint patterns, binding loop rules, layout gotchas |
 
 ---
 
@@ -324,4 +350,11 @@ Then as needed:
 - A build-order step completes → tick it in the table
 - A Pi gotcha is discovered → add to `## Gotchas`
 - A deferred item resolves → move it out of `## Deferred`
-- Keep this file under ~120 lines of content (excluding this Meta section)
+- A doc file is created → add a row to the `## Docs` table
+- Keep this file under ~160 lines of content (excluding this Meta section)
+
+### What never goes in CLAUDE.md or docs/*.md
+
+- Task progress, session logs, completed-work summaries → use Cerebro (`session_save`)
+- Git SHAs, version pins → stale in days, belong in git history
+- Commentary on what you just did → belongs in commit messages
