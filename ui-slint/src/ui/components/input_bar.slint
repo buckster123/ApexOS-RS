@@ -13,7 +13,10 @@ export component InputBar {
     in property <float>  glow-alpha: 0.0;
     in property <bool>   recording: false;
 
-    height: 52px;
+    // Grows with wrapped input (Enter sends, Shift+Enter = newline) up to a cap,
+    // after which the field scrolls internally.
+    min-height: 52px;
+    max-height: 132px;
 
     Rectangle {
         background: Palette.surface;
@@ -30,31 +33,41 @@ export component InputBar {
             padding: 8px;
             spacing: 8px;
 
-            // Input field with manual placeholder overlay
+            // Input field with manual placeholder overlay. clip keeps overflow text
+            // from spilling past the right edge / behind the buttons.
             field-wrap := Rectangle {
                 horizontal-stretch: 1;
+                clip: true;
 
                 field := TextInput {
                     width: parent.width;
-                    height: parent.height;
                     font-size: 13px;
                     color: Palette.text;
                     selection-background-color: Palette.primary-dim;
                     selection-foreground-color: Palette.text-bright;
-                    single-line: true;
+                    // Multi-line + wrap so long messages flow to the next line
+                    // instead of scrolling off the right edge.
+                    single-line: false;
+                    wrap: word-wrap;
                     enabled: !root.busy;
 
-                    accepted => {
-                        if self.text != "" {
-                            root.send(self.text);
-                            self.text = "";
+                    // Enter sends; Shift+Enter inserts a newline (multi-line edit).
+                    key-pressed(e) => {
+                        if (e.text == "\n" && !e.modifiers.shift) {
+                            if (self.text != "") {
+                                root.send(self.text);
+                                self.text = "";
+                            }
+                            return EventResult.accept;
                         }
+                        return EventResult.reject;
                     }
                 }
 
                 // Placeholder — shown when field is empty
                 if field.text == "": Text {
                     x: 2px;
+                    y: 0;
                     width: parent.width - 4px;
                     height: parent.height;
                     text: root.busy ? "apex is responding…"
