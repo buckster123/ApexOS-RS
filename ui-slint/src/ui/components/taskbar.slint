@@ -125,10 +125,13 @@ export component Taskbar inherits Rectangle {
     in property <bool> start-open;       // start menu currently shown
     in property <bool> tray-open;        // notification center currently shown
     in property <int> notif-count;       // unread badge on the tray
+    in property <int> council-count;     // sub-agents currently running
+    in property <bool> council-active;   // a council deliberation is in session
 
     callback start-clicked();
     callback task-activate(int);         // window id
     callback tray-clicked();
+    callback council-clicked();          // open the Council window
 
     height: 56px;
     background: Palette.surface;
@@ -163,6 +166,15 @@ export component Taskbar inherits Rectangle {
 
         // Push the tray to the far right.
         Rectangle { horizontal-stretch: 1; }
+
+        // Council indicator — only present while a council is in session or
+        // sub-agents are running; the badge counts running sub-agents.
+        if root.council-active || root.council-count > 0: EndButton {
+            glyph: "⚖";
+            active: root.council-active;
+            badge: root.council-count;
+            clicked => { root.council-clicked(); }
+        }
 
         EndButton {
             glyph: "🔔";

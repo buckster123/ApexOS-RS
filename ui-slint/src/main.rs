@@ -48,6 +48,9 @@ thread_local! {
     static TERM_RX: RefCell<Option<mpsc::UnboundedReceiver<String>>> =
         const { RefCell::new(None) };
     static TERM_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Council app (G3d): the deliberating-agent model, driven by Council* events.
+    static COUNCIL: RefCell<Option<Rc<slint::VecModel<CouncilAgent>>>> =
+        const { RefCell::new(None) };
 }
 
 // ── Feedback subsystem (toasts) ───────────────────────────────────────────────
@@ -113,6 +116,7 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::Sessions => 3,
         AppKind::Settings => 4,
         AppKind::Terminal => 5,
+        AppKind::Council => 6,
     }
 }
 
@@ -123,6 +127,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         3 => AppKind::Sessions,
         4 => AppKind::Settings,
         5 => AppKind::Terminal,
+        6 => AppKind::Council,
         _ => AppKind::Chat,
     }
 }
@@ -135,6 +140,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Sessions => "Sessions",
         AppKind::Settings => "Settings",
         AppKind::Terminal => "Terminal",
+        AppKind::Council => "Council",
     }
 }
 
@@ -148,6 +154,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Sessions => (500.0, 520.0),
         AppKind::Settings => (660.0, 560.0),
         AppKind::Terminal => (640.0, 420.0),
+        AppKind::Council => (560.0, 560.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -347,6 +354,42 @@ fn start_terminal(rt: &tokio::runtime::Handle, url: &str, ui_weak: slint::Weak<A
     if let Some(rx) = TERM_RX.with(|r| r.borrow_mut().take()) {
         rt.spawn(run_terminal_ws(url.to_string(), ui_weak, rx));
     }
+}
+
+/// Parse a "#RRGGBB" hex string into a Slint colour; falls back to a rotating
+/// palette (indexed by `idx`) when a council agent supplies no colour.
+fn council_accent(hex: Option<&str>, idx: usize) -> slint::Color {
+    const FALLBACK: [(u8, u8, u8); 6] = [
+        (0x00, 0xd4, 0xff), (0xd7, 0x77, 0x57), (0xff, 0xc1, 0x07),
+        (0x82, 0x7d, 0xbd), (0x4a, 0xde, 0x80), (0xf4, 0x72, 0xb6),
+    ];
+    if let Some(h) = hex {
+        let h = h.trim_start_matches('#');
+        if h.len() == 6 {
+            if let Ok(n) = u32::from_str_radix(h, 16) {
+                return slint::Color::from_rgb_u8((n >> 16) as u8, (n >> 8) as u8, n as u8);
+            }
+        }
+    }
+    let (r, g, b) = FALLBACK[idx % FALLBACK.len()];
+    slint::Color::from_rgb_u8(r, g, b)
+}
+
+/// Mutate the council agent with the given id (delta append / done).
+fn council_update(id: &str, f: impl FnOnce(&mut CouncilAgent)) {
+    COUNCIL.with(|c| {
+        if let Some(model) = c.borrow().as_ref() {
+            for i in 0..model.row_count() {
+                if let Some(mut a) = model.row_data(i) {
+                    if a.id == id {
+                        f(&mut a);
+                        model.set_row_data(i, a);
+                        return;
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Nudge the chat ScrollView to the bottom by bumping the AgentBridge tick.
@@ -751,6 +794,9 @@ async fn fetch_sys_stats(client: &reqwest::Client, base_url: &str) -> Option<(f3
 #[derive(Default)]
 struct AppState {
     session_id: Option<u64>,
+    // Child sessions spawned via agent.spawn and not yet turn-complete; drives
+    // the taskbar "N sub-agents running" badge.
+    subagents: std::collections::HashSet<u64>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -776,6 +822,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sessions: Rc<slint::VecModel<SessionItem>> = Rc::new(slint::VecModel::default());
     ui.set_sessions(slint::ModelRc::from(sessions.clone()));
     SESSIONS.with(|s| *s.borrow_mut() = Some(sessions.clone()));
+
+    // Council model (G3d) — deliberating agents, driven by Council* WS events.
+    let council: Rc<slint::VecModel<CouncilAgent>> = Rc::new(slint::VecModel::default());
+    ui.set_council_agents(slint::ModelRc::from(council.clone()));
+    COUNCIL.with(|c| *c.borrow_mut() = Some(council.clone()));
 
     let models_vec: Rc<slint::VecModel<ModelItem>> = Rc::new(slint::VecModel::default());
     ui.set_available_models(slint::ModelRc::from(models_vec.clone()));
@@ -1468,9 +1519,19 @@ fn dispatch_event(
             let rt_h   = ctx.rt_handle.clone();
             let client = Arc::clone(&ctx.http_client);
             let base   = ctx.http_base.clone();
+            let sess   = ev["session"].as_u64();
+            let st     = state.clone();
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
+                    // A sub-agent's turn finishing drops it from the running set + badge.
+                    if let Some(s) = sess {
+                        let remaining = {
+                            let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
+                            if g.subagents.remove(&s) { Some(g.subagents.len() as i32) } else { None }
+                        };
+                        if let Some(n) = remaining { ui.set_subagent_count(n); }
+                    }
                     finish_last_agent_message();
                     ui.set_agent_busy(false);
                     if tts {
@@ -1637,6 +1698,150 @@ fn dispatch_event(
                 }
                 _ => {}
             }
+        }
+
+        // ── Council (G3d) ──────────────────────────────────────────────
+        "council_started" => {
+            let topic = ev["topic"].as_str().unwrap_or("").to_string();
+            let agents: Vec<CouncilAgent> = ev["agents"].as_array()
+                .map(|arr| arr.iter().enumerate().map(|(i, a)| {
+                    let id = a["id"].as_str().unwrap_or("");
+                    let persona = a["persona"].as_str().unwrap_or("");
+                    CouncilAgent {
+                        id: id.into(),
+                        persona: if persona.is_empty() { id.into() } else { persona.into() },
+                        accent: council_accent(a["color"].as_str(), i),
+                        text: "".into(),
+                        done: false,
+                    }
+                }).collect())
+                .unwrap_or_default();
+            let topic2 = topic.clone();
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    COUNCIL.with(|c| {
+                        if let Some(model) = c.borrow().as_ref() { model.set_vec(agents); }
+                    });
+                    ui.set_council_topic(topic2.into());
+                    ui.set_council_round(0);
+                    ui.set_council_convergence(0.0);
+                    ui.set_council_active(true);
+                    ui.set_council_status("deliberating".into());
+                    ui.set_council_synthesis("".into());
+                    let t = ui.get_council_scroll_tick();
+                    ui.set_council_scroll_tick(t.wrapping_add(1));
+                }
+            }).ok();
+            notify(ToastKind::Info, format!("Council convened: {topic}"));
+        }
+
+        "council_round_start" => {
+            let round = ev["round"].as_u64().unwrap_or(0) as i32;
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    ui.set_council_round(round);
+                    // New round → clear each agent's transcript + done flag.
+                    COUNCIL.with(|c| {
+                        if let Some(model) = c.borrow().as_ref() {
+                            for i in 0..model.row_count() {
+                                if let Some(mut a) = model.row_data(i) {
+                                    a.text = "".into();
+                                    a.done = false;
+                                    model.set_row_data(i, a);
+                                }
+                            }
+                        }
+                    });
+                }
+            }).ok();
+        }
+
+        "council_agent_delta" => {
+            let agent_id = ev["agent_id"].as_str().unwrap_or("").to_string();
+            let delta    = ev["delta"].as_str().unwrap_or("").to_string();
+            if delta.is_empty() { return; }
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    council_update(&agent_id, |a| {
+                        let mut s = a.text.to_string();
+                        s.push_str(&delta);
+                        a.text = s.into();
+                    });
+                    let t = ui.get_council_scroll_tick();
+                    ui.set_council_scroll_tick(t.wrapping_add(1));
+                }
+            }).ok();
+        }
+
+        "council_agent_done" => {
+            let agent_id  = ev["agent_id"].as_str().unwrap_or("").to_string();
+            let full_text = ev["full_text"].as_str().unwrap_or("").to_string();
+            slint::invoke_from_event_loop(move || {
+                council_update(&agent_id, |a| {
+                    if !full_text.is_empty() { a.text = full_text.into(); }
+                    a.done = true;
+                });
+            }).ok();
+        }
+
+        "council_round_done" => {
+            let conv = ev["convergence"].as_f64().unwrap_or(0.0) as f32;
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() { ui.set_council_convergence(conv); }
+            }).ok();
+        }
+
+        "council_complete" => {
+            let reason    = ev["reason"].as_str().unwrap_or("").to_string();
+            let synthesis = ev["synthesis"].as_str().unwrap_or("").to_string();
+            let rounds    = ev["rounds"].as_u64().unwrap_or(0) as i32;
+            let status = match reason.as_str() {
+                "consensus"  => "consensus",
+                "max_rounds" => "max rounds",
+                "stopped"    => "stopped",
+                _            => "complete",
+            };
+            let syn2 = synthesis.clone();
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    ui.set_council_active(false);
+                    ui.set_council_status(status.into());
+                    ui.set_council_round(rounds);
+                    ui.set_council_synthesis(syn2.into());
+                    let t = ui.get_council_scroll_tick();
+                    ui.set_council_scroll_tick(t.wrapping_add(1));
+                }
+            }).ok();
+            notify(ToastKind::Success, format!("Council {status}"));
+        }
+
+        "council_butt_in" => {
+            let msg = ev["message"].as_str().unwrap_or("").to_string();
+            if !msg.is_empty() { notify(ToastKind::Info, format!("Council: {msg}")); }
+        }
+
+        "sub_agent_started" => {
+            let child = ev["child"].as_u64();
+            let st = state.clone();
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    if let Some(c) = child {
+                        let n = {
+                            let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
+                            g.subagents.insert(c);
+                            g.subagents.len() as i32
+                        };
+                        ui.set_subagent_count(n);
+                    }
+                }
+            }).ok();
+            notify(ToastKind::Info, "Sub-agent started");
         }
 
         _ => {}

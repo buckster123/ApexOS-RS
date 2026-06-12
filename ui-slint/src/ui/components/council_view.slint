@@ -1,0 +1,195 @@
+// CouncilView (glowup G3d) — live view of a council deliberation. Rust owns the
+// state, driven by the agentd Council* events: council_started populates the
+// agents, council_agent_delta streams each agent's text, council_round_start
+// advances the round (and clears per-round text), council_round_done sets the
+// convergence, council_complete writes the synthesis + final status.
+//
+// Auto-scroll: Rust bumps `scroll-tick` on each delta (same pattern as chat).
+
+import { Palette } from "../palette.slint";
+import { CouncilAgent } from "../types.slint";
+
+component AgentCard inherits Rectangle {
+    in property <string> persona;
+    in property <color>  accent;
+    in property <string> text;
+    in property <bool>   done;
+
+    border-radius: Palette.radius;
+    background: Palette.surface;
+    border-width: 1px;
+    border-color: Palette.border;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+
+            // Accent dot
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: root.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: root.persona;
+                color: Palette.text-bright;
+                font-size: 12px;
+                font-weight: 700;
+                letter-spacing: 0.4px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: root.done ? "✓ done" : "· deliberating";
+                color: root.done ? Palette.primary : Palette.text-dim;
+                font-size: 10px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: root.text == "" ? "…" : root.text;
+            color: Palette.text;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+    }
+}
+
+export component CouncilView {
+    in property <[CouncilAgent]> agents;
+    in property <string> topic;
+    in property <int>    round;
+    in property <float>  convergence;   // 0..1
+    in property <bool>   active;
+    in property <string> status;        // "deliberating" | "consensus" | "max rounds" | "stopped"
+    in property <string> synthesis;
+    in property <int>    scroll-tick: 0;
+
+    changed scroll-tick => {
+        flick.viewport-y = min(0px, -(flick.viewport-height - flick.height));
+    }
+
+    VerticalLayout {
+        // ── Header ──────────────────────────────────────────────────────
+        Rectangle {
+            height: header.preferred-height + 16px;
+            background: Palette.surface-hi;
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Palette.border-hi;
+            }
+
+            header := VerticalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 4px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "⚖ COUNCIL";
+                        color: Palette.secondary;
+                        font-size: 10px;
+                        font-weight: 700;
+                        letter-spacing: 1.6px;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: root.active ? "Round " + root.round : root.status;
+                        color: root.active ? Palette.primary : Palette.text-dim;
+                        font-size: 10px;
+                        font-weight: 700;
+                        letter-spacing: 1px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Text {
+                    text: root.topic == "" ? "—" : root.topic;
+                    color: Palette.text-bright;
+                    font-size: 13px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+
+                // Convergence bar
+                Rectangle {
+                    height: 4px;
+                    border-radius: 2px;
+                    background: Palette.surface;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * max(0.0, min(1.0, root.convergence));
+                        height: parent.height;
+                        border-radius: 2px;
+                        background: Palette.primary;
+                        animate width { duration: 300ms; }
+                    }
+                }
+            }
+        }
+
+        // ── Body ────────────────────────────────────────────────────────
+        flick := Flickable {
+            vertical-stretch: 1;
+            interactive: true;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                alignment: start;
+
+                if !root.active && root.agents.length == 0: Text {
+                    text: "No council in session.\nWhen the agent convenes a council, the deliberation appears here.";
+                    color: Palette.text-dim;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
+
+                for a in root.agents: AgentCard {
+                    persona: a.persona;
+                    accent:  a.accent;
+                    text:    a.text;
+                    done:    a.done;
+                }
+
+                if root.synthesis != "": Rectangle {
+                    border-radius: Palette.radius;
+                    background: Palette.primary-dim;
+                    border-width: 1px;
+                    border-color: Palette.primary;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 6px;
+                        Text {
+                            text: "SYNTHESIS";
+                            color: Palette.primary;
+                            font-size: 10px;
+                            font-weight: 700;
+                            letter-spacing: 1.6px;
+                        }
+                        Text {
+                            text: root.synthesis;
+                            color: Palette.text-bright;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -10,7 +10,7 @@
 // Releasing first means no pointer capture is active when the reorder happens.
 
 import { Palette } from "../palette.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, AppKind } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -18,6 +18,7 @@ import { SensorView } from "sensor_view.slint";
 import { SessionView } from "session_view.slint";
 import { SettingsView } from "settings_view.slint";
 import { TerminalView } from "terminal_view.slint";
+import { CouncilView } from "council_view.slint";
 
 component CaptionButton inherits Rectangle {
     in property <string> glyph;
@@ -69,6 +70,14 @@ export component AppWindowFrame inherits Rectangle {
     in property <[ModelItem]>    models;
     in property <string>         terminal-text;
     in property <int>            terminal-scroll-tick;
+    in property <[CouncilAgent]> council-agents;
+    in property <string>         council-topic;
+    in property <int>            council-round;
+    in property <float>          council-convergence;
+    in property <bool>           council-active;
+    in property <string>         council-status;
+    in property <string>         council-synthesis;
+    in property <int>            council-scroll-tick;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -248,6 +257,18 @@ export component AppWindowFrame inherits Rectangle {
             output: root.terminal-text;
             scroll-tick: root.terminal-scroll-tick;
             send(line) => { root.terminal-send(line); }
+        }
+
+        if root.kind == AppKind.council: CouncilView {
+            vertical-stretch: 1;
+            agents: root.council-agents;
+            topic: root.council-topic;
+            round: root.council-round;
+            convergence: root.council-convergence;
+            active: root.council-active;
+            status: root.council-status;
+            synthesis: root.council-synthesis;
+            scroll-tick: root.council-scroll-tick;
         }
     }
 

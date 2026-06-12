@@ -45,7 +45,7 @@ component MenuRow inherits Rectangle {
 }
 
 export component StartMenu inherits Rectangle {
-    callback launch(int);     // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings 5=terminal
+    callback launch(int);     // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings 5=terminal 6=council
 
     width: 240px;
     height: layout.preferred-height;
@@ -80,5 +80,6 @@ export component StartMenu inherits Rectangle {
         MenuRow { glyph: "🕘"; label: "Sessions"; clicked => { root.launch(3); } }
         MenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
         MenuRow { glyph: "⌨"; label: "Terminal"; clicked => { root.launch(5); } }
+        MenuRow { glyph: "⚖"; label: "Council";  clicked => { root.launch(6); } }
     }
 }

@@ -10,7 +10,19 @@ export enum ShellMode { desktop, focus }
 // Every app is a window. Rust owns the set (which windows exist, z-order =
 // model order with the last element on top); Slint owns live-drag geometry
 // for smoothness and commits back to Rust on release.
-export enum AppKind { chat, system, sensor, sessions, settings, terminal }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council }
+
+// ── Council (glowup G3d) ─────────────────────────────────────────────────
+// One deliberating agent in a council session. Rust owns the VecModel: delta
+// events append to `text`, agent_done sets `done`. `accent` is parsed from the
+// CouncilAgentDef hex colour (or a rotating default) by Rust.
+export struct CouncilAgent {
+    id:      string,
+    persona: string,
+    accent:  color,
+    text:    string,
+    done:    bool,
+}
 
 export struct WindowDesc {
     id:        int,        // stable identity assigned by Rust

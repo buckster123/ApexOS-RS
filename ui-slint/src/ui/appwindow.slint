@@ -1,5 +1,5 @@
 import { Palette, Theme } from "palette.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent } from "types.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
 import { Dashboard } from "components/dashboard.slint";
@@ -12,7 +12,7 @@ import { StartMenu } from "components/start_menu.slint";
 import { NotifCenter } from "components/notif_center.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
-export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge }
+export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -40,6 +40,17 @@ export component AppWindow inherits Window {
     // Terminal app (G3d) — Rust owns the /terminal-ws PTY; output streams here.
     in-out property <string>         terminal-text: "";
     in-out property <int>            terminal-scroll-tick: 0;
+    // Council app (G3d) — Rust owns the state, driven by Council* WS events.
+    in-out property <[CouncilAgent]> council-agents;
+    in-out property <string>         council-topic: "";
+    in-out property <int>            council-round: 0;
+    in-out property <float>          council-convergence: 0.0;
+    in-out property <bool>           council-active: false;
+    in-out property <string>         council-status: "idle";
+    in-out property <string>         council-synthesis: "";
+    in-out property <int>            council-scroll-tick: 0;
+    // Sub-agents currently running (SubAgentStarted − child turn_complete) → taskbar badge.
+    in-out property <int>            subagent-count: 0;
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id /
@@ -454,6 +465,14 @@ export component AppWindow inherits Window {
                         models: root.available-models;
                         terminal-text: root.terminal-text;
                         terminal-scroll-tick: root.terminal-scroll-tick;
+                        council-agents: root.council-agents;
+                        council-topic: root.council-topic;
+                        council-round: root.council-round;
+                        council-convergence: root.council-convergence;
+                        council-active: root.council-active;
+                        council-status: root.council-status;
+                        council-synthesis: root.council-synthesis;
+                        council-scroll-tick: root.council-scroll-tick;
 
                         send-message(t) => { root.send-message(t); }
                         terminal-send(line) => { root.terminal-send(line); }
@@ -481,11 +500,14 @@ export component AppWindow inherits Window {
                     start-open: root.start-menu-open;
                     tray-open: root.notif-center-open;
                     notif-count: root.notif-unread;
+                    council-count: root.subagent-count;
+                    council-active: root.council-active;
                     x: 16px;
                     width: parent.width - 32px;
                     y: parent.height - self.height - 16px;
                     start-clicked => { root.start-menu-open = !root.start-menu-open; }
                     task-activate(id) => { root.task-activate(id); }
+                    council-clicked => { root.launch-app(6); }
                     tray-clicked => {
                         root.notif-center-open = !root.notif-center-open;
                         if root.notif-center-open { root.notif-unread = 0; }
