@@ -5,14 +5,27 @@
 # ║  Runs on: Pi Zero 2W → Pi 5 → x86 mini-PC → GPU workstation             ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 #
-# Quick install (fresh device, clones repo automatically):
+# Quick install — UNATTENDED (recommended for fresh devices):
 #   curl -fsSL https://raw.githubusercontent.com/buckster123/ApexOS-RS/main/install.sh | sudo bash
+#   A piped install has no keyboard, so it runs fully hands-free: auto-detects the
+#   hardware tier/mode and reads the API key + optional settings from a file named
+#   apexos.env (or apexos.conf) dropped on a USB stick or the SD card's boot
+#   partition. No menus to hang on. See "boot/USB provisioning" below.
 #
-# From a local clone:
-#   sudo bash install.sh [OPTIONS]
+# Interactive menus (TUI) — run from a real terminal, not a pipe:
+#   curl -fsSLO https://raw.githubusercontent.com/buckster123/ApexOS-RS/main/install.sh
+#   sudo bash install.sh                 # download-then-run → whiptail menus work
+#   ...or force the TUI even when piped:  ... | sudo bash -s -- --tui
+#
+# Boot/USB provisioning file (apexos.env / apexos.conf), any of these lines:
+#   ANTHROPIC_API_KEY=sk-ant-...   (or just a bare sk-ant-... on its own line)
+#   OPENROUTER_API_KEY=...
+#   APEXOS_MODE=kiosk|headless|desktop      APEXOS_TIER=nano|micro|standard|pro
+#   APEXOS_NO_UI=1   APEXOS_NO_SENSOR=0   APEXOS_NO_CEREBRO_API=0   APEXOS_VOICE=1
 #
 # Options:
-#   -y / --yes              Non-interactive (accept all defaults, skip TUI)
+#   -y / --yes              Force unattended (also implied when stdin isn't a TTY)
+#   --tui                   Force the interactive menus even under curl|bash
 #   --no-ui                 Skip apexos-rs-ui (headless / server mode)
 #   --no-cerebro-api        Skip cerebro-api REST dashboard
 #   --no-sensor             Skip apex-sensor-bridge (no sensorhead attached)
@@ -74,23 +87,36 @@ ensure_bootstrap_deps() {
 # first. Filenames we accept (case-insensitive), at the root or one dir deep:
 KEYFILE_NAMES=(apexos.env apexos-rs.env agentd.env apex.env apexos.txt apexos-key.txt env.txt)
 
-# Set by find_key_file on success:
+# Set by find_key_file on success — keys plus optional install settings:
 FOUND_ANTHROPIC=""; FOUND_OPENROUTER=""; FOUND_KEY_SRC=""
+FOUND_MODE=""; FOUND_TIER=""; FOUND_NO_UI=""; FOUND_NO_SENSOR=""
+FOUND_NO_CEREBRO_API=""; FOUND_VOICE=""
 
-# Pull ANTHROPIC_API_KEY / OPENROUTER_API_KEY out of an env-style file, or accept
-# a bare "sk-ant-…" key file. Tolerates `export `, quotes, and Windows CRLF.
-# Returns 0 only if an Anthropic key was found.
+# Echo the value of KEY= in an env-style file (handles `export `, quotes, CRLF).
+_envval() {
+  grep -aE "^[[:space:]]*(export[[:space:]]+)?$2=" "$1" 2>/dev/null \
+    | head -1 | sed -E 's/^[^=]*=//; s/^["'"'"']//; s/["'"'"']$//' | tr -d ' \r' || true
+}
+
+# Truthy test for config flags: yes/y/1/true/on (case-insensitive).
+_truthy() { [[ "$1" =~ ^([Yy]([Ee][Ss])?|1|[Tt][Rr][Uu][Ee]|[Oo][Nn])$ ]]; }
+
+# Parse a provisioning file: API keys (or a bare sk-ant-… key) plus optional
+# APEXOS_* install settings. Returns 0 if it carried anything we can use.
 _parse_key_file() {
   local f="$1"
-  FOUND_ANTHROPIC=$(grep -aE '^[[:space:]]*(export[[:space:]]+)?ANTHROPIC_API_KEY=' "$f" 2>/dev/null \
-      | head -1 | sed -E 's/^[^=]*=//; s/^["'"'"']//; s/["'"'"']$//' | tr -d ' \r' || true)
-  FOUND_OPENROUTER=$(grep -aE '^[[:space:]]*(export[[:space:]]+)?OPENROUTER_API_KEY=' "$f" 2>/dev/null \
-      | head -1 | sed -E 's/^[^=]*=//; s/^["'"'"']//; s/["'"'"']$//' | tr -d ' \r' || true)
-  # bare key file: a lone sk-ant-… token with no KEY= form
+  FOUND_ANTHROPIC=$(_envval "$f" ANTHROPIC_API_KEY)
+  FOUND_OPENROUTER=$(_envval "$f" OPENROUTER_API_KEY)
   if [[ -z "$FOUND_ANTHROPIC" ]]; then
     FOUND_ANTHROPIC=$(grep -aoE 'sk-ant-[A-Za-z0-9_-]+' "$f" 2>/dev/null | head -1 || true)
   fi
-  [[ -n "$FOUND_ANTHROPIC" ]]
+  FOUND_MODE=$(_envval "$f" APEXOS_MODE)
+  FOUND_TIER=$(_envval "$f" APEXOS_TIER)
+  FOUND_NO_UI=$(_envval "$f" APEXOS_NO_UI)
+  FOUND_NO_SENSOR=$(_envval "$f" APEXOS_NO_SENSOR)
+  FOUND_NO_CEREBRO_API=$(_envval "$f" APEXOS_NO_CEREBRO_API)
+  FOUND_VOICE=$(_envval "$f" APEXOS_VOICE)
+  [[ -n "${FOUND_ANTHROPIC}${FOUND_OPENROUTER}${FOUND_MODE}${FOUND_TIER}${FOUND_NO_UI}${FOUND_NO_SENSOR}${FOUND_NO_CEREBRO_API}${FOUND_VOICE}" ]]
 }
 
 # Scan mounted media + the SD boot partition, then probe UNmounted removable
@@ -142,15 +168,35 @@ find_key_file() {
   return 1
 }
 
+# Config-first provisioning: load key + optional settings from a boot/USB file so a
+# fully unattended install can be configured by dropping one file on the boot
+# partition from any PC. Precedence: explicit CLI flags > boot file > auto-detect.
+load_boot_provisioning() {
+  find_key_file || return 0          # nothing on removable media — fine
+  [[ -z "$API_KEY"        && -n "$FOUND_ANTHROPIC"  ]] && API_KEY="$FOUND_ANTHROPIC"
+  [[ -z "$OPENROUTER_KEY" && -n "$FOUND_OPENROUTER" ]] && OPENROUTER_KEY="$FOUND_OPENROUTER"
+  [[ "$TIER" == "auto" && -n "$FOUND_TIER" ]] && TIER="$FOUND_TIER"
+  [[ "$MODE" == "auto" && -n "$FOUND_MODE" ]] && MODE="$FOUND_MODE"
+  [[ -n "$FOUND_NO_UI"          ]] && { _truthy "$FOUND_NO_UI"          && NO_UI=true          || NO_UI=false; }
+  [[ -n "$FOUND_NO_SENSOR"      ]] && { _truthy "$FOUND_NO_SENSOR"      && NO_SENSOR=true      || NO_SENSOR=false; }
+  [[ -n "$FOUND_NO_CEREBRO_API" ]] && { _truthy "$FOUND_NO_CEREBRO_API" && NO_CEREBRO_API=true || NO_CEREBRO_API=false; }
+  [[ -n "$FOUND_VOICE"          ]] && { _truthy "$FOUND_VOICE"          && NO_VOICE=false      || NO_VOICE=true; }
+  local what="settings"; [[ -n "$FOUND_ANTHROPIC" ]] && what="key + settings"
+  ok "Provisioned from ${FOUND_KEY_SRC} ($what)"
+}
+
 # ── Args ───────────────────────────────────────────────────────────────────────
-YES=false
-NO_UI=false; NO_CEREBRO_API=false; NO_SENSOR=false; NO_VOICE=true
+YES=false; TUI_FORCE=false
+# Sensor head OFF by default (most devices have no BME688/MLX90640 attached); a
+# boot-file APEXOS_NO_SENSOR=false or the manual checklist turns it on.
+NO_UI=false; NO_CEREBRO_API=false; NO_SENSOR=true; NO_VOICE=true
 API_KEY=""; OPENROUTER_KEY=""
 TIER="auto"; MODE="auto"; REPO_DIR=""
 
 for arg in "$@"; do
   case "$arg" in
     -y|--yes)              YES=true ;;
+    --tui)                 TUI_FORCE=true ;;
     --no-ui)               NO_UI=true ;;
     --no-cerebro-api)      NO_CEREBRO_API=true ;;
     --no-sensor)           NO_SENSOR=true ;;
@@ -168,6 +214,17 @@ done
 
 BUILD_USER="${SUDO_USER:-root}"
 BUILD_HOME=$(getent passwd "$BUILD_USER" | cut -d: -f6)
+
+# ── Interactive or unattended? ─────────────────────────────────────────────────
+# `curl … | sudo bash` has no keyboard on stdin (it's the script pipe), so an
+# interactive TUI there just renders a box that can never read a keypress and
+# hangs the console in raw mode. The robust default: if stdin isn't a real
+# terminal (or --yes was passed), run FULLY unattended — auto-detect + boot/USB
+# file, no prompts. A real terminal (download-then-run) gets the TUI; --tui forces
+# it even when piped (uses </dev/tty for the keyboard).
+if ! $TUI_FORCE && { $YES || ! [ -t 0 ]; }; then
+  YES=true
+fi
 
 # ── TUI helpers (whiptail with plain-text fallback) ────────────────────────────
 HAVE_WHIPTAIL=false
@@ -287,6 +344,10 @@ if [[ -f /proc/device-tree/model ]]; then
   echo "$PI_MODEL" | grep -qi "raspberry" && IS_PI=true
 fi
 
+# Load key + optional settings from a boot/USB file BEFORE filling tier/mode
+# defaults, so an apexos.env / apexos.conf can steer an unattended install.
+load_boot_provisioning
+
 if [[ "$TIER" == "auto" ]]; then
   if   (( RAM_MB <  768 )); then TIER="nano"
   elif (( RAM_MB < 2048 )); then TIER="micro"
@@ -323,11 +384,9 @@ How would you like to set it up?" \
     "manual" "Manual    — let me pick mode, components & tier")
   [[ -z "$STYLE" ]] && STYLE="auto"
 fi
-
-# Automatic = first-timer defaults: no sensorhead and no OpenRouter assumed.
-if [[ "$STYLE" == "auto" ]]; then
-  NO_SENSOR=true
-fi
+# (Sensor head defaults OFF globally — see NO_SENSOR default — so a boot-file
+#  APEXOS_NO_SENSOR=false or the manual checklist can switch it on; nothing here
+#  clobbers a provisioned choice.)
 
 # ── TUI: Welcome detail (manual only) ─────────────────────────────────────────
 if ! $YES && [[ "$STYLE" == "manual" ]]; then
