@@ -28,12 +28,15 @@ export component ChatView {
         interactive: true;
         // Explicit viewport-height so overflow (and the scroll-tick auto-scroll
         // math above) work — an unset Flickable sizes its child to the visible area.
-        viewport-height: msg-col.preferred-height;
+        // max(content, visible) keeps a sparse thread bottom-anchored: the column
+        // is stretched to the full visible height and `alignment: end` drops the
+        // messages to the bottom (chat-style), instead of stacking at the top.
+        viewport-height: max(msg-col.preferred-height, flick.height);
 
         msg-col := VerticalLayout {
             padding:  12px;
             spacing:  6px;
-            alignment: start;
+            alignment: end;
 
             // Empty-state hint
             if root.messages.length == 0: Text {

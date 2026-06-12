@@ -1886,6 +1886,7 @@ fn dispatch_event(
                 other => serde_json::to_string_pretty(other).unwrap_or_default(),
             };
             let status = if ok { "done" } else { "error" };
+            let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(row) = find_tool_row(&call_id) {
                     update_tool_row(row, |item| {
@@ -1893,6 +1894,9 @@ fn dispatch_event(
                         item.tool_status = status.into();
                         item.awaiting_approval = false;
                     });
+                }
+                if let Some(ui) = w.upgrade() {
+                    bump_scroll(&ui);
                 }
             })
             .ok();
@@ -1913,7 +1917,7 @@ fn dispatch_event(
             slint::invoke_from_event_loop(move || {
                 if let Some(row) = find_tool_row(&call_id) {
                     update_tool_row(row, |item| item.awaiting_approval = true);
-                } else if let Some(ui) = w.upgrade() {
+                } else {
                     push_message(MessageItem {
                         role: "tool".into(),
                         text: "".into(),
@@ -1925,6 +1929,10 @@ fn dispatch_event(
                         tool_status: "running".into(),
                         awaiting_approval: true,
                     });
+                }
+                // Pin the latest into view whether the card was just created or
+                // an existing one flipped to awaiting-approval (e.g. 3 at once).
+                if let Some(ui) = w.upgrade() {
                     bump_scroll(&ui);
                 }
             })
