@@ -1,0 +1,83 @@
+// Desktop-mode start menu (glowup G3b) — the app catalog that opens from the
+// taskbar's Start button. An in-canvas overlay panel (not a native
+// PopupWindow): linuxkms gives us a single fullscreen surface, so every
+// "popup" is just a layered element, dismissed by a backdrop click. Launching
+// an entry emits `launch(ordinal)` (AppKind) and the parent closes the menu.
+// Council / Terminal entries slot in here when those apps land (G3d+).
+
+import { Palette } from "../palette.slint";
+
+component MenuRow inherits Rectangle {
+    in property <string> glyph;
+    in property <string> label;
+    callback clicked;
+
+    height: 44px;
+    border-radius: Palette.radius;
+    background: touch.has-hover ? Palette.surface-hi : transparent;
+    animate background { duration: 120ms; }
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 16px;
+        spacing: 12px;
+        alignment: start;
+
+        Text {
+            text: root.glyph;
+            font-size: 18px;
+            width: 24px;
+            color: touch.has-hover ? Palette.primary : Palette.text;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: root.label;
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            color: touch.has-hover ? Palette.primary : Palette.text;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component StartMenu inherits Rectangle {
+    callback launch(int);     // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
+
+    width: 240px;
+    height: layout.preferred-height;
+    background: Palette.surface;
+    border-radius: Palette.radius-lg;
+    border-width: 1px;
+    border-color: Palette.border-hi;
+    drop-shadow-blur: 32px;
+    drop-shadow-color: #000000aa;
+    drop-shadow-offset-y: 8px;
+
+    layout := VerticalLayout {
+        padding: 8px;
+        spacing: 2px;
+
+        Text {
+            text: "APPS";
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1.6px;
+            color: Palette.text-dim;
+            height: 28px;
+            horizontal-alignment: left;
+            vertical-alignment: center;
+            // align label with the rows below it
+            x: 12px;
+        }
+
+        MenuRow { glyph: "💬"; label: "Chat";     clicked => { root.launch(0); } }
+        MenuRow { glyph: "🖥"; label: "System";   clicked => { root.launch(1); } }
+        MenuRow { glyph: "🌡"; label: "Sensors";  clicked => { root.launch(2); } }
+        MenuRow { glyph: "🕘"; label: "Sessions"; clicked => { root.launch(3); } }
+        MenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
+    }
+}

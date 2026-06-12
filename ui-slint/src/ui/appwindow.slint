@@ -8,6 +8,7 @@ import { SessionView } from "components/session_view.slint";
 import { SettingsView } from "components/settings_view.slint";
 import { ToastHost, Notifications } from "components/toast.slint";
 import { Taskbar } from "components/taskbar.slint";
+import { StartMenu } from "components/start_menu.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
 export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge }
@@ -478,6 +479,22 @@ export component AppWindow inherits Window {
                     start-clicked => { root.start-menu-open = !root.start-menu-open; }
                     task-activate(id) => { root.task-activate(id); }
                     tray-clicked => { root.notif-center-open = !root.notif-center-open; }
+                }
+
+                // Start menu (G3b) — backdrop dismiss + catalog panel, anchored
+                // above the Start button. Layered after the taskbar so it paints
+                // on top.
+                if root.start-menu-open: TouchArea {
+                    x: 0; y: 0; width: parent.width; height: parent.height;
+                    clicked => { root.start-menu-open = false; }
+                }
+                if root.start-menu-open: StartMenu {
+                    x: 16px;
+                    y: parent.height - 56px - 16px - self.height - 8px;
+                    launch(ord) => {
+                        root.launch-app(ord);
+                        root.start-menu-open = false;
+                    }
                 }
             }
         }
