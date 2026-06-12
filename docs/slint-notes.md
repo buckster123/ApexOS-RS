@@ -2,6 +2,10 @@
 
 Footguns, patterns, and Pi-specific setup for the ApexOS-RS codebase.
 
+> **Exact widget/element API:** see [`slint-reference/`](slint-reference/README.md) —
+> std-widgets + element fundamentals vendored verbatim from the official Slint
+> repo. Consult it instead of recalling Slint syntax from memory.
+
 ---
 
 ## Main Thread Ownership
