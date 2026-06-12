@@ -545,16 +545,27 @@ hdr "Repository"
 if [[ -z "$REPO_DIR" ]]; then
   REPO_DIR=/opt/ApexOS-RS
   ensure_bootstrap_deps          # git/curl/ca-certs must exist before we can clone
+  # The clone runs as root (needs to write under /opt), but the build runs as
+  # $BUILD_USER (the rustup toolchain owner). Cargo must write target/ + Cargo.lock,
+  # so $BUILD_USER has to OWN the tree — otherwise: Permission denied (os error 13)
+  # at .../target. Chown BEFORE pulling so an existing root-owned clone (left by a
+  # prior run) can be updated as $BUILD_USER without git "dubious ownership".
   if [[ -d "$REPO_DIR/.git" ]]; then
+    [[ "$BUILD_USER" != "root" ]] && chown -R "$BUILD_USER:" "$REPO_DIR"
     info "Updating existing clone at $REPO_DIR …"
-    git -C "$REPO_DIR" pull --ff-only
+    if [[ "$BUILD_USER" != "root" ]]; then
+      sudo -u "$BUILD_USER" git -C "$REPO_DIR" pull --ff-only
+    else
+      git -C "$REPO_DIR" pull --ff-only
+    fi
   else
     info "Cloning ApexOS-RS …"
     git clone --depth=1 https://github.com/buckster123/ApexOS-RS "$REPO_DIR"
+    [[ "$BUILD_USER" != "root" ]] && chown -R "$BUILD_USER:" "$REPO_DIR"
   fi
 fi
 [[ -f "$REPO_DIR/Cargo.toml" ]] || die "Cargo.toml not found in $REPO_DIR"
-ok "Repo at $REPO_DIR"
+ok "Repo at $REPO_DIR (owner: $(stat -c '%U' "$REPO_DIR"))"
 
 # ── System deps ────────────────────────────────────────────────────────────────
 hdr "System dependencies"
