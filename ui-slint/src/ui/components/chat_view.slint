@@ -1,4 +1,5 @@
 import { Palette } from "../palette.slint";
+import { Personas } from "../personas.slint";
 import { MessageItem, AgentBridge } from "../types.slint";
 import { MessageBubble } from "message_bubble.slint";
 import { ToolCard } from "tool_card.slint";
@@ -35,7 +36,7 @@ export component ChatView {
             if root.messages.length == 0: Text {
                 text: "Say 'apex' or type below…";
                 color: Palette.text-dim;
-                font-size: 13px;
+                font-size: 13px * Personas.font-scale;
                 horizontal-alignment: center;
             }
 

@@ -1,4 +1,5 @@
 import { Palette, Theme } from "../palette.slint";
+import { Personas } from "../personas.slint";
 
 // Single chat message bubble.
 // User messages: right-aligned, primary-tinted.
@@ -44,7 +45,8 @@ export component MessageBubble {
                     color: root.is-user
                         ? Palette.user-bubble-text
                         : Palette.agent-bubble-text;
-                    font-size: 13px;
+                    // G5: persona base-size scaling (mom reads larger).
+                    font-size: 13px * Personas.font-scale;
                     wrap: word-wrap;
                 }
             }

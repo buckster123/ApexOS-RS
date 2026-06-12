@@ -66,11 +66,11 @@ export component AppWindow inherits Window {
     in-out property <bool>           notif-center-open: false;
     in-out property <int>            notif-unread: 0;
 
-    // ── Persona system (G4) ─────────────────────────────────────────────
-    // Rust builds `persona-defs` once (the catalogue) and applies a persona via
-    // set-persona → it sets Personas.current + Palette.theme + shell-mode. The
-    // first-boot wizard shows when no persona is persisted yet.
-    in-out property <[PersonaDef]>   persona-defs;
+    // ── Persona system (G4/G5) ──────────────────────────────────────────
+    // The catalogue + switch callback live on the Personas global (Rust wires
+    // Personas.pick → apply_persona, which sets current + theme + shell-mode +
+    // persists). Only the transient UI state stays here. The first-boot wizard
+    // shows when no persona is persisted yet.
     in-out property <bool>           persona-picker-open: false;
     in-out property <bool>           first-boot: false;
 
@@ -85,7 +85,6 @@ export component AppWindow inherits Window {
     callback set-policy(string);
     callback set-model(string);
     callback power-action(string);
-    callback set-persona(int);                // Persona ordinal — Rust resolves + persists
     callback terminal-send(string);          // a submitted terminal command line
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
@@ -733,12 +732,12 @@ export component AppWindow inherits Window {
         clicked => { root.persona-picker-open = false; }
     }
     if root.persona-picker-open: PersonaPicker {
-        defs: root.persona-defs;
+        defs: Personas.defs;
         current-id: Personas.current-id;
         x: parent.width - self.width - 16px;
         y: 48px;
         pick(id) => {
-            root.set-persona(id);
+            Personas.pick(id);
             root.persona-picker-open = false;
         }
     }
@@ -754,10 +753,10 @@ export component AppWindow inherits Window {
     // Top-most modal: picking a tile applies the persona + dismisses.
     if root.first-boot: FirstBootWizard {
         x: 0px; y: 0px; width: parent.width; height: parent.height;
-        defs: root.persona-defs;
+        defs: Personas.defs;
         current-id: Personas.current-id;
         pick(id) => {
-            root.set-persona(id);
+            Personas.pick(id);
             root.first-boot = false;
         }
     }

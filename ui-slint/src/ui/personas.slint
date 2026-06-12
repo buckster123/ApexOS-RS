@@ -10,11 +10,28 @@
 // Hot-switch from Rust:
 //   ui.global::<Personas>().set_current(Persona::Mom);  // + Palette.theme + shell-mode
 
-import { Persona, ChromeKind } from "types.slint";
+import { Persona, ChromeKind, PersonaDef } from "types.slint";
 
 export global Personas {
     // ── Active persona ────────────────────────────────────────────────────
     in-out property <Persona> current: Persona.apex;
+
+    // ── Catalogue + switch callback (G5) ──────────────────────────────────
+    // Rust builds `defs` once and wires `pick` to apply_persona (which sets
+    // current + Palette.theme + shell-mode + persists). Exposed on the global so
+    // the title-bar picker, first-boot wizard, AND the Settings pane all reach
+    // them with no prop-threading.
+    in-out property <[PersonaDef]> defs;
+    callback pick(int);   // Persona ordinal
+
+    // ── Behaviour gating (G5 tier-1, surface only) ────────────────────────
+    // "Moderate": the warm/simple persona (mom) hides the deep-tech apps from
+    // the Start menu, collapses tool-call internals in chat, and reads at a
+    // larger base size. Everyone else sees the full surface. Agent style
+    // preamble (tier-2) is deferred to a dedicated agentd session.
+    out property <bool> show-tech-apps: current != Persona.mom;
+    out property <bool> hide-tool-internals: current == Persona.mom;
+    out property <float> font-scale: current == Persona.mom ? 1.15 : 1.0;
 
     // Ordinal of `current` (0..5) — lets catalogue tiles compare against a
     // PersonaDef.id without an enum→int helper in Slint.

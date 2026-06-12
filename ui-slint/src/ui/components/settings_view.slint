@@ -1,5 +1,7 @@
 import { Palette } from "../palette.slint";
+import { Personas } from "../personas.slint";
 import { ModelItem } from "../types.slint";
+import { PersonaTile } from "persona_picker.slint";
 
 // ── SettingsView ───────────────────────────────────────────────────────────────
 //
@@ -54,6 +56,25 @@ export component SettingsView {
                 padding: 20px;
                 spacing: 24px;
                 alignment: start;
+
+                // ── Appearance / persona (G5) ──────────────────────────────
+                VerticalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: "PERSONA";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 2px;
+                    }
+
+                    for d in Personas.defs: PersonaTile {
+                        def: d;
+                        selected: d.id == Personas.current-id;
+                        clicked => { Personas.pick(d.id); }
+                    }
+                }
 
                 // ── Soul.md editor ─────────────────────────────────────────
                 VerticalLayout {

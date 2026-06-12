@@ -1,4 +1,5 @@
 import { Palette } from "../palette.slint";
+import { Personas } from "../personas.slint";
 
 // Tool call card — rendered in the chat stream for role == "tool".
 // States: running (spinner dots), done (checkmark), error (✗).
@@ -18,6 +19,10 @@ export component ToolCard {
 
     property <bool> expanded: false;
     property <bool> has-output: root.tool-output != "";
+    // G5 surface gating: the warm/simple persona collapses tool internals — the
+    // card stays (status + approvals are essential) but args/output can't open.
+    property <bool> can-expand: !Personas.hide-tool-internals
+        && (root.tool-args != "" || root.has-output);
 
     // Status icon
     property <string> status-icon:
@@ -55,7 +60,7 @@ export component ToolCard {
                 // ── Header row ──────────────────────────────────────────
                 header-area := TouchArea {
                     height: 32px;
-                    clicked => { root.expanded = !root.expanded; }
+                    clicked => { if (root.can-expand) { root.expanded = !root.expanded; } }
 
                     HorizontalLayout {
                         padding-left: 10px;
@@ -82,8 +87,8 @@ export component ToolCard {
                             letter-spacing: root.tool-name != "" && Palette.scanlines ? 0.5px : 0px;
                         }
 
-                        // Expand chevron (only when there's something to show)
-                        if root.tool-args != "" || root.has-output: Text {
+                        // Expand chevron (only when expandable + not gated)
+                        if root.can-expand: Text {
                             text: root.expanded ? "▲" : "▼";
                             color: Palette.text-dim;
                             font-size: 9px;
@@ -141,7 +146,7 @@ export component ToolCard {
                 }
 
                 // ── Expanded body ───────────────────────────────────────
-                if root.expanded && (root.tool-args != "" || root.has-output): VerticalLayout {
+                if root.expanded && root.can-expand: VerticalLayout {
                     spacing: 0px;
 
                     // Divider

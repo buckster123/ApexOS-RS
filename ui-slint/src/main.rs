@@ -944,7 +944,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // persona is applied silently; a fresh install shows the first-boot wizard
     // over a sane Apex default. apply_persona tier-clamps the shell mode, so the
     // femtovg "Nano-first" Focus default is handled there (CLAUDE.md).
-    ui.set_persona_defs(slint::ModelRc::from(Rc::new(
+    ui.global::<Personas>().set_defs(slint::ModelRc::from(Rc::new(
         slint::VecModel::from(build_persona_defs()),
     )));
     match load_persona() {
@@ -956,7 +956,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let uw = ui.as_weak();
-        ui.on_set_persona(move |ord| {
+        ui.global::<Personas>().on_pick(move |ord| {
             if let Some(ui) = uw.upgrade() {
                 apply_persona(&ui, persona_from_ordinal(ord), true);
             }

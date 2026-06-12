@@ -6,6 +6,7 @@
 // Council / Terminal entries slot in here when those apps land (G3d+).
 
 import { Palette } from "../palette.slint";
+import { Personas } from "../personas.slint";
 
 component MenuRow inherits Rectangle {
     in property <string> glyph;
@@ -74,12 +75,15 @@ export component StartMenu inherits Rectangle {
             x: 12px;
         }
 
+        // Core apps — always shown.
         MenuRow { glyph: "💬"; label: "Chat";     clicked => { root.launch(0); } }
         MenuRow { glyph: "🖥"; label: "System";   clicked => { root.launch(1); } }
-        MenuRow { glyph: "🌡"; label: "Sensors";  clicked => { root.launch(2); } }
         MenuRow { glyph: "🕘"; label: "Sessions"; clicked => { root.launch(3); } }
         MenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
-        MenuRow { glyph: "⌨"; label: "Terminal"; clicked => { root.launch(5); } }
-        MenuRow { glyph: "⚖"; label: "Council";  clicked => { root.launch(6); } }
+
+        // Deep-tech apps — hidden by the simple/warm persona (G5 surface gating).
+        if Personas.show-tech-apps: MenuRow { glyph: "🌡"; label: "Sensors";  clicked => { root.launch(2); } }
+        if Personas.show-tech-apps: MenuRow { glyph: "⌨"; label: "Terminal"; clicked => { root.launch(5); } }
+        if Personas.show-tech-apps: MenuRow { glyph: "⚖"; label: "Council";  clicked => { root.launch(6); } }
     }
 }

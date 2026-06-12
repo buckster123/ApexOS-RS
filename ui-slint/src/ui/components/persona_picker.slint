@@ -14,7 +14,7 @@ import { Palette } from "../palette.slint";
 import { PersonaDef } from "../types.slint";
 
 // ── Shared tile ──────────────────────────────────────────────────────────────
-component PersonaTile inherits Rectangle {
+export component PersonaTile inherits Rectangle {
     in property <PersonaDef> def;
     in property <bool> selected;
     in property <bool> large;
