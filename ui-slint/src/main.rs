@@ -676,6 +676,29 @@ fn update_tool_row(row: usize, f: impl FnOnce(&mut MessageItem)) {
     });
 }
 
+/// On cancel, retire any tool cards still awaiting approval (or running) so they
+/// don't hang in the chat — agentd aborts the turn but emits no TurnComplete.
+fn clear_pending_tools() {
+    MESSAGES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            for i in 0..model.row_count() {
+                if let Some(mut item) = model.row_data(i) {
+                    if item.role.as_str() == "tool"
+                        && (item.awaiting_approval || item.tool_status.as_str() == "running")
+                    {
+                        item.awaiting_approval = false;
+                        item.tool_status = "error".into();
+                        if item.tool_output.as_str().is_empty() {
+                            item.tool_output = "cancelled".into();
+                        }
+                        model.set_row_data(i, item);
+                    }
+                }
+            }
+        }
+    });
+}
+
 // ── SysStats helpers ──────────────────────────────────────────────────────────
 
 fn empty_sys_stats() -> SysStats {
@@ -1342,10 +1365,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(row) = find_tool_row(call_id.as_str()) {
             update_tool_row(row, |item| item.awaiting_approval = false);
         }
+        // Event::UserApproval { session, action: ActionId, granted } — gateway injects session.
+        // call_id is the stringified action-id; parse it back to the bare number agentd expects.
+        let action: u64 = call_id.as_str().parse().unwrap_or(0);
         let payload = serde_json::json!({
             "type": "user_approval",
-            "call_id": call_id.as_str(),
-            "approved": true
+            "action": action,
+            "granted": true
         })
         .to_string();
         tx_approve.send(payload).ok();
@@ -1359,10 +1385,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 item.tool_status = "error".into();
             });
         }
+        let action: u64 = call_id.as_str().parse().unwrap_or(0);
         let payload = serde_json::json!({
             "type": "user_approval",
-            "call_id": call_id.as_str(),
-            "approved": false
+            "action": action,
+            "granted": false
         })
         .to_string();
         tx_reject.send(payload).ok();
@@ -1389,6 +1416,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         let payload = serde_json::json!({"type": "user_prompt", "text": text.as_str()}).to_string();
         tx_send.send(payload).ok();
+    });
+
+    // ── stop / cancel callback ────────────────────────────────────────────────
+    // Abort the in-flight turn. agentd's cascade_cancel aborts the task but emits
+    // no TurnComplete, so we also clear busy + retire pending tool cards locally.
+    let tx_stop   = tx.clone();
+    let stop_weak = ui.as_weak();
+    ui.on_stop_turn(move || {
+        let payload = serde_json::json!({"type": "user_cancel"}).to_string();
+        tx_stop.send(payload).ok();
+        clear_pending_tools();
+        if let Some(ui) = stop_weak.upgrade() {
+            ui.set_agent_busy(false);
+        }
     });
 
     // ── refresh-sessions callback ─────────────────────────────────────────────
@@ -1803,12 +1844,16 @@ fn dispatch_event(
         }
 
         "tool_requested" => {
-            let call_id   = ev["call_id"].as_str().unwrap_or("").to_string();
-            let tool_name = ev["name"].as_str().unwrap_or("").to_string();
-            let tool_args = ev["input"]
-                .as_object()
-                .map(|o| serde_json::to_string_pretty(o).unwrap_or_default())
-                .unwrap_or_default();
+            // Event::ToolRequested { session, call: ToolCall } — fields nest under `call`.
+            // ToolCall.id is ActionId(u64) → a bare number; stringify for the row key.
+            let call      = &ev["call"];
+            let call_id   = call["id"].as_u64().map(|n| n.to_string()).unwrap_or_default();
+            let tool_name = call["tool"].as_str().unwrap_or("").to_string();
+            let tool_args = if call["args"].is_null() {
+                String::new()
+            } else {
+                serde_json::to_string_pretty(&call["args"]).unwrap_or_default()
+            };
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
@@ -1830,13 +1875,23 @@ fn dispatch_event(
         }
 
         "tool_result" => {
-            let call_id = ev["call_id"].as_str().unwrap_or("").to_string();
-            let output  = ev["output"].as_str().unwrap_or("").to_string();
+            // Event::ToolResult { session, call: ActionId, output: ToolOutput }.
+            // `call` is the bare action-id number; output nests { ok, content }.
+            let call_id = ev["call"].as_u64().map(|n| n.to_string()).unwrap_or_default();
+            let out     = &ev["output"];
+            let ok      = out["ok"].as_bool().unwrap_or(true);
+            let output  = match &out["content"] {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null      => String::new(),
+                other => serde_json::to_string_pretty(other).unwrap_or_default(),
+            };
+            let status = if ok { "done" } else { "error" };
             slint::invoke_from_event_loop(move || {
                 if let Some(row) = find_tool_row(&call_id) {
                     update_tool_row(row, |item| {
                         item.tool_output = output.into();
-                        item.tool_status = "done".into();
+                        item.tool_status = status.into();
+                        item.awaiting_approval = false;
                     });
                 }
             })
@@ -1844,23 +1899,33 @@ fn dispatch_event(
         }
 
         "approval_pending" => {
-            let call_id   = ev["call_id"].as_str().unwrap_or("").to_string();
-            let tool_name = ev["name"].as_str().unwrap_or("").to_string();
+            // Event::ApprovalPending { session, call: ToolCall } — same nesting as tool_requested.
+            // Normally a tool_requested arrives first (card exists); the else-branch is a fallback.
+            let call      = &ev["call"];
+            let call_id   = call["id"].as_u64().map(|n| n.to_string()).unwrap_or_default();
+            let tool_name = call["tool"].as_str().unwrap_or("").to_string();
+            let tool_args = if call["args"].is_null() {
+                String::new()
+            } else {
+                serde_json::to_string_pretty(&call["args"]).unwrap_or_default()
+            };
+            let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(row) = find_tool_row(&call_id) {
                     update_tool_row(row, |item| item.awaiting_approval = true);
-                } else {
+                } else if let Some(ui) = w.upgrade() {
                     push_message(MessageItem {
                         role: "tool".into(),
                         text: "".into(),
                         streaming: false,
                         call_id: call_id.into(),
                         tool_name: tool_name.into(),
-                        tool_args: "".into(),
+                        tool_args: tool_args.into(),
                         tool_output: "".into(),
                         tool_status: "running".into(),
                         awaiting_approval: true,
                     });
+                    bump_scroll(&ui);
                 }
             })
             .ok();
