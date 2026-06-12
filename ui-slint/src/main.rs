@@ -578,6 +578,50 @@ fn clear_messages() {
             }
         }
     });
+    // A fresh transcript should re-stamp on the next exchange.
+    LAST_STAMP.with(|c| c.set(0));
+}
+
+thread_local! {
+    // Epoch (secs) of the last chat time-divider; 0 = none yet this transcript.
+    static LAST_STAMP: std::cell::Cell<i64> = std::cell::Cell::new(0);
+}
+
+// Drop a centered date/time marker into the chat at the start of an exchange,
+// but only once per ~3-minute window so rapid back-and-forth doesn't spam them.
+// role="time"; the formatted label rides in `text` (no per-message field, so
+// every MessageItem construction site stays untouched). Grounds the thread in
+// wall-clock time for both the reader and (later, via agentd) the model.
+fn maybe_push_time_divider() {
+    let now = chrono::Local::now();
+    let epoch = now.timestamp();
+    let due = LAST_STAMP.with(|c| {
+        let last = c.get();
+        last == 0 || epoch - last >= 180
+    });
+    if !due {
+        return;
+    }
+    LAST_STAMP.with(|c| c.set(epoch));
+    push_message(MessageItem {
+        role: "time".into(),
+        text: now.format("%-d %b %Y, %H:%M").to_string().into(),
+        streaming: false,
+        call_id: "".into(),
+        tool_name: "".into(),
+        tool_args: "".into(),
+        tool_output: "".into(),
+        tool_status: "".into(),
+        awaiting_approval: false,
+    });
+}
+
+// Refresh the Clock global from local wall-clock time (driven by a 1s timer).
+fn update_clock(ui: &AppWindow) {
+    let now = chrono::Local::now();
+    let clock = ui.global::<Clock>();
+    clock.set_time(now.format("%H:%M").to_string().into());
+    clock.set_date(now.format("%a %-d %b").to_string().into());
 }
 
 fn replace_sessions(items: Vec<SessionItem>) {
@@ -1331,6 +1375,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if text.is_empty() {
             return;
         }
+        maybe_push_time_divider();
         messages_send.push(MessageItem {
             role: "user".into(),
             text: text.clone(),
@@ -1421,6 +1466,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(ui) = ui_w.upgrade() {
                         ui.set_recording(false);
                         if !text.is_empty() {
+                            maybe_push_time_divider();
                             push_message(MessageItem {
                                 role: "user".into(),
                                 text: text.clone().into(),
@@ -1565,6 +1611,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .send().await.ok();
         });
     });
+
+    // ── Clock (G6.1) — tick the tray/temporal clock every second on the Slint
+    // thread. Held until run() returns so it isn't dropped (which would stop it).
+    update_clock(&ui);
+    let clock_timer = slint::Timer::default();
+    {
+        let ui_weak = ui.as_weak();
+        clock_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(1),
+            move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    update_clock(&ui);
+                }
+            },
+        );
+    }
 
     ui.run()?;
     Ok(())

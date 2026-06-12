@@ -9,7 +9,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { WindowDesc, ChromeKind } from "../types.slint";
+import { WindowDesc, ChromeKind, Clock } from "../types.slint";
 
 // A single running-window button. Active = focused & visible; a minimized
 // window shows dimmed so it's still discoverable (the G2 bug was that it
@@ -188,6 +188,22 @@ export component Taskbar inherits Rectangle {
             badge: root.notif-count;
             clicked => { root.tray-clicked(); }
         }
+
+        // Live clock (G6.1).
+        if Clock.time != "": Rectangle {
+            width: clk.preferred-width + 16px;
+            HorizontalLayout {
+                alignment: center;
+                clk := Text {
+                    text: Clock.time;
+                    color: Palette.text-dim;
+                    font-size: 12px;
+                    font-weight: 600;
+                    letter-spacing: 1px;
+                    vertical-alignment: center;
+                }
+            }
+        }
     }
 
     // ════ WIN-98 BAR ═════════════════════════════════════════════════════
@@ -294,6 +310,14 @@ export component Taskbar inherits Rectangle {
                         }
                     }
                     tray-ta := TouchArea { clicked => { root.tray-clicked(); } }
+                }
+
+                // Classic tray clock.
+                if Clock.time != "": Text {
+                    text: Clock.time;
+                    color: Win98.text;
+                    font-size: 11px;
+                    vertical-alignment: center;
                 }
             }
             BevelEdges { sunken: true; }

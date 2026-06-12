@@ -52,7 +52,28 @@ export component ChatView {
                     approve => { AgentBridge.approve-tool(item.call-id); }
                     reject  => { AgentBridge.reject-tool(item.call-id); }
                 }
-                if item.role != "tool": MessageBubble {
+                // Temporal marker (G6.1) — a centered date/time chip dropped in
+                // at the start of an exchange after a gap; grounds the thread.
+                if item.role == "time": HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: 20px;
+                        width: stamp.preferred-width + 20px;
+                        background: Palette.surface-hi;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        stamp := Text {
+                            text: item.text;
+                            color: Palette.text-dim;
+                            font-size: 10px * Personas.font-scale;
+                            letter-spacing: 0.5px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                if item.role != "tool" && item.role != "time": MessageBubble {
                     role:       item.role;
                     text:       item.text;
                     streaming:  item.streaming;
