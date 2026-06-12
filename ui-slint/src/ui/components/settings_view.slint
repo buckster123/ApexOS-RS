@@ -1,3 +1,4 @@
+import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { ModelItem } from "../types.slint";
@@ -48,15 +49,13 @@ export component SettingsView {
         Rectangle { height: 1px; background: Palette.border; }
 
         // ── Scrollable content ─────────────────────────────────────────────
-        // viewport-height MUST be set to the content's preferred height — without
-        // it a Flickable sizes its child layout to the visible area, so nothing
-        // overflows and nothing scrolls (the soul sub-Flickable below does the same).
-        Flickable {
+        // ScrollView (std-widgets) auto-manages the viewport from its child layout
+        // AND draws a click-draggable scrollbar — more robust than a bare Flickable
+        // on a kiosk where wheel/drag events may be flaky.
+        ScrollView {
             vertical-stretch: 1;
-            interactive: true;
-            viewport-height: settings-content.preferred-height;
 
-            settings-content := VerticalLayout {
+            VerticalLayout {
                 padding: 20px;
                 spacing: 24px;
                 alignment: start;

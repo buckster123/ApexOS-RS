@@ -44,8 +44,12 @@ export component ChatView {
             }
 
             for item in root.messages: Rectangle {
-                // Route to tool card or chat bubble based on role
+                // Route to tool card or chat bubble based on role.
+                // NB: children of a plain Rectangle take their *content* size, not the
+                // row width — so each branch sets width:100% to span the row, otherwise
+                // the bubble's alignment/centering has no room to act (looks centered).
                 if item.role == "tool": ToolCard {
+                    width: 100%;
                     tool-name:          item.tool-name;
                     tool-args:          item.tool-args;
                     tool-output:        item.tool-output;
@@ -58,6 +62,7 @@ export component ChatView {
                 // Temporal marker (G6.1) — a centered date/time chip dropped in
                 // at the start of an exchange after a gap; grounds the thread.
                 if item.role == "time": HorizontalLayout {
+                    width: 100%;
                     alignment: center;
                     Rectangle {
                         height: 20px;
@@ -77,6 +82,7 @@ export component ChatView {
                     }
                 }
                 if item.role != "tool" && item.role != "time": MessageBubble {
+                    width: 100%;
                     role:       item.role;
                     text:       item.text;
                     streaming:  item.streaming;
