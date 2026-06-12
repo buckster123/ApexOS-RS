@@ -68,8 +68,9 @@ export component SessionView {
         Flickable {
             vertical-stretch: 1;
             interactive: true;
+            viewport-height: sess-col.preferred-height;
 
-            VerticalLayout {
+            sess-col := VerticalLayout {
                 padding: 12px;
                 spacing: 8px;
                 alignment: start;

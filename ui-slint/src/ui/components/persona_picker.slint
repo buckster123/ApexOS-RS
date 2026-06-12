@@ -173,7 +173,8 @@ export component FirstBootWizard inherits Rectangle {
 
             Flickable {
                 vertical-stretch: 1;
-                VerticalLayout {
+                viewport-height: pp-col.preferred-height;
+                pp-col := VerticalLayout {
                     spacing: 10px;
                     for d in root.defs: PersonaTile {
                         def: d;

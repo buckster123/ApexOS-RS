@@ -104,6 +104,32 @@ Define `MessageItem` as a `struct` in `.slint` and import it via `slint::include
 
 ---
 
+## Flickable / scrolling — set `viewport-height` or it won't scroll
+
+A `Flickable` whose only child is a layout does **not** auto-scroll: with no explicit
+`viewport-height`, Slint sizes the child layout to the *visible* area, so the content
+never overflows and there's nothing to scroll. Symptom: content is clipped at the
+bottom and drag does nothing.
+
+**Fix** — bind `viewport-height` to the content layout's `preferred-height` (give the
+layout an id; it must be a direct, non-conditional child so the id is in scope):
+```slint
+Flickable {
+    vertical-stretch: 1;
+    viewport-height: col.preferred-height;   // ← the missing piece
+    col := VerticalLayout {
+        // …rows, for-loops, etc.
+    }
+}
+```
+`viewport-width` may be left unset (defaults to the Flickable width → no horizontal
+scroll). This is also required for any manual auto-scroll-to-bottom handler, since
+`flick.viewport-y = min(0px, -(flick.viewport-height - flick.height))` needs a real
+`viewport-height` to compute the bottom. Every scrollable pane in this repo follows
+this pattern (chat, settings, session, council, terminal, persona, notif).
+
+---
+
 ## Pi KMS/DRM Setup
 
 ### Environment variable

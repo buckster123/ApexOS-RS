@@ -146,8 +146,9 @@ export component CouncilView {
         flick := Flickable {
             vertical-stretch: 1;
             interactive: true;
+            viewport-height: council-col.preferred-height;
 
-            VerticalLayout {
+            council-col := VerticalLayout {
                 padding: 12px;
                 spacing: 8px;
                 alignment: start;

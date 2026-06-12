@@ -23,8 +23,9 @@ export component TerminalView {
         flick := Flickable {
             vertical-stretch: 1;
             interactive: true;
+            viewport-height: term-col.preferred-height;
 
-            VerticalLayout {
+            term-col := VerticalLayout {
                 padding: 10px;
                 alignment: start;
 
