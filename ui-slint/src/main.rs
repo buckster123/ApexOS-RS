@@ -649,7 +649,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let w = windows.clone();
         let uw = ui.as_weak();
         ui.on_launch_app(move |ord| {
-            if let Some(ui) = uw.upgrade() { wm_launch(&ui, &w, kind_from_ordinal(ord)); }
+            if let Some(ui) = uw.upgrade() {
+                let kind = kind_from_ordinal(ord);
+                wm_launch(&ui, &w, kind);
+                // Fire the per-app refresh the legacy tab strip used to trigger on
+                // open-view — without it Settings/Sessions windows launch empty.
+                match kind {
+                    AppKind::Settings => ui.invoke_refresh_settings(),
+                    AppKind::Sessions => ui.invoke_refresh_sessions(),
+                    _ => {}
+                }
+            }
         });
     }
     {
