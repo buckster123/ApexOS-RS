@@ -1,5 +1,11 @@
 // Shared struct definitions — exported for Rust and all components.
 
+// ── Shell ───────────────────────────────────────────────────────────────
+// The shell has two modes (glowup G1). Desktop = windowed face (wallpaper +
+// dock + app windows); Focus = a single full-screen app (the appliance face).
+// Runtime-switchable; tier-clamped by Rust (Nano defaults to Focus).
+export enum ShellMode { desktop, focus }
+
 // System stats polled from agentd /api/run + sensor_reading WS events.
 export struct SysStats {
     cpu-pct:      float,   // 0–100  (load avg / nproc * 100, capped)

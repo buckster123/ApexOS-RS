@@ -153,7 +153,7 @@ Focus + static accents. Heavy assets (wallpapers, fonts, sounds) are tier-gated 
 | Phase | Deliverable | Gate |
 |-------|-------------|------|
 | **G0** ✓ | View router fix | tab switch shows exactly one view, no overlap, no jank; chat aliases intact — **DONE** (commit e32ae46, verified live: stacking fixed) |
-| **G1** | Shell scaffold | `shell-mode` toggles Desktop⇄Focus; Desktop shows wallpaper + dock + Chat in one window |
+| **G1** ✓ | Shell scaffold | `shell-mode` toggles Desktop⇄Focus; Desktop shows wallpaper + dock + Chat in one window — **DONE** (verified live on desktop: toggle + smooth framed⇄fullscreen transition + dock). Notes: app content lives in one `surface` whose geometry switches on `shell-mode` (chat instantiated once → aliases intact); dock replaces the tab strip in Desktop, tab strip stays in Focus; Focus is still the full legacy tabbed face (narrowing to single-app deferred to G3+); default tier-clamped (femtovg→Focus). New: `components/dock.slint`, `ShellMode` enum. |
 | **G2** | Window manager core | launch/close/focus/min/maximize + smooth drag + resize + z-order; ≥3 windows |
 | **G3** | App catalog | all existing views run as windows; launcher/start menu + taskbar functional |
 | **G4** | Persona system + first-boot wizard | picker switches theme+chrome+wallpaper+mode live; wizard sets it on first run |

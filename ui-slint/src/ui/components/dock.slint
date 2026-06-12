@@ -1,0 +1,61 @@
+// Desktop-mode dock (glowup G1) — a floating bottom-centre launcher bar.
+// One button per app; the active app is highlighted. Emits `select(view)`;
+// the parent owns the view-switch + any per-app refresh. Persona-specific
+// chrome (mac dock vs win98 start bar) lands in later phases — this is the
+// neutral G1 baseline that every theme can read its tokens into.
+
+import { Palette } from "../palette.slint";
+
+component DockButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked;
+
+    width: 84px;
+    height: 40px;
+    border-radius: Palette.radius;
+    background: active ? Palette.primary-dim
+                       : (touch.has-hover ? Palette.surface-hi : transparent);
+    border-width: 1px;
+    border-color: active ? Palette.primary : transparent;
+    animate background, border-color { duration: 150ms; }
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+
+    Text {
+        text: root.label;
+        color: active ? Palette.primary : Palette.text-dim;
+        font-size: 10px;
+        font-weight: active ? 700 : 400;
+        letter-spacing: 1.2px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        animate color { duration: 150ms; }
+    }
+}
+
+export component Dock inherits Rectangle {
+    in property <int> current-view;       // 0=chat 1=system 2=sensor 3=sessions 4=settings
+    callback select(int);
+
+    height: 56px;
+    width: row.preferred-width;
+    background: Palette.surface;
+    border-radius: Palette.radius-lg;
+    border-width: 1px;
+    border-color: Palette.border-hi;
+    drop-shadow-blur: 24px;
+    drop-shadow-color: #00000066;
+    drop-shadow-offset-y: 6px;
+
+    row := HorizontalLayout {
+        padding: 8px;
+        spacing: 4px;
+
+        DockButton { label: "CHAT";     active: root.current-view == 0; clicked => { root.select(0); } }
+        DockButton { label: "SYSTEM";   active: root.current-view == 1; clicked => { root.select(1); } }
+        DockButton { label: "SENSOR";   active: root.current-view == 2; clicked => { root.select(2); } }
+        DockButton { label: "SESSIONS"; active: root.current-view == 3; clicked => { root.select(3); } }
+        DockButton { label: "SETTINGS"; active: root.current-view == 4; clicked => { root.select(4); } }
+    }
+}

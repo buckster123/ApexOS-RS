@@ -1,5 +1,5 @@
 import { Palette, Theme } from "palette.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode } from "types.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
 import { Dashboard } from "components/dashboard.slint";
@@ -7,8 +7,9 @@ import { SensorView } from "components/sensor_view.slint";
 import { SessionView } from "components/session_view.slint";
 import { SettingsView } from "components/settings_view.slint";
 import { ToastHost, Notifications } from "components/toast.slint";
+import { Dock } from "components/dock.slint";
 
-export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, Notifications }
+export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, Notifications }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -23,7 +24,8 @@ export component AppWindow inherits Window {
     in-out property <SysStats>       sys-stats;
     in-out property <[SessionItem]>  sessions;
     in-out property <int>            current-session-id: 0;
-    in-out property <int>            current-view: 0;   // 0=chat  1=system  2=sensor  3=sessions
+    in-out property <int>            current-view: 0;   // 0=chat  1=system  2=sensor  3=sessions  4=settings
+    in-out property <ShellMode>      shell-mode: ShellMode.desktop;  // G1: Desktop (windowed) ⇄ Focus (full-screen app)
     in-out property <bool>           recording: false;
     in-out property <bool>           tts-enabled: false;
     in-out property <string>         soul-text: "";
@@ -48,6 +50,21 @@ export component AppWindow inherits Window {
     callback scroll-to-bottom <=> chat.scroll-to-bottom;
     callback approve-tool <=> chat.approve-tool;
     callback reject-tool  <=> chat.reject-tool;
+
+    // Name of the currently active app (used by the desktop window caption).
+    function app-title() -> string {
+        root.current-view == 1 ? "System" :
+        root.current-view == 2 ? "Sensors" :
+        root.current-view == 3 ? "Sessions" :
+        root.current-view == 4 ? "Settings" : "Chat"
+    }
+
+    // Switch app + run any per-app refresh (shared by tab strip and dock).
+    function open-view(v: int) {
+        root.current-view = v;
+        if (v == 3) { root.refresh-sessions(); }
+        if (v == 4) { root.refresh-settings(); }
+    }
 
     // ── Jarvis pulse animation ──────────────────────────────────────────
     property <float> jarvis-pulse: 0.0;
@@ -107,6 +124,32 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle { horizontal-stretch: 1; }
+
+                // Shell-mode toggle (⊞ = desktop / ▢ = focus)
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: shell-area.has-hover ? Palette.surface-hi : transparent;
+                    y: (parent.height - self.height) / 2;
+                    animate background { duration: 150ms; }
+
+                    shell-area := TouchArea {
+                        clicked => {
+                            root.shell-mode = root.shell-mode == ShellMode.desktop
+                                ? ShellMode.focus : ShellMode.desktop;
+                        }
+                    }
+
+                    Text {
+                        text: root.shell-mode == ShellMode.desktop ? "⊞" : "▢";
+                        color: root.shell-mode == ShellMode.desktop ? Palette.primary : Palette.text-dim;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        animate color { duration: 150ms; }
+                    }
+                }
 
                 // Power button (⏻ = open power modal)
                 Rectangle {
@@ -168,226 +211,285 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ── Tab strip (36 px) ─────────────────────────────────────────
+        // ── Body: wallpaper + app surface + dock. A Rectangle (not a
+        //    layout) so the desktop wallpaper, the window surface and the
+        //    dock can overlap. In Focus mode the surface fills the body and
+        //    the wallpaper/dock are absent — identical to the legacy face. ─
         Rectangle {
-            height: 36px;
-            background: Palette.surface;
+            vertical-stretch: 1;
 
+            // ── Wallpaper (Desktop only) — themed gradient. Cheap (no
+            //    animation) so it holds on Nano too; the temp-reactive
+            //    "breathing" variant is a later, tier-gated enhancement. ──
+            if root.shell-mode == ShellMode.desktop: Rectangle {
+                x: 0; y: 0;
+                width: parent.width;
+                height: parent.height;
+                background: Palette.bg;
+
+                Rectangle {
+                    x: 0; y: 0; width: parent.width; height: parent.height;
+                    background: @linear-gradient(150deg,
+                        Palette.surface 0%, Palette.bg 55%, Palette.surface-hi 100%);
+                    opacity: 0.55;
+                }
+                Rectangle {
+                    x: 0; y: 0; width: parent.width; height: parent.height;
+                    background: @radial-gradient(circle, Palette.primary-dim 0%, transparent 65%);
+                    opacity: 0.10;
+                }
+            }
+
+            // ── App surface: a framed window in Desktop, full-screen in
+            //    Focus. Instantiated ONCE so chat's callback aliases stay
+            //    valid; only its geometry/chrome changes with shell-mode. ──
             Rectangle {
-                y: parent.height - 1px;
-                height: 1px;
-                background: Palette.border;
-            }
+                clip: true;
+                x:      root.shell-mode == ShellMode.desktop ? 64px : 0px;
+                y:      root.shell-mode == ShellMode.desktop ? 24px : 0px;
+                width:  root.shell-mode == ShellMode.desktop ? parent.width  - 128px : parent.width;
+                height: root.shell-mode == ShellMode.desktop ? parent.height - 24px - 88px : parent.height;
+                background: Palette.bg;
+                border-radius: root.shell-mode == ShellMode.desktop ? Palette.radius-lg : 0px;
+                border-width:  root.shell-mode == ShellMode.desktop ? 1px : 0px;
+                border-color: Palette.border-hi;
+                drop-shadow-blur: root.shell-mode == ShellMode.desktop ? 32px : 0px;
+                drop-shadow-color: #00000080;
+                drop-shadow-offset-y: 8px;
+                animate x, y, width, height { duration: 220ms; easing: ease-in-out; }
 
-            HorizontalLayout {
-                padding-left: 8px;
-                spacing: 0px;
+                VerticalLayout {
 
-                // CHAT tab
-                Rectangle {
-                    width: 80px;
+                    // ── Window caption (Desktop only) — app name ─────────
+                    if root.shell-mode == ShellMode.desktop: Rectangle {
+                        height: 30px;
+                        background: Palette.surface;
 
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: Palette.border;
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 10px;
+                            spacing: 8px;
+
+                            Text {
+                                text: root.app-title();
+                                color: Palette.text-bright;
+                                font-size: 11px;
+                                font-weight: 700;
+                                letter-spacing: 0.5px;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
+
+                    // ── Tab strip (Focus only) — legacy nav; the dock
+                    //    replaces it in Desktop mode. ──────────────────────
+                    if root.shell-mode == ShellMode.focus: Rectangle {
+                        height: 36px;
+                        background: Palette.surface;
+
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: Palette.border;
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            spacing: 0px;
+
+                            // CHAT tab
+                            Rectangle {
+                                width: 80px;
+                                if root.current-view == 0: Rectangle {
+                                    y: parent.height - 2px;
+                                    height: 2px;
+                                    background: Palette.primary;
+                                    border-radius: 1px;
+                                }
+                                TouchArea { clicked => { root.open-view(0); } }
+                                Text {
+                                    text: "CHAT";
+                                    y: (parent.height - self.height) / 2;
+                                    color: root.current-view == 0 ? Palette.primary : Palette.text-dim;
+                                    font-size: 10px;
+                                    font-weight: root.current-view == 0 ? 700 : 400;
+                                    horizontal-alignment: center;
+                                    letter-spacing: 1.2px;
+                                    animate color { duration: 200ms; }
+                                }
+                            }
+                            // SYSTEM tab
+                            Rectangle {
+                                width: 80px;
+                                if root.current-view == 1: Rectangle {
+                                    y: parent.height - 2px;
+                                    height: 2px;
+                                    background: Palette.primary;
+                                    border-radius: 1px;
+                                }
+                                TouchArea { clicked => { root.open-view(1); } }
+                                Text {
+                                    text: "SYSTEM";
+                                    y: (parent.height - self.height) / 2;
+                                    color: root.current-view == 1 ? Palette.primary : Palette.text-dim;
+                                    font-size: 10px;
+                                    font-weight: root.current-view == 1 ? 700 : 400;
+                                    horizontal-alignment: center;
+                                    letter-spacing: 1.2px;
+                                    animate color { duration: 200ms; }
+                                }
+                            }
+                            // SENSOR tab
+                            Rectangle {
+                                width: 80px;
+                                if root.current-view == 2: Rectangle {
+                                    y: parent.height - 2px;
+                                    height: 2px;
+                                    background: Palette.primary;
+                                    border-radius: 1px;
+                                }
+                                TouchArea { clicked => { root.open-view(2); } }
+                                Text {
+                                    text: "SENSOR";
+                                    y: (parent.height - self.height) / 2;
+                                    color: root.current-view == 2 ? Palette.primary : Palette.text-dim;
+                                    font-size: 10px;
+                                    font-weight: root.current-view == 2 ? 700 : 400;
+                                    horizontal-alignment: center;
+                                    letter-spacing: 1.2px;
+                                    animate color { duration: 200ms; }
+                                }
+                            }
+                            // SESSIONS tab
+                            Rectangle {
+                                width: 80px;
+                                if root.current-view == 3: Rectangle {
+                                    y: parent.height - 2px;
+                                    height: 2px;
+                                    background: Palette.primary;
+                                    border-radius: 1px;
+                                }
+                                TouchArea { clicked => { root.open-view(3); } }
+                                Text {
+                                    text: "SESSIONS";
+                                    y: (parent.height - self.height) / 2;
+                                    color: root.current-view == 3 ? Palette.primary : Palette.text-dim;
+                                    font-size: 10px;
+                                    font-weight: root.current-view == 3 ? 700 : 400;
+                                    horizontal-alignment: center;
+                                    letter-spacing: 1.2px;
+                                    animate color { duration: 200ms; }
+                                }
+                            }
+                            // SETTINGS tab
+                            Rectangle {
+                                width: 88px;
+                                if root.current-view == 4: Rectangle {
+                                    y: parent.height - 2px;
+                                    height: 2px;
+                                    background: Palette.primary;
+                                    border-radius: 1px;
+                                }
+                                TouchArea { clicked => { root.open-view(4); } }
+                                Text {
+                                    text: "SETTINGS";
+                                    y: (parent.height - self.height) / 2;
+                                    color: root.current-view == 4 ? Palette.primary : Palette.text-dim;
+                                    font-size: 10px;
+                                    font-weight: root.current-view == 4 ? 700 : 400;
+                                    horizontal-alignment: center;
+                                    letter-spacing: 1.2px;
+                                    animate color { duration: 200ms; }
+                                }
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
+
+                    // ── Chat view — ALWAYS instantiated: its callback
+                    //    aliases require the `chat` element to exist.
+                    //    Collapses to 0 px when inactive. ──────────────────
+                    chat := ChatView {
+                        vertical-stretch: root.current-view == 0 ? 1 : 0;
+                        max-height: root.current-view == 0 ? 999999px : 0px;
+                        messages: root.messages;
+                        glow-alpha: root.jarvis-pulse;
+                    }
+
+                    // ── G0 router: the other views are CONDITIONALLY
+                    //    instantiated — inactive views leave the tree. ─────
+                    if root.current-view == 1: Dashboard {
+                        vertical-stretch: 1;
+                        stats: root.sys-stats;
+                        glow-alpha: root.jarvis-pulse;
+                    }
+
+                    if root.current-view == 2: SensorView {
+                        vertical-stretch: 1;
+                        stats: root.sys-stats;
+                    }
+
+                    if root.current-view == 3: SessionView {
+                        vertical-stretch: 1;
+                        sessions: root.sessions;
+                        active-session-id: root.current-session-id;
+                        restore-session(id) => { root.restore-session(id); }
+                        refresh => { root.refresh-sessions(); }
+                    }
+
+                    if root.current-view == 4: SettingsView {
+                        vertical-stretch: 1;
+                        soul-text <=> root.soul-text;
+                        policy-mode: root.settings-policy;
+                        current-model: root.settings-model;
+                        api-key-set: root.settings-api-key-set;
+                        models: root.available-models;
+                        save-soul(text) => { root.save-soul(text); }
+                        set-policy(mode) => { root.set-policy(mode); }
+                        set-model(id) => { root.set-model(id); }
+                        refresh => { root.refresh-settings(); }
+                    }
+
+                    // ── Glow divider (chat view + Jarvis only) ───────────
+                    if Palette.scanlines && root.current-view == 0: Rectangle {
+                        height: 1px;
+                        background: rgba(0, 212, 255, root.jarvis-pulse * 0.5 + 0.1);
+                    }
+
+                    // ── Input bar (chat view only) ───────────────────────
                     if root.current-view == 0: Rectangle {
-                        y: parent.height - 2px;
-                        height: 2px;
-                        background: Palette.primary;
-                        border-radius: 1px;
-                    }
-
-                    TouchArea { clicked => { root.current-view = 0; } }
-
-                    Text {
-                        text: "CHAT";
-                        y: (parent.height - self.height) / 2;
-                        color: root.current-view == 0 ? Palette.primary : Palette.text-dim;
-                        font-size: 10px;
-                        font-weight: root.current-view == 0 ? 700 : 400;
-                        horizontal-alignment: center;
-                        letter-spacing: 1.2px;
-                        animate color { duration: 200ms; }
-                    }
-                }
-
-                // SYSTEM tab
-                Rectangle {
-                    width: 80px;
-
-                    if root.current-view == 1: Rectangle {
-                        y: parent.height - 2px;
-                        height: 2px;
-                        background: Palette.primary;
-                        border-radius: 1px;
-                    }
-
-                    TouchArea { clicked => { root.current-view = 1; } }
-
-                    Text {
-                        text: "SYSTEM";
-                        y: (parent.height - self.height) / 2;
-                        color: root.current-view == 1 ? Palette.primary : Palette.text-dim;
-                        font-size: 10px;
-                        font-weight: root.current-view == 1 ? 700 : 400;
-                        horizontal-alignment: center;
-                        letter-spacing: 1.2px;
-                        animate color { duration: 200ms; }
-                    }
-                }
-
-                // SENSOR tab
-                Rectangle {
-                    width: 80px;
-
-                    if root.current-view == 2: Rectangle {
-                        y: parent.height - 2px;
-                        height: 2px;
-                        background: Palette.primary;
-                        border-radius: 1px;
-                    }
-
-                    TouchArea { clicked => { root.current-view = 2; } }
-
-                    Text {
-                        text: "SENSOR";
-                        y: (parent.height - self.height) / 2;
-                        color: root.current-view == 2 ? Palette.primary : Palette.text-dim;
-                        font-size: 10px;
-                        font-weight: root.current-view == 2 ? 700 : 400;
-                        horizontal-alignment: center;
-                        letter-spacing: 1.2px;
-                        animate color { duration: 200ms; }
-                    }
-                }
-
-                // SESSIONS tab
-                Rectangle {
-                    width: 80px;
-
-                    if root.current-view == 3: Rectangle {
-                        y: parent.height - 2px;
-                        height: 2px;
-                        background: Palette.primary;
-                        border-radius: 1px;
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.current-view = 3;
-                            root.refresh-sessions();  // auto-fetch on tab open
+                        background: Palette.bg;
+                        HorizontalLayout {
+                            padding: 12px;
+                            InputBar {
+                                busy: root.agent-busy;
+                                glow-alpha: root.jarvis-pulse;
+                                recording: root.recording;
+                                toggle-recording => { root.toggle-recording(); }
+                                send(text) => {
+                                    root.send-message(text);
+                                }
+                            }
                         }
                     }
-
-                    Text {
-                        text: "SESSIONS";
-                        y: (parent.height - self.height) / 2;
-                        color: root.current-view == 3 ? Palette.primary : Palette.text-dim;
-                        font-size: 10px;
-                        font-weight: root.current-view == 3 ? 700 : 400;
-                        horizontal-alignment: center;
-                        letter-spacing: 1.2px;
-                        animate color { duration: 200ms; }
-                    }
                 }
-
-                // SETTINGS tab
-                Rectangle {
-                    width: 88px;
-
-                    if root.current-view == 4: Rectangle {
-                        y: parent.height - 2px;
-                        height: 2px;
-                        background: Palette.primary;
-                        border-radius: 1px;
-                    }
-
-                    TouchArea {
-                        clicked => {
-                            root.current-view = 4;
-                            root.refresh-settings();
-                        }
-                    }
-
-                    Text {
-                        text: "SETTINGS";
-                        y: (parent.height - self.height) / 2;
-                        color: root.current-view == 4 ? Palette.primary : Palette.text-dim;
-                        font-size: 10px;
-                        font-weight: root.current-view == 4 ? 700 : 400;
-                        horizontal-alignment: center;
-                        letter-spacing: 1.2px;
-                        animate color { duration: 200ms; }
-                    }
-                }
-
-                Rectangle { horizontal-stretch: 1; }
             }
-        }
 
-        // ── Chat view — ALWAYS instantiated: its callback aliases
-        //    (scroll-to-bottom / approve-tool / reject-tool) require the
-        //    `chat` element to exist. Collapses to 0 px when inactive. ───
-        chat := ChatView {
-            vertical-stretch: root.current-view == 0 ? 1 : 0;
-            max-height: root.current-view == 0 ? 999999px : 0px;
-            messages: root.messages;
-            glow-alpha: root.jarvis-pulse;
-        }
-
-        // ── G0 router: the other views are CONDITIONALLY instantiated.
-        //    An inactive view leaves the tree entirely — no zero-height
-        //    overpaint (the old layout bug) and no 5-tree thrash on switch.
-        //    Exactly one of these exists at a time; it stretches to fill. ─
-        if root.current-view == 1: Dashboard {
-            vertical-stretch: 1;
-            stats: root.sys-stats;
-            glow-alpha: root.jarvis-pulse;
-        }
-
-        if root.current-view == 2: SensorView {
-            vertical-stretch: 1;
-            stats: root.sys-stats;
-        }
-
-        if root.current-view == 3: SessionView {
-            vertical-stretch: 1;
-            sessions: root.sessions;
-            active-session-id: root.current-session-id;
-            restore-session(id) => { root.restore-session(id); }
-            refresh => { root.refresh-sessions(); }
-        }
-
-        if root.current-view == 4: SettingsView {
-            vertical-stretch: 1;
-            soul-text <=> root.soul-text;
-            policy-mode: root.settings-policy;
-            current-model: root.settings-model;
-            api-key-set: root.settings-api-key-set;
-            models: root.available-models;
-            save-soul(text) => { root.save-soul(text); }
-            set-policy(mode) => { root.set-policy(mode); }
-            set-model(id) => { root.set-model(id); }
-            refresh => { root.refresh-settings(); }
-        }
-
-        // ── Glow divider (chat view + Jarvis only) ────────────────────
-        if Palette.scanlines && root.current-view == 0: Rectangle {
-            height: 1px;
-            background: rgba(0, 212, 255, root.jarvis-pulse * 0.5 + 0.1);
-        }
-
-        // ── Input bar (chat view only) ────────────────────────────────
-        if root.current-view == 0: Rectangle {
-            background: Palette.bg;
-            HorizontalLayout {
-                padding: 12px;
-                InputBar {
-                    busy: root.agent-busy;
-                    glow-alpha: root.jarvis-pulse;
-                    recording: root.recording;
-                    toggle-recording => { root.toggle-recording(); }
-                    send(text) => {
-                        root.send-message(text);
-                    }
-                }
+            // ── Dock (Desktop only) — bottom-centre app launcher ─────────
+            if root.shell-mode == ShellMode.desktop: Dock {
+                current-view: root.current-view;
+                x: (parent.width - self.width) / 2;
+                y: parent.height - self.height - 16px;
+                select(v) => { root.open-view(v); }
             }
         }
     }

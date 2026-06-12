@@ -476,6 +476,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ui = AppWindow::new()?;
 
+    // Shell mode default is tier-clamped (CLAUDE.md "Nano-first"): the femtovg
+    // software renderer (Pi Zero 2W / 512MB boards) boots to the flat Focus
+    // face; everything else gets the windowed Desktop shell. Runtime-togglable.
+    if std::env::var("SLINT_BACKEND").map(|b| b.contains("femtovg")).unwrap_or(false) {
+        ui.set_shell_mode(ShellMode::Focus);
+    }
+
     // Message model
     let messages: Rc<slint::VecModel<MessageItem>> = Rc::new(slint::VecModel::default());
     ui.set_messages(slint::ModelRc::from(messages.clone()));
