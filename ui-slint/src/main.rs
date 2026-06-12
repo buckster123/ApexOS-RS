@@ -31,6 +31,10 @@ thread_local! {
         const { RefCell::new(None) };
     static TOASTS: RefCell<Option<Rc<slint::VecModel<ToastItem>>>> =
         const { RefCell::new(None) };
+    // Window manager (G2): Rust owns the window set; model order = z-order.
+    static WINDOWS: RefCell<Option<Rc<slint::VecModel<WindowDesc>>>> =
+        const { RefCell::new(None) };
+    static WIN_NEXT_ID: std::cell::Cell<i32> = const { std::cell::Cell::new(1) };
 }
 
 // ── Feedback subsystem (toasts) ───────────────────────────────────────────────
@@ -69,6 +73,133 @@ fn dismiss_toast(id: i32) {
 fn notify(kind: ToastKind, text: impl Into<String>) {
     let text = text.into();
     slint::invoke_from_event_loop(move || toast(kind, &text)).ok();
+}
+
+// ── Window manager (G2) ───────────────────────────────────────────────────────
+// All helpers run on the Slint thread (called from UI callbacks). The WINDOWS
+// VecModel's order IS the z-order: the last row paints on top.
+
+fn kind_ordinal(k: AppKind) -> i32 {
+    match k {
+        AppKind::Chat => 0,
+        AppKind::System => 1,
+        AppKind::Sensor => 2,
+        AppKind::Sessions => 3,
+        AppKind::Settings => 4,
+    }
+}
+
+fn kind_from_ordinal(o: i32) -> AppKind {
+    match o {
+        1 => AppKind::System,
+        2 => AppKind::Sensor,
+        3 => AppKind::Sessions,
+        4 => AppKind::Settings,
+        _ => AppKind::Chat,
+    }
+}
+
+fn kind_title(k: AppKind) -> &'static str {
+    match k {
+        AppKind::Chat => "Chat",
+        AppKind::System => "System",
+        AppKind::Sensor => "Sensors",
+        AppKind::Sessions => "Sessions",
+        AppKind::Settings => "Settings",
+    }
+}
+
+/// Default size for a freshly-launched window of `kind`; `n` is the current
+/// window count, used to cascade so new windows don't perfectly overlap.
+fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
+    let (w, h) = match kind {
+        AppKind::Chat => (760.0, 540.0),
+        AppKind::System => (440.0, 460.0),
+        AppKind::Sensor => (560.0, 480.0),
+        AppKind::Sessions => (500.0, 520.0),
+        AppKind::Settings => (660.0, 560.0),
+    };
+    let step = (n % 6) as f32 * 30.0;
+    (72.0 + step, 32.0 + step, w, h)
+}
+
+fn wm_index_by_id(model: &Rc<slint::VecModel<WindowDesc>>, id: i32) -> Option<usize> {
+    (0..model.row_count()).find(|&i| model.row_data(i).map(|d| d.id) == Some(id))
+}
+
+fn wm_index_by_kind(model: &Rc<slint::VecModel<WindowDesc>>, kind: AppKind) -> Option<usize> {
+    (0..model.row_count()).find(|&i| model.row_data(i).map(|d| d.kind) == Some(kind))
+}
+
+/// Move a window to the top of the z-order (end of the model) and mark it
+/// focused. Returns the focused window's kind ordinal (or -1 if not found).
+fn wm_focus(ui: &AppWindow, model: &Rc<slint::VecModel<WindowDesc>>, id: i32) {
+    if let Some(i) = wm_index_by_id(model, id) {
+        let d = model.remove(i);
+        let kind = d.kind;
+        model.push(d);
+        ui.set_focused_id(id);
+        ui.set_focused_kind(kind_ordinal(kind));
+    }
+}
+
+/// Recompute focus to the top-most non-minimised window (after a close/minimise).
+fn wm_refocus_top(ui: &AppWindow, model: &Rc<slint::VecModel<WindowDesc>>) {
+    for i in (0..model.row_count()).rev() {
+        if let Some(d) = model.row_data(i) {
+            if !d.minimized {
+                ui.set_focused_id(d.id);
+                ui.set_focused_kind(kind_ordinal(d.kind));
+                return;
+            }
+        }
+    }
+    ui.set_focused_id(0);
+    ui.set_focused_kind(-1);
+}
+
+fn wm_update_row(model: &Rc<slint::VecModel<WindowDesc>>, id: i32, f: impl FnOnce(&mut WindowDesc)) {
+    if let Some(i) = wm_index_by_id(model, id) {
+        if let Some(mut d) = model.row_data(i) {
+            f(&mut d);
+            model.set_row_data(i, d);
+        }
+    }
+}
+
+/// Open (or reveal) the single window of `kind`: un-minimise + focus if it
+/// already exists, else create it with a cascaded default geometry.
+fn wm_launch(ui: &AppWindow, model: &Rc<slint::VecModel<WindowDesc>>, kind: AppKind) {
+    if let Some(i) = wm_index_by_kind(model, kind) {
+        let id = model.row_data(i).map(|d| d.id).unwrap_or(0);
+        wm_update_row(model, id, |d| d.minimized = false);
+        wm_focus(ui, model, id);
+        return;
+    }
+    let id = WIN_NEXT_ID.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        v
+    });
+    let (x, y, w, h) = default_geom(kind, model.row_count() as i32);
+    model.push(WindowDesc {
+        id,
+        kind,
+        title: kind_title(kind).into(),
+        x,
+        y,
+        w,
+        h,
+        minimized: false,
+        maximized: false,
+    });
+    wm_focus(ui, model, id);
+}
+
+/// Nudge the chat ScrollView to the bottom by bumping the AgentBridge tick.
+fn bump_scroll(ui: &AppWindow) {
+    let t = ui.global::<AgentBridge>().get_chat_scroll_tick();
+    ui.global::<AgentBridge>().set_chat_scroll_tick(t.wrapping_add(1));
 }
 
 fn push_message(item: MessageItem) {
@@ -507,6 +638,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initial sys stats (all zeros, offline)
     ui.set_sys_stats(empty_sys_stats());
 
+    // ── Window manager (G2): model + seed the Chat window ─────────────────────
+    let windows: Rc<slint::VecModel<WindowDesc>> = Rc::new(slint::VecModel::default());
+    ui.set_windows(slint::ModelRc::from(windows.clone()));
+    WINDOWS.with(|w| *w.borrow_mut() = Some(windows.clone()));
+    wm_launch(&ui, &windows, AppKind::Chat);
+
+    // ── Window-management callbacks ───────────────────────────────────────────
+    {
+        let w = windows.clone();
+        let uw = ui.as_weak();
+        ui.on_launch_app(move |ord| {
+            if let Some(ui) = uw.upgrade() { wm_launch(&ui, &w, kind_from_ordinal(ord)); }
+        });
+    }
+    {
+        let w = windows.clone();
+        let uw = ui.as_weak();
+        ui.on_focus_window(move |id| {
+            if let Some(ui) = uw.upgrade() { wm_focus(&ui, &w, id); }
+        });
+    }
+    {
+        let w = windows.clone();
+        let uw = ui.as_weak();
+        ui.on_close_window(move |id| {
+            if let Some(ui) = uw.upgrade() {
+                if let Some(i) = wm_index_by_id(&w, id) { w.remove(i); }
+                wm_refocus_top(&ui, &w);
+            }
+        });
+    }
+    {
+        let w = windows.clone();
+        let uw = ui.as_weak();
+        ui.on_minimize_window(move |id| {
+            if let Some(ui) = uw.upgrade() {
+                wm_update_row(&w, id, |d| d.minimized = true);
+                wm_refocus_top(&ui, &w);
+            }
+        });
+    }
+    {
+        let w = windows.clone();
+        let uw = ui.as_weak();
+        ui.on_maximize_window(move |id| {
+            if let Some(ui) = uw.upgrade() {
+                wm_update_row(&w, id, |d| d.maximized = !d.maximized);
+                wm_focus(&ui, &w, id);
+            }
+        });
+    }
+    {
+        let w = windows.clone();
+        ui.on_move_window(move |id, x, y| {
+            wm_update_row(&w, id, |d| { d.x = x; d.y = y; });
+        });
+    }
+    {
+        let w = windows.clone();
+        ui.on_resize_window(move |id, ww, hh| {
+            wm_update_row(&w, id, |d| { d.w = ww; d.h = hh; });
+        });
+    }
+
     let state = Arc::new(Mutex::new(AppState::default()));
 
     // Voice state
@@ -663,9 +858,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // ── approve / reject callbacks ────────────────────────────────────────────
+    // ── approve / reject callbacks (via AgentBridge global) ───────────────────
     let tx_approve = tx.clone();
-    ui.on_approve_tool(move |call_id| {
+    ui.global::<AgentBridge>().on_approve_tool(move |call_id| {
         if let Some(row) = find_tool_row(call_id.as_str()) {
             update_tool_row(row, |item| item.awaiting_approval = false);
         }
@@ -679,7 +874,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let tx_reject = tx.clone();
-    ui.on_reject_tool(move |call_id| {
+    ui.global::<AgentBridge>().on_reject_tool(move |call_id| {
         if let Some(row) = find_tool_row(call_id.as_str()) {
             update_tool_row(row, |item| {
                 item.awaiting_approval = false;
@@ -805,7 +1000,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                             let payload = serde_json::json!({"type":"user_prompt","text":&text}).to_string();
                             tx.send(payload).ok();
-                            ui.invoke_scroll_to_bottom();
+                            bump_scroll(&ui);
                         }
                     }
                 }).ok();
@@ -972,7 +1167,7 @@ fn dispatch_event(
                         push_message(item);
                     }
                     if has_history {
-                        ui.invoke_scroll_to_bottom();
+                        bump_scroll(&ui);
                     }
                 }
             })
@@ -995,7 +1190,7 @@ fn dispatch_event(
                         tool_status: "".into(),
                         awaiting_approval: false,
                     });
-                    ui.invoke_scroll_to_bottom();
+                    bump_scroll(&ui);
                 }
             })
             .ok();
@@ -1029,7 +1224,7 @@ fn dispatch_event(
                         ui.set_agent_busy(true);
                     }
                     update_last_agent_message(&delta);
-                    ui.invoke_scroll_to_bottom();
+                    bump_scroll(&ui);
                 }
             })
             .ok();
@@ -1121,7 +1316,7 @@ fn dispatch_event(
                         tool_status: "running".into(),
                         awaiting_approval: false,
                     });
-                    ui.invoke_scroll_to_bottom();
+                    bump_scroll(&ui);
                 }
             })
             .ok();

@@ -1,5 +1,5 @@
 import { Palette, Theme } from "palette.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge } from "types.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
 import { Dashboard } from "components/dashboard.slint";
@@ -8,8 +8,9 @@ import { SessionView } from "components/session_view.slint";
 import { SettingsView } from "components/settings_view.slint";
 import { ToastHost, Notifications } from "components/toast.slint";
 import { Dock } from "components/dock.slint";
+import { AppWindowFrame } from "components/app_window_frame.slint";
 
-export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, Notifications }
+export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -24,8 +25,8 @@ export component AppWindow inherits Window {
     in-out property <SysStats>       sys-stats;
     in-out property <[SessionItem]>  sessions;
     in-out property <int>            current-session-id: 0;
-    in-out property <int>            current-view: 0;   // 0=chat  1=system  2=sensor  3=sessions  4=settings
-    in-out property <ShellMode>      shell-mode: ShellMode.desktop;  // G1: Desktop (windowed) ⇄ Focus (full-screen app)
+    in-out property <int>            current-view: 0;   // 0=chat 1=system 2=sensor 3=sessions 4=settings (Focus mode)
+    in-out property <ShellMode>      shell-mode: ShellMode.desktop;  // Desktop (windowed) ⇄ Focus (full-screen app)
     in-out property <bool>           recording: false;
     in-out property <bool>           tts-enabled: false;
     in-out property <string>         soul-text: "";
@@ -34,6 +35,13 @@ export component AppWindow inherits Window {
     in-out property <bool>           settings-api-key-set: false;
     in-out property <[ModelItem]>    available-models;
     in-out property <bool>           power-modal-open: false;
+
+    // ── Window manager (G2) ─────────────────────────────────────────────
+    // Rust owns the set; model order = z-order (last on top). focused-id /
+    // focused-kind are Rust-maintained for chrome highlight + dock state.
+    in-out property <[WindowDesc]>   windows;
+    in-out property <int>            focused-id: 0;
+    in-out property <int>            focused-kind: -1;   // AppKind ordinal of focused window
 
     // ── Callbacks sent to Rust ──────────────────────────────────────────
     callback send-message(string);
@@ -46,20 +54,16 @@ export component AppWindow inherits Window {
     callback set-policy(string);
     callback set-model(string);
     callback power-action(string);
-    // chat always instantiated — aliases always valid
-    callback scroll-to-bottom <=> chat.scroll-to-bottom;
-    callback approve-tool <=> chat.approve-tool;
-    callback reject-tool  <=> chat.reject-tool;
+    // Window management (Desktop mode)
+    callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
+    callback focus-window(int);               // id
+    callback close-window(int);               // id
+    callback minimize-window(int);            // id
+    callback maximize-window(int);            // id
+    callback move-window(int, length, length);     // id, x, y
+    callback resize-window(int, length, length);   // id, w, h
 
-    // Name of the currently active app (used by the desktop window caption).
-    function app-title() -> string {
-        root.current-view == 1 ? "System" :
-        root.current-view == 2 ? "Sensors" :
-        root.current-view == 3 ? "Sessions" :
-        root.current-view == 4 ? "Settings" : "Chat"
-    }
-
-    // Switch app + run any per-app refresh (shared by tab strip and dock).
+    // Switch app + run any per-app refresh (Focus-mode tab strip).
     function open-view(v: int) {
         root.current-view = v;
         if (v == 3) { root.refresh-sessions(); }
@@ -211,108 +215,33 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ── Body: wallpaper + app surface + dock. A Rectangle (not a
-        //    layout) so the desktop wallpaper, the window surface and the
-        //    dock can overlap. In Focus mode the surface fills the body and
-        //    the wallpaper/dock are absent — identical to the legacy face. ─
+        // ── Body ────────────────────────────────────────────────────────
         Rectangle {
             vertical-stretch: 1;
 
-            // ── Wallpaper (Desktop only) — themed gradient. Cheap (no
-            //    animation) so it holds on Nano too; the temp-reactive
-            //    "breathing" variant is a later, tier-gated enhancement. ──
-            if root.shell-mode == ShellMode.desktop: Rectangle {
-                x: 0; y: 0;
-                width: parent.width;
-                height: parent.height;
-                background: Palette.bg;
-
-                Rectangle {
-                    x: 0; y: 0; width: parent.width; height: parent.height;
-                    background: @linear-gradient(150deg,
-                        Palette.surface 0%, Palette.bg 55%, Palette.surface-hi 100%);
-                    opacity: 0.55;
-                }
-                Rectangle {
-                    x: 0; y: 0; width: parent.width; height: parent.height;
-                    background: @radial-gradient(circle, Palette.primary-dim 0%, transparent 65%);
-                    opacity: 0.10;
-                }
-            }
-
-            // ── App surface: a framed window in Desktop, full-screen in
-            //    Focus. Instantiated ONCE so chat's callback aliases stay
-            //    valid; only its geometry/chrome changes with shell-mode. ──
-            Rectangle {
-                clip: true;
-                x:      root.shell-mode == ShellMode.desktop ? 64px : 0px;
-                y:      root.shell-mode == ShellMode.desktop ? 24px : 0px;
-                width:  root.shell-mode == ShellMode.desktop ? parent.width  - 128px : parent.width;
-                height: root.shell-mode == ShellMode.desktop ? parent.height - 24px - 88px : parent.height;
-                background: Palette.bg;
-                border-radius: root.shell-mode == ShellMode.desktop ? Palette.radius-lg : 0px;
-                border-width:  root.shell-mode == ShellMode.desktop ? 1px : 0px;
-                border-color: Palette.border-hi;
-                drop-shadow-blur: root.shell-mode == ShellMode.desktop ? 32px : 0px;
-                drop-shadow-color: #00000080;
-                drop-shadow-offset-y: 8px;
-                animate x, y, width, height { duration: 220ms; easing: ease-in-out; }
+            // ════ FOCUS MODE: legacy full-screen tabbed surface ══════════
+            if root.shell-mode == ShellMode.focus: Rectangle {
+                x: 0; y: 0; width: parent.width; height: parent.height;
 
                 VerticalLayout {
-
-                    // ── Window caption (Desktop only) — app name ─────────
-                    if root.shell-mode == ShellMode.desktop: Rectangle {
-                        height: 30px;
-                        background: Palette.surface;
-
-                        Rectangle {
-                            y: parent.height - 1px;
-                            height: 1px;
-                            background: Palette.border;
-                        }
-
-                        HorizontalLayout {
-                            padding-left: 14px;
-                            padding-right: 10px;
-                            spacing: 8px;
-
-                            Text {
-                                text: root.app-title();
-                                color: Palette.text-bright;
-                                font-size: 11px;
-                                font-weight: 700;
-                                letter-spacing: 0.5px;
-                                vertical-alignment: center;
-                            }
-
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                    }
-
-                    // ── Tab strip (Focus only) — legacy nav; the dock
-                    //    replaces it in Desktop mode. ──────────────────────
-                    if root.shell-mode == ShellMode.focus: Rectangle {
+                    // Tab strip (36 px)
+                    Rectangle {
                         height: 36px;
                         background: Palette.surface;
-
                         Rectangle {
                             y: parent.height - 1px;
                             height: 1px;
                             background: Palette.border;
                         }
-
                         HorizontalLayout {
                             padding-left: 8px;
                             spacing: 0px;
 
-                            // CHAT tab
                             Rectangle {
                                 width: 80px;
                                 if root.current-view == 0: Rectangle {
-                                    y: parent.height - 2px;
-                                    height: 2px;
-                                    background: Palette.primary;
-                                    border-radius: 1px;
+                                    y: parent.height - 2px; height: 2px;
+                                    background: Palette.primary; border-radius: 1px;
                                 }
                                 TouchArea { clicked => { root.open-view(0); } }
                                 Text {
@@ -326,14 +255,11 @@ export component AppWindow inherits Window {
                                     animate color { duration: 200ms; }
                                 }
                             }
-                            // SYSTEM tab
                             Rectangle {
                                 width: 80px;
                                 if root.current-view == 1: Rectangle {
-                                    y: parent.height - 2px;
-                                    height: 2px;
-                                    background: Palette.primary;
-                                    border-radius: 1px;
+                                    y: parent.height - 2px; height: 2px;
+                                    background: Palette.primary; border-radius: 1px;
                                 }
                                 TouchArea { clicked => { root.open-view(1); } }
                                 Text {
@@ -347,14 +273,11 @@ export component AppWindow inherits Window {
                                     animate color { duration: 200ms; }
                                 }
                             }
-                            // SENSOR tab
                             Rectangle {
                                 width: 80px;
                                 if root.current-view == 2: Rectangle {
-                                    y: parent.height - 2px;
-                                    height: 2px;
-                                    background: Palette.primary;
-                                    border-radius: 1px;
+                                    y: parent.height - 2px; height: 2px;
+                                    background: Palette.primary; border-radius: 1px;
                                 }
                                 TouchArea { clicked => { root.open-view(2); } }
                                 Text {
@@ -368,14 +291,11 @@ export component AppWindow inherits Window {
                                     animate color { duration: 200ms; }
                                 }
                             }
-                            // SESSIONS tab
                             Rectangle {
                                 width: 80px;
                                 if root.current-view == 3: Rectangle {
-                                    y: parent.height - 2px;
-                                    height: 2px;
-                                    background: Palette.primary;
-                                    border-radius: 1px;
+                                    y: parent.height - 2px; height: 2px;
+                                    background: Palette.primary; border-radius: 1px;
                                 }
                                 TouchArea { clicked => { root.open-view(3); } }
                                 Text {
@@ -389,14 +309,11 @@ export component AppWindow inherits Window {
                                     animate color { duration: 200ms; }
                                 }
                             }
-                            // SETTINGS tab
                             Rectangle {
                                 width: 88px;
                                 if root.current-view == 4: Rectangle {
-                                    y: parent.height - 2px;
-                                    height: 2px;
-                                    background: Palette.primary;
-                                    border-radius: 1px;
+                                    y: parent.height - 2px; height: 2px;
+                                    background: Palette.primary; border-radius: 1px;
                                 }
                                 TouchArea { clicked => { root.open-view(4); } }
                                 Text {
@@ -410,34 +327,28 @@ export component AppWindow inherits Window {
                                     animate color { duration: 200ms; }
                                 }
                             }
-
                             Rectangle { horizontal-stretch: 1; }
                         }
                     }
 
-                    // ── Chat view — ALWAYS instantiated: its callback
-                    //    aliases require the `chat` element to exist.
-                    //    Collapses to 0 px when inactive. ──────────────────
-                    chat := ChatView {
+                    // Chat (always) + conditional router views
+                    ChatView {
                         vertical-stretch: root.current-view == 0 ? 1 : 0;
                         max-height: root.current-view == 0 ? 999999px : 0px;
                         messages: root.messages;
                         glow-alpha: root.jarvis-pulse;
+                        scroll-tick: AgentBridge.chat-scroll-tick;
                     }
 
-                    // ── G0 router: the other views are CONDITIONALLY
-                    //    instantiated — inactive views leave the tree. ─────
                     if root.current-view == 1: Dashboard {
                         vertical-stretch: 1;
                         stats: root.sys-stats;
                         glow-alpha: root.jarvis-pulse;
                     }
-
                     if root.current-view == 2: SensorView {
                         vertical-stretch: 1;
                         stats: root.sys-stats;
                     }
-
                     if root.current-view == 3: SessionView {
                         vertical-stretch: 1;
                         sessions: root.sessions;
@@ -445,7 +356,6 @@ export component AppWindow inherits Window {
                         restore-session(id) => { root.restore-session(id); }
                         refresh => { root.refresh-sessions(); }
                     }
-
                     if root.current-view == 4: SettingsView {
                         vertical-stretch: 1;
                         soul-text <=> root.soul-text;
@@ -459,13 +369,11 @@ export component AppWindow inherits Window {
                         refresh => { root.refresh-settings(); }
                     }
 
-                    // ── Glow divider (chat view + Jarvis only) ───────────
                     if Palette.scanlines && root.current-view == 0: Rectangle {
                         height: 1px;
                         background: rgba(0, 212, 255, root.jarvis-pulse * 0.5 + 0.1);
                     }
 
-                    // ── Input bar (chat view only) ───────────────────────
                     if root.current-view == 0: Rectangle {
                         background: Palette.bg;
                         HorizontalLayout {
@@ -475,21 +383,89 @@ export component AppWindow inherits Window {
                                 glow-alpha: root.jarvis-pulse;
                                 recording: root.recording;
                                 toggle-recording => { root.toggle-recording(); }
-                                send(text) => {
-                                    root.send-message(text);
-                                }
+                                send(text) => { root.send-message(text); }
                             }
                         }
                     }
                 }
             }
 
-            // ── Dock (Desktop only) — bottom-centre app launcher ─────────
-            if root.shell-mode == ShellMode.desktop: Dock {
-                current-view: root.current-view;
-                x: (parent.width - self.width) / 2;
-                y: parent.height - self.height - 16px;
-                select(v) => { root.open-view(v); }
+            // ════ DESKTOP MODE: wallpaper + window layer + dock ══════════
+            if root.shell-mode == ShellMode.desktop: Rectangle {
+                x: 0; y: 0; width: parent.width; height: parent.height;
+
+                // Wallpaper — themed gradient (cheap; tier-safe).
+                Rectangle {
+                    x: 0; y: 0; width: parent.width; height: parent.height;
+                    background: Palette.bg;
+                    Rectangle {
+                        x: 0; y: 0; width: parent.width; height: parent.height;
+                        background: @linear-gradient(150deg,
+                            Palette.surface 0%, Palette.bg 55%, Palette.surface-hi 100%);
+                        opacity: 0.55;
+                    }
+                    Rectangle {
+                        x: 0; y: 0; width: parent.width; height: parent.height;
+                        background: @radial-gradient(circle, Palette.primary-dim 0%, transparent 65%);
+                        opacity: 0.10;
+                    }
+                }
+
+                // Window layer — one frame per (non-minimised) window; paint
+                // order = model order, so the last window renders on top.
+                for w in root.windows: Rectangle {
+                    if !w.minimized: AppWindowFrame {
+                        win-id: w.id;
+                        kind: w.kind;
+                        title: w.title;
+                        base-x: w.x;
+                        base-y: w.y;
+                        base-w: w.w;
+                        base-h: w.h;
+                        maximized: w.maximized;
+                        focused: w.id == root.focused-id;
+                        area-w: parent.width;
+                        area-h: parent.height - 88px;
+
+                        messages: root.messages;
+                        agent-busy: root.agent-busy;
+                        glow-alpha: root.jarvis-pulse;
+                        recording: root.recording;
+                        scroll-tick: AgentBridge.chat-scroll-tick;
+                        stats: root.sys-stats;
+                        sessions: root.sessions;
+                        active-session-id: root.current-session-id;
+                        soul-text: root.soul-text;
+                        policy-mode: root.settings-policy;
+                        current-model: root.settings-model;
+                        api-key-set: root.settings-api-key-set;
+                        models: root.available-models;
+
+                        send-message(t) => { root.send-message(t); }
+                        toggle-recording => { root.toggle-recording(); }
+                        restore-session(id) => { root.restore-session(id); }
+                        refresh-sessions => { root.refresh-sessions(); }
+                        save-soul(t) => { root.save-soul(t); }
+                        set-policy(m) => { root.set-policy(m); }
+                        set-model(id) => { root.set-model(id); }
+                        refresh-settings => { root.refresh-settings(); }
+
+                        req-focus => { root.focus-window(w.id); }
+                        req-close => { root.close-window(w.id); }
+                        req-minimize => { root.minimize-window(w.id); }
+                        req-maximize => { root.maximize-window(w.id); }
+                        commit-move(nx, ny) => { root.move-window(w.id, nx, ny); }
+                        commit-resize(nw, nh) => { root.resize-window(w.id, nw, nh); }
+                    }
+                }
+
+                // Dock — bottom-centre launcher; highlights the focused kind.
+                Dock {
+                    current-view: root.focused-kind;
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height - self.height - 16px;
+                    select(v) => { root.launch-app(v); }
+                }
             }
         }
     }
@@ -510,7 +486,6 @@ export component AppWindow inherits Window {
         width: parent.width; height: parent.height;
         background: rgba(0, 0, 0, 0.75);
 
-        // Modal card
         Rectangle {
             width: 268px;
             height: 160px;
@@ -538,7 +513,6 @@ export component AppWindow inherits Window {
                     spacing: 8px;
                     alignment: center;
 
-                    // REBOOT
                     Rectangle {
                         width: 72px; height: 34px;
                         border-radius: Palette.radius;
@@ -554,7 +528,6 @@ export component AppWindow inherits Window {
                                 root.power-action("reboot");
                             }
                         }
-
                         Text {
                             text: "REBOOT";
                             color: #eab308;
@@ -566,7 +539,6 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // SHUTDOWN
                     Rectangle {
                         width: 80px; height: 34px;
                         border-radius: Palette.radius;
@@ -582,7 +554,6 @@ export component AppWindow inherits Window {
                                 root.power-action("shutdown");
                             }
                         }
-
                         Text {
                             text: "SHUTDOWN";
                             color: #ef4444;
@@ -594,7 +565,6 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // CANCEL
                     Rectangle {
                         width: 60px; height: 34px;
                         border-radius: Palette.radius;
@@ -607,7 +577,6 @@ export component AppWindow inherits Window {
                         cancel-area := TouchArea {
                             clicked => { root.power-modal-open = false; }
                         }
-
                         Text {
                             text: "CANCEL";
                             color: Palette.text-dim;

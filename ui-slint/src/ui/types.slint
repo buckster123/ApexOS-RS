@@ -6,6 +6,36 @@
 // Runtime-switchable; tier-clamped by Rust (Nano defaults to Focus).
 export enum ShellMode { desktop, focus }
 
+// ── Window manager (glowup G2) ──────────────────────────────────────────
+// Every app is a window. Rust owns the set (which windows exist, z-order =
+// model order with the last element on top); Slint owns live-drag geometry
+// for smoothness and commits back to Rust on release.
+export enum AppKind { chat, system, sensor, sessions, settings }
+
+export struct WindowDesc {
+    id:        int,        // stable identity assigned by Rust
+    kind:      AppKind,
+    title:     string,
+    x:         length,
+    y:         length,
+    w:         length,
+    h:         length,
+    minimized: bool,
+    maximized: bool,
+}
+
+// ── AgentBridge global ──────────────────────────────────────────────────
+// Decouples chat tool-approval + scroll from the AppWindow element tree so
+// ChatView can be instantiated freely (Focus surface AND a Desktop window)
+// without the single-instance callback-alias constraint. Rust wires the
+// callbacks once; any ChatView instance calls them. Rust bumps
+// chat-scroll-tick to request an auto-scroll-to-bottom.
+export global AgentBridge {
+    callback approve-tool(string);   // call_id
+    callback reject-tool(string);    // call_id
+    in property <int> chat-scroll-tick: 0;
+}
+
 // System stats polled from agentd /api/run + sensor_reading WS events.
 export struct SysStats {
     cpu-pct:      float,   // 0–100  (load avg / nproc * 100, capped)

@@ -1,10 +1,12 @@
 import { Palette } from "../palette.slint";
-import { MessageItem } from "../types.slint";
+import { MessageItem, AgentBridge } from "../types.slint";
 import { MessageBubble } from "message_bubble.slint";
 import { ToolCard } from "tool_card.slint";
 
 // Scrollable message list.
-// Auto-scroll is triggered by AppWindow calling scroll-to-bottom().
+// Auto-scroll: Rust bumps AgentBridge.chat-scroll-tick, which feeds `scroll-tick`
+// here; the `changed` handler snaps the flickable to the bottom. Tool approval
+// routes through the AgentBridge global so ChatView is no longer single-instance.
 
 export component ChatView {
     preferred-height: 0px;
@@ -12,15 +14,12 @@ export component ChatView {
 
     in property <[MessageItem]> messages;
     in property <float>         glow-alpha: 0.0;
-
-    callback scroll-to-bottom();
-    callback approve-tool(string);   // call_id
-    callback reject-tool(string);    // call_id
+    in property <int>           scroll-tick: 0;   // bump to request scroll-to-bottom
 
     // Expose the flickable for scroll control
     property <length> flick-height: flick.viewport-height;
 
-    scroll-to-bottom => {
+    changed scroll-tick => {
         flick.viewport-y = min(0px, -(flick.viewport-height - flick.height));
     }
 
@@ -49,8 +48,8 @@ export component ChatView {
                     tool-status:        item.tool-status;
                     awaiting-approval:  item.awaiting-approval;
                     glow-alpha:         root.glow-alpha;
-                    approve => { root.approve-tool(item.call-id); }
-                    reject  => { root.reject-tool(item.call-id); }
+                    approve => { AgentBridge.approve-tool(item.call-id); }
+                    reject  => { AgentBridge.reject-tool(item.call-id); }
                 }
                 if item.role != "tool": MessageBubble {
                     role:       item.role;

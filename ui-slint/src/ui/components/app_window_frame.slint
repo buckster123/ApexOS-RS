@@ -1,0 +1,288 @@
+// AppWindowFrame (glowup G2) — a draggable / resizable / focusable window
+// frame that hosts any app by `kind`. Chrome = caption bar (title + minimise /
+// maximise / close) over a clipped content area.
+//
+// Geometry model: Rust owns base x/y/w/h (the WindowDesc row); the frame keeps
+// LOCAL drag/resize deltas for smooth pointer tracking and commits them to Rust
+// on release. Focus (raise-to-front) also fires on release — deliberately, not
+// on press: raising reorders the Rust model, and a `for` repeater keys by index,
+// so reordering mid-drag would reassign this instance to another window's data.
+// Releasing first means no pointer capture is active when the reorder happens.
+
+import { Palette } from "../palette.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, AppKind } from "../types.slint";
+import { ChatView } from "chat_view.slint";
+import { InputBar } from "input_bar.slint";
+import { Dashboard } from "dashboard.slint";
+import { SensorView } from "sensor_view.slint";
+import { SessionView } from "session_view.slint";
+import { SettingsView } from "settings_view.slint";
+
+component CaptionButton inherits Rectangle {
+    in property <string> glyph;
+    in property <color> hover-bg: Palette.surface-hi;
+    in property <color> glyph-color: Palette.text-dim;
+    callback clicked;
+    width: 26px;
+    height: 22px;
+    border-radius: Palette.radius-sm;
+    background: touch.has-hover ? root.hover-bg : transparent;
+    animate background { duration: 120ms; }
+    touch := TouchArea { clicked => { root.clicked(); } }
+    Text {
+        text: root.glyph;
+        color: root.glyph-color;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component AppWindowFrame inherits Rectangle {
+    // ── Window identity / geometry (from the Rust WindowDesc) ────────────
+    in property <int>     win-id;
+    in property <AppKind> kind;
+    in property <string>  title;
+    in property <length>  base-x;
+    in property <length>  base-y;
+    in property <length>  base-w;
+    in property <length>  base-h;
+    in property <bool>    maximized;
+    in property <bool>    focused;
+    in property <length>  area-w;      // desktop area, for maximise + clamping
+    in property <length>  area-h;
+
+    // ── App data (pass-through; only the active kind reads its slice) ────
+    in property <[MessageItem]>  messages;
+    in property <bool>           agent-busy;
+    in property <float>          glow-alpha;
+    in property <bool>           recording;
+    in property <int>            scroll-tick;
+    in property <SysStats>       stats;
+    in property <[SessionItem]>  sessions;
+    in property <int>            active-session-id;
+    in property <string>         soul-text;
+    in property <string>         policy-mode;
+    in property <string>         current-model;
+    in property <bool>           api-key-set;
+    in property <[ModelItem]>    models;
+
+    // ── App callbacks (forwarded to root AppWindow) ─────────────────────
+    callback send-message(string);
+    callback toggle-recording();
+    callback restore-session(int);
+    callback refresh-sessions();
+    callback save-soul(string);
+    callback set-policy(string);
+    callback set-model(string);
+    callback refresh-settings();
+
+    // ── Window-management callbacks ─────────────────────────────────────
+    callback req-focus();
+    callback req-close();
+    callback req-minimize();
+    callback req-maximize();
+    callback commit-move(length, length);     // new x, y
+    callback commit-resize(length, length);   // new w, h
+
+    // ── Local drag / resize deltas ──────────────────────────────────────
+    property <length> dx: 0;
+    property <length> dy: 0;
+    property <length> dw: 0;
+    property <length> dh: 0;
+    property <length> press-ax;
+    property <length> press-ay;
+    property <length> orig-a;
+    property <length> orig-b;
+
+    property <length> min-w: 220px;
+    property <length> min-h: 140px;
+
+    x:      root.maximized ? 0px       : root.base-x + root.dx;
+    y:      root.maximized ? 0px       : root.base-y + root.dy;
+    width:  root.maximized ? root.area-w : root.base-w + root.dw;
+    height: root.maximized ? root.area-h : root.base-h + root.dh;
+
+    background: Palette.bg;
+    border-radius: root.maximized ? 0px : Palette.radius-lg;
+    border-width: 1px;
+    border-color: root.focused ? Palette.border-hi : Palette.border;
+    clip: true;
+    drop-shadow-blur: root.focused ? 36px : 18px;
+    drop-shadow-color: root.focused ? #000000aa : #00000066;
+    drop-shadow-offset-y: 8px;
+
+    VerticalLayout {
+        // ── Caption bar (drag handle) ───────────────────────────────────
+        Rectangle {
+            height: 30px;
+            background: root.focused ? Palette.surface-hi : Palette.surface;
+            animate background { duration: 150ms; }
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Palette.border;
+            }
+
+            caption-ta := TouchArea {
+                mouse-cursor: move;
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down && !root.maximized) {
+                        root.orig-a = root.dx;
+                        root.orig-b = root.dy;
+                        root.press-ax = self.absolute-position.x + self.mouse-x;
+                        root.press-ay = self.absolute-position.y + self.mouse-y;
+                    }
+                    if (ev.kind == PointerEventKind.up) {
+                        if (!root.maximized) {
+                            root.commit-move(root.base-x + root.dx, root.base-y + root.dy);
+                            root.dx = 0;
+                            root.dy = 0;
+                        }
+                        root.req-focus();   // raise on release (see header note)
+                    }
+                }
+                moved => {
+                    if (!root.maximized) {
+                        root.dx = root.orig-a + (self.absolute-position.x + self.mouse-x - root.press-ax);
+                        root.dy = root.orig-b + (self.absolute-position.y + self.mouse-y - root.press-ay);
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 6px;
+                spacing: 6px;
+
+                Text {
+                    text: root.title;
+                    color: Palette.text-bright;
+                    font-size: 11px;
+                    font-weight: 700;
+                    letter-spacing: 0.5px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                CaptionButton {
+                    glyph: "—";
+                    clicked => { root.req-minimize(); }
+                }
+                CaptionButton {
+                    glyph: root.maximized ? "❐" : "▢";
+                    clicked => { root.req-maximize(); }
+                }
+                CaptionButton {
+                    glyph: "✕";
+                    hover-bg: rgba(239, 68, 68, 0.25);
+                    glyph-color: Palette.text-dim;
+                    clicked => { root.req-close(); }
+                }
+            }
+        }
+
+        // ── Content area: app by kind ───────────────────────────────────
+        if root.kind == AppKind.chat: VerticalLayout {
+            ChatView {
+                vertical-stretch: 1;
+                messages: root.messages;
+                glow-alpha: root.glow-alpha;
+                scroll-tick: root.scroll-tick;
+            }
+            Rectangle {
+                background: Palette.bg;
+                HorizontalLayout {
+                    padding: 12px;
+                    InputBar {
+                        busy: root.agent-busy;
+                        glow-alpha: root.glow-alpha;
+                        recording: root.recording;
+                        toggle-recording => { root.toggle-recording(); }
+                        send(text) => { root.send-message(text); }
+                    }
+                }
+            }
+        }
+
+        if root.kind == AppKind.system: Dashboard {
+            vertical-stretch: 1;
+            stats: root.stats;
+            glow-alpha: root.glow-alpha;
+        }
+
+        if root.kind == AppKind.sensor: SensorView {
+            vertical-stretch: 1;
+            stats: root.stats;
+        }
+
+        if root.kind == AppKind.sessions: SessionView {
+            vertical-stretch: 1;
+            sessions: root.sessions;
+            active-session-id: root.active-session-id;
+            restore-session(id) => { root.restore-session(id); }
+            refresh => { root.refresh-sessions(); }
+        }
+
+        if root.kind == AppKind.settings: SettingsView {
+            vertical-stretch: 1;
+            soul-text: root.soul-text;
+            policy-mode: root.policy-mode;
+            current-model: root.current-model;
+            api-key-set: root.api-key-set;
+            models: root.models;
+            save-soul(text) => { root.save-soul(text); }
+            set-policy(mode) => { root.set-policy(mode); }
+            set-model(id) => { root.set-model(id); }
+            refresh => { root.refresh-settings(); }
+        }
+    }
+
+    // ── Resize grip (bottom-right) ──────────────────────────────────────
+    if !root.maximized: Rectangle {
+        width: 16px;
+        height: 16px;
+        x: parent.width - self.width;
+        y: parent.height - self.height;
+
+        resize-ta := TouchArea {
+            mouse-cursor: nwse-resize;
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.down) {
+                    root.orig-a = root.dw;
+                    root.orig-b = root.dh;
+                    root.press-ax = self.absolute-position.x + self.mouse-x;
+                    root.press-ay = self.absolute-position.y + self.mouse-y;
+                }
+                if (ev.kind == PointerEventKind.up) {
+                    root.commit-resize(root.base-w + root.dw, root.base-h + root.dh);
+                    root.dw = 0;
+                    root.dh = 0;
+                    root.req-focus();
+                }
+            }
+            moved => {
+                root.dw = max(root.min-w - root.base-w,
+                              root.orig-a + (self.absolute-position.x + self.mouse-x - root.press-ax));
+                root.dh = max(root.min-h - root.base-h,
+                              root.orig-b + (self.absolute-position.y + self.mouse-y - root.press-ay));
+            }
+        }
+
+        // little corner hatch (two dots)
+        Rectangle {
+            x: 10px; y: 10px; width: 2px; height: 2px;
+            background: Palette.text-dim;
+        }
+        Rectangle {
+            x: 10px; y: 6px; width: 2px; height: 2px;
+            background: Palette.text-dim;
+        }
+        Rectangle {
+            x: 6px; y: 10px; width: 2px; height: 2px;
+            background: Palette.text-dim;
+        }
+    }
+}
