@@ -1,0 +1,88 @@
+// TerminalView (glowup G3d) — a line-mode PTY pane over agentd's /terminal-ws.
+// Rust owns the WS: it streams PTY output (ANSI stripped) into `output` and
+// bumps `scroll-tick` to pin the flickable to the bottom. Submitting the input
+// emits `send(line)`; Rust appends "\n" and writes it to the PTY stdin.
+//
+// Deliberately NOT a full terminal emulator: no cursor grid, no in-place ANSI
+// rendering — curses apps (htop, vim) will look garbled. This is the cheap
+// "log-watching / run-a-command" intermediate before a real VTE (deferred).
+
+import { Palette } from "../palette.slint";
+
+export component TerminalView {
+    in property <string> output;
+    in property <int>    scroll-tick: 0;   // bump to request scroll-to-bottom
+    callback send(string);                  // a submitted command line (no trailing \n)
+
+    changed scroll-tick => {
+        flick.viewport-y = min(0px, -(flick.viewport-height - flick.height));
+    }
+
+    VerticalLayout {
+        // ── Output pane ────────────────────────────────────────────────
+        flick := Flickable {
+            vertical-stretch: 1;
+            interactive: true;
+
+            VerticalLayout {
+                padding: 10px;
+                alignment: start;
+
+                if root.output == "": Text {
+                    text: "PTY ready — type a command below.\nLine-mode only (no full-screen apps).";
+                    color: Palette.text-dim;
+                    font-family: "monospace";
+                    font-size: 12px;
+                }
+
+                Text {
+                    text: root.output;
+                    color: Palette.text;
+                    font-family: "monospace";
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // ── Command input ──────────────────────────────────────────────
+        Rectangle {
+            height: 40px;
+            background: Palette.surface;
+
+            Rectangle {
+                y: 0px;
+                height: 1px;
+                background: Palette.border;
+            }
+
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 8px;
+
+                Text {
+                    text: "›";
+                    color: Palette.primary;
+                    font-family: "monospace";
+                    font-size: 15px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+
+                input := TextInput {
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    color: Palette.text-bright;
+                    font-family: "monospace";
+                    font-size: 13px;
+                    single-line: true;
+                    accepted => {
+                        root.send(self.text);
+                        self.text = "";
+                    }
+                }
+            }
+        }
+    }
+}

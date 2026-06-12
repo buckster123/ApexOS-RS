@@ -37,6 +37,9 @@ export component AppWindow inherits Window {
     in-out property <bool>           settings-api-key-set: false;
     in-out property <[ModelItem]>    available-models;
     in-out property <bool>           power-modal-open: false;
+    // Terminal app (G3d) — Rust owns the /terminal-ws PTY; output streams here.
+    in-out property <string>         terminal-text: "";
+    in-out property <int>            terminal-scroll-tick: 0;
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id /
@@ -61,6 +64,7 @@ export component AppWindow inherits Window {
     callback set-policy(string);
     callback set-model(string);
     callback power-action(string);
+    callback terminal-send(string);          // a submitted terminal command line
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -448,8 +452,11 @@ export component AppWindow inherits Window {
                         current-model: root.settings-model;
                         api-key-set: root.settings-api-key-set;
                         models: root.available-models;
+                        terminal-text: root.terminal-text;
+                        terminal-scroll-tick: root.terminal-scroll-tick;
 
                         send-message(t) => { root.send-message(t); }
+                        terminal-send(line) => { root.terminal-send(line); }
                         toggle-recording => { root.toggle-recording(); }
                         restore-session(id) => { root.restore-session(id); }
                         refresh-sessions => { root.refresh-sessions(); }

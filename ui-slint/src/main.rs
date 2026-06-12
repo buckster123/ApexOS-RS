@@ -41,6 +41,13 @@ thread_local! {
     static WINDOWS: RefCell<Option<Rc<slint::VecModel<WindowDesc>>>> =
         const { RefCell::new(None) };
     static WIN_NEXT_ID: std::cell::Cell<i32> = const { std::cell::Cell::new(1) };
+    // Terminal app (G3d): stdin sender (UI→task) + the matching receiver, parked
+    // until the Terminal window is first launched, when the WS task is spawned.
+    static TERM_TX: RefCell<Option<mpsc::UnboundedSender<String>>> =
+        const { RefCell::new(None) };
+    static TERM_RX: RefCell<Option<mpsc::UnboundedReceiver<String>>> =
+        const { RefCell::new(None) };
+    static TERM_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 // ── Feedback subsystem (toasts) ───────────────────────────────────────────────
@@ -105,6 +112,7 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::Sensor => 2,
         AppKind::Sessions => 3,
         AppKind::Settings => 4,
+        AppKind::Terminal => 5,
     }
 }
 
@@ -114,6 +122,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         2 => AppKind::Sensor,
         3 => AppKind::Sessions,
         4 => AppKind::Settings,
+        5 => AppKind::Terminal,
         _ => AppKind::Chat,
     }
 }
@@ -125,6 +134,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Sensor => "Sensors",
         AppKind::Sessions => "Sessions",
         AppKind::Settings => "Settings",
+        AppKind::Terminal => "Terminal",
     }
 }
 
@@ -137,6 +147,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Sensor => (560.0, 480.0),
         AppKind::Sessions => (500.0, 520.0),
         AppKind::Settings => (660.0, 560.0),
+        AppKind::Terminal => (640.0, 420.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -213,6 +224,129 @@ fn wm_launch(ui: &AppWindow, model: &Rc<slint::VecModel<WindowDesc>>, kind: AppK
         maximized: false,
     });
     wm_focus(ui, model, id);
+}
+
+/// Strip ANSI/VT escape sequences for the line-mode terminal (no cursor grid).
+/// Drops CSI (ESC[…), OSC (ESC]…BEL/ST), charset designations, carriage returns,
+/// and other C0 control bytes — keeping only printable text plus \n and \t.
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut col = 0usize; // current column, for tab expansion (8-wide stops)
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                // CSI: consume params/intermediates until a final byte @–~
+                Some('[') => {
+                    while let Some(&n) = chars.peek() {
+                        chars.next();
+                        if ('@'..='~').contains(&n) { break; }
+                    }
+                }
+                // OSC: consume until BEL or ST (ESC \)
+                Some(']') => {
+                    while let Some(&n) = chars.peek() {
+                        chars.next();
+                        if n == '\u{07}' { break; }
+                        if n == '\u{1b}' {
+                            if chars.peek() == Some(&'\\') { chars.next(); }
+                            break;
+                        }
+                    }
+                }
+                // Charset designation (ESC( / ESC) ) — drop the one trailing byte.
+                Some('(') | Some(')') => { chars.next(); }
+                // Any other single-char escape: the following char is already consumed.
+                _ => {}
+            },
+            '\r' | '\u{07}' => {} // carriage return / bell — meaningless without a grid
+            '\n' => { out.push('\n'); col = 0; }
+            '\t' => { // expand to the next 8-col tab stop (raw \t renders as a box)
+                let spaces = 8 - (col % 8);
+                for _ in 0..spaces { out.push(' '); }
+                col += spaces;
+            }
+            c if (c as u32) < 0x20 => {} // other C0 control chars
+            c => { out.push(c); col += 1; }
+        }
+    }
+    out
+}
+
+/// The /terminal-ws PTY task: streams binary PTY output into `terminal-text`
+/// (ANSI stripped, ring-buffered) and writes stdin lines from `rx`. Reconnects
+/// with backoff; a fresh bash is spawned on each (re)connect.
+async fn run_terminal_ws(
+    url: String,
+    ui_weak: slint::Weak<AppWindow>,
+    mut rx: mpsc::UnboundedReceiver<String>,
+) {
+    const CAP: usize = 60_000; // keep the last ~60 KB of scrollback
+    let mut buf = String::new();
+    let mut backoff_secs: u64 = 2;
+
+    loop {
+        eprintln!("[ui-slint] terminal connecting to {url}");
+        let (ws, _) = match connect_async(&url).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("[ui-slint] terminal WS connect failed: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(30);
+                continue;
+            }
+        };
+        backoff_secs = 2;
+        let (mut write, mut read) = ws.split();
+
+        loop {
+            tokio::select! {
+                msg = read.next() => match msg {
+                    Some(Ok(Message::Binary(data))) => {
+                        buf.push_str(&strip_ansi(&String::from_utf8_lossy(&data)));
+                        if buf.len() > CAP {
+                            let mut start = buf.len() - CAP / 2;
+                            while !buf.is_char_boundary(start) { start += 1; }
+                            buf.drain(..start);
+                        }
+                        let snap = buf.clone();
+                        let w = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = w.upgrade() {
+                                ui.set_terminal_text(snap.into());
+                                let t = ui.get_terminal_scroll_tick();
+                                ui.set_terminal_scroll_tick(t.wrapping_add(1));
+                            }
+                        }).ok();
+                    }
+                    Some(Ok(Message::Text(t))) => {
+                        buf.push_str(&strip_ansi(&t));
+                    }
+                    _ => {
+                        eprintln!("[ui-slint] terminal WS disconnected — reconnecting in {backoff_secs}s");
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                        backoff_secs = (backoff_secs * 2).min(30);
+                        break;
+                    }
+                },
+                line = rx.recv() => {
+                    if let Some(l) = line {
+                        write.send(Message::Binary(l.into_bytes().into())).await.ok();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Spawn the terminal WS task on first Terminal-window launch (once).
+fn start_terminal(rt: &tokio::runtime::Handle, url: &str, ui_weak: slint::Weak<AppWindow>) {
+    if TERM_STARTED.with(|c| { let v = c.get(); c.set(true); v }) {
+        return;
+    }
+    if let Some(rx) = TERM_RX.with(|r| r.borrow_mut().take()) {
+        rt.spawn(run_terminal_ws(url.to_string(), ui_weak, rx));
+    }
 }
 
 /// Nudge the chat ScrollView to the bottom by bumping the AgentBridge tick.
@@ -681,10 +815,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     WINDOWS.with(|w| *w.borrow_mut() = Some(windows.clone()));
     wm_launch(&ui, &windows, AppKind::Chat);
 
+    // ── Terminal (G3d): stdin channel + WS URL (parked until first launch) ────
+    let term_url = {
+        let base = std::env::var("AGENTD_WS")
+            .unwrap_or_else(|_| "ws://localhost:8787/ws".to_string());
+        let base = base
+            .strip_suffix("/ws")
+            .map(|b| format!("{b}/terminal-ws"))
+            .unwrap_or(base);
+        match std::env::var("AGENTD_TOKEN") {
+            Ok(t) if !t.is_empty() => format!("{base}?token={t}"),
+            _ => base,
+        }
+    };
+    {
+        let (term_tx, term_rx) = mpsc::unbounded_channel::<String>();
+        TERM_TX.with(|t| *t.borrow_mut() = Some(term_tx));
+        TERM_RX.with(|r| *r.borrow_mut() = Some(term_rx));
+    }
+    ui.on_terminal_send(move |line| {
+        TERM_TX.with(|t| {
+            if let Some(tx) = t.borrow().as_ref() {
+                let _ = tx.send(format!("{line}\n"));
+            }
+        });
+    });
+
     // ── Window-management callbacks ───────────────────────────────────────────
     {
         let w = windows.clone();
         let uw = ui.as_weak();
+        let rt_h_term = rt.handle().clone();
+        let term_url = term_url.clone();
         ui.on_launch_app(move |ord| {
             if let Some(ui) = uw.upgrade() {
                 let kind = kind_from_ordinal(ord);
@@ -694,6 +856,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match kind {
                     AppKind::Settings => ui.invoke_refresh_settings(),
                     AppKind::Sessions => ui.invoke_refresh_sessions(),
+                    AppKind::Terminal => start_terminal(&rt_h_term, &term_url, ui.as_weak()),
                     _ => {}
                 }
             }

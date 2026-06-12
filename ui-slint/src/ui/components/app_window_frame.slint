@@ -17,6 +17,7 @@ import { Dashboard } from "dashboard.slint";
 import { SensorView } from "sensor_view.slint";
 import { SessionView } from "session_view.slint";
 import { SettingsView } from "settings_view.slint";
+import { TerminalView } from "terminal_view.slint";
 
 component CaptionButton inherits Rectangle {
     in property <string> glyph;
@@ -66,6 +67,8 @@ export component AppWindowFrame inherits Rectangle {
     in property <string>         current-model;
     in property <bool>           api-key-set;
     in property <[ModelItem]>    models;
+    in property <string>         terminal-text;
+    in property <int>            terminal-scroll-tick;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -76,6 +79,7 @@ export component AppWindowFrame inherits Rectangle {
     callback set-policy(string);
     callback set-model(string);
     callback refresh-settings();
+    callback terminal-send(string);
 
     // ── Window-management callbacks ─────────────────────────────────────
     callback req-focus();
@@ -237,6 +241,13 @@ export component AppWindowFrame inherits Rectangle {
             set-policy(mode) => { root.set-policy(mode); }
             set-model(id) => { root.set-model(id); }
             refresh => { root.refresh-settings(); }
+        }
+
+        if root.kind == AppKind.terminal: TerminalView {
+            vertical-stretch: 1;
+            output: root.terminal-text;
+            scroll-tick: root.terminal-scroll-tick;
+            send(line) => { root.terminal-send(line); }
         }
     }
 
