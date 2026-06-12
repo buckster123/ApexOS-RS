@@ -48,11 +48,15 @@ export component SettingsView {
         Rectangle { height: 1px; background: Palette.border; }
 
         // ── Scrollable content ─────────────────────────────────────────────
+        // viewport-height MUST be set to the content's preferred height — without
+        // it a Flickable sizes its child layout to the visible area, so nothing
+        // overflows and nothing scrolls (the soul sub-Flickable below does the same).
         Flickable {
             vertical-stretch: 1;
             interactive: true;
+            viewport-height: settings-content.preferred-height;
 
-            VerticalLayout {
+            settings-content := VerticalLayout {
                 padding: 20px;
                 spacing: 24px;
                 alignment: start;

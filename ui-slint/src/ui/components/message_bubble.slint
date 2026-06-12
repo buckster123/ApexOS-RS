@@ -12,16 +12,23 @@ export component MessageBubble {
     in property <string> text;
     in property <bool>   streaming: false;
     in property <float>  glow-alpha: 0.0;   // 0–1, driven by AppWindow Timer
+    // Max bubble width, passed down from ChatView (which knows the row width
+    // top-down). Driving it from root.width here would form a binding loop.
+    in property <length> max-bubble-width: 600px;
 
     property <bool> is-user: root.role == "user";
 
+    // Pack the bubble to its side and let it hug its content (capped at ~78% of
+    // the row), instead of stretching full width — the classic user-right /
+    // agent-left chat layout. `alignment` makes the child take its preferred
+    // width; `max-width` bounds long messages so the Text wraps.
     HorizontalLayout {
-        padding-left:  root.is-user ? 72px : 0px;
-        padding-right: root.is-user ? 0px  : 72px;
+        alignment: root.is-user ? end : start;
         padding-top:   3px;
         padding-bottom: 3px;
 
         Rectangle {
+            max-width: root.max-bubble-width;
             background: root.is-user ? Palette.user-bubble : Palette.agent-bubble;
             border-radius: Palette.radius-lg;
             border-width: 1px;
