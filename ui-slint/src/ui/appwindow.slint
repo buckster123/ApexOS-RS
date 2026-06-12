@@ -9,6 +9,7 @@ import { SettingsView } from "components/settings_view.slint";
 import { ToastHost, Notifications } from "components/toast.slint";
 import { Taskbar } from "components/taskbar.slint";
 import { StartMenu } from "components/start_menu.slint";
+import { NotifCenter } from "components/notif_center.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
 export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge }
@@ -478,7 +479,10 @@ export component AppWindow inherits Window {
                     y: parent.height - self.height - 16px;
                     start-clicked => { root.start-menu-open = !root.start-menu-open; }
                     task-activate(id) => { root.task-activate(id); }
-                    tray-clicked => { root.notif-center-open = !root.notif-center-open; }
+                    tray-clicked => {
+                        root.notif-center-open = !root.notif-center-open;
+                        if root.notif-center-open { root.notif-unread = 0; }
+                    }
                 }
 
                 // Start menu (G3b) — backdrop dismiss + catalog panel, anchored
@@ -495,6 +499,17 @@ export component AppWindow inherits Window {
                         root.launch-app(ord);
                         root.start-menu-open = false;
                     }
+                }
+
+                // Notification center (G3c) — backdrop dismiss + history panel,
+                // anchored above the tray (bottom-right).
+                if root.notif-center-open: TouchArea {
+                    x: 0; y: 0; width: parent.width; height: parent.height;
+                    clicked => { root.notif-center-open = false; }
+                }
+                if root.notif-center-open: NotifCenter {
+                    x: parent.width - self.width - 16px;
+                    y: parent.height - 56px - 16px - self.height - 8px;
                 }
             }
         }

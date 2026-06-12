@@ -31,6 +31,12 @@ thread_local! {
         const { RefCell::new(None) };
     static TOASTS: RefCell<Option<Rc<slint::VecModel<ToastItem>>>> =
         const { RefCell::new(None) };
+    // Notification center (G3c): persisted history, newest first.
+    static NOTIF_LOG: RefCell<Option<Rc<slint::VecModel<ToastItem>>>> =
+        const { RefCell::new(None) };
+    // Weak handle for updating the unread badge from toast() on the Slint thread.
+    static UI_WEAK: RefCell<Option<slint::Weak<AppWindow>>> =
+        const { RefCell::new(None) };
     // Window manager (G2): Rust owns the window set; model order = z-order.
     static WINDOWS: RefCell<Option<Rc<slint::VecModel<WindowDesc>>>> =
         const { RefCell::new(None) };
@@ -48,9 +54,22 @@ fn toast(kind: ToastKind, text: &str) {
         _                => 4000,
     };
     let id = TOAST_SEQ.fetch_add(1, Ordering::SeqCst);
+    let item = ToastItem { id, kind, text: text.into(), timeout_ms };
     TOASTS.with(|t| {
         if let Some(model) = t.borrow().as_ref() {
-            model.push(ToastItem { id, kind, text: text.into(), timeout_ms });
+            model.push(item.clone());
+        }
+    });
+    // Persist a copy to the notification center history (newest first) and bump
+    // the tray's unread badge.
+    NOTIF_LOG.with(|l| {
+        if let Some(model) = l.borrow().as_ref() {
+            model.insert(0, item);
+        }
+    });
+    UI_WEAK.with(|u| {
+        if let Some(ui) = u.borrow().as_ref().and_then(|w| w.upgrade()) {
+            ui.set_notif_unread(ui.get_notif_unread() + 1);
         }
     });
 }
@@ -634,6 +653,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     TOASTS.with(|t| *t.borrow_mut() = Some(toasts_vec.clone()));
     ui.global::<Notifications>().on_show(|kind, text| toast(kind, text.as_str()));
     ui.global::<Notifications>().on_dismiss(dismiss_toast);
+
+    // Notification center (G3c): persisted history model + clear-all. UI_WEAK
+    // lets toast() bump the unread badge from the Slint thread.
+    let notif_log: Rc<slint::VecModel<ToastItem>> = Rc::new(slint::VecModel::default());
+    ui.global::<Notifications>().set_log(slint::ModelRc::from(notif_log.clone()));
+    NOTIF_LOG.with(|l| *l.borrow_mut() = Some(notif_log.clone()));
+    UI_WEAK.with(|u| *u.borrow_mut() = Some(ui.as_weak()));
+    {
+        let uw = ui.as_weak();
+        ui.global::<Notifications>().on_clear_log(move || {
+            NOTIF_LOG.with(|l| {
+                if let Some(model) = l.borrow().as_ref() {
+                    model.set_vec(Vec::new());
+                }
+            });
+            if let Some(ui) = uw.upgrade() { ui.set_notif_unread(0); }
+        });
+    }
 
     // Initial sys stats (all zeros, offline)
     ui.set_sys_stats(empty_sys_stats());

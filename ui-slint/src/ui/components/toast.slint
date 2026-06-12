@@ -10,9 +10,11 @@ import { Palette } from "../palette.slint";
 import { ToastItem, ToastKind } from "../types.slint";
 
 export global Notifications {
-    in-out property <[ToastItem]> toasts;
+    in-out property <[ToastItem]> toasts;       // transient, on-screen now
+    in-out property <[ToastItem]> log;          // persisted history, newest first (G3c)
     callback show(ToastKind, string);  // implemented in Rust (assigns id, pushes)
     callback dismiss(int);             // implemented in Rust (removes by id)
+    callback clear-log();              // implemented in Rust (empties log + unread)
 }
 
 component ToastCard inherits Rectangle {

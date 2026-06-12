@@ -1,0 +1,126 @@
+// Desktop-mode notification center (glowup G3c) — the persisted history behind
+// the taskbar's 🔔 tray. Same data model as toasts (Notifications global): a
+// toast is transient, but a copy is kept in `Notifications.log` (newest first)
+// so background events (settings saved, policy change, later: dream-cycle done,
+// sensor thresholds, plugin crashes) have a durable home. In-canvas overlay
+// panel, dismissed by the backdrop; "Clear" empties the log.
+
+import { Palette } from "../palette.slint";
+import { ToastItem, ToastKind } from "../types.slint";
+import { Notifications } from "toast.slint";
+
+component NotifRow inherits Rectangle {
+    in property <ToastItem> item;
+
+    property <color> accent:
+        item.kind == ToastKind.success ? #22c55e :
+        item.kind == ToastKind.warn    ? #eab308 :
+        item.kind == ToastKind.error   ? #ef4444 :
+        Palette.primary;
+    property <string> glyph:
+        item.kind == ToastKind.success ? "✓" :
+        item.kind == ToastKind.warn    ? "⚠" :
+        item.kind == ToastKind.error   ? "✕" :
+        "ℹ";
+
+    height: row.preferred-height;
+    background: Palette.surface-hi;
+    border-radius: Palette.radius;
+
+    Rectangle {
+        x: 0px;
+        width: 3px;
+        height: parent.height;
+        background: accent;
+        border-top-left-radius: Palette.radius;
+        border-bottom-left-radius: Palette.radius;
+    }
+
+    row := HorizontalLayout {
+        padding: 10px;
+        padding-left: 14px;
+        spacing: 10px;
+        Text {
+            text: glyph;
+            color: accent;
+            font-size: 13px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        Text {
+            text: item.text;
+            color: Palette.text-bright;
+            font-size: 12px;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+export component NotifCenter inherits Rectangle {
+    width: 320px;
+    height: 400px;
+    background: Palette.surface;
+    border-radius: Palette.radius-lg;
+    border-width: 1px;
+    border-color: Palette.border-hi;
+    drop-shadow-blur: 32px;
+    drop-shadow-color: #000000aa;
+    drop-shadow-offset-y: 8px;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+
+        // Header — title + clear-all.
+        HorizontalLayout {
+            height: 24px;
+            Text {
+                text: "NOTIFICATIONS";
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 1.6px;
+                color: Palette.text-dim;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            clear := Rectangle {
+                width: clear-txt.preferred-width + 16px;
+                border-radius: Palette.radius;
+                background: clear-touch.has-hover ? Palette.surface-hi : transparent;
+                clear-txt := Text {
+                    text: "Clear";
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: clear-touch.has-hover ? Palette.primary : Palette.text-dim;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                clear-touch := TouchArea { clicked => { Notifications.clear-log(); } }
+            }
+        }
+
+        // Empty state.
+        if Notifications.log.length == 0: Rectangle {
+            vertical-stretch: 1;
+            Text {
+                text: "No notifications yet";
+                color: Palette.text-dim;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        // History — newest first (Rust inserts at index 0).
+        if Notifications.log.length > 0: Flickable {
+            vertical-stretch: 1;
+            viewport-height: list.preferred-height;
+            list := VerticalLayout {
+                spacing: 6px;
+                for t in Notifications.log: NotifRow { item: t; }
+            }
+        }
+    }
+}
