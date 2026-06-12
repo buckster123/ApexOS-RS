@@ -67,6 +67,80 @@ ensure_bootstrap_deps() {
     || die "Could not install ${need[*]} — check network/DNS and try again."
 }
 
+# ── Key-file discovery (USB stick / SD boot partition) ─────────────────────────
+# Anthropic keys are ~100 chars of "alien glyphs" — typing them into a TUI is a
+# typo nightmare. So we look for a pre-written key/env file on removable media
+# first. Filenames we accept (case-insensitive), at the root or one dir deep:
+KEYFILE_NAMES=(apexos.env apexos-rs.env agentd.env apex.env apexos.txt apexos-key.txt env.txt)
+
+# Set by find_key_file on success:
+FOUND_ANTHROPIC=""; FOUND_OPENROUTER=""; FOUND_KEY_SRC=""
+
+# Pull ANTHROPIC_API_KEY / OPENROUTER_API_KEY out of an env-style file, or accept
+# a bare "sk-ant-…" key file. Tolerates `export `, quotes, and Windows CRLF.
+# Returns 0 only if an Anthropic key was found.
+_parse_key_file() {
+  local f="$1"
+  FOUND_ANTHROPIC=$(grep -aE '^[[:space:]]*(export[[:space:]]+)?ANTHROPIC_API_KEY=' "$f" 2>/dev/null \
+      | head -1 | sed -E 's/^[^=]*=//; s/^["'"'"']//; s/["'"'"']$//' | tr -d ' \r' || true)
+  FOUND_OPENROUTER=$(grep -aE '^[[:space:]]*(export[[:space:]]+)?OPENROUTER_API_KEY=' "$f" 2>/dev/null \
+      | head -1 | sed -E 's/^[^=]*=//; s/^["'"'"']//; s/["'"'"']$//' | tr -d ' \r' || true)
+  # bare key file: a lone sk-ant-… token with no KEY= form
+  if [[ -z "$FOUND_ANTHROPIC" ]]; then
+    FOUND_ANTHROPIC=$(grep -aoE 'sk-ant-[A-Za-z0-9_-]+' "$f" 2>/dev/null | head -1 || true)
+  fi
+  [[ -n "$FOUND_ANTHROPIC" ]]
+}
+
+# Scan mounted media + the SD boot partition, then probe UNmounted removable
+# partitions (fresh Pi OS Lite doesn't auto-mount USB). Sets FOUND_* on success.
+find_key_file() {
+  FOUND_ANTHROPIC=""; FOUND_OPENROUTER=""; FOUND_KEY_SRC=""
+  local dir name f
+
+  # 1) Already-mounted removable media + the FAT boot partition (mounts on any PC).
+  local search_dirs=(/boot/firmware /boot /media /mnt /run/media)
+  while IFS= read -r dir; do search_dirs+=("$dir"); done < <(
+    awk '$2 ~ /^\/(media|mnt|run\/media)/ {print $2}' /proc/mounts 2>/dev/null || true)
+
+  for dir in "${search_dirs[@]}"; do
+    [[ -d "$dir" ]] || continue
+    for name in "${KEYFILE_NAMES[@]}"; do
+      while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        if _parse_key_file "$f"; then FOUND_KEY_SRC="$f"; return 0; fi
+      done < <(find "$dir" -maxdepth 2 -iname "$name" -type f 2>/dev/null || true)
+    done
+  done
+
+  # 2) Probe unmounted removable partitions read-only.
+  local mp=/run/apexos-usb
+  mkdir -p "$mp"
+  local line NAME FSTYPE RM TYPE
+  while IFS= read -r line; do
+    eval "$line"                       # sets NAME FSTYPE RM TYPE from lsblk -P
+    [[ "${TYPE:-}" == "part" ]]   || continue
+    [[ "${RM:-0}" == "1" ]]       || continue
+    [[ -n "${FSTYPE:-}" ]]        || continue
+    if findmnt -nS "$NAME" &>/dev/null; then continue; fi
+    mount -o ro "$NAME" "$mp" 2>/dev/null || continue
+    for name in "${KEYFILE_NAMES[@]}"; do
+      while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        if _parse_key_file "$f"; then
+          FOUND_KEY_SRC="${NAME} → $(basename "$f")"
+          umount "$mp" 2>/dev/null || true
+          rmdir "$mp" 2>/dev/null || true
+          return 0
+        fi
+      done < <(find "$mp" -maxdepth 2 -iname "$name" -type f 2>/dev/null || true)
+    done
+    umount "$mp" 2>/dev/null || true
+  done < <(lsblk -Ppo NAME,FSTYPE,RM,TYPE 2>/dev/null || true)
+  rmdir "$mp" 2>/dev/null || true
+  return 1
+}
+
 # ── Args ───────────────────────────────────────────────────────────────────────
 YES=false
 NO_UI=false; NO_CEREBRO_API=false; NO_SENSOR=false; NO_VOICE=true
@@ -305,21 +379,66 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
   echo "$ADDONS" | grep -q '"voice"'   && NO_VOICE=false  || NO_VOICE=true
 fi
 
-# ── TUI: API keys ─────────────────────────────────────────────────────────────
-# The Anthropic key is the one thing every install needs — asked in both auto and
-# manual. OpenRouter is a power-user extra, so only manual mode prompts for it.
-if ! $YES; then
-  if [[ -z "$API_KEY" ]]; then
-    API_KEY=$(tui_input "Anthropic API Key" \
-      "Paste your Anthropic API key — this is what powers the AI.\nFormat: sk-ant-api03-...\n\nDon't have one yet? Leave blank; you can add it later in\n/etc/agentd/env and the rest still installs fine." \
-      "password") || true
-  fi
+# ── API keys ──────────────────────────────────────────────────────────────────
+# Priority: --api-key flag  >  key file on USB/SD-boot  >  manual TUI entry.
+# The key is ~100 chars of "alien glyphs", so a pre-written file beats typing it.
 
-  if [[ "$STYLE" == "manual" && -z "$OPENROUTER_KEY" ]]; then
-    OPENROUTER_KEY=$(tui_input "OpenRouter API Key (optional)" \
-      "Enter your OpenRouter key for access to alternative models\n(GPT-4o, Gemini, Llama, etc.).\n\nLeave blank to skip." \
-      "password") || true
+if [[ -z "$API_KEY" ]]; then
+  info "Looking for a key file (apexos.env) on USB / SD-boot media …"
+  if find_key_file; then
+    API_KEY="$FOUND_ANTHROPIC"
+    [[ -z "$OPENROUTER_KEY" && -n "$FOUND_OPENROUTER" ]] && OPENROUTER_KEY="$FOUND_OPENROUTER"
+    ok "Loaded API key from ${FOUND_KEY_SRC}"
+    ! $YES && tui_msg "Key file found 🎉" \
+      "Loaded your Anthropic API key from:\n\n  ${FOUND_KEY_SRC}\n\nNo glyph-typing required."
+  else
+    info "No key file found on removable media."
   fi
+fi
+
+# Still no key and we can ask interactively → scan-again / type / skip / abort.
+if [[ -z "$API_KEY" ]] && ! $YES; then
+  while true; do
+    KEYCHOICE=$(tui_menu "Anthropic API Key" \
+"Anthropic keys are ~100 characters — no fun to type here.
+
+Easiest path (no typing):
+  1. On any PC/phone, make a text file named  apexos.env
+  2. Put one line in it:  ANTHROPIC_API_KEY=sk-ant-...
+  3. Save it to a USB stick, OR straight onto the SD card's
+     boot partition (it shows up as a normal drive on any PC).
+  4. Plug into the Pi and choose 'Scan again'." \
+      "scan"  "Scan USB / SD-boot for apexos.env again" \
+      "type"  "Type the key by hand" \
+      "skip"  "Skip — add it later in /etc/agentd/env" \
+      "abort" "Abort the install")
+    case "$KEYCHOICE" in
+      scan)
+        if find_key_file; then
+          API_KEY="$FOUND_ANTHROPIC"
+          [[ -z "$OPENROUTER_KEY" && -n "$FOUND_OPENROUTER" ]] && OPENROUTER_KEY="$FOUND_OPENROUTER"
+          tui_msg "Key file found 🎉" "Loaded from:\n  ${FOUND_KEY_SRC}"
+          break
+        else
+          tui_msg "Nothing found" \
+            "Still no apexos.env on any USB or SD-boot partition.\n\nCheck the filename and that the device is plugged in,\nthen try again."
+        fi ;;
+      type)
+        API_KEY=$(tui_input "Anthropic API Key" \
+          "Paste or type your key (sk-ant-...):" "password") || true
+        [[ -n "$API_KEY" ]] && break ;;
+      skip)  break ;;
+      abort) die "Install aborted — no API key provided." ;;
+      *)     break ;;
+    esac
+  done
+fi
+
+# OpenRouter (optional) — manual mode only, and only if not already supplied.
+if ! $YES && [[ "$STYLE" == "manual" && -z "$OPENROUTER_KEY" ]]; then
+  OPENROUTER_KEY=$(tui_input "OpenRouter API Key (optional)" \
+    "Enter your OpenRouter key for access to alternative models\n(GPT-4o, Gemini, Llama, etc.).\n\nLeave blank to skip." \
+    "password") || true
 fi
 
 # ── TUI: Pre-build summary + confirm ─────────────────────────────────────────
