@@ -35,7 +35,8 @@ else
 fi
 echo "── ApexOS-RS install started $(date) ──"
 
-trap 'echo -e "\n${RED:-}  ✗ Install failed at line $LINENO — see $LOG${NC:-}" >&2' ERR
+# On failure: restore the terminal (whiptail may have left it in raw mode) then report.
+trap 'stty sane </dev/tty 2>/dev/null || true; echo -e "\n${RED:-}  ✗ Install failed at line $LINENO — see $LOG${NC:-}" >&2' ERR
 
 # ── Colours ────────────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -181,13 +182,16 @@ if ! $YES; then
 fi
 
 # All TUI calls route through these wrappers.
-# whiptail draws on /dev/tty so it is unaffected by the exec tee above.
+# whiptail draws on /dev/tty (unaffected by the exec-tee on fd1/fd2) AND reads the
+# keyboard from /dev/tty — critical under `curl … | sudo bash`, where the script's
+# stdin is the pipe, not the terminal. Without `</dev/tty` whiptail renders the box
+# but can never read a keypress, leaving the console in raw mode (^[[A on arrows).
 H=20; W=72   # default dialog height/width
 
 # Show a message box. $1=title $2=body
 tui_msg() {
   if $HAVE_WHIPTAIL; then
-    whiptail --title "$1" --msgbox "$2" $H $W 3>&1 1>/dev/tty 2>&3 || true
+    whiptail --title "$1" --msgbox "$2" $H $W 3>&1 1>/dev/tty 2>&3 </dev/tty || true
   else
     hdr "$1"; echo -e "$2"; echo
   fi
@@ -196,7 +200,7 @@ tui_msg() {
 # Ask yes/no. Returns 0=yes 1=no. $1=title $2=body
 tui_yesno() {
   if $HAVE_WHIPTAIL; then
-    whiptail --title "$1" --yesno "$2" $H $W 3>&1 1>/dev/tty 2>&3; return $?
+    whiptail --title "$1" --yesno "$2" $H $W 3>&1 1>/dev/tty 2>&3 </dev/tty; return $?
   else
     hdr "$1"; echo -e "$2"
     local reply; read -r reply </dev/tty
@@ -210,7 +214,7 @@ tui_menu() {
   if $HAVE_WHIPTAIL; then
     local choice
     choice=$(whiptail --title "$title" --menu "$prompt" $H $W $(( ($# / 2) + 1 )) "$@" \
-      3>&1 1>/dev/tty 2>&3) || true
+      3>&1 1>/dev/tty 2>&3 </dev/tty) || true
     echo "$choice"
   else
     hdr "$title"; echo -e "$prompt"
@@ -227,7 +231,7 @@ tui_checklist() {
   local title="$1" prompt="$2"; shift 2
   if $HAVE_WHIPTAIL; then
     whiptail --title "$title" --checklist "$prompt" $H $W $(( ($# / 3) + 1 )) "$@" \
-      3>&1 1>/dev/tty 2>&3 || true
+      3>&1 1>/dev/tty 2>&3 </dev/tty || true
   else
     hdr "$title"; echo -e "$prompt"
     # Print items, auto-accept all ON items
@@ -249,7 +253,7 @@ tui_input() {
     local flag="--inputbox"
     [[ "$type" == "password" ]] && flag="--passwordbox"
     whiptail --title "$title" $flag "$prompt" 10 $W "" \
-      3>&1 1>/dev/tty 2>&3 || true
+      3>&1 1>/dev/tty 2>&3 </dev/tty || true
   else
     echo -e "${BOLD}  ?${NC} $prompt"
     if [[ "$type" == "password" ]]; then
