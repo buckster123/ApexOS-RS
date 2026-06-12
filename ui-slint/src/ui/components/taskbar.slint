@@ -1,0 +1,174 @@
+// Desktop-mode taskbar (glowup G3) — the unified bottom bar that retires the
+// G1/G2 floating dock. Three regions, left→right:
+//   [⊞ Start]  →  one button per OPEN window  →  [🔔 tray]
+// Start opens the app catalog (start menu, G3b); the running-window buttons
+// focus / restore / minimize-toggle their window; the tray opens the
+// notification center (G3c). Persona chrome (mac dock, win98 start bar) reads
+// its tokens into this same skeleton in later phases.
+
+import { Palette } from "../palette.slint";
+import { WindowDesc } from "../types.slint";
+
+// A single running-window button. Active = focused & visible; a minimized
+// window shows dimmed so it's still discoverable (the G2 bug was that it
+// vanished entirely with no way back).
+component TaskButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> minimized;
+    callback clicked;
+
+    height: 40px;
+    min-width: 96px;
+    horizontal-stretch: 0;
+    border-radius: Palette.radius;
+    background: active ? Palette.primary-dim
+                       : (touch.has-hover ? Palette.surface-hi : transparent);
+    border-width: 1px;
+    border-color: active ? Palette.primary : transparent;
+    opacity: minimized ? 0.55 : 1.0;
+    animate background, border-color, opacity { duration: 150ms; }
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 6px;
+        alignment: start;
+
+        // Minimized marker — a small underscore-style bar, like a taskbar tab.
+        Rectangle {
+            width: 6px;
+            y: parent.height - 10px;
+            height: 3px;
+            border-radius: 1.5px;
+            background: root.minimized ? Palette.text-dim : Palette.primary;
+            vertical-stretch: 0;
+        }
+
+        Text {
+            text: root.label;
+            color: active ? Palette.primary : Palette.text-dim;
+            font-size: 11px;
+            font-weight: active ? 700 : 500;
+            letter-spacing: 0.6px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// A flat icon-ish button for the Start and tray ends of the bar.
+component EndButton inherits Rectangle {
+    in property <string> glyph;
+    in property <string> label;
+    in property <bool> active;
+    in property <int> badge: 0;     // >0 shows a count pip (tray unread)
+    callback clicked;
+
+    height: 40px;
+    min-width: 56px;
+    border-radius: Palette.radius;
+    background: active ? Palette.primary-dim
+                       : (touch.has-hover ? Palette.surface-hi : transparent);
+    border-width: 1px;
+    border-color: active ? Palette.primary : transparent;
+    animate background, border-color { duration: 150ms; }
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 6px;
+        alignment: center;
+
+        Text {
+            text: root.glyph;
+            color: active ? Palette.primary : Palette.text;
+            font-size: 15px;
+            vertical-alignment: center;
+        }
+        if root.label != "": Text {
+            text: root.label;
+            color: active ? Palette.primary : Palette.text-dim;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            vertical-alignment: center;
+        }
+    }
+
+    // Unread badge pip (tray).
+    if root.badge > 0: Rectangle {
+        x: parent.width - self.width - 4px;
+        y: 4px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: Palette.primary;
+        Text {
+            text: root.badge > 9 ? "9+" : root.badge;
+            color: Palette.bg;
+            font-size: 9px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component Taskbar inherits Rectangle {
+    in property <[WindowDesc]> windows;
+    in property <int> focused-id;
+    in property <bool> start-open;       // start menu currently shown
+    in property <bool> tray-open;        // notification center currently shown
+    in property <int> notif-count;       // unread badge on the tray
+
+    callback start-clicked();
+    callback task-activate(int);         // window id
+    callback tray-clicked();
+
+    height: 56px;
+    background: Palette.surface;
+    border-radius: Palette.radius-lg;
+    border-width: 1px;
+    border-color: Palette.border-hi;
+    drop-shadow-blur: 24px;
+    drop-shadow-color: #00000066;
+    drop-shadow-offset-y: 6px;
+
+    HorizontalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        EndButton {
+            glyph: "⊞";
+            label: "START";
+            active: root.start-open;
+            clicked => { root.start-clicked(); }
+        }
+
+        // Divider between Start and the running tasks.
+        Rectangle { width: 1px; background: Palette.border-hi; }
+
+        // Running-window buttons — one per window in z-order.
+        for w in root.windows: TaskButton {
+            label: w.title;
+            active: w.id == root.focused-id && !w.minimized;
+            minimized: w.minimized;
+            clicked => { root.task-activate(w.id); }
+        }
+
+        // Push the tray to the far right.
+        Rectangle { horizontal-stretch: 1; }
+
+        EndButton {
+            glyph: "🔔";
+            active: root.tray-open;
+            badge: root.notif-count;
+            clicked => { root.tray-clicked(); }
+        }
+    }
+}

@@ -701,6 +701,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let w = windows.clone();
+        let uw = ui.as_weak();
+        ui.on_task_activate(move |id| {
+            if let Some(ui) = uw.upgrade() {
+                let minimized = wm_index_by_id(&w, id)
+                    .and_then(|i| w.row_data(i))
+                    .map(|d| d.minimized)
+                    .unwrap_or(false);
+                if minimized {
+                    // Restore: bring it back and focus it.
+                    wm_update_row(&w, id, |d| d.minimized = false);
+                    wm_focus(&ui, &w, id);
+                } else if ui.get_focused_id() == id {
+                    // Clicking the already-focused window minimizes it (Windows-style).
+                    wm_update_row(&w, id, |d| d.minimized = true);
+                    wm_refocus_top(&ui, &w);
+                } else {
+                    wm_focus(&ui, &w, id);
+                }
+            }
+        });
+    }
+    {
+        let w = windows.clone();
         ui.on_move_window(move |id, x, y| {
             wm_update_row(&w, id, |d| { d.x = x; d.y = y; });
         });

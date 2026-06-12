@@ -7,7 +7,7 @@ import { SensorView } from "components/sensor_view.slint";
 import { SessionView } from "components/session_view.slint";
 import { SettingsView } from "components/settings_view.slint";
 import { ToastHost, Notifications } from "components/toast.slint";
-import { Dock } from "components/dock.slint";
+import { Taskbar } from "components/taskbar.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
 export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge }
@@ -42,6 +42,11 @@ export component AppWindow inherits Window {
     in-out property <[WindowDesc]>   windows;
     in-out property <int>            focused-id: 0;
     in-out property <int>            focused-kind: -1;   // AppKind ordinal of focused window
+    // Taskbar (G3) — bottom-bar state. start-menu / notif-center popups land in
+    // G3b / G3c; the toggles already drive the Start/tray button highlight.
+    in-out property <bool>           start-menu-open: false;
+    in-out property <bool>           notif-center-open: false;
+    in-out property <int>            notif-unread: 0;
 
     // ── Callbacks sent to Rust ──────────────────────────────────────────
     callback send-message(string);
@@ -60,6 +65,7 @@ export component AppWindow inherits Window {
     callback close-window(int);               // id
     callback minimize-window(int);            // id
     callback maximize-window(int);            // id
+    callback task-activate(int);              // id — taskbar click: restore/focus/minimize-toggle
     callback move-window(int, length, length);     // id, x, y
     callback resize-window(int, length, length);   // id, w, h
 
@@ -459,12 +465,19 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // Dock — bottom-centre launcher; highlights the focused kind.
-                Dock {
-                    current-view: root.focused-kind;
-                    x: (parent.width - self.width) / 2;
+                // Taskbar (G3) — full-width bottom bar: Start · running windows · tray.
+                Taskbar {
+                    windows: root.windows;
+                    focused-id: root.focused-id;
+                    start-open: root.start-menu-open;
+                    tray-open: root.notif-center-open;
+                    notif-count: root.notif-unread;
+                    x: 16px;
+                    width: parent.width - 32px;
                     y: parent.height - self.height - 16px;
-                    select(v) => { root.launch-app(v); }
+                    start-clicked => { root.start-menu-open = !root.start-menu-open; }
+                    task-activate(id) => { root.task-activate(id); }
+                    tray-clicked => { root.notif-center-open = !root.notif-center-open; }
                 }
             }
         }
