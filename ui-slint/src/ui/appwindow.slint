@@ -1,5 +1,7 @@
 import { Palette, Theme } from "palette.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent } from "types.slint";
+import { Personas } from "personas.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind } from "types.slint";
+import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
 import { Dashboard } from "components/dashboard.slint";
@@ -12,7 +14,7 @@ import { StartMenu } from "components/start_menu.slint";
 import { NotifCenter } from "components/notif_center.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
-export { Palette, Theme, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent }
+export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -64,6 +66,14 @@ export component AppWindow inherits Window {
     in-out property <bool>           notif-center-open: false;
     in-out property <int>            notif-unread: 0;
 
+    // ── Persona system (G4) ─────────────────────────────────────────────
+    // Rust builds `persona-defs` once (the catalogue) and applies a persona via
+    // set-persona → it sets Personas.current + Palette.theme + shell-mode. The
+    // first-boot wizard shows when no persona is persisted yet.
+    in-out property <[PersonaDef]>   persona-defs;
+    in-out property <bool>           persona-picker-open: false;
+    in-out property <bool>           first-boot: false;
+
     // ── Callbacks sent to Rust ──────────────────────────────────────────
     callback send-message(string);
     callback refresh-sessions();
@@ -75,6 +85,7 @@ export component AppWindow inherits Window {
     callback set-policy(string);
     callback set-model(string);
     callback power-action(string);
+    callback set-persona(int);                // Persona ordinal — Rust resolves + persists
     callback terminal-send(string);          // a submitted terminal command line
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
@@ -220,12 +231,41 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Text {
-                    text: Palette.theme-name;
-                    color: Palette.secondary;
-                    font-size: 10px;
-                    vertical-alignment: center;
-                    letter-spacing: 1.5px;
+                // Persona chip — click to open the live persona picker.
+                Rectangle {
+                    height: 24px;
+                    width: persona-row.preferred-width + 20px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Palette.radius;
+                    background: root.persona-picker-open ? Palette.primary-dim
+                              : persona-area.has-hover ? Palette.surface-hi : transparent;
+                    border-width: 1px;
+                    border-color: root.persona-picker-open ? Palette.primary : Palette.border;
+                    animate background, border-color { duration: 150ms; }
+
+                    persona-area := TouchArea {
+                        clicked => { root.persona-picker-open = !root.persona-picker-open; }
+                    }
+
+                    persona-row := HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 6px;
+                        alignment: center;
+                        Text {
+                            text: Personas.glyph;
+                            color: Palette.primary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: Personas.name;
+                            color: Palette.secondary;
+                            font-size: 10px;
+                            letter-spacing: 1.5px;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
 
                 Text {
@@ -417,20 +457,40 @@ export component AppWindow inherits Window {
             if root.shell-mode == ShellMode.desktop: Rectangle {
                 x: 0; y: 0; width: parent.width; height: parent.height;
 
-                // Wallpaper — themed gradient (cheap; tier-safe).
+                // Wallpaper — per-persona themed gradient (cheap; tier-safe).
+                // Style id from Personas.wallpaper drives angle + wash strength:
+                // 0 grid · 1 soft · 2 adwaita-flat · 3 bliss · 4 starfield · 5 alchemy.
                 Rectangle {
                     x: 0; y: 0; width: parent.width; height: parent.height;
                     background: Palette.bg;
                     Rectangle {
                         x: 0; y: 0; width: parent.width; height: parent.height;
-                        background: @linear-gradient(150deg,
+                        background: @linear-gradient(
+                            Personas.wallpaper == 1 ? 120deg :
+                            Personas.wallpaper == 2 ? 180deg :
+                            Personas.wallpaper == 3 ? 160deg :
+                            Personas.wallpaper == 4 ? 135deg : 150deg,
                             Palette.surface 0%, Palette.bg 55%, Palette.surface-hi 100%);
-                        opacity: 0.55;
+                        opacity:
+                            Personas.wallpaper == 1 ? 0.70 :
+                            Personas.wallpaper == 2 ? 0.35 :
+                            Personas.wallpaper == 4 ? 0.50 : 0.55;
                     }
                     Rectangle {
                         x: 0; y: 0; width: parent.width; height: parent.height;
                         background: @radial-gradient(circle, Palette.primary-dim 0%, transparent 65%);
-                        opacity: 0.10;
+                        opacity:
+                            Personas.wallpaper == 2 ? 0.04 :
+                            Personas.wallpaper == 1 ? 0.06 :
+                            Personas.wallpaper == 4 ? 0.16 :
+                            Personas.wallpaper == 5 ? 0.16 : 0.10;
+                    }
+                    // Secondary accent wash (bliss / starfield / alchemy get a
+                    // second tinted glow from the bottom for extra depth).
+                    if Personas.wallpaper == 3 || Personas.wallpaper == 4 || Personas.wallpaper == 5: Rectangle {
+                        x: 0; y: 0; width: parent.width; height: parent.height;
+                        background: @radial-gradient(circle, Palette.secondary 0%, transparent 55%);
+                        opacity: 0.07;
                     }
                 }
 
@@ -665,10 +725,40 @@ export component AppWindow inherits Window {
         }
     }
 
+    // ── Persona picker (G4) — live theme/chrome/wallpaper/mode switch ──
+    // Available in both shell modes; anchored under the title-bar chip.
+    // Backdrop-dismiss mirrors the G3 start-menu pattern.
+    if root.persona-picker-open: TouchArea {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        clicked => { root.persona-picker-open = false; }
+    }
+    if root.persona-picker-open: PersonaPicker {
+        defs: root.persona-defs;
+        current-id: Personas.current-id;
+        x: parent.width - self.width - 16px;
+        y: 48px;
+        pick(id) => {
+            root.set-persona(id);
+            root.persona-picker-open = false;
+        }
+    }
+
     // ── Feedback: toast stack (top-right, above everything) ────────────
     ToastHost {
         x: root.width - self.width - 16px;
         y: 52px;
         width: 340px;
+    }
+
+    // ── First-boot persona wizard (G4) — shown once on first run ───────
+    // Top-most modal: picking a tile applies the persona + dismisses.
+    if root.first-boot: FirstBootWizard {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        defs: root.persona-defs;
+        current-id: Personas.current-id;
+        pick(id) => {
+            root.set-persona(id);
+            root.first-boot = false;
+        }
     }
 }

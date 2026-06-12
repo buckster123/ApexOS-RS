@@ -1,0 +1,63 @@
+// ApexOS-RS — Personas global (glowup G4)
+//
+// L3 of the shell stack (above Palette tokens). A persona bundles theme +
+// chrome + wallpaper + default shell mode (+ behaviour, G5). Resolution lives
+// in Rust (`apply_persona`): on switch, Rust sets `Personas.current`,
+// `Palette.theme`, and the shell mode together. This global derives the live
+// structural bits Slint components read — chrome variant, wallpaper style, and
+// the display chip — straight from `current`, so no prop-threading is needed.
+//
+// Hot-switch from Rust:
+//   ui.global::<Personas>().set_current(Persona::Mom);  // + Palette.theme + shell-mode
+
+import { Persona, ChromeKind } from "types.slint";
+
+export global Personas {
+    // ── Active persona ────────────────────────────────────────────────────
+    in-out property <Persona> current: Persona.apex;
+
+    // Ordinal of `current` (0..5) — lets catalogue tiles compare against a
+    // PersonaDef.id without an enum→int helper in Slint.
+    out property <int> current-id:
+        current == Persona.mom          ? 1 :
+        current == Persona.ubuntu-dad   ? 2 :
+        current == Persona.windows-dad  ? 3 :
+        current == Persona.tech-kid     ? 4 :
+        current == Persona.aurum        ? 5 :
+        /* apex */                        0;
+
+    // ── Structural chrome variant ─────────────────────────────────────────
+    out property <ChromeKind> chrome:
+        current == Persona.mom          ? ChromeKind.mac :
+        current == Persona.ubuntu-dad   ? ChromeKind.adwaita :
+        current == Persona.windows-dad  ? ChromeKind.win :
+        current == Persona.tech-kid     ? ChromeKind.hud :
+        /* apex / aurum */                ChromeKind.apex;
+
+    // ── Wallpaper style id ────────────────────────────────────────────────
+    // 0 grid · 1 soft-gradient · 2 adwaita-flat · 3 bliss · 4 starfield · 5 alchemy
+    out property <int> wallpaper:
+        current == Persona.mom          ? 1 :
+        current == Persona.ubuntu-dad   ? 2 :
+        current == Persona.windows-dad  ? 3 :
+        current == Persona.tech-kid     ? 4 :
+        current == Persona.aurum        ? 5 :
+        /* apex */                        0;
+
+    // ── Display chip (active persona) ─────────────────────────────────────
+    out property <string> name:
+        current == Persona.mom          ? "Simple" :
+        current == Persona.ubuntu-dad   ? "Ubuntu" :
+        current == Persona.windows-dad  ? "Classic" :
+        current == Persona.tech-kid     ? "HUD" :
+        current == Persona.aurum        ? "Aurum" :
+        /* apex */                        "Apex";
+
+    out property <string> glyph:
+        current == Persona.mom          ? "☺" :
+        current == Persona.ubuntu-dad   ? "◆" :
+        current == Persona.windows-dad  ? "▣" :
+        current == Persona.tech-kid     ? "⬡" :
+        current == Persona.aurum        ? "⚗" :
+        /* apex */                        "⬢";
+}

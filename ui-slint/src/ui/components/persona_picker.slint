@@ -1,0 +1,188 @@
+// PersonaPicker + FirstBootWizard (glowup G4)
+//
+// Two surfaces over one catalogue (`[PersonaDef]`, built by Rust):
+//   • PersonaTile   — shared tile: glyph + name/title + tagline + swatch.
+//   • PersonaPicker — compact in-canvas panel (reuses the G3 start-menu
+//                     backdrop+panel pattern; appwindow owns the backdrop).
+//   • FirstBootWizard — full-screen "Who's this for?" tile grid shown once on
+//                     first run; picking sets the persona and dismisses.
+//
+// Selecting a tile emits `pick(id)` with the Persona ordinal; Rust's
+// apply_persona switches theme + chrome + wallpaper + shell-mode live.
+
+import { Palette } from "../palette.slint";
+import { PersonaDef } from "../types.slint";
+
+// ── Shared tile ──────────────────────────────────────────────────────────────
+component PersonaTile inherits Rectangle {
+    in property <PersonaDef> def;
+    in property <bool> selected;
+    in property <bool> large;
+    callback clicked;
+
+    border-radius: Palette.radius-lg;
+    background: selected ? Palette.primary-dim
+              : touch.has-hover ? Palette.surface-hi
+              : Palette.surface;
+    border-width: 1px;
+    border-color: selected ? Palette.primary : Palette.border;
+    animate background, border-color { duration: 150ms; }
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+
+    HorizontalLayout {
+        padding: root.large ? 16px : 12px;
+        spacing: root.large ? 16px : 12px;
+
+        // Swatch / glyph preview
+        Rectangle {
+            width: root.large ? 56px : 40px;
+            height: root.large ? 56px : 40px;
+            border-radius: Palette.radius;
+            background: root.def.swatch-bg;
+            border-width: 2px;
+            border-color: root.def.swatch;
+            y: (parent.height - self.height) / 2;
+
+            Text {
+                text: root.def.glyph;
+                color: root.def.swatch;
+                font-size: root.large ? 26px : 18px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: root.def.name;
+                    color: root.selected ? Palette.text-bright : Palette.text;
+                    font-size: root.large ? 16px : 13px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.def.title;
+                    color: Palette.text-dim;
+                    font-size: root.large ? 11px : 9px;
+                    letter-spacing: 1px;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                if root.selected: Text {
+                    text: "✓";
+                    color: Palette.primary;
+                    font-size: root.large ? 16px : 12px;
+                    vertical-alignment: center;
+                }
+            }
+            Text {
+                text: root.def.tagline;
+                color: Palette.text-dim;
+                font-size: root.large ? 12px : 10px;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// ── Compact in-canvas picker panel ───────────────────────────────────────────
+export component PersonaPicker inherits Rectangle {
+    in property <[PersonaDef]> defs;
+    in property <int> current-id;
+    callback pick(int);
+
+    width: 320px;
+    height: header.preferred-height + list.preferred-height + 16px;
+    border-radius: Palette.radius-lg;
+    background: Palette.surface;
+    border-width: 1px;
+    border-color: Palette.border-hi;
+    drop-shadow-blur: 40px;
+    drop-shadow-color: #000000aa;
+    drop-shadow-offset-y: 8px;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        header := Text {
+            text: "PERSONA";
+            color: Palette.text-dim;
+            font-size: 9px;
+            letter-spacing: 2px;
+            horizontal-alignment: left;
+        }
+
+        list := VerticalLayout {
+            spacing: 6px;
+            for d in root.defs: PersonaTile {
+                def: d;
+                selected: d.id == root.current-id;
+                clicked => { root.pick(d.id); }
+            }
+        }
+    }
+}
+
+// ── First-boot wizard (full-screen) ──────────────────────────────────────────
+export component FirstBootWizard inherits Rectangle {
+    in property <[PersonaDef]> defs;
+    in property <int> current-id;
+    callback pick(int);
+
+    background: rgba(0, 0, 0, 0.82);
+
+    // Centred card
+    Rectangle {
+        width: min(720px, parent.width - 48px);
+        height: min(620px, parent.height - 48px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Palette.bg;
+        border-radius: Palette.radius-lg;
+        border-width: 1px;
+        border-color: Palette.border-hi;
+        drop-shadow-blur: 60px;
+        drop-shadow-color: #000000cc;
+
+        VerticalLayout {
+            padding: 28px;
+            spacing: 6px;
+
+            Text {
+                text: "Welcome to ApexOS";
+                color: Palette.text-bright;
+                font-size: 22px;
+                font-weight: 800;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "Who's this for? Pick a face — you can change it anytime in Settings.";
+                color: Palette.text-dim;
+                font-size: 13px;
+                horizontal-alignment: center;
+            }
+
+            Rectangle { height: 10px; }
+
+            Flickable {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    spacing: 10px;
+                    for d in root.defs: PersonaTile {
+                        def: d;
+                        large: true;
+                        selected: d.id == root.current-id;
+                        clicked => { root.pick(d.id); }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -132,6 +132,139 @@ fn kind_from_ordinal(o: i32) -> AppKind {
     }
 }
 
+// ── Persona system (G4) ───────────────────────────────────────────────────────
+// A persona bundles theme + chrome + wallpaper + default shell mode. Resolution
+// lives here (CLAUDE.md / ui-glowup.md §5): apply_persona sets the Slint
+// Personas global (chrome/wallpaper derive from it) + Palette.theme + shell-mode
+// together, then persists. Ordinals mirror the Personas global:
+// 0 apex · 1 mom · 2 ubuntu-dad · 3 windows-dad · 4 tech-kid · 5 aurum.
+
+fn persona_from_ordinal(o: i32) -> Persona {
+    match o {
+        1 => Persona::Mom,
+        2 => Persona::UbuntuDad,
+        3 => Persona::WindowsDad,
+        4 => Persona::TechKid,
+        5 => Persona::Aurum,
+        _ => Persona::Apex,
+    }
+}
+
+fn persona_slug(p: Persona) -> &'static str {
+    match p {
+        Persona::Apex => "apex",
+        Persona::Mom => "mom",
+        Persona::UbuntuDad => "ubuntu-dad",
+        Persona::WindowsDad => "windows-dad",
+        Persona::TechKid => "tech-kid",
+        Persona::Aurum => "aurum",
+    }
+}
+
+fn persona_from_slug(s: &str) -> Option<Persona> {
+    Some(match s.trim() {
+        "apex" => Persona::Apex,
+        "mom" => Persona::Mom,
+        "ubuntu-dad" => Persona::UbuntuDad,
+        "windows-dad" => Persona::WindowsDad,
+        "tech-kid" => Persona::TechKid,
+        "aurum" => Persona::Aurum,
+        _ => return None,
+    })
+}
+
+fn persona_theme(p: Persona) -> Theme {
+    match p {
+        Persona::Apex => Theme::ApexOS,
+        Persona::Mom => Theme::MacOS,
+        Persona::UbuntuDad => Theme::Gnome,
+        Persona::WindowsDad => Theme::Windows,
+        Persona::TechKid => Theme::Jarvis,
+        Persona::Aurum => Theme::Aurum,
+    }
+}
+
+// Default shell mode per persona (desktop-default; the tech kid boots to the
+// HUD Focus face). Tier-clamped to Focus on the femtovg Nano renderer.
+fn persona_default_mode(p: Persona) -> ShellMode {
+    match p {
+        Persona::TechKid => ShellMode::Focus,
+        _ => ShellMode::Desktop,
+    }
+}
+
+fn is_femtovg() -> bool {
+    std::env::var("SLINT_BACKEND")
+        .map(|b| b.contains("femtovg"))
+        .unwrap_or(false)
+}
+
+/// Switch persona live: theme + chrome/wallpaper (derived in the global from
+/// `current`) + shell mode (tier-clamped). Persists the choice when `persist`.
+/// Must run on the Slint thread (touches globals + properties).
+fn apply_persona(ui: &AppWindow, p: Persona, persist: bool) {
+    ui.global::<Personas>().set_current(p);
+    ui.global::<Palette>().set_theme(persona_theme(p));
+    let mode = if is_femtovg() { ShellMode::Focus } else { persona_default_mode(p) };
+    ui.set_shell_mode(mode);
+    if persist {
+        if let Err(e) = persist_persona(p) {
+            eprintln!("[ui-slint] persona persist failed: {e}");
+        }
+    }
+}
+
+fn persona_config_path() -> std::path::PathBuf {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            format!("{}/.config", std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+        });
+    std::path::PathBuf::from(base).join("apexos-rs").join("persona")
+}
+
+fn persist_persona(p: Persona) -> std::io::Result<()> {
+    let path = persona_config_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, persona_slug(p))
+}
+
+fn load_persona() -> Option<Persona> {
+    std::fs::read_to_string(persona_config_path())
+        .ok()
+        .and_then(|s| persona_from_slug(&s))
+}
+
+fn persona_rgb(hex: u32) -> slint::Color {
+    slint::Color::from_rgb_u8((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+// The persona catalogue — backs the first-boot wizard + the picker tiles.
+fn build_persona_defs() -> Vec<PersonaDef> {
+    let row = |id: i32, name: &str, title: &str, tagline: &str, glyph: &str, swatch: u32, bg: u32| {
+        PersonaDef {
+            id,
+            name: name.into(),
+            title: title.into(),
+            tagline: tagline.into(),
+            glyph: glyph.into(),
+            swatch: persona_rgb(swatch),
+            swatch_bg: persona_rgb(bg),
+        }
+    };
+    vec![
+        row(0, "Apex", "DEVELOPER", "Terse and technical — every surface exposed.", "⬢", 0x39ff14, 0x0d0f18),
+        row(1, "Simple", "WARM", "Big text, plain language, voice-friendly.", "☺", 0x007aff, 0xf5f5f7),
+        row(2, "Ubuntu", "BALANCED", "A familiar Linux desktop with moderate detail.", "◆", 0xe95420, 0x2c001e),
+        row(3, "Classic", "GUIDED", "Friendly and guided — classic Windows affordances.", "▣", 0x0078d4, 0x0b1a2e),
+        row(4, "HUD", "TECH KID", "Telemetry-rich and fast — shows the reasoning.", "⬡", 0x00d4ff, 0x000a14),
+        row(5, "Aurum", "MEMORY", "Gold dashboard skin for the cerebro mind.", "⚗", 0xd4a017, 0x1a0f00),
+    ]
+}
+
 fn kind_title(k: AppKind) -> &'static str {
     match k {
         AppKind::Chat => "Chat",
@@ -806,11 +939,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ui = AppWindow::new()?;
 
-    // Shell mode default is tier-clamped (CLAUDE.md "Nano-first"): the femtovg
-    // software renderer (Pi Zero 2W / 512MB boards) boots to the flat Focus
-    // face; everything else gets the windowed Desktop shell. Runtime-togglable.
-    if std::env::var("SLINT_BACKEND").map(|b| b.contains("femtovg")).unwrap_or(false) {
-        ui.set_shell_mode(ShellMode::Focus);
+    // ── Persona system (G4): catalogue + boot resolution ─────────────────────
+    // The catalogue backs the wizard + picker tiles. On boot: a persisted
+    // persona is applied silently; a fresh install shows the first-boot wizard
+    // over a sane Apex default. apply_persona tier-clamps the shell mode, so the
+    // femtovg "Nano-first" Focus default is handled there (CLAUDE.md).
+    ui.set_persona_defs(slint::ModelRc::from(Rc::new(
+        slint::VecModel::from(build_persona_defs()),
+    )));
+    match load_persona() {
+        Some(p) => apply_persona(&ui, p, false),
+        None => {
+            apply_persona(&ui, Persona::Apex, false);
+            ui.set_first_boot(true);
+        }
+    }
+    {
+        let uw = ui.as_weak();
+        ui.on_set_persona(move |ord| {
+            if let Some(ui) = uw.upgrade() {
+                apply_persona(&ui, persona_from_ordinal(ord), true);
+            }
+        });
     }
 
     // Message model

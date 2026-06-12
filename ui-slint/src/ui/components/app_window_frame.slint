@@ -10,7 +10,8 @@
 // Releasing first means no pointer capture is active when the reorder happens.
 
 import { Palette } from "../palette.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent } from "../types.slint";
+import { Personas } from "../personas.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -35,6 +36,26 @@ component CaptionButton inherits Rectangle {
         text: root.glyph;
         color: root.glyph-color;
         font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// macOS traffic-light dot (close / minimise / maximise). Coloured circle that
+// reveals its glyph on hover of the cluster.
+component MacDot inherits Rectangle {
+    in property <color> dot;
+    in property <string> glyph;
+    callback clicked;
+    width: 12px;
+    height: 12px;
+    border-radius: 6px;
+    background: root.dot;
+    dot-ta := TouchArea { clicked => { root.clicked(); } }
+    Text {
+        text: dot-ta.has-hover ? root.glyph : "";
+        color: #00000099;
+        font-size: 9px;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -164,24 +185,58 @@ export component AppWindowFrame inherits Rectangle {
                 }
             }
 
-            HorizontalLayout {
+            // ── macOS chrome: traffic-lights left, title centred ─────────
+            if Personas.chrome == ChromeKind.mac: Rectangle {
+                // Centred title (pointer events pass through to the drag area).
+                Text {
+                    text: root.title;
+                    color: Palette.text-bright;
+                    font-size: 11px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                // Traffic-lights left; each dot reveals its glyph on its own
+                // hover. Dragging works from anywhere on the bar but the dots.
+                HorizontalLayout {
+                    padding-left: 12px;
+                    spacing: 8px;
+                    alignment: start;
+                    MacDot {
+                        dot: #ff5f57; glyph: "✕";
+                        clicked => { root.req-close(); }
+                    }
+                    MacDot {
+                        dot: #febc2e; glyph: "—";
+                        clicked => { root.req-minimize(); }
+                    }
+                    MacDot {
+                        dot: #28c840; glyph: "+";
+                        clicked => { root.req-maximize(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+
+            // ── Right-buttons family (apex / adwaita / win / hud) ─────────
+            if Personas.chrome != ChromeKind.mac: HorizontalLayout {
                 padding-left: 12px;
                 padding-right: 6px;
-                spacing: 6px;
+                spacing: Personas.chrome == ChromeKind.win ? 2px : 6px;
 
                 Text {
                     text: root.title;
                     color: Palette.text-bright;
                     font-size: 11px;
                     font-weight: 700;
-                    letter-spacing: 0.5px;
+                    letter-spacing: Personas.chrome == ChromeKind.hud ? 1.5px : 0.5px;
                     vertical-alignment: center;
                 }
 
                 Rectangle { horizontal-stretch: 1; }
 
                 CaptionButton {
-                    glyph: "—";
+                    glyph: Personas.chrome == ChromeKind.hud ? "⎯" : "—";
                     clicked => { root.req-minimize(); }
                 }
                 CaptionButton {

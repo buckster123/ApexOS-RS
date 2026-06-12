@@ -12,6 +12,31 @@ export enum ShellMode { desktop, focus }
 // for smoothness and commits back to Rust on release.
 export enum AppKind { chat, system, sensor, sessions, settings, terminal, council }
 
+// ── Persona system (glowup G4) ───────────────────────────────────────────
+// A persona is a named bundle: theme + chrome + wallpaper + default shell mode
+// (+ behaviour, G5). Resolution lives in Rust (apply_persona); the Personas
+// global derives the live structural bits Slint components read. Ordinals MUST
+// match the Rust Persona<->ordinal mapping: 0 apex, 1 mom, 2 ubuntu-dad,
+// 3 windows-dad, 4 tech-kid, 5 aurum.
+export enum Persona { apex, mom, ubuntu-dad, windows-dad, tech-kid, aurum }
+
+// Structural caption-bar variant. G4 implements `mac` (traffic-lights, centred
+// title) vs the right-buttons family (apex/adwaita/win/hud differ by glyph +
+// accent only); full Win-98 bevel fidelity is G6.
+export enum ChromeKind { apex, mac, adwaita, win, hud }
+
+// One entry in the persona catalogue (first-boot wizard + picker tiles). Built
+// once by Rust; both surfaces iterate it. `id` is the Persona ordinal.
+export struct PersonaDef {
+    id:        int,
+    name:      string,   // "Apex"
+    title:     string,   // "Developer"
+    tagline:   string,   // one-line "who's this for"
+    glyph:     string,   // emoji / icon
+    swatch:    color,    // accent preview
+    swatch-bg: color,    // tile background preview
+}
+
 // ── Council (glowup G3d) ─────────────────────────────────────────────────
 // One deliberating agent in a council session. Rust owns the VecModel: delta
 // events append to `text`, agent_done sets `done`. `accent` is parsed from the
