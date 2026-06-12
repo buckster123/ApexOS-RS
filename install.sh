@@ -212,7 +212,15 @@ done
 
 [[ $EUID -eq 0 ]] || die "Run as root: sudo bash install.sh"
 
-BUILD_USER="${SUDO_USER:-root}"
+# Resolve the unprivileged build user (the rustup toolchain owner). Normally the
+# invoking sudo user; when invoked as bare root (e.g. a UI "Update" button, or
+# `apexos-update` run as root) fall back to the owner of an existing clone so we
+# never try to build as root (root has no rustup toolchain).
+BUILD_USER="${SUDO_USER:-}"
+if [[ -z "$BUILD_USER" || "$BUILD_USER" == "root" ]] && [[ -d /opt/ApexOS-RS ]]; then
+  BUILD_USER=$(stat -c '%U' /opt/ApexOS-RS 2>/dev/null || echo "")
+fi
+[[ -n "$BUILD_USER" ]] || BUILD_USER=root
 BUILD_HOME=$(getent passwd "$BUILD_USER" | cut -d: -f6)
 
 # ── Interactive or unattended? ─────────────────────────────────────────────────
@@ -772,6 +780,22 @@ systemctl enable agentd apex-sensor-bridge
 
 ok "Services enabled"
 
+# ── Self-update command ────────────────────────────────────────────────────────
+# Drop an `apexos-update` so updates need zero cargo/git knowledge: it just re-runs
+# this installer against the existing clone (pull → rebuild → hot-swap → restart).
+# Self-escalates with sudo, so a normal user (or the UI as root) can invoke it.
+hdr "Update command"
+cat > /usr/local/bin/apexos-update <<'UPD'
+#!/usr/bin/env bash
+# ApexOS-RS self-update — pull latest, rebuild, hot-swap binaries + restart.
+set -euo pipefail
+if [[ $EUID -ne 0 ]]; then exec sudo -E "$0" "$@"; fi
+echo "── ApexOS-RS update — pulling, building, hot-swapping… ──"
+curl -fsSL https://raw.githubusercontent.com/buckster123/ApexOS-RS/main/install.sh | bash
+UPD
+chmod 755 /usr/local/bin/apexos-update
+ok "apexos-update installed — run 'apexos-update' anytime to pull + rebuild"
+
 # ── fastembed pre-warm ─────────────────────────────────────────────────────────
 if [[ "$TIER" != "nano" ]]; then
   hdr "Embedding model pre-warm"
@@ -880,6 +904,7 @@ echo -e "  ${DIM}Agent UI:         http://$(hostname -I | awk '{print $1}'):8787
 echo ""
 echo -e "  ${DIM}Logs:    sudo journalctl -u agentd -f${NC}"
 echo -e "  ${DIM}Install: $LOG${NC}"
+echo -e "  ${DIM}Update:  apexos-update   (pull + rebuild + hot-swap)${NC}"
 echo ""
 
 # ── TUI: Final summary ────────────────────────────────────────────────────────
