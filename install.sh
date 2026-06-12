@@ -51,6 +51,22 @@ warn() { echo -e "${YELLOW}  ⚠${NC} $*"; }
 die()  { echo -e "${RED}  ✗${NC} $*" >&2; exit 1; }
 hdr()  { echo -e "\n${CYAN}${BOLD}━━━  $*  ━━━${NC}\n"; }
 
+# Ensure the handful of tools needed to even fetch + clone the repo. A freshly
+# imaged Pi OS Lite has neither git nor (sometimes) curl, and the clone below runs
+# BEFORE the main apt step — so without this, a one-shot `curl … | sudo bash` on a
+# never-updated device dies on `git clone`. Installs only what is missing.
+ensure_bootstrap_deps() {
+  local need=()
+  command -v git  &>/dev/null || need+=(git)
+  command -v curl &>/dev/null || need+=(curl)
+  [[ -e /etc/ssl/certs/ca-certificates.crt ]] || need+=(ca-certificates)
+  (( ${#need[@]} )) || return 0
+  info "Installing bootstrap tools: ${need[*]}"
+  apt-get update -qq
+  apt-get install -y --no-install-recommends "${need[@]}" >/dev/null \
+    || die "Could not install ${need[*]} — check network/DNS and try again."
+}
+
 # ── Args ───────────────────────────────────────────────────────────────────────
 YES=false
 NO_UI=false; NO_CEREBRO_API=false; NO_SENSOR=false; NO_VOICE=true
@@ -213,8 +229,30 @@ case "$TIER" in
   pro)      TIER_DESC="Pro — bge-large + 30–70B local models (GPU)" ;;
 esac
 
-# ── TUI: Welcome ──────────────────────────────────────────────────────────────
+# ── TUI: Install style — the first thing anyone sees ──────────────────────────
+# "auto"   = detect everything, ask only for the API key (the one unavoidable step)
+# "manual" = the full picker flow (mode / components / tier / keys)
+STYLE="auto"
 if ! $YES; then
+  STYLE=$(tui_menu "ApexOS-RS  ·  Welcome aboard 🚀" \
+"Found this device:
+
+  $PI_MODEL
+  $ARCH  ·  ${RAM_MB} MB RAM  ·  tier '$TIER'  ·  '$MODE' mode
+
+How would you like to set it up?" \
+    "auto"   "Automatic — recommended, I'll handle everything" \
+    "manual" "Manual    — let me pick mode, components & tier")
+  [[ -z "$STYLE" ]] && STYLE="auto"
+fi
+
+# Automatic = first-timer defaults: no sensorhead and no OpenRouter assumed.
+if [[ "$STYLE" == "auto" ]]; then
+  NO_SENSOR=true
+fi
+
+# ── TUI: Welcome detail (manual only) ─────────────────────────────────────────
+if ! $YES && [[ "$STYLE" == "manual" ]]; then
   WELCOME_MSG="Welcome to the ApexOS-RS installer.
 
 This will install the pure-Rust agent OS on your device:
@@ -235,8 +273,8 @@ Full log → $LOG"
   tui_msg "ApexOS-RS Installer" "$WELCOME_MSG"
 fi
 
-# ── TUI: Mode picker ──────────────────────────────────────────────────────────
-if ! $YES; then
+# ── TUI: Mode picker (manual only — auto keeps the detected mode) ─────────────
+if ! $YES && [[ "$STYLE" == "manual" ]]; then
   MODE_CHOICE=$(tui_menu "Deployment Mode" \
     "How will you use this device?" \
     "kiosk"    "Kiosk    — dedicated HDMI display (Pi + monitor)" \
@@ -247,8 +285,8 @@ fi
 [[ "$MODE" == "headless" || "$MODE" == "desktop" ]] && NO_UI=true
 info "Mode: $MODE | Tier: $TIER | Arch: $ARCH"
 
-# ── TUI: Addon checklist ──────────────────────────────────────────────────────
-if ! $YES; then
+# ── TUI: Addon checklist (manual only — auto uses sensible defaults) ──────────
+if ! $YES && [[ "$STYLE" == "manual" ]]; then
   SENSOR_STATE="ON"; $NO_SENSOR && SENSOR_STATE="OFF"
   API_STATE="ON";    $NO_CEREBRO_API && API_STATE="OFF"
   UI_STATE="ON";     $NO_UI && UI_STATE="OFF"
@@ -268,14 +306,16 @@ if ! $YES; then
 fi
 
 # ── TUI: API keys ─────────────────────────────────────────────────────────────
+# The Anthropic key is the one thing every install needs — asked in both auto and
+# manual. OpenRouter is a power-user extra, so only manual mode prompts for it.
 if ! $YES; then
   if [[ -z "$API_KEY" ]]; then
     API_KEY=$(tui_input "Anthropic API Key" \
-      "Enter your Anthropic API key (required for LLM calls).\nFormat: sk-ant-api03-...\n\nLeave blank to configure later via /etc/agentd/env" \
+      "Paste your Anthropic API key — this is what powers the AI.\nFormat: sk-ant-api03-...\n\nDon't have one yet? Leave blank; you can add it later in\n/etc/agentd/env and the rest still installs fine." \
       "password") || true
   fi
 
-  if [[ -z "$OPENROUTER_KEY" ]]; then
+  if [[ "$STYLE" == "manual" && -z "$OPENROUTER_KEY" ]]; then
     OPENROUTER_KEY=$(tui_input "OpenRouter API Key (optional)" \
       "Enter your OpenRouter key for access to alternative models\n(GPT-4o, Gemini, Llama, etc.).\n\nLeave blank to skip." \
       "password") || true
@@ -322,6 +362,7 @@ hdr "Repository"
 
 if [[ -z "$REPO_DIR" ]]; then
   REPO_DIR=/opt/ApexOS-RS
+  ensure_bootstrap_deps          # git/curl/ca-certs must exist before we can clone
   if [[ -d "$REPO_DIR/.git" ]]; then
     info "Updating existing clone at $REPO_DIR …"
     git -C "$REPO_DIR" pull --ff-only
@@ -496,7 +537,9 @@ write_env_key() {
 
 # Generate gateway token once — never overwrite an existing one
 if ! grep -q "^AGENTD_TOKEN=" "$ENV_FILE" 2>/dev/null; then
-  _tok=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 64 | head -c 64)
+  # openssl/xxd aren't guaranteed on a minimal image; od is coreutils (always present).
+  _tok=$(openssl rand -hex 32 2>/dev/null || true)
+  [[ -n "$_tok" ]] || _tok=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
   write_env_key "AGENTD_TOKEN" "$_tok"
   ok "AGENTD_TOKEN generated (bearer auth enabled)"
 fi
