@@ -11,7 +11,7 @@
 //   Aurum   — alchemical gold      (cerebro-api dashboard)
 //   MacOS   — soft light rounded   ("mom" persona)
 //   Gnome   — Adwaita dark         ("ubuntu-dad" persona)
-//   Windows — Win7 Aero glass      ("windows-dad" persona)
+//   Windows — Win-98 classic grey  ("windows-dad" persona; G6 retune from Aero)
 //   Jarvis  — HUD cyan holographic ("tech-kid" persona)
 
 export enum Theme { ApexOS, Aurum, MacOS, Gnome, Windows, Jarvis }
@@ -27,7 +27,7 @@ export global Palette {
         theme == Theme.Aurum   ? #0d0800 :
         theme == Theme.MacOS   ? #f5f5f7 :
         theme == Theme.Gnome   ? #1e1e1e :
-        theme == Theme.Windows ? #0b1a2e :
+        theme == Theme.Windows ? #c0c0c0 :   // classic dialog grey
         /*Jarvis*/               #000a14;
 
     // surface: card / panel fill
@@ -36,7 +36,7 @@ export global Palette {
         theme == Theme.Aurum   ? #1a0f00 :
         theme == Theme.MacOS   ? #ffffff :
         theme == Theme.Gnome   ? #2a2a2a :
-        theme == Theme.Windows ? #1a2a3e :
+        theme == Theme.Windows ? #ffffff :   // sunken white field
         /*Jarvis*/               #00162a;
 
     // surface-hi: elevated surface (hover states, modal backgrounds)
@@ -45,7 +45,7 @@ export global Palette {
         theme == Theme.Aurum   ? #251600 :
         theme == Theme.MacOS   ? #f0f0f5 :
         theme == Theme.Gnome   ? #363636 :
-        theme == Theme.Windows ? #243650 :
+        theme == Theme.Windows ? #dfdfdf :   // light grey hover
         /*Jarvis*/               #001e38;
 
     // ── Borders ───────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ export global Palette {
         theme == Theme.Aurum   ? #d4a01722 :
         theme == Theme.MacOS   ? #00000014 :
         theme == Theme.Gnome   ? #ffffff14 :
-        theme == Theme.Windows ? #ffffff1a :
+        theme == Theme.Windows ? #808080 :   // button-shadow grey
         /*Jarvis*/               #00d4ff33;
 
     out property <color> border-hi:
@@ -62,7 +62,7 @@ export global Palette {
         theme == Theme.Aurum   ? #d4a01744 :
         theme == Theme.MacOS   ? #00000026 :
         theme == Theme.Gnome   ? #ffffff26 :
-        theme == Theme.Windows ? #64b4ff4c :
+        theme == Theme.Windows ? #000000 :   // window-frame black
         /*Jarvis*/               #00d4ff66;
 
     // ── Accent colours ────────────────────────────────────────────────
@@ -72,7 +72,7 @@ export global Palette {
         theme == Theme.Aurum   ? #d4a017 :
         theme == Theme.MacOS   ? #007aff :
         theme == Theme.Gnome   ? #3584e4 :
-        theme == Theme.Windows ? #0078d4 :
+        theme == Theme.Windows ? #000080 :   // classic navy
         /*Jarvis*/               #00d4ff;
 
     // primary-dim: low-opacity primary for backgrounds / fills
@@ -81,7 +81,7 @@ export global Palette {
         theme == Theme.Aurum   ? #d4a01733 :
         theme == Theme.MacOS   ? #007aff22 :
         theme == Theme.Gnome   ? #3584e422 :
-        theme == Theme.Windows ? #0078d422 :
+        theme == Theme.Windows ? #00008033 :
         /*Jarvis*/               #00d4ff22;
 
     // secondary: supporting accent (links, badges, secondary buttons)
@@ -90,7 +90,7 @@ export global Palette {
         theme == Theme.Aurum   ? #c8961c :   // amber
         theme == Theme.MacOS   ? #5856d6 :   // Apple purple
         theme == Theme.Gnome   ? #813d9c :   // GNOME purple
-        theme == Theme.Windows ? #00b4d8 :   // taskbar cyan
+        theme == Theme.Windows ? #1084d0 :   // title-bar gradient blue
         /*Jarvis*/               #0080ff;    // electric blue
 
     // error / destructive
@@ -99,7 +99,7 @@ export global Palette {
         theme == Theme.Aurum   ? #ff4444 :
         theme == Theme.MacOS   ? #ff3b30 :
         theme == Theme.Gnome   ? #e01b24 :
-        theme == Theme.Windows ? #d13438 :
+        theme == Theme.Windows ? #aa0000 :   // classic maroon
         /*Jarvis*/               #ff0044;
 
     // warning / caution (tool calls, policy indicators)
@@ -108,7 +108,7 @@ export global Palette {
         theme == Theme.Aurum   ? #ffd700 :
         theme == Theme.MacOS   ? #ff9f0a :
         theme == Theme.Gnome   ? #e5a50a :
-        theme == Theme.Windows ? #ffd700 :
+        theme == Theme.Windows ? #808000 :   // olive
         /*Jarvis*/               #ffa500;
 
     // ── Text ──────────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ export global Palette {
         theme == Theme.Aurum   ? #f5d98b :   // warm cream
         theme == Theme.MacOS   ? #1c1c1e :
         theme == Theme.Gnome   ? #ffffff :
-        theme == Theme.Windows ? #ffffff :
+        theme == Theme.Windows ? #000000 :   // black on grey
         /*Jarvis*/               #a0e8f0;
 
     out property <color> text-dim:
@@ -125,7 +125,7 @@ export global Palette {
         theme == Theme.Aurum   ? #8a6a30 :
         theme == Theme.MacOS   ? #8e8e93 :
         theme == Theme.Gnome   ? #ffffff8c :
-        theme == Theme.Windows ? #ffffff99 :
+        theme == Theme.Windows ? #404040 :
         /*Jarvis*/               #1a8090;
 
     out property <color> text-bright:
@@ -133,7 +133,7 @@ export global Palette {
         theme == Theme.Aurum   ? #ffeeba :
         theme == Theme.MacOS   ? #000000 :
         theme == Theme.Gnome   ? #ffffff :
-        theme == Theme.Windows ? #ffffff :
+        theme == Theme.Windows ? #000000 :
         /*Jarvis*/               #00d4ff;
 
     // ── Chat bubbles ─────────────────────────────────────────────────
@@ -143,7 +143,7 @@ export global Palette {
         theme == Theme.Aurum   ? #251600 :
         theme == Theme.MacOS   ? #007aff :   // classic iMessage blue
         theme == Theme.Gnome   ? #3584e4 :
-        theme == Theme.Windows ? #0078d4 :
+        theme == Theme.Windows ? #000080 :   // navy
         /*Jarvis*/               #001e38;
 
     // user text on the bubble
@@ -161,7 +161,7 @@ export global Palette {
         theme == Theme.Aurum   ? #1a0f00 :
         theme == Theme.MacOS   ? #e9e9eb :
         theme == Theme.Gnome   ? #363636 :
-        theme == Theme.Windows ? #243650 :
+        theme == Theme.Windows ? #ffffff :   // white field
         /*Jarvis*/               #000a14;
 
     out property <color> agent-bubble-text:
@@ -169,7 +169,7 @@ export global Palette {
         theme == Theme.Aurum   ? #f5d98b :
         theme == Theme.MacOS   ? #1c1c1e :
         theme == Theme.Gnome   ? #ffffff :
-        theme == Theme.Windows ? #ffffff :
+        theme == Theme.Windows ? #000000 :
         /*Jarvis*/               #a0e8f0;
 
     // ── Tool call cards ───────────────────────────────────────────────
@@ -178,7 +178,7 @@ export global Palette {
         theme == Theme.Aurum   ? #0f0800 :
         theme == Theme.MacOS   ? #f2f2f7 :
         theme == Theme.Gnome   ? #242424 :
-        theme == Theme.Windows ? #1a2a3e :
+        theme == Theme.Windows ? #dfdfdf :   // light grey card
         /*Jarvis*/               #001020;
 
     out property <color> tool-fg:
@@ -186,7 +186,7 @@ export global Palette {
         theme == Theme.Aurum   ? #d4a017 :
         theme == Theme.MacOS   ? #1c1c1e :
         theme == Theme.Gnome   ? #ffffff :
-        theme == Theme.Windows ? #64b4ff :
+        theme == Theme.Windows ? #000080 :   // navy label
         /*Jarvis*/               #00d4ff;
 
     out property <color> tool-border:
@@ -194,7 +194,7 @@ export global Palette {
         theme == Theme.Aurum   ? #d4a01744 :
         theme == Theme.MacOS   ? #00000014 :
         theme == Theme.Gnome   ? #ffffff14 :
-        theme == Theme.Windows ? #64b4ff33 :
+        theme == Theme.Windows ? #808080 :
         /*Jarvis*/               #00d4ff44;
 
     // ── Shape ─────────────────────────────────────────────────────────
@@ -203,7 +203,7 @@ export global Palette {
         theme == Theme.Aurum   ? 4px  :
         theme == Theme.MacOS   ? 12px :
         theme == Theme.Gnome   ? 6px  :
-        theme == Theme.Windows ? 3px  :
+        theme == Theme.Windows ? 0px  :   // sharp — Win-98 has no rounding
         /*Jarvis*/               1px;
 
     out property <length> radius-sm:
@@ -211,7 +211,7 @@ export global Palette {
         theme == Theme.Aurum   ? 2px :
         theme == Theme.MacOS   ? 8px :
         theme == Theme.Gnome   ? 4px :
-        theme == Theme.Windows ? 2px :
+        theme == Theme.Windows ? 0px :
         /*Jarvis*/               0px;
 
     out property <length> radius-lg:
@@ -219,7 +219,7 @@ export global Palette {
         theme == Theme.Aurum   ? 6px  :
         theme == Theme.MacOS   ? 18px :
         theme == Theme.Gnome   ? 10px :
-        theme == Theme.Windows ? 4px  :
+        theme == Theme.Windows ? 0px  :
         /*Jarvis*/               2px;
 
     // ── Jarvis-specific animation tokens ─────────────────────────────

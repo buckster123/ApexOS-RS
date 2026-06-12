@@ -11,6 +11,7 @@
 
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
+import { Win98, BevelEdges, Win98Button } from "win98.slint";
 import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
@@ -132,28 +133,38 @@ export component AppWindowFrame inherits Rectangle {
     property <length> min-w: 220px;
     property <length> min-h: 140px;
 
+    // Win-98 chrome: grey beveled frame instead of the rounded dark card.
+    property <bool> win98: Personas.chrome == ChromeKind.win;
+
     x:      root.maximized ? 0px       : root.base-x + root.dx;
     y:      root.maximized ? 0px       : root.base-y + root.dy;
     width:  root.maximized ? root.area-w : root.base-w + root.dw;
     height: root.maximized ? root.area-h : root.base-h + root.dh;
 
-    background: Palette.bg;
-    border-radius: root.maximized ? 0px : Palette.radius-lg;
-    border-width: 1px;
+    background: root.win98 ? Win98.face : Palette.bg;
+    border-radius: root.win98 ? 0px : (root.maximized ? 0px : Palette.radius-lg);
+    border-width: root.win98 ? 0px : 1px;
     border-color: root.focused ? Palette.border-hi : Palette.border;
     clip: true;
-    drop-shadow-blur: root.focused ? 36px : 18px;
-    drop-shadow-color: root.focused ? #000000aa : #00000066;
-    drop-shadow-offset-y: 8px;
+    drop-shadow-blur: root.win98 ? 8px : (root.focused ? 36px : 18px);
+    drop-shadow-color: root.win98 ? #00000066 : (root.focused ? #000000aa : #00000066);
+    drop-shadow-offset-y: root.win98 ? 3px : 8px;
 
     VerticalLayout {
+        padding: root.win98 ? 3px : 0px;
+
         // ── Caption bar (drag handle) ───────────────────────────────────
         Rectangle {
-            height: 30px;
-            background: root.focused ? Palette.surface-hi : Palette.surface;
+            height: root.win98 ? 22px : 30px;
+            background: root.win98
+                ? (root.focused
+                    ? @linear-gradient(90deg, Win98.title-1 0%, Win98.title-2 100%)
+                    : @linear-gradient(90deg, Win98.title-off-1 0%, Win98.title-off-2 100%))
+                : (root.focused ? Palette.surface-hi : Palette.surface);
             animate background { duration: 150ms; }
 
-            Rectangle {
+            // Modern chrome under-line; the Win-98 navy bar runs edge-to-edge.
+            if !root.win98: Rectangle {
                 y: parent.height - 1px;
                 height: 1px;
                 background: Palette.border;
@@ -218,11 +229,11 @@ export component AppWindowFrame inherits Rectangle {
                 }
             }
 
-            // ── Right-buttons family (apex / adwaita / win / hud) ─────────
-            if Personas.chrome != ChromeKind.mac: HorizontalLayout {
+            // ── Right-buttons family (apex / adwaita / hud) ──────────────
+            if Personas.chrome != ChromeKind.mac && Personas.chrome != ChromeKind.win: HorizontalLayout {
                 padding-left: 12px;
                 padding-right: 6px;
-                spacing: Personas.chrome == ChromeKind.win ? 2px : 6px;
+                spacing: 6px;
 
                 Text {
                     text: root.title;
@@ -247,6 +258,53 @@ export component AppWindowFrame inherits Rectangle {
                     glyph: "✕";
                     hover-bg: rgba(239, 68, 68, 0.25);
                     glyph-color: Palette.text-dim;
+                    clicked => { root.req-close(); }
+                }
+            }
+
+            // ── Win-98 caption: icon + white bold title + 3 beveled buttons.
+            if Personas.chrome == ChromeKind.win: HorizontalLayout {
+                padding-left: 3px;
+                padding-right: 2px;
+                padding-top: 2px;
+                padding-bottom: 2px;
+                spacing: 4px;
+
+                // Window icon (persona glyph) on a tiny plate.
+                Text {
+                    text: Personas.glyph;
+                    color: Win98.title-text;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                    width: 16px;
+                }
+                Text {
+                    text: root.title;
+                    color: Win98.title-text;
+                    font-size: 11px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                Win98Button {
+                    width: 18px;
+                    glyph: "▁";
+                    bold: true;
+                    clicked => { root.req-minimize(); }
+                }
+                Win98Button {
+                    width: 18px;
+                    glyph: root.maximized ? "❐" : "❒";
+                    clicked => { root.req-maximize(); }
+                }
+                Win98Button {
+                    width: 18px;
+                    glyph: "✕";
+                    bold: true;
                     clicked => { root.req-close(); }
                 }
             }
@@ -326,6 +384,9 @@ export component AppWindowFrame inherits Rectangle {
             scroll-tick: root.council-scroll-tick;
         }
     }
+
+    // ── Win-98 raised frame bevel (overlays the whole window edge) ───────
+    if root.win98 && !root.maximized: BevelEdges { }
 
     // ── Resize grip (bottom-right) ──────────────────────────────────────
     if !root.maximized: Rectangle {

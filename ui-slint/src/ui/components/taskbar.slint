@@ -7,7 +7,9 @@
 // its tokens into this same skeleton in later phases.
 
 import { Palette } from "../palette.slint";
-import { WindowDesc } from "../types.slint";
+import { Personas } from "../personas.slint";
+import { Win98, BevelEdges, Win98Button } from "win98.slint";
+import { WindowDesc, ChromeKind } from "../types.slint";
 
 // A single running-window button. Active = focused & visible; a minimized
 // window shows dimmed so it's still discoverable (the G2 bug was that it
@@ -133,16 +135,20 @@ export component Taskbar inherits Rectangle {
     callback tray-clicked();
     callback council-clicked();          // open the Council window
 
-    height: 56px;
-    background: Palette.surface;
-    border-radius: Palette.radius-lg;
-    border-width: 1px;
-    border-color: Palette.border-hi;
-    drop-shadow-blur: 24px;
-    drop-shadow-color: #00000066;
-    drop-shadow-offset-y: 6px;
+    // Win-98 taskbar: flush grey beveled bar (shorter, no rounding/float).
+    property <bool> win98: Personas.chrome == ChromeKind.win;
 
-    HorizontalLayout {
+    height: root.win98 ? 34px : 56px;
+    background: root.win98 ? Win98.face : Palette.surface;
+    border-radius: root.win98 ? 0px : Palette.radius-lg;
+    border-width: root.win98 ? 0px : 1px;
+    border-color: Palette.border-hi;
+    drop-shadow-blur: root.win98 ? 0px : 24px;
+    drop-shadow-color: #00000066;
+    drop-shadow-offset-y: root.win98 ? 0px : 6px;
+
+    // ════ MODERN BAR (apex / mac / adwaita / hud) ════════════════════════
+    if !root.win98: HorizontalLayout {
         padding: 8px;
         spacing: 6px;
 
@@ -183,4 +189,117 @@ export component Taskbar inherits Rectangle {
             clicked => { root.tray-clicked(); }
         }
     }
+
+    // ════ WIN-98 BAR ═════════════════════════════════════════════════════
+    if root.win98: HorizontalLayout {
+        padding: 2px;
+        spacing: 4px;
+
+        // ── Start button: beveled, 4-pane flag + bold "Start" ───────────
+        Rectangle {
+            width: 60px;
+            background: Win98.face;
+
+            HorizontalLayout {
+                padding-left: (start-ta.pressed || root.start-open) ? 7px : 6px;
+                padding-top: (start-ta.pressed || root.start-open) ? 1px : 0px;
+                spacing: 4px;
+                alignment: start;
+
+                // Waving 4-pane window flag (red/green/blue/yellow quadrants).
+                Rectangle {
+                    width: 15px; height: 14px;
+                    y: (parent.height - self.height) / 2;
+                    Rectangle { x: 0px;   y: 1px; width: 6px; height: 6px; background: #ff0000; }
+                    Rectangle { x: 7px;   y: 0px; width: 6px; height: 6px; background: #00a800; }
+                    Rectangle { x: 0px;   y: 8px; width: 6px; height: 6px; background: #0000ff; }
+                    Rectangle { x: 7px;   y: 7px; width: 6px; height: 6px; background: #ffff00; }
+                }
+                Text {
+                    text: "Start";
+                    color: Win98.text;
+                    font-size: 12px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+            BevelEdges { sunken: start-ta.pressed || root.start-open; }
+            start-ta := TouchArea { clicked => { root.start-clicked(); } }
+        }
+
+        // Sunken seam after Start (classic quick-launch separator).
+        Rectangle { width: 4px; }
+
+        // Running-window buttons — beveled tabs, sunken when active.
+        for w in root.windows: Win98Button {
+            width: 150px;
+            label: w.title;
+            active: w.id == root.focused-id && !w.minimized;
+            clicked => { root.task-activate(w.id); }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        // ── Sunken system tray (council + notifications) ────────────────
+        Rectangle {
+            width: tray.preferred-width + 12px;
+            background: Win98.face;
+
+            tray := HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 8px;
+                alignment: center;
+
+                if root.council-active || root.council-count > 0: Rectangle {
+                    width: 18px;
+                    Text {
+                        text: "⚖";
+                        color: root.council-active ? Win98.sel-bg : Win98.text;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    if root.council-count > 0: Text {
+                        text: root.council-count;
+                        x: parent.width - self.width;
+                        y: 0px;
+                        color: #aa0000;
+                        font-size: 8px;
+                        font-weight: 700;
+                    }
+                    council-ta := TouchArea { clicked => { root.council-clicked(); } }
+                }
+
+                Rectangle {
+                    width: 18px;
+                    Text {
+                        text: "🔔";
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    if root.notif-count > 0: Rectangle {
+                        x: parent.width - self.width;
+                        y: 0px;
+                        width: 12px; height: 12px;
+                        background: #aa0000;
+                        Text {
+                            text: root.notif-count > 9 ? "9+" : root.notif-count;
+                            color: #ffffff;
+                            font-size: 7px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    tray-ta := TouchArea { clicked => { root.tray-clicked(); } }
+                }
+            }
+            BevelEdges { sunken: true; }
+        }
+    }
+
+    // Win-98 bar's raised top edge (drawn over the flush bar).
+    if root.win98: BevelEdges { }
 }

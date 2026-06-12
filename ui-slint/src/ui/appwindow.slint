@@ -1,5 +1,6 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
+import { Win98 } from "components/win98.slint";
 import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { ChatView } from "components/chat_view.slint";
@@ -10,7 +11,7 @@ import { SessionView } from "components/session_view.slint";
 import { SettingsView } from "components/settings_view.slint";
 import { ToastHost, Notifications } from "components/toast.slint";
 import { Taskbar } from "components/taskbar.slint";
-import { StartMenu } from "components/start_menu.slint";
+import { StartMenu, Win98StartMenu } from "components/start_menu.slint";
 import { NotifCenter } from "components/notif_center.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
@@ -456,13 +457,21 @@ export component AppWindow inherits Window {
             if root.shell-mode == ShellMode.desktop: Rectangle {
                 x: 0; y: 0; width: parent.width; height: parent.height;
 
+                // Win-98 chrome flushes the taskbar to the bottom edge (no float,
+                // no rounding) and shortens it; everyone else gets the floating bar.
+                property <bool> win98: Personas.chrome == ChromeKind.win;
+                property <length> tb-h: win98 ? 34px : 56px;
+                property <length> tb-margin: win98 ? 0px : 16px;
+                property <length> tb-zone: tb-h + tb-margin * 2;
+
                 // Wallpaper — per-persona themed gradient (cheap; tier-safe).
                 // Style id from Personas.wallpaper drives angle + wash strength:
                 // 0 grid · 1 soft · 2 adwaita-flat · 3 bliss · 4 starfield · 5 alchemy.
+                // Win-98 overrides with the iconic flat teal desktop.
                 Rectangle {
                     x: 0; y: 0; width: parent.width; height: parent.height;
-                    background: Palette.bg;
-                    Rectangle {
+                    background: win98 ? Win98.desktop : Palette.bg;
+                    if !win98: Rectangle {
                         x: 0; y: 0; width: parent.width; height: parent.height;
                         background: @linear-gradient(
                             Personas.wallpaper == 1 ? 120deg :
@@ -475,7 +484,7 @@ export component AppWindow inherits Window {
                             Personas.wallpaper == 2 ? 0.35 :
                             Personas.wallpaper == 4 ? 0.50 : 0.55;
                     }
-                    Rectangle {
+                    if !win98: Rectangle {
                         x: 0; y: 0; width: parent.width; height: parent.height;
                         background: @radial-gradient(circle, Palette.primary-dim 0%, transparent 65%);
                         opacity:
@@ -486,7 +495,7 @@ export component AppWindow inherits Window {
                     }
                     // Secondary accent wash (bliss / starfield / alchemy get a
                     // second tinted glow from the bottom for extra depth).
-                    if Personas.wallpaper == 3 || Personas.wallpaper == 4 || Personas.wallpaper == 5: Rectangle {
+                    if !win98 && (Personas.wallpaper == 3 || Personas.wallpaper == 4 || Personas.wallpaper == 5): Rectangle {
                         x: 0; y: 0; width: parent.width; height: parent.height;
                         background: @radial-gradient(circle, Palette.secondary 0%, transparent 55%);
                         opacity: 0.07;
@@ -507,7 +516,7 @@ export component AppWindow inherits Window {
                         maximized: w.maximized;
                         focused: w.id == root.focused-id;
                         area-w: parent.width;
-                        area-h: parent.height - 88px;
+                        area-h: parent.height - tb-zone;
 
                         messages: root.messages;
                         agent-busy: root.agent-busy;
@@ -561,9 +570,9 @@ export component AppWindow inherits Window {
                     notif-count: root.notif-unread;
                     council-count: root.subagent-count;
                     council-active: root.council-active;
-                    x: 16px;
-                    width: parent.width - 32px;
-                    y: parent.height - self.height - 16px;
+                    x: tb-margin;
+                    width: parent.width - tb-margin * 2;
+                    y: parent.height - self.height - tb-margin;
                     start-clicked => { root.start-menu-open = !root.start-menu-open; }
                     task-activate(id) => { root.task-activate(id); }
                     council-clicked => { root.launch-app(6); }
@@ -580,9 +589,17 @@ export component AppWindow inherits Window {
                     x: 0; y: 0; width: parent.width; height: parent.height;
                     clicked => { root.start-menu-open = false; }
                 }
-                if root.start-menu-open: StartMenu {
-                    x: 16px;
-                    y: parent.height - 56px - 16px - self.height - 8px;
+                if root.start-menu-open && !win98: StartMenu {
+                    x: tb-margin;
+                    y: parent.height - tb-h - tb-margin - self.height - 8px;
+                    launch(ord) => {
+                        root.launch-app(ord);
+                        root.start-menu-open = false;
+                    }
+                }
+                if root.start-menu-open && win98: Win98StartMenu {
+                    x: tb-margin;
+                    y: parent.height - tb-h - self.height;
                     launch(ord) => {
                         root.launch-app(ord);
                         root.start-menu-open = false;
@@ -596,8 +613,8 @@ export component AppWindow inherits Window {
                     clicked => { root.notif-center-open = false; }
                 }
                 if root.notif-center-open: NotifCenter {
-                    x: parent.width - self.width - 16px;
-                    y: parent.height - 56px - 16px - self.height - 8px;
+                    x: parent.width - self.width - tb-margin;
+                    y: parent.height - tb-h - tb-margin - self.height - (win98 ? 0px : 8px);
                 }
             }
         }

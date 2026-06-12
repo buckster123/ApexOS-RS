@@ -7,6 +7,7 @@
 
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
+import { Win98, BevelEdges } from "win98.slint";
 
 component MenuRow inherits Rectangle {
     in property <string> glyph;
@@ -86,4 +87,102 @@ export component StartMenu inherits Rectangle {
         if Personas.show-tech-apps: MenuRow { glyph: "⌨"; label: "Terminal"; clicked => { root.launch(5); } }
         if Personas.show-tech-apps: MenuRow { glyph: "⚖"; label: "Council";  clicked => { root.launch(6); } }
     }
+}
+
+// ── Win-98 start menu (glowup G6) ────────────────────────────────────────
+// The iconic look: a grey beveled panel with a dark vertical banner running up
+// the left (rotated "ApexOS" wordmark) and classic menu rows that highlight
+// navy-on-white on hover. Same launch(ordinal) contract as StartMenu.
+component WinMenuRow inherits Rectangle {
+    in property <string> glyph;
+    in property <string> label;
+    callback clicked;
+
+    height: 26px;
+    background: touch.has-hover ? Win98.sel-bg : transparent;
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 16px;
+        spacing: 10px;
+        alignment: start;
+
+        Text {
+            text: root.glyph;
+            font-size: 15px;
+            width: 22px;
+            color: touch.has-hover ? Win98.sel-text : Win98.text;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: root.label;
+            font-size: 12px;
+            font-weight: 400;
+            color: touch.has-hover ? Win98.sel-text : Win98.text;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component Win98StartMenu inherits Rectangle {
+    callback launch(int);     // AppKind ordinal — same contract as StartMenu
+
+    width: 200px;
+    // 4 core rows + (optional separator + 3 tech rows), all 26px; + 4px pads.
+    height: (Personas.show-tech-apps ? 4 * 26px + 9px + 3 * 26px : 4 * 26px) + 8px;
+    background: Win98.face;
+    drop-shadow-blur: 6px;
+    drop-shadow-color: #00000088;
+    drop-shadow-offset-y: 3px;
+
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 3px;
+
+        // Left banner — navy gradient with the rotated wordmark.
+        Rectangle {
+            width: 26px;
+            background: @linear-gradient(180deg, #1084d0 0%, #000080 45%, #000040 100%);
+
+            Text {
+                text: "ApexOS";
+                color: #ffffff;
+                font-size: 15px;
+                font-weight: 700;
+                letter-spacing: 1px;
+                transform-rotation: -90deg;
+                width: parent.height;
+                height: parent.width;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            WinMenuRow { glyph: "💬"; label: "Chat";     clicked => { root.launch(0); } }
+            WinMenuRow { glyph: "🖥"; label: "System";   clicked => { root.launch(1); } }
+            WinMenuRow { glyph: "🕘"; label: "Sessions"; clicked => { root.launch(3); } }
+            WinMenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
+
+            // Etched separator before the deep-tech group.
+            if Personas.show-tech-apps: Rectangle {
+                height: 9px;
+                Rectangle { x: 4px; y: 4px; width: parent.width - 8px; height: 1px; background: Win98.shadow; }
+                Rectangle { x: 4px; y: 5px; width: parent.width - 8px; height: 1px; background: Win98.hilite; }
+            }
+            if Personas.show-tech-apps: WinMenuRow { glyph: "🌡"; label: "Sensors";  clicked => { root.launch(2); } }
+            if Personas.show-tech-apps: WinMenuRow { glyph: "⌨"; label: "Terminal"; clicked => { root.launch(5); } }
+            if Personas.show-tech-apps: WinMenuRow { glyph: "⚖"; label: "Council";  clicked => { root.launch(6); } }
+        }
+    }
+
+    BevelEdges { }
 }

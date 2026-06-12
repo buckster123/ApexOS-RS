@@ -1,0 +1,134 @@
+// ApexOS-RS — Win-98 fidelity toolkit (glowup G6)
+//
+// The classic Windows-98 look is a fixed system of 3D bevels + system colours
+// that does NOT generalise to the 6-theme Palette (white highlight / black
+// shadow / #c0c0c0 face / navy title are a closed set). So it lives here as a
+// self-contained `Win98` token global + reusable bevel primitives, used only
+// by the windows-dad persona (`Personas.chrome == ChromeKind.win`).
+//
+// Bevels: Slint Rectangles have a single uniform border, so a two-tone 3D edge
+// is drawn as layered 1px edge rectangles — two rings (outer + inner), four
+// edges each. `BevelEdges` is a transparent overlay you stack OVER content (set
+// the content's padding to 2px so it clears the edges). `Win98Button` is the
+// interactive form: raised at rest, sunken while pressed.
+
+export global Win98 {
+    // System face + bevel ramp (light → dark).
+    out property <color> face:    #c0c0c0;   // dialog / button grey
+    out property <color> light:   #dfdfdf;   // inner highlight (button-light)
+    out property <color> hilite:  #ffffff;   // outer highlight (white)
+    out property <color> shadow:  #808080;   // inner shadow (button-shadow)
+    out property <color> dark:    #000000;   // outer shadow (window-frame black)
+
+    out property <color> field:   #ffffff;   // sunken input / list field
+    out property <color> text:    #000000;
+    out property <color> text-dim: #404040;
+    out property <color> text-disabled: #808080;
+
+    // Title bar — active = navy gradient, inactive = grey gradient.
+    out property <color> title-1:     #000080;   // active left
+    out property <color> title-2:     #1084d0;   // active right
+    out property <color> title-off-1: #808080;   // inactive left
+    out property <color> title-off-2: #b5b5b5;   // inactive right
+    out property <color> title-text:  #ffffff;
+
+    // Classic teal desktop.
+    out property <color> desktop:     #008080;
+
+    // Selection highlight (menus / list rows).
+    out property <color> sel-bg:   #000080;
+    out property <color> sel-text: #ffffff;
+}
+
+// Pure decorative 3D bevel: 8 layered 1px edge rectangles (outer + inner ring),
+// transparent centre. Stack as the LAST child of a face-coloured Rectangle so
+// its edges paint over the content corners; give the content 2px padding.
+//   Rectangle { background: Win98.face; VerticalLayout { padding: 2px; … } BevelEdges {} }
+export component BevelEdges inherits Rectangle {
+    in property <bool> sunken: false;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+
+    // ── Outer ring ──────────────────────────────────────────────────────
+    Rectangle {  // top
+        x: 0; y: 0; width: parent.width; height: 1px;
+        background: root.sunken ? Win98.shadow : Win98.hilite;
+    }
+    Rectangle {  // left
+        x: 0; y: 0; width: 1px; height: parent.height;
+        background: root.sunken ? Win98.shadow : Win98.hilite;
+    }
+    Rectangle {  // right
+        x: parent.width - 1px; y: 0; width: 1px; height: parent.height;
+        background: root.sunken ? Win98.hilite : Win98.dark;
+    }
+    Rectangle {  // bottom
+        x: 0; y: parent.height - 1px; width: parent.width; height: 1px;
+        background: root.sunken ? Win98.hilite : Win98.dark;
+    }
+
+    // ── Inner ring (offset 1px) ─────────────────────────────────────────
+    Rectangle {  // top
+        x: 1px; y: 1px; width: parent.width - 2px; height: 1px;
+        background: root.sunken ? Win98.dark : Win98.light;
+    }
+    Rectangle {  // left
+        x: 1px; y: 1px; width: 1px; height: parent.height - 2px;
+        background: root.sunken ? Win98.dark : Win98.light;
+    }
+    Rectangle {  // right
+        x: parent.width - 2px; y: 1px; width: 1px; height: parent.height - 2px;
+        background: root.sunken ? Win98.light : Win98.shadow;
+    }
+    Rectangle {  // bottom
+        x: 1px; y: parent.height - 2px; width: parent.width - 2px; height: 1px;
+        background: root.sunken ? Win98.light : Win98.shadow;
+    }
+}
+
+// Interactive beveled button: raised at rest, sunken while pressed, with the
+// classic 1px focus-ish hover face brighten. `label` (text) and/or `glyph`.
+export component Win98Button inherits Rectangle {
+    in property <string> label;
+    in property <string> glyph;
+    in property <length> text-size: 11px;
+    in property <bool> bold: false;
+    in property <bool> active: false;     // forced-sunken (e.g. toggled task tab)
+    callback clicked;
+
+    property <bool> down: ta.pressed || root.active;
+
+    background: Win98.face;
+
+    content := HorizontalLayout {
+        padding-left: root.down ? 9px : 8px;     // nudge content on press
+        padding-right: root.down ? 7px : 8px;
+        padding-top: root.down ? 1px : 0px;
+        spacing: 5px;
+        alignment: center;
+
+        if root.glyph != "": Text {
+            text: root.glyph;
+            color: Win98.text;
+            font-size: root.text-size;
+            font-weight: root.bold ? 700 : 400;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+        if root.label != "": Text {
+            text: root.label;
+            color: Win98.text;
+            font-size: root.text-size;
+            font-weight: root.bold ? 700 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    BevelEdges { sunken: root.down; }
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
