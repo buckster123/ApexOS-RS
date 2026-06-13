@@ -158,9 +158,10 @@ verbs (`cognitive_bootstrap`, `session_recall`, `check_inbox`, `list_intentions`
 | Cerebro memory types, episodes, `dream_run` | ✓ (in the cortex) |
 | **Sleep loop — `session_save` + `dream_run` mandate** | ✓ soul.md Session-shutdown section (`fa2eba8`, deployed) |
 | **Boot verbs auto-approved in policy** | ✓ `config/policy.toml` allow-list (`fa2eba8`, deployed) |
-| `cognitive_bootstrap` (CCBS) actually implemented | ✗ **stub** — `cerebro-mcp dispatch.rs` has no route; returns fake success (audit 2026-06-13) |
-| **CCBS fused into the boot** (`cognitive_bootstrap`) | ✗ soul.md calls it (step 0) but the tool is a stub |
-| **agentd auto-injects a CCBS block at session start** | ✗ agentd injects static soul only |
+| `cognitive_bootstrap` (CCBS) actually implemented | ✓ **live-state assembler** — pulls open intentions + query-relevant session summaries/procedures/memories into a token-budgeted block (`cerebro-mcp dispatch.rs::assemble_bootstrap`). Authored `# Module: X` skill-modules (the Python CCBS layer) can plug in later. |
+| **Recall reinforcement (ACT-R)** | ✓ `recall()` records an access on returned memories so base-level activation rises — "recall sharpens memory" (`cortex.rs` + `sqlite::record_accesses`) |
+| **CCBS fused into the boot** (`cognitive_bootstrap`) | ◑ soul.md calls it as step-0 and the tool now returns real priming; agent-driven (APEX calls it), not yet daemon-injected |
+| **agentd auto-injects a CCBS block at session start** | ✗ agentd injects static soul only (roadmap — prepend the `cognitive_bootstrap` block to the kernel before turn 1) |
 
 ### Concrete next steps (smallest first)
 

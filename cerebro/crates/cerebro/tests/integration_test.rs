@@ -1044,6 +1044,29 @@ mod cortex_pipeline {
     }
 
     #[tokio::test]
+    async fn recall_reinforces_access_count_across_calls() {
+        // ACT-R reinforcement: a successful retrieval is an access, so access_count
+        // must rise AND persist (proven by the count growing across two recalls —
+        // the second call reloads from sqlite, so c2 > c1 means c1's bump was saved).
+        let (cortex, _dir) = make_cortex().await;
+        cortex.remember(
+            "sqlite vector storage is the primary persistence layer",
+            None, None, None, VisibilityScope::global(),
+        ).await.unwrap();
+
+        let r1 = cortex.recall("sqlite vector storage", 5, VisibilityScope::global())
+            .await.unwrap();
+        assert!(!r1.is_empty());
+        let c1 = r1[0].0.access_count;
+
+        let r2 = cortex.recall("sqlite vector storage", 5, VisibilityScope::global())
+            .await.unwrap();
+        let c2 = r2[0].0.access_count;
+
+        assert!(c2 > c1, "recall should reinforce + persist access_count (got {c1} then {c2})");
+    }
+
+    #[tokio::test]
     async fn associate_creates_graph_edge() {
         let (cortex, _dir) = make_cortex().await;
         let a = cortex.remember(

@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
+use chrono::Utc;
 use petgraph::graph::NodeIndex;
 use tokio::sync::RwLock;
 
@@ -167,10 +168,29 @@ impl CerebroCortex {
         let node_map: HashMap<MemoryId, MemoryNode> =
             nodes.into_iter().map(|n| (n.id.clone(), n)).collect();
 
-        let results = ranked.into_iter()
+        let mut results: Vec<(MemoryNode, f32)> = ranked.into_iter()
             .take(k)
             .filter_map(|(id, score)| node_map.get(&id).map(|n| (n.clone(), score)))
             .collect();
+
+        // Reinforcement (ACT-R): a successful retrieval IS an access — record it
+        // so base-level activation rises and the memory resurfaces more easily
+        // next time ("recall sharpens memory"). Only the returned top-k are
+        // reinforced (what the caller actually saw), and the strength is persisted
+        // in one batched UPDATE so the hot path stays cheap. The returned nodes
+        // carry the updated access history so the caller sees a consistent view.
+        let now = Utc::now();
+        for (node, _) in results.iter_mut() {
+            node.record_access(now);
+        }
+        let reinforcements: Vec<(MemoryId, u32, String)> = results.iter()
+            .map(|(n, _)| {
+                let times = serde_json::to_string(&n.access_times)
+                    .unwrap_or_else(|_| "[]".to_string());
+                (n.id.clone(), n.access_count, times)
+            })
+            .collect();
+        storage.sqlite.record_accesses(&reinforcements).await?;
 
         Ok(results)
     }

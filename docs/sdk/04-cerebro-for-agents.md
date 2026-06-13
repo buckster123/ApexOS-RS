@@ -268,14 +268,15 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 
 - `ingest_file`, `describe_image`, `search_vision` are advertised in `TOOL_NAMES` but
   unimplemented — they now return an honest `-32601` not-implemented **error** (C-RS-007).
-  `cognitive_bootstrap` has a deliberate route arm that returns a *success*
-  `{"status":"not_yet_implemented"}` stub (kept successful so APEX's soul-boot step-0 doesn't
-  hard-fail) — but it injects **zero** priming. So any Wake-loop calling it as "step 0" is a
-  silent no-op today (audit CB-001); use `session_recall` + `check_inbox` + `list_intentions`
-  to orient.
-- **Reinforcement is inert.** `recall`/`get_memory` do not bump FSRS/ACT-R activation. The
-  "recall sharpens memory" story is aspirational, not wired. `record_procedure_outcome` *does*
-  nudge salience/difficulty (`dispatch.rs:757`), but ordinary reads do not.
+- **`cognitive_bootstrap` is implemented** (CB-001 closed): one call assembles a
+  token-budgeted priming block from live memory state — open intentions + query-relevant
+  session summaries, procedures, and memories. It is the one-call replacement for the manual
+  `session_recall` + `list_intentions` + `find_relevant_procedures` + `recall` orient; pass
+  your current task as `query`. (Authored `# Module: X` skill-modules can layer in later.)
+- **Recall reinforcement is wired.** `recall` records an access on returned memories so ACT-R
+  base-level activation rises ("recall sharpens memory") — frequently-recalled memories
+  resurface more easily. `record_procedure_outcome` additionally nudges procedure
+  salience/difficulty (FSRS grading); ordinary reads do the ACT-R access bump only.
 - **Spreading activation enforces scope** as of C-RS-003: `recall` builds a per-node
   visibility map and `spread()` skips non-visible neighbors, so cross-agent leakage via graph
   traversal is closed. (Note CB-017: `agent_id` is still self-asserted at the MCP boundary —
@@ -356,7 +357,7 @@ ApexOS-RS conventions: FORGE → `agent_id="FORGE"`; APEX → `agent_id="CLAUDE-
 ### Boot-verb policy allow-list (`config/policy.toml`)
 
 Allowed without approval even in `suggest`: `remember`, `recall`, `associate`, `get_memory`,
-`memory_store`, `memory_search`, `cognitive_bootstrap` (stub), `session_recall`,
+`memory_store`, `memory_search`, `cognitive_bootstrap`, `session_recall`,
 `check_inbox`, `list_intentions`, `find_relevant_procedures`. **Everything else gated** by
 mode default (incl. `session_save`, `store_intention`, `store_procedure`, `dream_run`,
 `delete_memory`, `purge_*`, `bulk_delete`).
@@ -364,8 +365,7 @@ mode default (incl. `session_save`, `store_intention`, `store_procedure`, `dream
 ### Known stubs (advertised but unimplemented)
 
 `ingest_file` · `describe_image` · `search_vision` — return an honest `-32601` error.
-`cognitive_bootstrap` — routed to a *success* `not_yet_implemented` stub (soul-boot step-0),
-but primes nothing yet (CB-001).
+(`cognitive_bootstrap` is now **implemented** — a live-state priming assembler, CB-001 closed.)
 
 ### Files
 
