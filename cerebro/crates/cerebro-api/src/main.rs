@@ -58,11 +58,32 @@ fn not_found(id: &str) -> ApiError {
     ApiError(anyhow::anyhow!("not found: {id}"))
 }
 
+/// CB-023: responder for `CatchPanicLayer`. Turns a caught handler panic into a
+/// clean 500 JSON body shaped like `ApiError` (instead of an aborted connection
+/// with no response), mirroring the MCP sibling's per-call panic isolation.
+fn panic_response(err: Box<dyn std::any::Any + Send + 'static>) -> axum::response::Response {
+    let msg = err
+        .downcast_ref::<&str>().map(|s| s.to_string())
+        .or_else(|| err.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "handler panicked".to_string());
+    tracing::error!("cerebro-api: caught handler panic: {msg}");
+    let body = Json(json!({ "error": format!("internal panic: {msg}") }));
+    (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+}
+
 fn scope_from(agent_id: Option<&str>) -> VisibilityScope {
     match agent_id {
         Some(a) if !a.is_empty() => VisibilityScope::for_agent(AgentId(a.to_string())),
         _ => VisibilityScope::global(),
     }
+}
+
+/// CB-012: canonicalize a session priority to uppercase, matching the MCP
+/// `normalize_priority` (dispatch.rs) so a `priority:<p>` tag written here is
+/// findable by an MCP `session_recall` priority filter (which compares against
+/// the uppercased value). Keep this in lockstep with the MCP twin.
+fn normalize_priority(p: &str) -> String {
+    p.to_uppercase()
 }
 
 fn parse_link_type(s: &str) -> LinkType {
@@ -217,6 +238,10 @@ struct RecallQuery {
     #[serde(default = "default_top_k")]
     top_k:    usize,
     agent_id: Option<String>,
+    // CB-026: honor the same priority/session_type filters the MCP session_recall
+    // twin applies, so the HTTP surface returns the same result set.
+    priority:     Option<String>,
+    session_type: Option<String>,
 }
 fn default_top_k() -> usize { 10 }
 
@@ -303,10 +328,17 @@ async fn update_memory(
     let mut node = storage.sqlite
         .get_memory(&MemoryId(id.clone()), &scope).await?
         .ok_or_else(|| not_found(&id))?;
+    let content_changed = req.content.is_some();
     if let Some(c) = req.content  { node.content  = c; }
     if let Some(t) = req.tags     { node.tags      = t; }
     if let Some(s) = req.salience { node.salience  = s as f32; }
     storage.sqlite.update_memory(&node).await?;
+    // CB-006: mirror the MCP update path — re-embed when content changed so the
+    // vector index does not point at the pre-edit text (sqlite.update_memory only
+    // refreshes the content column + FTS5 trigger, never the embedding/vec0 row).
+    if content_changed {
+        storage.vector.embed_and_store(&node.id, &node.content).await?;
+    }
     Ok(Json(serde_json::to_value(&node)?))
 }
 
@@ -437,7 +469,7 @@ async fn session_save(
     State(brain): State<Brain>,
     Json(req): Json<SessionSaveReq>,
 ) -> AppResult {
-    let priority     = req.priority.as_deref().unwrap_or("medium");
+    let priority     = normalize_priority(req.priority.as_deref().unwrap_or("MEDIUM"));
     let session_type = req.session_type.as_deref().unwrap_or("general");
     let mut tags = vec![
         "session_note".to_string(),
@@ -459,9 +491,18 @@ async fn session_recall(
     State(brain): State<Brain>,
 ) -> AppResult {
     let scope   = scope_from(q.agent_id.as_deref());
+    let priority_filter = q.priority.as_deref();
+    let type_filter     = q.session_type.as_deref();
+    // Over-fetch so the tag filters don't deplete results (matches MCP twin).
     let results = brain.recall(&q.query, q.top_k * 5, scope).await?;
     let arr: Vec<Value> = results.into_iter()
         .filter(|(n, _)| n.tags.iter().any(|t| t == "session_note"))
+        .filter(|(n, _)| priority_filter.map_or(true, |p| {
+            let want = format!("priority:{}", normalize_priority(p));
+            n.tags.iter().any(|t| t == &want)
+        }))
+        .filter(|(n, _)| type_filter.map_or(true, |st|
+            n.tags.iter().any(|t| t == &format!("session_type:{st}"))))
         .take(q.top_k)
         .map(|(n, s)| json!({ "score": s, "memory": n }))
         .collect();
@@ -952,6 +993,12 @@ async fn main() -> Result<()> {
         }
     ));
 
+    // CB-023: outermost layer so a panic anywhere in a handler (or the auth
+    // middleware) becomes a 500 JSON body rather than a dropped connection.
+    let app = app.layer(
+        tower_http::catch_panic::CatchPanicLayer::custom(panic_response),
+    );
+
     let addr = std::env::var("CEREBRO_API_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:8765".into());
     if api_token.is_empty() {
@@ -968,4 +1015,26 @@ async fn main() -> Result<()> {
     }
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // CB-012: the HTTP priority normalization must match the MCP canonical
+    // (uppercase) so a `priority:<p>` tag written here is matched by an MCP
+    // session_recall priority filter that uppercases its argument.
+    #[test]
+    fn normalize_priority_uppercases() {
+        assert_eq!(normalize_priority("medium"), "MEDIUM");
+        assert_eq!(normalize_priority("High"), "HIGH");
+        assert_eq!(normalize_priority("LOW"), "LOW");
+    }
+
+    // The session_save default ("MEDIUM") and an HTTP-supplied lowercase value
+    // ("medium") must produce the identical canonical tag.
+    #[test]
+    fn normalize_priority_default_matches_lowercase_input() {
+        assert_eq!(normalize_priority("MEDIUM"), normalize_priority("medium"));
+    }
 }
