@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
@@ -15,7 +15,7 @@ import { StartMenu, Win98StartMenu } from "components/start_menu.slint";
 import { NotifCenter } from "components/notif_center.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
-export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem }
+export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -75,6 +75,9 @@ export component AppWindow inherits Window {
     in-out property <string>         notes-current-text: "";
     in-out property <string>         face-state: "idle";
     in-out property <int>            face-tick: 0;
+    in-out property <[SketchStroke]> sketch-strokes;
+    in-out property <int>            sketch-color: 0;
+    in-out property <int>            sketch-width: 0;
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id /
@@ -125,6 +128,13 @@ export component AppWindow inherits Window {
     callback open-note(string);               // name
     callback save-note(string, string);       // name, text
     callback create-note(string);             // new note name
+    callback sketch-down(float, float);
+    callback sketch-move(float, float);
+    callback sketch-up();
+    callback sketch-clear();
+    callback sketch-send(float, float);       // canvas px w, h
+    callback sketch-set-color(int);
+    callback sketch-set-width(int);
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -599,6 +609,9 @@ export component AppWindow inherits Window {
                         notes-current-text <=> root.notes-current-text;
                         face-state: root.face-state;
                         face-tick: root.face-tick;
+                        sketch-strokes: root.sketch-strokes;
+                        sketch-color: root.sketch-color;
+                        sketch-width: root.sketch-width;
 
                         send-message(t) => { root.send-message(t); }
                         stop-turn => { root.stop-turn(); }
@@ -625,6 +638,13 @@ export component AppWindow inherits Window {
                         open-note(name) => { root.open-note(name); }
                         save-note(name, text) => { root.save-note(name, text); }
                         create-note(name) => { root.create-note(name); }
+                        sketch-down(x, y) => { root.sketch-down(x, y); }
+                        sketch-move(x, y) => { root.sketch-move(x, y); }
+                        sketch-up => { root.sketch-up(); }
+                        sketch-clear => { root.sketch-clear(); }
+                        sketch-send(w, h) => { root.sketch-send(w, h); }
+                        sketch-set-color(i) => { root.sketch-set-color(i); }
+                        sketch-set-width(i) => { root.sketch-set-width(i); }
 
                         req-focus => { root.focus-window(w.id); }
                         req-close => { root.close-window(w.id); }

@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -28,6 +28,7 @@ import { AudioEditorView } from "audio_editor_view.slint";
 import { SonusView } from "sonus_view.slint";
 import { NotesView } from "notes_view.slint";
 import { FaceView } from "face_view.slint";
+import { SketchpadView } from "sketchpad_view.slint";
 
 component CaptionButton inherits Rectangle {
     in property <string> glyph;
@@ -127,6 +128,9 @@ export component AppWindowFrame inherits Rectangle {
     in-out property <string>     notes-current-text;
     in property <string>         face-state;
     in property <int>            face-tick;
+    in property <[SketchStroke]> sketch-strokes;
+    in property <int>            sketch-color;
+    in property <int>            sketch-width;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -155,6 +159,13 @@ export component AppWindowFrame inherits Rectangle {
     callback open-note(string);               // name
     callback save-note(string, string);       // name, text
     callback create-note(string);             // new note name
+    callback sketch-down(float, float);
+    callback sketch-move(float, float);
+    callback sketch-up();
+    callback sketch-clear();
+    callback sketch-send(float, float);       // canvas px w, h
+    callback sketch-set-color(int);
+    callback sketch-set-width(int);
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -492,6 +503,20 @@ export component AppWindowFrame inherits Rectangle {
             vertical-stretch: 1;
             state: root.face-state;
             tick: root.face-tick;
+        }
+
+        if root.kind == AppKind.sketchpad: SketchpadView {
+            vertical-stretch: 1;
+            strokes: root.sketch-strokes;
+            active-color: root.sketch-color;
+            active-width: root.sketch-width;
+            down(x, y) => { root.sketch-down(x, y); }
+            move(x, y) => { root.sketch-move(x, y); }
+            up => { root.sketch-up(); }
+            clear => { root.sketch-clear(); }
+            send(w, h) => { root.sketch-send(w, h); }
+            set-color(i) => { root.sketch-set-color(i); }
+            set-width(i) => { root.sketch-set-width(i); }
         }
     }
 

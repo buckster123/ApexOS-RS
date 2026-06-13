@@ -66,6 +66,39 @@ thread_local! {
         const { RefCell::new(None) };
     static NOTES_FILES: RefCell<Option<Rc<slint::VecModel<NoteItem>>>> =
         const { RefCell::new(None) };
+    // Sketchpad: the rendered stroke model (Slint Paths) + the raw point data we
+    // post to /api/sketch. Index into SKETCH_PALETTE drives colour; width index 0/1.
+    static SKETCH_STROKES: RefCell<Option<Rc<slint::VecModel<SketchStroke>>>> =
+        const { RefCell::new(None) };
+    static SKETCH_DATA: RefCell<Vec<StrokeData>> = const { RefCell::new(Vec::new()) };
+    static SKETCH_COLOR: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    static SKETCH_WIDTH: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+// Raw geometry for one stroke — mirrored into a SketchStroke (for rendering) and
+// serialised to /api/sketch (for rasterisation).
+#[derive(Clone)]
+struct StrokeData {
+    color_hex: String,
+    width: f32,
+    points: Vec<(f32, f32)>,
+}
+
+// Swatch index → "#rrggbb". MUST mirror SketchpadView.swatches.
+const SKETCH_PALETTE: [&str; 5] = ["#e6e6eb", "#00d4ff", "#eab308", "#39ff14", "#ef4444"];
+// Width index → logical px.
+const SKETCH_WIDTHS: [f32; 2] = [2.5, 6.0];
+
+fn sketch_hex(idx: i32) -> &'static str {
+    SKETCH_PALETTE.get(idx.clamp(0, 4) as usize).copied().unwrap_or("#e6e6eb")
+}
+fn sketch_width_px(idx: i32) -> f32 {
+    SKETCH_WIDTHS.get(idx.clamp(0, 1) as usize).copied().unwrap_or(2.5)
+}
+fn sketch_color(idx: i32) -> slint::Color {
+    let h = sketch_hex(idx).trim_start_matches('#');
+    let v = u32::from_str_radix(h, 16).unwrap_or(0xe6e6eb);
+    slint::Color::from_rgb_u8((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
 // ── Feedback subsystem (toasts) ───────────────────────────────────────────────
@@ -139,6 +172,7 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::Sonus => 11,
         AppKind::Notes => 12,
         AppKind::Face => 13,
+        AppKind::Sketchpad => 14,
     }
 }
 
@@ -157,6 +191,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         11 => AppKind::Sonus,
         12 => AppKind::Notes,
         13 => AppKind::Face,
+        14 => AppKind::Sketchpad,
         _ => AppKind::Chat,
     }
 }
@@ -310,6 +345,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Sonus => "Sonus",
         AppKind::Notes => "Notes",
         AppKind::Face => "APEX",
+        AppKind::Sketchpad => "Sketchpad",
     }
 }
 
@@ -331,6 +367,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Sonus => (480.0, 540.0),
         AppKind::Notes => (640.0, 540.0),
         AppKind::Face => (380.0, 460.0),
+        AppKind::Sketchpad => (600.0, 580.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -782,6 +819,75 @@ fn replace_notes_files(items: Vec<NoteItem>) {
             }
         }
     });
+}
+
+// ── Sketchpad helpers (run on the Slint thread) ────────────────────────────────
+
+/// Start a new stroke at (x, y) with the current colour/width.
+fn sketch_begin_stroke(x: f32, y: f32) {
+    let color_idx = SKETCH_COLOR.with(|c| c.get());
+    let width_idx = SKETCH_WIDTH.with(|c| c.get());
+    let hex = sketch_hex(color_idx).to_string();
+    let width = sketch_width_px(width_idx);
+    SKETCH_DATA.with(|d| d.borrow_mut().push(StrokeData {
+        color_hex: hex,
+        width,
+        points: vec![(x, y)],
+    }));
+    SKETCH_STROKES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            model.push(SketchStroke {
+                commands: format!("M {x} {y}").into(),
+                color: sketch_color(color_idx),
+                width,
+            });
+        }
+    });
+}
+
+/// Extend the in-progress stroke to (x, y).
+fn sketch_extend_stroke(x: f32, y: f32) {
+    SKETCH_DATA.with(|d| {
+        if let Some(s) = d.borrow_mut().last_mut() { s.points.push((x, y)); }
+    });
+    SKETCH_STROKES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            let n = model.row_count();
+            if n > 0 {
+                if let Some(mut row) = model.row_data(n - 1) {
+                    row.commands = format!("{} L {x} {y}", row.commands).into();
+                    model.set_row_data(n - 1, row);
+                }
+            }
+        }
+    });
+}
+
+/// Drop all strokes.
+fn sketch_clear_all() {
+    SKETCH_DATA.with(|d| d.borrow_mut().clear());
+    SKETCH_STROKES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            while model.row_count() > 0 { model.remove(model.row_count() - 1); }
+        }
+    });
+}
+
+/// Build the /api/sketch JSON body from the captured strokes.
+fn sketch_payload(width: f32, height: f32) -> Value {
+    let strokes: Vec<Value> = SKETCH_DATA.with(|d| {
+        d.borrow().iter().map(|s| serde_json::json!({
+            "color": s.color_hex,
+            "width": s.width,
+            "points": s.points.iter().map(|(x, y)| serde_json::json!({ "x": x, "y": y })).collect::<Vec<_>>(),
+        })).collect()
+    });
+    serde_json::json!({
+        "width": width.max(1.0).round() as u32,
+        "height": height.max(1.0).round() as u32,
+        "bg": "#0d0f18",
+        "strokes": strokes,
+    })
 }
 
 fn find_tool_row(call_id: &str) -> Option<usize> {
@@ -1454,6 +1560,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let notes_files_vec: Rc<slint::VecModel<NoteItem>> = Rc::new(slint::VecModel::default());
     ui.set_notes(slint::ModelRc::from(notes_files_vec.clone()));
     NOTES_FILES.with(|m| *m.borrow_mut() = Some(notes_files_vec.clone()));
+
+    let sketch_strokes_vec: Rc<slint::VecModel<SketchStroke>> = Rc::new(slint::VecModel::default());
+    ui.set_sketch_strokes(slint::ModelRc::from(sketch_strokes_vec.clone()));
+    SKETCH_STROKES.with(|m| *m.borrow_mut() = Some(sketch_strokes_vec.clone()));
 
     // Feedback subsystem: bind the toast model + global callbacks.
     let toasts_vec: Rc<slint::VecModel<ToastItem>> = Rc::new(slint::VecModel::default());
@@ -2293,6 +2403,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 None => notify(ToastKind::Error, "Failed to create note"),
             }
+        });
+    });
+
+    // ── Sketchpad callbacks ─────────────────────────────────────────────────────
+    // Drawing is pure Slint-thread state; only "send" touches the network.
+    ui.on_sketch_down(|x, y| sketch_begin_stroke(x, y));
+    ui.on_sketch_move(|x, y| sketch_extend_stroke(x, y));
+    ui.on_sketch_up(|| { /* stroke complete; nothing to finalise */ });
+    ui.on_sketch_clear(|| sketch_clear_all());
+    ui.on_sketch_set_color(|i| SKETCH_COLOR.with(|c| c.set(i)));
+    ui.on_sketch_set_width(|i| SKETCH_WIDTH.with(|c| c.set(i)));
+
+    let rt_h_sk     = rt.handle().clone();
+    let client_sk   = Arc::clone(&http_client);
+    let base_sk     = http_base.clone();
+    let tx_sk       = tx.clone();
+    ui.on_sketch_send(move |w, h| {
+        let payload = sketch_payload(w, h);
+        let empty = payload["strokes"].as_array().map(|a| a.is_empty()).unwrap_or(true);
+        if empty {
+            notify(ToastKind::Warn, "Nothing drawn yet");
+            return;
+        }
+        let client = Arc::clone(&client_sk);
+        let base   = base_sk.clone();
+        let tx     = tx_sk.clone();
+        rt_h_sk.spawn(async move {
+            let ok = client.post(format!("{base}/api/sketch"))
+                .json(&payload)
+                .timeout(std::time::Duration::from_secs(10))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if !ok {
+                notify(ToastKind::Error, "Failed to send sketch");
+                return;
+            }
+            notify(ToastKind::Success, "Sent to APEX 👁");
+            // Surface the request in the chat + drive APEX to look at it.
+            slint::invoke_from_event_loop(|| {
+                maybe_push_time_divider();
+                push_message(MessageItem {
+                    role: "user".into(),
+                    text: "🎨 I drew something on the Sketchpad — take a look.".into(),
+                    streaming: false,
+                    call_id: "".into(), tool_name: "".into(), tool_args: "".into(),
+                    tool_output: "".into(), tool_status: "".into(),
+                    awaiting_approval: false,
+                });
+            }).ok();
+            let prompt = serde_json::json!({
+                "type": "user_prompt",
+                "text": "I drew something on the Sketchpad. Use the sketch_snapshot tool to get the image and tell me what you see.",
+            }).to_string();
+            tx.send(prompt).ok();
         });
     });
 
