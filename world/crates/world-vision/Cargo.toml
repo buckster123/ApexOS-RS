@@ -1,0 +1,25 @@
+# world-vision — agent-vision MCP stdio plugin for apexos-world.
+#
+# This is a LEAF crate (design DESIGN.md §2): light deps only, NO GPU/Slint/Bevy.
+# It is a child process agentd spawns and speaks newline-delimited JSON-RPC 2.0 over
+# stdio (the cerebro-mcp / apexos-tools pattern). Standalone package (not a workspace
+# member) so it builds and handshake-tests on a headless box from day one.
+[package]
+name = "world-vision"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "agent-vision MCP-over-stdio plugin for apexos-world (world_look / world_snapshot)"
+
+[[bin]]
+name = "world-vision"
+path = "src/main.rs"
+
+[dependencies]
+# stdio MCP loop needs io-std for stdin/stdout; the rest inherit the workspace pins.
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros", "net", "time"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
