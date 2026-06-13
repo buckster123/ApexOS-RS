@@ -1,0 +1,182 @@
+import { Palette } from "../palette.slint";
+
+// ── WebView (🌐) ────────────────────────────────────────────────────────────
+//
+// Tier-D launcher: the Cerebro and Sensor Head dashboards are web UIs that Slint
+// can't embed (no iframe/webview), so we surface them as tiles that (a) show the
+// URL — useful even on a kiosk with no local browser, open it from your phone on
+// the LAN — and (b) best-effort open it via the host browser. Plus a free URL
+// bar (the old "Browser" tab). URLs are derived by Rust from the agentd host.
+//
+// preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
+
+component LinkTile inherits Rectangle {
+    in property <string> glyph;
+    in property <string> name;
+    in property <string> url;
+    callback open(string);
+
+    height: 64px;
+    border-radius: Palette.radius;
+    background: Palette.surface;
+    border-width: 1px;
+    border-color: Palette.border;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 12px;
+        spacing: 12px;
+
+        Text {
+            text: root.glyph;
+            font-size: 22px;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.name;
+                color: Palette.text-bright;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            Text {
+                text: root.url;
+                color: Palette.text-dim;
+                font-size: 10px;
+                overflow: elide;
+            }
+        }
+
+        Rectangle {
+            width: 72px;
+            height: 30px;
+            border-radius: Palette.radius;
+            background: open-ta.has-hover ? Palette.primary : Palette.primary-dim;
+            animate background { duration: 150ms; }
+            y: (parent.height - self.height) / 2;
+            open-ta := TouchArea { clicked => { root.open(root.url); } }
+            Text {
+                text: "OPEN";
+                color: Palette.bg;
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 1px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component WebView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <string> cerebro-url;
+    in property <string> sensorhead-url;
+    in-out property <string> custom-url;
+
+    callback open(string);
+
+    VerticalLayout {
+        // Header
+        Rectangle {
+            height: 48px;
+            background: Palette.surface;
+            HorizontalLayout {
+                padding-left: 20px;
+                Text {
+                    text: "WEB";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 2px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // Tiles + custom URL bar
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+            alignment: start;
+
+            LinkTile {
+                glyph: "🧠";
+                name: "Cerebro";
+                url: root.cerebro-url;
+                open(u) => { root.open(u); }
+            }
+            LinkTile {
+                glyph: "👁";
+                name: "Sensor Head";
+                url: root.sensorhead-url;
+                open(u) => { root.open(u); }
+            }
+
+            Text {
+                text: "OPEN A URL";
+                color: Palette.text-dim;
+                font-size: 9px;
+                letter-spacing: 2px;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 32px;
+                    border-radius: Palette.radius;
+                    background: Palette.bg;
+                    border-width: 1px;
+                    border-color: url-field.has-focus ? Palette.primary : Palette.border;
+                    clip: true;
+                    url-field := TextInput {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        single-line: true;
+                        font-size: 12px;
+                        color: Palette.text;
+                        selection-background-color: Palette.primary-dim;
+                        text <=> root.custom-url;
+                        accepted => { if (root.custom-url != "") { root.open(root.custom-url); } }
+                    }
+                    if root.custom-url == "": Text {
+                        x: 10px;
+                        text: "https://…";
+                        color: Palette.text-dim;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    width: 72px;
+                    height: 32px;
+                    border-radius: Palette.radius;
+                    background: go-ta.has-hover ? Palette.primary : Palette.primary-dim;
+                    animate background { duration: 150ms; }
+                    go-ta := TouchArea {
+                        clicked => { if (root.custom-url != "") { root.open(root.custom-url); } }
+                    }
+                    Text {
+                        text: "GO";
+                        color: Palette.bg;
+                        font-size: 11px;
+                        font-weight: 700;
+                        letter-spacing: 1px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

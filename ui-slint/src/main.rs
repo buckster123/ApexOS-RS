@@ -176,6 +176,7 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::Notes => 12,
         AppKind::Face => 13,
         AppKind::Sketchpad => 14,
+        AppKind::Web => 15,
     }
 }
 
@@ -195,6 +196,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         12 => AppKind::Notes,
         13 => AppKind::Face,
         14 => AppKind::Sketchpad,
+        15 => AppKind::Web,
         _ => AppKind::Chat,
     }
 }
@@ -349,6 +351,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Notes => "Notes",
         AppKind::Face => "APEX",
         AppKind::Sketchpad => "Sketchpad",
+        AppKind::Web => "Web",
     }
 }
 
@@ -371,6 +374,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Notes => (640.0, 540.0),
         AppKind::Face => (380.0, 460.0),
         AppKind::Sketchpad => (600.0, 580.0),
+        AppKind::Web => (460.0, 400.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -1030,6 +1034,14 @@ fn iaq_label(score: f32) -> &'static str {
 }
 
 // Derive HTTP base from WS URL: "ws://host:port/ws" → "http://host:port"
+/// Extract the bare host from an http(s) base URL (drops scheme, port, path).
+/// "http://192.168.0.158:8787" → "192.168.0.158".
+fn web_host(base: &str) -> String {
+    let no_scheme = base.split("://").nth(1).unwrap_or(base);
+    let host_port = no_scheme.split('/').next().unwrap_or(no_scheme);
+    host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port).to_string()
+}
+
 fn ws_to_http(ws_url: &str) -> String {
     // Strip any query string first (e.g. "?token=…" appended for WS auth),
     // otherwise the trailing "/ws" is no longer at the end and survives,
@@ -1803,6 +1815,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let http_base = ws_to_http(&ws_url);
 
+    // Web launcher (Tier D): point the dashboard tiles at the real agentd host
+    // (not localhost), so the URL is usable from any device on the LAN. Full-URL
+    // env overrides win.
+    {
+        let host = web_host(&http_base);
+        let cerebro = std::env::var("CEREBRO_WEB_URL").ok().filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("http://{host}:8765"));
+        let sensorhead = std::env::var("SENSORHEAD_URL").ok().filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("http://{host}:8080"));
+        ui.set_web_cerebro_url(cerebro.into());
+        ui.set_web_sensorhead_url(sensorhead.into());
+    }
+
     // Shared HTTP client — carries the bearer token (if set) on every REST call,
     // mirroring the ?token= already on the WS URL. Without this, every /api/* call
     // 401s whenever AGENTD_TOKEN is set (which install.sh now always does).
@@ -2481,6 +2506,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_sketch_set_color(|i| SKETCH_COLOR.with(|c| c.set(i)));
     ui.on_sketch_set_width(|i| SKETCH_WIDTH.with(|c| c.set(i)));
     ui.on_sketch_set_tool(|i| SKETCH_TOOL.with(|t| t.set(i)));
+
+    // ── Web launcher: open a URL in the host browser (best-effort) ──────────────
+    let rt_h_url = rt.handle().clone();
+    ui.on_open_url(move |url| {
+        let u = url.to_string();
+        if u.is_empty() { return; }
+        notify(ToastKind::Info, format!("Opening {u}…"));
+        let prog = std::env::var("BROWSER").ok().filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "xdg-open".into());
+        // Run + reap on the blocking pool so we neither block the UI nor leave a zombie.
+        rt_h_url.spawn_blocking(move || {
+            match std::process::Command::new(&prog).arg(&u).spawn() {
+                Ok(mut child) => { let _ = child.wait(); }
+                Err(_) => notify(ToastKind::Warn,
+                    format!("No browser here — open {u} on another device")),
+            }
+        });
+    });
 
     let rt_h_sk     = rt.handle().clone();
     let client_sk   = Arc::clone(&http_client);
