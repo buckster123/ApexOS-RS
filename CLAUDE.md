@@ -274,6 +274,7 @@ Full event list: `agentd/crates/core/src/types.rs` — `Event` enum.
 | `SLINT_BACKEND` | auto | `winit` (desktop), `linuxkms` (Pi), `linuxkms-femtovg` (Pi Zero) |
 | `SLINT_FULLSCREEN` | unset | `1` = fullscreen, no window chrome |
 | `RUST_LOG` | `info` | tracing filter |
+| `VISION_MAX_EDGE` | `1024` | agentd: longest-edge px cap for images entering model context (the token-bomb shim, clamped 128–4096) |
 
 ---
 
@@ -301,13 +302,14 @@ Full event list: `agentd/crates/core/src/types.rs` — `Event` enum.
 
 ---
 
-## Git discipline
+## Git discipline — PR workflow (default since June 2026)
 
-- **Gate passes → commit immediately.** Each build-order step = at minimum one commit.
-- **Commit format:** imperative, lowercase. `implement agent chat streaming view`
-- **Push after every commit.**
+- **Never commit to `main`. Work on a feature branch off the latest `origin/main`:** `feat/…`, `fix/…`, `chore/…`, `proto/…`. One branch = one slice.
+- **Ship via PR.** When a step/feature gate passes: commit, push the branch, open a PR with `gh pr create`. **Do NOT merge it yourself** — André reviews and merges, or explicitly tells you to merge.
+- **After merge → André runs `apexos-update`** to deploy, then we take the next slice.
+- **Commit format:** imperative, lowercase (`implement agent chat streaming view`); end the message with the `Co-Authored-By` trailer.
 - **Never amend a pushed commit. Never force-push.**
-- **Docs travel with code.** Update CLAUDE.md + relevant docs/ file in the same commit.
+- **Docs travel with code.** Update CLAUDE.md + the relevant docs/ file in the same PR.
 
 ---
 
@@ -374,7 +376,10 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 - Monaco / code editor — SSH/vim or embedded webkit2gtk webview for soul.md heavy editing
 - Sub-agent windows — `Popup` per child session, maps to `SubAgentStarted` events
 - `apexos-core` vendor — optionally vendor agentd's core crate for shared `Event` types (avoids JSON string matching), blocked on agentd publishing it as a library crate
-- **Vision input** (dedicated session) — give APEX real eyes: multimodal image→model in agentd's API path + un-stub cerebro `describe_image`/`search_vision`. Hard precondition: a frame **compression/downscale shim** (SensorHead high-res ≈ 500k tok/frame). Generalize beyond SensorHead to **webcam / laptop camera / arbitrary image**. Sibling: a **screenshot "mirror" tool** so APEX can snap its own screen (self-modification feedback). `sketch_snapshot` PNGs are a ready test target.
+- ~~Vision input — core eyes~~ — shipped: the downscale **shim** (`apexos_core::vision`, `VISION_MAX_EDGE` cap = the SensorHead token-bomb guard) + the **vision tool-result path** (a tool returns `{"vision":{"path"|"b64"},"text"}` → `turn.rs::vision_rewrite` shims it → multimodal content block; Anthropic native, OAI/Ollama follow-up user msg). `sketch_snapshot` now hands APEX the drawing inline. Remaining vision follow-ups still deferred:
+  - **Screenshot "mirror" tool** (next up) — APEX snaps its own screen for self-modification feedback. Pure capture → PNG → the *same* `{vision:{path}}` sentinel, zero agentd changes. Open unknown: the capture backend on Pi linuxkms (no compositor → DRM/GL readback) / Wayland laptop.
+  - **User-attached images** — webcam / laptop camera / arbitrary image handed to APEX via UI/PWA (upload endpoint + WS `user_prompt` image; needs a first-class `ContentBlock::Image` for user messages).
+  - **cerebro `describe_image` / `search_vision`** — still stubbed; describe_image wants a VLM, search_vision wants CLIP-style image embeddings.
 
 ---
 

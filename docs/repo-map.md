@@ -147,6 +147,7 @@ store writer, scheduler/council handlers.
 | Change **auth / bind policy** (token, loopback) | bind/auth in `agentd/crates/agentd/src/main.rs:240-251`; `require_token` middleware in `gateway/src/lib.rs:89-114` |
 | Change the **wire protocol** (Event/Intent/ToolCall shape) | `agentd/crates/core/src/types.rs` (then `SystemState::apply` in `state.rs` + every consumer) |
 | Change **LLM provider / turn loop** logic | `agentd/crates/agent/src/turn.rs`; provider impls in `anthropic.rs` / `oai.rs`; dispatch in `routing.rs` |
+| Give a **tool image output** (let APEX see a PNG) | tool returns the **vision sentinel** `{"vision":{"path"\|"b64","media_type"?},"text"?}`; `turn.rs::vision_rewrite` runs it through `apexos_core::vision` (the downscale shim, `VISION_MAX_EDGE`) → multimodal content block. Providers gate on `vision::contains_image_block`. Reference impl: `apexos-tools` `sketch_snapshot` |
 | Add / change **multi-agent council** | `agentd/crates/agent/src/council.rs` + `agentd/crates/agentd/src/council_handler.rs` |
 | Change **scheduled / cron tasks** | `agentd/crates/agentd/src/scheduler.rs` |
 | Change **session history persistence** | `agentd/crates/agentd/src/session_store.rs` (root sessions) |

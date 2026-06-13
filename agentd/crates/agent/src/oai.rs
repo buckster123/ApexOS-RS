@@ -88,15 +88,45 @@ fn build_body(model: &str, history: &[Message], tools: &[ToolSpec], system: Opti
                 // Tool results must precede any new user text in OAI ordering.
                 let mut tool_results: Vec<Value> = Vec::new();
                 let mut text_parts:   Vec<String> = Vec::new();
+                let mut vision_parts: Vec<Value>  = Vec::new(); // OpenAI image_url items
 
                 for block in content {
                     match block {
                         ContentBlock::ToolResult { tool_use_id, content: c, is_error } => {
-                            let body = match c {
-                                Value::String(s) => s.clone(),
-                                other => other.to_string(),
+                            // A multimodal vision result is a content-block array. OAI
+                            // tool-role messages can't carry images, so send the caption
+                            // here and defer the image(s) to a trailing user message.
+                            let body = if apexos_core::vision::contains_image_block(c) {
+                                let mut caption = String::new();
+                                for item in c.as_array().into_iter().flatten() {
+                                    match item["type"].as_str() {
+                                        Some("text") => {
+                                            if let Some(t) = item["text"].as_str() { caption.push_str(t); }
+                                        }
+                                        Some("image") => {
+                                            if let (Some(mt), Some(data)) = (
+                                                item["source"]["media_type"].as_str(),
+                                                item["source"]["data"].as_str(),
+                                            ) {
+                                                vision_parts.push(serde_json::json!({
+                                                    "type": "image_url",
+                                                    "image_url": { "url": format!("data:{mt};base64,{data}") },
+                                                }));
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                if caption.is_empty() {
+                                    "[image returned in the following message]".to_string()
+                                } else { caption }
+                            } else {
+                                let body = match c {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                if *is_error { format!("[ERROR] {body}") } else { body }
                             };
-                            let body = if *is_error { format!("[ERROR] {body}") } else { body };
                             tool_results.push(serde_json::json!({
                                 "role":         "tool",
                                 "tool_call_id": tool_use_id,
@@ -114,6 +144,16 @@ fn build_body(model: &str, history: &[Message], tools: &[ToolSpec], system: Opti
                         "role":    "user",
                         "content": text_parts.join("\n"),
                     }));
+                }
+                // Images from vision tool-results ride in their own user message
+                // (OpenAI multimodal shape); a non-vision model just ignores them.
+                if !vision_parts.is_empty() {
+                    let mut parts = vec![serde_json::json!({
+                        "type": "text",
+                        "text": "Image(s) returned by the preceding tool call:",
+                    })];
+                    parts.extend(vision_parts);
+                    messages.push(serde_json::json!({ "role": "user", "content": parts }));
                 }
             }
 

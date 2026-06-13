@@ -303,9 +303,11 @@ dependencies = [
  "apexos-core",
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "futures-core",
  "futures-util",
+ "image",
  "reqwest",
  "serde",
  "serde_json",
@@ -316,6 +318,9 @@ dependencies = [
 name = "apexos-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "image",
  "serde",
  "serde_json",
  "tokio",
@@ -337,6 +342,7 @@ dependencies = [
  "serde",
  "serde_json",
  "subtle",
+ "tiny-skia 0.11.4",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "toml 0.8.23",
@@ -6409,6 +6415,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "log",
+ "png 0.17.16",
  "tiny-skia-path 0.11.4",
 ]
 
