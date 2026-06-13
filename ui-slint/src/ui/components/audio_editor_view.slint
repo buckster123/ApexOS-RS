@@ -1,0 +1,295 @@
+import { Palette } from "../palette.slint";
+import { AudioFileItem } from "../types.slint";
+
+// ── AudioEditorView (🎛️) ───────────────────────────────────────────────────────
+//
+// Pick a workspace audio file (/api/audio/files), see its waveform envelope
+// (/api/audio/waveform) + loudness stats (/api/audio/analyze), and apply
+// one-click ffmpeg ops (/api/audio/process): Normalize · Trim Silence ·
+// Peak Limit · Clean (the composite). Output lands as <stem>_edit.<ext> and the
+// file list re-scans so the result shows up.
+//
+// The waveform is drawn as absolutely-positioned bars over a `[float]` model
+// (normalised 0..1 by Rust) — Slint has no raw canvas; the sensor heatmap uses
+// the same fake-canvas-with-rects approach.
+//
+// preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
+
+component OpButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> danger: false;
+    in property <bool> enabled-look: true;
+    callback clicked;
+
+    height: 30px;
+    min-width: 92px;
+    border-radius: Palette.radius;
+    background: !root.enabled-look ? Palette.surface
+              : touch.has-hover ? (root.danger ? rgba(234,179,8,0.2) : Palette.primary-dim)
+              : Palette.surface-hi;
+    border-width: 1px;
+    border-color: root.danger ? rgba(234,179,8,0.5) : Palette.primary;
+    opacity: root.enabled-look ? 1.0 : 0.4;
+    animate background { duration: 150ms; }
+
+    touch := TouchArea {
+        clicked => { if root.enabled-look { root.clicked(); } }
+    }
+
+    Text {
+        text: root.label;
+        color: root.danger ? #eab308 : Palette.primary;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component AudioEditorView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <[AudioFileItem]> files;
+    in property <string>         selected-path;
+    in property <string>         selected-name;
+    in property <[float]>        waveform;
+    in property <string>         stats;
+    in property <string>         duration;
+    in property <bool>           busy;
+
+    callback refresh();
+    callback select(string, string);   // path, name
+    callback process(string, string);  // path, op
+
+    VerticalLayout {
+        // ── Header ────────────────────────────────────────────────────────
+        Rectangle {
+            height: 48px;
+            background: Palette.surface;
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 14px;
+                spacing: 10px;
+
+                Text {
+                    text: "AUDIO EDITOR";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 2px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                if root.busy: Text {
+                    text: "working…";
+                    color: Palette.warning;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    width: 72px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface-hi;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    y: (parent.height - self.height) / 2;
+
+                    TouchArea { clicked => { root.refresh(); } }
+
+                    Text {
+                        text: "REFRESH";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 1px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── File list (top third) ───────────────────────────────────────────
+        Rectangle {
+            height: 132px;
+            background: Palette.bg;
+
+            Flickable {
+                interactive: true;
+                viewport-height: file-col.preferred-height;
+
+                file-col := VerticalLayout {
+                    padding: 8px;
+                    spacing: 4px;
+                    alignment: start;
+
+                    if root.files.length == 0: Text {
+                        text: "Tap REFRESH to find audio in the workspace…";
+                        color: Palette.text-dim;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                    }
+
+                    for f in root.files: Rectangle {
+                        height: 34px;
+                        border-radius: Palette.radius;
+                        background: f.path == root.selected-path ? Palette.surface-hi : transparent;
+                        border-width: 1px;
+                        border-color: f.path == root.selected-path ? Palette.primary : transparent;
+
+                        TouchArea { clicked => { root.select(f.path, f.name); } }
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 10px;
+
+                            Text {
+                                text: f.name;
+                                color: f.path == root.selected-path ? Palette.text-bright : Palette.text;
+                                font-size: 11px;
+                                font-weight: f.path == root.selected-path ? 700 : 400;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                            Text {
+                                text: f.size-label;
+                                color: Palette.text-dim;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Editor pane ───────────────────────────────────────────────────────
+        Rectangle {
+            vertical-stretch: 1;
+            background: Palette.bg;
+
+            if root.selected-path == "": Text {
+                text: "Select a file above to view its waveform.";
+                color: Palette.text-dim;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            if root.selected-path != "": VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                // Title + duration
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: root.selected-name;
+                        color: Palette.text-bright;
+                        font-size: 13px;
+                        font-weight: 700;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.duration;
+                        color: Palette.text-dim;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Waveform — bars over the [float] envelope (centered, mirrored).
+                Rectangle {
+                    height: 120px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    clip: true;
+
+                    // Center line
+                    Rectangle {
+                        y: parent.height / 2;
+                        height: 1px;
+                        background: Palette.border-hi;
+                    }
+
+                    if root.waveform.length == 0: Text {
+                        text: root.busy ? "loading waveform…" : "no waveform";
+                        color: Palette.text-dim;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    for s[i] in root.waveform: Rectangle {
+                        property <length> bar-w: parent.width / max(root.waveform.length, 1);
+                        width: parent.width / max(root.waveform.length, 1) - 1px;
+                        x: i * self.bar-w;
+                        height: max(2px, s * (parent.height - 8px));
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 1px;
+                        background: Palette.primary;
+                        opacity: 0.85;
+                    }
+                }
+
+                // Stats line
+                Text {
+                    text: root.stats == "" ? "—" : root.stats;
+                    color: Palette.text-dim;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+
+                // One-click ops
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    OpButton {
+                        label: "NORMALIZE";
+                        enabled-look: !root.busy;
+                        clicked => { root.process(root.selected-path, "normalize"); }
+                    }
+                    OpButton {
+                        label: "TRIM SILENCE";
+                        enabled-look: !root.busy;
+                        clicked => { root.process(root.selected-path, "trim_silence"); }
+                    }
+                    OpButton {
+                        label: "PEAK LIMIT";
+                        enabled-look: !root.busy;
+                        clicked => { root.process(root.selected-path, "peak_limit"); }
+                    }
+                    OpButton {
+                        label: "CLEAN";
+                        danger: true;
+                        enabled-look: !root.busy;
+                        clicked => { root.process(root.selected-path, "clean"); }
+                    }
+                }
+
+                Text {
+                    text: "Output saved as <name>_edit.<ext> in the same folder; list re-scans.";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                }
+
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+}
