@@ -1,12 +1,12 @@
-/// Integration tests — build-order gates.
-///
-/// Step 1: types serde round-trips
-/// Step 2: activation values match Python fixtures within 1e-4
-/// Step 3: SQLite schema init and CRUD (coming)
-///
-/// Fixture generation: `PYTHONPATH=../CerebroCortex/src python3 scripts/gen_activation_fixtures.py`
-/// using the CerebroCortex venv:
-///   `/home/andre/Projects/CerebroCortex/venv/bin/python3 scripts/gen_activation_fixtures.py`
+// Integration tests — build-order gates.
+//
+// Step 1: types serde round-trips
+// Step 2: activation values match Python fixtures within 1e-4
+// Step 3: SQLite schema init and CRUD (coming)
+//
+// Fixture generation: `PYTHONPATH=../CerebroCortex/src python3 scripts/gen_activation_fixtures.py`
+// using the CerebroCortex venv:
+//   `/home/andre/Projects/CerebroCortex/venv/bin/python3 scripts/gen_activation_fixtures.py`
 
 // =============================================================================
 // Step 1 — types serde round-trips

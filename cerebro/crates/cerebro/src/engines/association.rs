@@ -13,6 +13,12 @@ use crate::{
 /// Mirrors Python engines/association.py LinkEngine.
 pub struct LinkEngine;
 
+impl Default for LinkEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LinkEngine {
     pub fn new() -> Self { Self }
 

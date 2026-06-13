@@ -258,5 +258,5 @@ fn init_fastembed(model_name: &str) -> Result<fastembed::TextEmbedding> {
         "BAAI/bge-small-en-v1.5" => EmbeddingModel::BGESmallENV15,
         other => anyhow::bail!("unsupported embed model: {other}"),
     };
-    Ok(TextEmbedding::try_new(InitOptions::new(model))?)
+    TextEmbedding::try_new(InitOptions::new(model))
 }

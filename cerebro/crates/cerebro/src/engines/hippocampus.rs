@@ -4,6 +4,12 @@
 /// Mirrors Python engines/hippocampus.py EpisodicEngine.
 pub struct EpisodicEngine;
 
+impl Default for EpisodicEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EpisodicEngine {
     pub fn new() -> Self { Self }
 }

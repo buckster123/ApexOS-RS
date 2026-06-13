@@ -4,6 +4,12 @@
 /// Mirrors Python engines/cerebellum.py ProceduralEngine.
 pub struct ProceduralEngine;
 
+impl Default for ProceduralEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProceduralEngine {
     pub fn new() -> Self { Self }
 }
