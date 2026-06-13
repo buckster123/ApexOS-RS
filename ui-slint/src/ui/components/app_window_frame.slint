@@ -30,6 +30,7 @@ import { NotesView } from "notes_view.slint";
 import { FaceView } from "face_view.slint";
 import { SketchpadView } from "sketchpad_view.slint";
 import { WebView } from "web_view.slint";
+import { CalculatorView } from "calculator_view.slint";
 
 component CaptionButton inherits Rectangle {
     in property <string> glyph;
@@ -136,6 +137,7 @@ export component AppWindowFrame inherits Rectangle {
     in property <string>         web-cerebro-url;
     in property <string>         web-sensorhead-url;
     in-out property <string>     web-custom-url;
+    in property <string>         calc-display;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -173,6 +175,7 @@ export component AppWindowFrame inherits Rectangle {
     callback sketch-set-width(int);
     callback sketch-set-tool(int);
     callback open-url(string);
+    callback calc-key(string);
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -534,6 +537,12 @@ export component AppWindowFrame inherits Rectangle {
             sensorhead-url: root.web-sensorhead-url;
             custom-url <=> root.web-custom-url;
             open(u) => { root.open-url(u); }
+        }
+
+        if root.kind == AppKind.calculator: CalculatorView {
+            vertical-stretch: 1;
+            display: root.calc-display;
+            key(k) => { root.calc-key(k); }
         }
     }
 

@@ -82,6 +82,7 @@ export component AppWindow inherits Window {
     in-out property <string>         web-cerebro-url: "";
     in-out property <string>         web-sensorhead-url: "";
     in-out property <string>         web-custom-url: "";
+    in-out property <string>         calc-display: "0";
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id /
@@ -141,6 +142,7 @@ export component AppWindow inherits Window {
     callback sketch-set-width(int);
     callback sketch-set-tool(int);
     callback open-url(string);
+    callback calc-key(string);
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -622,6 +624,7 @@ export component AppWindow inherits Window {
                         web-cerebro-url: root.web-cerebro-url;
                         web-sensorhead-url: root.web-sensorhead-url;
                         web-custom-url <=> root.web-custom-url;
+                        calc-display: root.calc-display;
 
                         send-message(t) => { root.send-message(t); }
                         stop-turn => { root.stop-turn(); }
@@ -657,6 +660,7 @@ export component AppWindow inherits Window {
                         sketch-set-width(i) => { root.sketch-set-width(i); }
                         sketch-set-tool(i) => { root.sketch-set-tool(i); }
                         open-url(u) => { root.open-url(u); }
+                        calc-key(k) => { root.calc-key(k); }
 
                         req-focus => { root.focus-window(w.id); }
                         req-close => { root.close-window(w.id); }
