@@ -86,6 +86,9 @@ export component StartMenu inherits Rectangle {
         if Personas.show-tech-apps: MenuRow { glyph: "🌡"; label: "Sensors";  clicked => { root.launch(2); } }
         if Personas.show-tech-apps: MenuRow { glyph: "⌨"; label: "Terminal"; clicked => { root.launch(5); } }
         if Personas.show-tech-apps: MenuRow { glyph: "⚖"; label: "Council";  clicked => { root.launch(6); } }
+        if Personas.show-tech-apps: MenuRow { glyph: "📜"; label: "Event Log"; clicked => { root.launch(7); } }
+        if Personas.show-tech-apps: MenuRow { glyph: "🕸"; label: "Mesh";      clicked => { root.launch(8); } }
+        if Personas.show-tech-apps: MenuRow { glyph: "⚡"; label: "Inference"; clicked => { root.launch(9); } }
     }
 }
 
@@ -131,8 +134,8 @@ export component Win98StartMenu inherits Rectangle {
     callback launch(int);     // AppKind ordinal — same contract as StartMenu
 
     width: 200px;
-    // 4 core rows + (optional separator + 3 tech rows), all 26px; + 4px pads.
-    height: (Personas.show-tech-apps ? 4 * 26px + 9px + 3 * 26px : 4 * 26px) + 8px;
+    // 4 core rows + (optional separator + 6 tech rows), all 26px; + 4px pads.
+    height: (Personas.show-tech-apps ? 4 * 26px + 9px + 6 * 26px : 4 * 26px) + 8px;
     background: Win98.face;
     drop-shadow-blur: 6px;
     drop-shadow-color: #00000088;
@@ -181,6 +184,9 @@ export component Win98StartMenu inherits Rectangle {
             if Personas.show-tech-apps: WinMenuRow { glyph: "🌡"; label: "Sensors";  clicked => { root.launch(2); } }
             if Personas.show-tech-apps: WinMenuRow { glyph: "⌨"; label: "Terminal"; clicked => { root.launch(5); } }
             if Personas.show-tech-apps: WinMenuRow { glyph: "⚖"; label: "Council";  clicked => { root.launch(6); } }
+            if Personas.show-tech-apps: WinMenuRow { glyph: "📜"; label: "Event Log"; clicked => { root.launch(7); } }
+            if Personas.show-tech-apps: WinMenuRow { glyph: "🕸"; label: "Mesh";      clicked => { root.launch(8); } }
+            if Personas.show-tech-apps: WinMenuRow { glyph: "⚡"; label: "Inference"; clicked => { root.launch(9); } }
         }
     }
 

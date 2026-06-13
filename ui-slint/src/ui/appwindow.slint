@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
@@ -15,7 +15,7 @@ import { StartMenu, Win98StartMenu } from "components/start_menu.slint";
 import { NotifCenter } from "components/notif_center.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
-export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock }
+export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -55,6 +55,13 @@ export component AppWindow inherits Window {
     // Sub-agents currently running (SubAgentStarted − child turn_complete) → taskbar badge.
     in-out property <int>            subagent-count: 0;
 
+    // ── Tier-A parity apps (Event Log / Mesh / Inference) ───────────────
+    in-out property <[EventLogItem]> event-log;
+    in-out property <[MeshNode]>     mesh-nodes;
+    in-out property <string>         inference-backend: "—";
+    in-out property <string>         inference-base-url: "";
+    in-out property <[ModelItem]>    inference-models;
+
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id /
     // focused-kind are Rust-maintained for chrome highlight + dock state.
@@ -88,6 +95,12 @@ export component AppWindow inherits Window {
     callback set-model(string);
     callback power-action(string);
     callback terminal-send(string);          // a submitted terminal command line
+    // Tier-A parity apps
+    callback refresh-events();
+    callback refresh-mesh();
+    callback add-peer(string, string);       // node_id, ws_url
+    callback remove-peer(string);            // node_id
+    callback refresh-inference();
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -543,6 +556,11 @@ export component AppWindow inherits Window {
                         council-status: root.council-status;
                         council-synthesis: root.council-synthesis;
                         council-scroll-tick: root.council-scroll-tick;
+                        event-log: root.event-log;
+                        mesh-nodes: root.mesh-nodes;
+                        inference-backend: root.inference-backend;
+                        inference-base-url: root.inference-base-url;
+                        inference-models: root.inference-models;
 
                         send-message(t) => { root.send-message(t); }
                         stop-turn => { root.stop-turn(); }
@@ -554,6 +572,11 @@ export component AppWindow inherits Window {
                         set-policy(m) => { root.set-policy(m); }
                         set-model(id) => { root.set-model(id); }
                         refresh-settings => { root.refresh-settings(); }
+                        refresh-events => { root.refresh-events(); }
+                        refresh-mesh => { root.refresh-mesh(); }
+                        add-peer(id, url) => { root.add-peer(id, url); }
+                        remove-peer(id) => { root.remove-peer(id); }
+                        refresh-inference => { root.refresh-inference(); }
 
                         req-focus => { root.focus-window(w.id); }
                         req-close => { root.close-window(w.id); }
