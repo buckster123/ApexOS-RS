@@ -28,7 +28,7 @@ Original app catalogue lives in `../ApexOS/ui/desktop-app.js` (`WIN_DEFAULTS` +
 | 🕸 Mesh | ⏳ planned | A | `/api/mesh/{nodes,peers}` |
 | ⚡ Inference | ⏳ planned | A | `/api/backend`,`/api/model(s)`,`/api/vast/*` |
 | 📜 Event Log | ⏳ planned | A | `/api/events/recent` |
-| 📝 Notes | ✗ | B | local + `write_file`/`read_file` |
+| 📝 Notes | ✅ `notes_view` | B | `/api/notes/{,read,write}` + `notes_{list,read,append}` tools |
 | 🎨 Sketchpad | ✗ | B | Slint canvas + **new** `sketch_snapshot` tool |
 | 😊 APEX Face | ✗ | B | custom painter + existing `display_face` tool |
 | 🎵 Sonus | ✅ player (list+play); gen needs APEX | C | `/api/sonus/{files,stream,play,stop}`; `sonus-mcp` plugin (ext. hermes-sonus) |
@@ -69,7 +69,7 @@ Original app catalogue lives in `../ApexOS/ui/desktop-app.js` (`WIN_DEFAULTS` +
      checks containment), and the sonus dir is inside the workspace default anyway.
    - Remaining: (a) APEX orchestration-guidance proposal; (b) flesh out the
      `plugins.toml` deploy stanza; (c) confirm live env on the Pi.
-4. **Tier B apps** — Notes, Sketchpad (symbiosis showcase), APEX Face.
+4. **Tier B apps** — Notes ✅, Sketchpad (symbiosis showcase), APEX Face.
 5. **Tier D launcher tiles** — cheap external-browser stubs for Cerebro/SensorHead/Browser.
 6. **New OS-standard apps** — see ideas below.
 

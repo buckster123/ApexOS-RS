@@ -1,0 +1,274 @@
+import { Palette } from "../palette.slint";
+import { NoteItem } from "../types.slint";
+
+// ── NotesView (📝) ──────────────────────────────────────────────────────────
+//
+// The shared notebook: plain markdown files under <workspace>/notes, the same
+// dir APEX reads/appends via the notes_* tools. Two panes — a note list on the
+// left (open/new/refresh) and a plain-text editor on the right (save). The open
+// note is highlighted; the editor is empty until one is selected or created.
+//
+// preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
+
+export component NotesView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <[NoteItem]>  notes;
+    in-out property <string>  current-name;   // open note ("" = none)
+    in-out property <string>  current-text;   // editor buffer
+    property <string>         new-name;        // new-note name field
+
+    callback refresh();
+    callback open(string);            // name
+    callback save(string, string);    // name, text
+    callback create(string);          // new note name
+
+    HorizontalLayout {
+        // ── Left: note list ──────────────────────────────────────────────────
+        Rectangle {
+            width: 210px;
+            background: Palette.surface;
+
+            VerticalLayout {
+                // Header
+                Rectangle {
+                    height: 48px;
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 12px;
+                        Text {
+                            text: "NOTES";
+                            color: Palette.text-dim;
+                            font-size: 9px;
+                            letter-spacing: 2px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Rectangle {
+                            width: 64px;
+                            height: 26px;
+                            border-radius: Palette.radius;
+                            background: Palette.surface-hi;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            y: (parent.height - self.height) / 2;
+                            TouchArea { clicked => { root.refresh(); } }
+                            Text {
+                                text: "REFRESH";
+                                color: Palette.text-dim;
+                                font-size: 8px;
+                                letter-spacing: 1px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                // New note row
+                Rectangle {
+                    height: 42px;
+                    HorizontalLayout {
+                        padding: 8px;
+                        spacing: 6px;
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 26px;
+                            border-radius: Palette.radius;
+                            background: Palette.bg;
+                            border-width: 1px;
+                            border-color: name-field.has-focus ? Palette.primary : Palette.border;
+                            clip: true;
+                            name-field := TextInput {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                single-line: true;
+                                font-size: 11px;
+                                color: Palette.text;
+                                selection-background-color: Palette.primary-dim;
+                                text <=> root.new-name;
+                                accepted => {
+                                    if (root.new-name != "") { root.create(root.new-name); root.new-name = ""; }
+                                }
+                            }
+                            if root.new-name == "": Text {
+                                x: 8px;
+                                text: "new note…";
+                                color: Palette.text-dim;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Rectangle {
+                            width: 28px;
+                            height: 26px;
+                            border-radius: Palette.radius;
+                            background: add-ta.has-hover ? Palette.primary : Palette.primary-dim;
+                            animate background { duration: 150ms; }
+                            add-ta := TouchArea {
+                                clicked => {
+                                    if (root.new-name != "") { root.create(root.new-name); root.new-name = ""; }
+                                }
+                            }
+                            Text {
+                                text: "+";
+                                color: Palette.bg;
+                                font-size: 16px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                // List
+                Flickable {
+                    vertical-stretch: 1;
+                    interactive: true;
+                    viewport-height: list-col.preferred-height;
+
+                    list-col := VerticalLayout {
+                        padding: 8px;
+                        spacing: 4px;
+                        alignment: start;
+
+                        if root.notes.length == 0: Text {
+                            text: "No notes yet.";
+                            color: Palette.text-dim;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                        }
+
+                        for n in root.notes: Rectangle {
+                            height: 40px;
+                            border-radius: Palette.radius;
+                            background: n.name == root.current-name ? Palette.surface-hi : transparent;
+                            border-width: 1px;
+                            border-color: n.name == root.current-name ? Palette.primary : transparent;
+                            row-ta := TouchArea { clicked => { root.open(n.name); } }
+                            VerticalLayout {
+                                padding-left: 10px;
+                                padding-right: 8px;
+                                spacing: 2px;
+                                alignment: center;
+                                Text {
+                                    text: n.name;
+                                    color: n.name == root.current-name ? Palette.text-bright : (row-ta.has-hover ? Palette.text-bright : Palette.text);
+                                    font-size: 12px;
+                                    font-weight: n.name == root.current-name ? 700 : 400;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: n.size-label;
+                                    color: Palette.text-dim;
+                                    font-size: 9px;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle { width: 1px; background: Palette.border; }
+
+        // ── Right: editor ─────────────────────────────────────────────────────
+        Rectangle {
+            background: Palette.bg;
+            horizontal-stretch: 1;
+
+            VerticalLayout {
+                // Editor header
+                Rectangle {
+                    height: 48px;
+                    background: Palette.surface;
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 12px;
+                        Text {
+                            text: root.current-name == "" ? "— no note open —" : root.current-name;
+                            color: root.current-name == "" ? Palette.text-dim : Palette.text-bright;
+                            font-size: 12px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        Rectangle {
+                            width: 72px;
+                            height: 30px;
+                            border-radius: Palette.radius;
+                            background: root.current-name == ""
+                                ? Palette.surface-hi
+                                : (save-ta.has-hover ? Palette.primary : Palette.primary-dim);
+                            animate background { duration: 150ms; }
+                            y: (parent.height - self.height) / 2;
+                            save-ta := TouchArea {
+                                clicked => {
+                                    if (root.current-name != "") { root.save(root.current-name, root.current-text); }
+                                }
+                            }
+                            Text {
+                                text: "SAVE";
+                                color: root.current-name == "" ? Palette.text-dim : Palette.bg;
+                                font-size: 10px;
+                                font-weight: 700;
+                                letter-spacing: 1px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                // Editor body
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: Palette.bg;
+                    clip: true;
+
+                    if root.current-name == "": Text {
+                        text: "Select a note, or type a name above and press + to create one.";
+                        color: Palette.text-dim;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: parent.width - 40px;
+                        wrap: word-wrap;
+                    }
+
+                    if root.current-name != "": Flickable {
+                        x: 14px; y: 12px;
+                        width: parent.width - 28px;
+                        height: parent.height - 24px;
+                        interactive: true;
+                        viewport-height: body-field.preferred-height + 20px;
+
+                        body-field := TextInput {
+                            width: parent.width;
+                            height: max(self.preferred-height, parent.height);
+                            single-line: false;
+                            wrap: TextWrap.word-wrap;
+                            font-size: 13px;
+                            color: Palette.text;
+                            selection-background-color: Palette.primary-dim;
+                            selection-foreground-color: Palette.text-bright;
+                            text <=> root.current-text;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

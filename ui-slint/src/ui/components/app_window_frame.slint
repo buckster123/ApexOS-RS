@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -26,6 +26,7 @@ import { MeshView } from "mesh_view.slint";
 import { InferenceView } from "inference_view.slint";
 import { AudioEditorView } from "audio_editor_view.slint";
 import { SonusView } from "sonus_view.slint";
+import { NotesView } from "notes_view.slint";
 
 component CaptionButton inherits Rectangle {
     in property <string> glyph;
@@ -120,6 +121,9 @@ export component AppWindowFrame inherits Rectangle {
     in property <bool>           audio-busy;
     in property <[SonusFileItem]> sonus-files;
     in property <string>         sonus-now-playing;
+    in property <[NoteItem]>     notes;
+    in-out property <string>     notes-current-name;
+    in-out property <string>     notes-current-text;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -144,6 +148,10 @@ export component AppWindowFrame inherits Rectangle {
     callback refresh-sonus();
     callback play-sonus(string);              // name
     callback stop-sonus();
+    callback refresh-notes();
+    callback open-note(string);               // name
+    callback save-note(string, string);       // name, text
+    callback create-note(string);             // new note name
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -464,6 +472,17 @@ export component AppWindowFrame inherits Rectangle {
             refresh => { root.refresh-sonus(); }
             play(name) => { root.play-sonus(name); }
             stop => { root.stop-sonus(); }
+        }
+
+        if root.kind == AppKind.notes: NotesView {
+            vertical-stretch: 1;
+            notes: root.notes;
+            current-name <=> root.notes-current-name;
+            current-text <=> root.notes-current-text;
+            refresh => { root.refresh-notes(); }
+            open(name) => { root.open-note(name); }
+            save(name, text) => { root.save-note(name, text); }
+            create(name) => { root.create-note(name); }
         }
     }
 

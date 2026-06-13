@@ -80,6 +80,7 @@ export component StartMenu inherits Rectangle {
         MenuRow { glyph: "💬"; label: "Chat";     clicked => { root.launch(0); } }
         MenuRow { glyph: "🖥"; label: "System";   clicked => { root.launch(1); } }
         MenuRow { glyph: "🎵"; label: "Sonus";    clicked => { root.launch(11); } }
+        MenuRow { glyph: "📝"; label: "Notes";    clicked => { root.launch(12); } }
         MenuRow { glyph: "🕘"; label: "Sessions"; clicked => { root.launch(3); } }
         MenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
 
@@ -136,8 +137,8 @@ export component Win98StartMenu inherits Rectangle {
     callback launch(int);     // AppKind ordinal — same contract as StartMenu
 
     width: 200px;
-    // 5 core rows + (optional separator + 7 tech rows), all 26px; + 4px pads.
-    height: (Personas.show-tech-apps ? 5 * 26px + 9px + 7 * 26px : 5 * 26px) + 8px;
+    // 6 core rows + (optional separator + 7 tech rows), all 26px; + 4px pads.
+    height: (Personas.show-tech-apps ? 6 * 26px + 9px + 7 * 26px : 6 * 26px) + 8px;
     background: Win98.face;
     drop-shadow-blur: 6px;
     drop-shadow-color: #00000088;
@@ -175,6 +176,7 @@ export component Win98StartMenu inherits Rectangle {
             WinMenuRow { glyph: "💬"; label: "Chat";     clicked => { root.launch(0); } }
             WinMenuRow { glyph: "🖥"; label: "System";   clicked => { root.launch(1); } }
             WinMenuRow { glyph: "🎵"; label: "Sonus";    clicked => { root.launch(11); } }
+            WinMenuRow { glyph: "📝"; label: "Notes";    clicked => { root.launch(12); } }
             WinMenuRow { glyph: "🕘"; label: "Sessions"; clicked => { root.launch(3); } }
             WinMenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
 
