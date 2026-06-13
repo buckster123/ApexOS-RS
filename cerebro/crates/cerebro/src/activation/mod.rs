@@ -67,7 +67,7 @@ mod tests {
     #[test]
     fn recall_prob_above_threshold() {
         let p = recall_probability(1.0, 0.0, 0.4);
-        let expected = 0.92414182_f32;
+        let expected = 0.924_141_8_f32;
         assert!((p - expected).abs() < 1e-5, "got {p}");
     }
 
@@ -79,6 +79,6 @@ mod tests {
     #[test]
     fn recall_score_range() {
         let s = recall_score(0.8, -0.5, 0.1, 0.7, 0.6);
-        assert!(s >= 0.0 && s <= 1.0, "out of range: {s}");
+        assert!((0.0..=1.0).contains(&s), "out of range: {s}");
     }
 }

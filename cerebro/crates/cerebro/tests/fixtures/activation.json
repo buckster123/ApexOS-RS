@@ -265,5 +265,246 @@
       "halflife_days": 30.0,
       "effective_weight": 0.375
     }
+  ],
+  "spreading": [
+    {
+      "name": "single_seed",
+      "nodes": [
+        "mem_s0"
+      ],
+      "links": [],
+      "seeds": [
+        {
+          "id": "mem_s0",
+          "weight": 1.0
+        }
+      ],
+      "expected": {
+        "mem_s0": 1.0
+      }
+    },
+    {
+      "name": "chain",
+      "nodes": [
+        "mem_c0",
+        "mem_c1",
+        "mem_c2",
+        "mem_c3"
+      ],
+      "links": [
+        {
+          "source": "mem_c0",
+          "target": "mem_c1",
+          "link_type": "temporal",
+          "weight": 0.8
+        },
+        {
+          "source": "mem_c1",
+          "target": "mem_c2",
+          "link_type": "temporal",
+          "weight": 0.8
+        },
+        {
+          "source": "mem_c2",
+          "target": "mem_c3",
+          "link_type": "temporal",
+          "weight": 0.8
+        }
+      ],
+      "seeds": [
+        {
+          "id": "mem_c0",
+          "weight": 1.0
+        }
+      ],
+      "expected": {
+        "mem_c0": 1.0,
+        "mem_c1": 0.288
+      }
+    },
+    {
+      "name": "star_mixed",
+      "nodes": [
+        "mem_h",
+        "mem_l0",
+        "mem_l1",
+        "mem_l2"
+      ],
+      "links": [
+        {
+          "source": "mem_h",
+          "target": "mem_l0",
+          "link_type": "causal",
+          "weight": 0.8
+        },
+        {
+          "source": "mem_h",
+          "target": "mem_l1",
+          "link_type": "semantic",
+          "weight": 0.8
+        },
+        {
+          "source": "mem_h",
+          "target": "mem_l2",
+          "link_type": "contradicts",
+          "weight": 0.8
+        }
+      ],
+      "seeds": [
+        {
+          "id": "mem_h",
+          "weight": 1.0
+        }
+      ],
+      "expected": {
+        "mem_h": 1.0,
+        "mem_l0": 0.39264731545576176,
+        "mem_l1": 0.34901983596067715,
+        "mem_l2": 0.13088243848525388
+      }
+    },
+    {
+      "name": "multi_seed_weights",
+      "nodes": [
+        "mem_a",
+        "mem_b",
+        "mem_x",
+        "mem_y"
+      ],
+      "links": [
+        {
+          "source": "mem_a",
+          "target": "mem_x",
+          "link_type": "semantic",
+          "weight": 0.8
+        },
+        {
+          "source": "mem_b",
+          "target": "mem_y",
+          "link_type": "semantic",
+          "weight": 0.8
+        }
+      ],
+      "seeds": [
+        {
+          "id": "mem_a",
+          "weight": 0.9
+        },
+        {
+          "id": "mem_b",
+          "weight": 0.4
+        }
+      ],
+      "expected": {
+        "mem_a": 1.0,
+        "mem_b": 0.42561653108226455,
+        "mem_y": 0.1634367479355896,
+        "mem_x": 0.36773268285507654
+      }
+    },
+    {
+      "name": "diamond",
+      "nodes": [
+        "mem_da",
+        "mem_db",
+        "mem_dc",
+        "mem_dd"
+      ],
+      "links": [
+        {
+          "source": "mem_da",
+          "target": "mem_db",
+          "link_type": "semantic",
+          "weight": 0.9
+        },
+        {
+          "source": "mem_da",
+          "target": "mem_dc",
+          "link_type": "semantic",
+          "weight": 0.9
+        },
+        {
+          "source": "mem_db",
+          "target": "mem_dd",
+          "link_type": "semantic",
+          "weight": 0.9
+        },
+        {
+          "source": "mem_dc",
+          "target": "mem_dd",
+          "link_type": "semantic",
+          "weight": 0.9
+        }
+      ],
+      "seeds": [
+        {
+          "id": "mem_da",
+          "weight": 1.0
+        }
+      ],
+      "expected": {
+        "mem_da": 1.0,
+        "mem_db": 0.3884981524754528,
+        "mem_dc": 0.3884981524754528,
+        "mem_dd": 0.15104808168245604
+      }
+    },
+    {
+      "name": "undirected_reverse",
+      "nodes": [
+        "mem_u0",
+        "mem_u1"
+      ],
+      "links": [
+        {
+          "source": "mem_u0",
+          "target": "mem_u1",
+          "link_type": "causal",
+          "weight": 0.9
+        }
+      ],
+      "seeds": [
+        {
+          "id": "mem_u1",
+          "weight": 1.0
+        }
+      ],
+      "expected": {
+        "mem_u1": 1.0,
+        "mem_u0": 0.4538413467769981
+      }
+    },
+    {
+      "name": "weight_ordering",
+      "nodes": [
+        "mem_w0",
+        "mem_w1",
+        "mem_w2"
+      ],
+      "links": [
+        {
+          "source": "mem_w0",
+          "target": "mem_w1",
+          "link_type": "causal",
+          "weight": 0.95
+        },
+        {
+          "source": "mem_w0",
+          "target": "mem_w2",
+          "link_type": "contextual",
+          "weight": 0.1
+        }
+      ],
+      "seeds": [
+        {
+          "id": "mem_w0",
+          "weight": 1.0
+        }
+      ],
+      "expected": {
+        "mem_w0": 1.0,
+        "mem_w1": 0.4754619465004286
+      }
+    }
   ]
 }

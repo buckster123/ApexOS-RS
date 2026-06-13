@@ -1,4 +1,4 @@
-use std::{path::Path, sync::{Arc, OnceLock}};
+use std::{collections::HashMap, path::Path, sync::{Arc, OnceLock}};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     models::{AssociativeLink, MemoryNode, StrengthState},
-    types::{AgentId, LinkType, MemoryId, VisibilityScope},
+    types::{AgentId, LinkType, MemoryId, Visibility, VisibilityScope},
 };
 
 /// Register the sqlite-vec extension exactly once for the process.
@@ -712,6 +712,45 @@ impl SqliteStore {
         Ok(ids)
     }
 
+    /// Bulk-fetch `(visibility, agent_id)` for the given memory ids — used to
+    /// build the scope-visibility map that gates spreading activation (C-RS-003).
+    /// Mirrors Python `_build_visibility_cache`. Ids absent from the result are
+    /// not in the DB and are treated as visible (then filtered by the final
+    /// SQLite scope query), matching Python's `_check_access` fallthrough.
+    pub async fn get_visibility_meta(
+        &self,
+        ids: &[MemoryId],
+    ) -> Result<HashMap<MemoryId, (Visibility, Option<AgentId>)>> {
+        if ids.is_empty() { return Ok(HashMap::new()); }
+        let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT id, visibility, agent_id FROM memories \
+             WHERE id IN ({placeholders}) AND deleted_at IS NULL"
+        );
+        let conn = self.conn.lock().await;
+        let id_strs: Vec<&str> = ids.iter().map(|id| id.0.as_str()).collect();
+        let dyn_params: Vec<&dyn rusqlite::ToSql> =
+            id_strs.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(dyn_params.as_slice(), |row| {
+            let id:  String = row.get(0)?;
+            let vis: String = row.get(1)?;
+            let agent: Option<String> = row.get(2)?;
+            Ok((id, vis, agent))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (id, vis, agent) = row?;
+            let visibility = match vis.as_str() {
+                "private" => Visibility::Private,
+                "thread"  => Visibility::Thread,
+                _         => Visibility::Shared,
+            };
+            map.insert(MemoryId(id), (visibility, agent.map(AgentId)));
+        }
+        Ok(map)
+    }
+
     /// All links whose both endpoints are non-deleted memories — for graph rebuild.
     pub async fn list_all_links(&self) -> Result<Vec<AssociativeLink>> {
         let conn = self.conn.lock().await;
@@ -1180,6 +1219,24 @@ impl SqliteStore {
             "UPDATE episodes SET ended_at=?1, summary=?2 WHERE id=?3 AND ended_at IS NULL",
             params![Utc::now().to_rfc3339(), summary, episode_id],
         )? > 0)
+    }
+
+    /// Auto-close open episodes older than `max_age_hours` (C-RS-004). Mirrors
+    /// Python's pre-phase dream cleanup: a stale open episode gets `ended_at`
+    /// stamped now plus placeholder title/summary if unset. Returns the count
+    /// closed.
+    pub async fn close_stale_episodes(&self, max_age_hours: i64) -> Result<usize> {
+        let cutoff = (Utc::now() - chrono::Duration::hours(max_age_hours)).to_rfc3339();
+        let conn = self.conn.lock().await;
+        let n = conn.execute(
+            "UPDATE episodes \
+             SET ended_at = ?1, \
+                 title    = COALESCE(title, '(auto-closed)'), \
+                 summary  = COALESCE(summary, 'auto-closed: stale open episode') \
+             WHERE ended_at IS NULL AND started_at < ?2",
+            params![Utc::now().to_rfc3339(), cutoff],
+        )?;
+        Ok(n)
     }
 
     pub async fn get_episode_raw(&self, episode_id: &str) -> Result<Option<serde_json::Value>> {

@@ -12,11 +12,9 @@ fn bench_actr(c: &mut Criterion) {
 }
 
 fn bench_fsrs(c: &mut Criterion) {
-    let now = Utc::now();
-    let last_review = now - Duration::days(3);
-
+    // retrievability(elapsed_days, stability)
     c.bench_function("fsrs_retrievability", |b| {
-        b.iter(|| retrievability(black_box(2.0), black_box(last_review), black_box(now)))
+        b.iter(|| retrievability(black_box(3.0), black_box(2.0)))
     });
 }
 
