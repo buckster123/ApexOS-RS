@@ -64,6 +64,8 @@ thread_local! {
         const { RefCell::new(None) };
     static SONUS_FILES: RefCell<Option<Rc<slint::VecModel<SonusFileItem>>>> =
         const { RefCell::new(None) };
+    static NOTES_FILES: RefCell<Option<Rc<slint::VecModel<NoteItem>>>> =
+        const { RefCell::new(None) };
 }
 
 // ── Feedback subsystem (toasts) ───────────────────────────────────────────────
@@ -135,6 +137,7 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::Inference => 9,
         AppKind::AudioEditor => 10,
         AppKind::Sonus => 11,
+        AppKind::Notes => 12,
     }
 }
 
@@ -151,6 +154,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         9 => AppKind::Inference,
         10 => AppKind::AudioEditor,
         11 => AppKind::Sonus,
+        12 => AppKind::Notes,
         _ => AppKind::Chat,
     }
 }
@@ -302,6 +306,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Inference => "Inference",
         AppKind::AudioEditor => "Audio Editor",
         AppKind::Sonus => "Sonus",
+        AppKind::Notes => "Notes",
     }
 }
 
@@ -321,6 +326,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Inference => (520.0, 520.0),
         AppKind::AudioEditor => (660.0, 600.0),
         AppKind::Sonus => (480.0, 540.0),
+        AppKind::Notes => (640.0, 540.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -750,6 +756,19 @@ fn replace_waveform(samples: Vec<f32>) {
 
 fn replace_sonus_files(items: Vec<SonusFileItem>) {
     SONUS_FILES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+            for item in items {
+                model.push(item);
+            }
+        }
+    });
+}
+
+fn replace_notes_files(items: Vec<NoteItem>) {
+    NOTES_FILES.with(|m| {
         if let Some(model) = m.borrow().as_ref() {
             while model.row_count() > 0 {
                 model.remove(model.row_count() - 1);
@@ -1320,6 +1339,30 @@ async fn fetch_sonus_files(client: &reqwest::Client, base_url: &str) -> Vec<Sonu
     }).collect()
 }
 
+async fn fetch_notes(client: &reqwest::Client, base_url: &str) -> Vec<NoteItem> {
+    // GET /api/notes → { files: [{ name, size }] }
+    let body = json_get(client, format!("{base_url}/api/notes")).await;
+    body["files"].as_array().unwrap_or(&vec![]).iter().map(|f| NoteItem {
+        name:       f["name"].as_str().unwrap_or("").into(),
+        size_label: human_size(f["size"].as_u64().unwrap_or(0)).into(),
+    }).collect()
+}
+
+/// POST /api/notes/read → the note's content (empty string on any error).
+async fn fetch_note_content(client: &reqwest::Client, base_url: &str, name: &str) -> String {
+    match client.post(format!("{base_url}/api/notes/read"))
+        .json(&serde_json::json!({ "name": name }))
+        .timeout(std::time::Duration::from_secs(8))
+        .send().await
+    {
+        Ok(r) if r.status().is_success() => r.json::<Value>().await
+            .ok()
+            .and_then(|v| v["content"].as_str().map(|s| s.to_string()))
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 #[derive(Default)]
 struct AppState {
@@ -1404,6 +1447,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_sonus_files(slint::ModelRc::from(sonus_files_vec.clone()));
     SONUS_FILES.with(|m| *m.borrow_mut() = Some(sonus_files_vec.clone()));
 
+    let notes_files_vec: Rc<slint::VecModel<NoteItem>> = Rc::new(slint::VecModel::default());
+    ui.set_notes(slint::ModelRc::from(notes_files_vec.clone()));
+    NOTES_FILES.with(|m| *m.borrow_mut() = Some(notes_files_vec.clone()));
+
     // Feedback subsystem: bind the toast model + global callbacks.
     let toasts_vec: Rc<slint::VecModel<ToastItem>> = Rc::new(slint::VecModel::default());
     ui.global::<Notifications>().set_toasts(slint::ModelRc::from(toasts_vec.clone()));
@@ -1485,6 +1532,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     AppKind::Inference => ui.invoke_refresh_inference(),
                     AppKind::AudioEditor => ui.invoke_refresh_audio(),
                     AppKind::Sonus => ui.invoke_refresh_sonus(),
+                    AppKind::Notes => ui.invoke_refresh_notes(),
                     _ => {}
                 }
             }
@@ -2142,6 +2190,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = client.post(format!("{base}/api/sonus/stop"))
                 .timeout(std::time::Duration::from_secs(8))
                 .send().await;
+        });
+    });
+
+    // ── Notes callbacks ───────────────────────────────────────────────────────
+    let rt_h_nref   = rt.handle().clone();
+    let client_nref = Arc::clone(&http_client);
+    let base_nref   = http_base.clone();
+    ui.on_refresh_notes(move || {
+        let client = Arc::clone(&client_nref);
+        let base   = base_nref.clone();
+        rt_h_nref.spawn(async move {
+            let items = fetch_notes(&client, &base).await;
+            slint::invoke_from_event_loop(move || replace_notes_files(items)).ok();
+        });
+    });
+
+    let rt_h_nopen    = rt.handle().clone();
+    let client_nopen  = Arc::clone(&http_client);
+    let base_nopen    = http_base.clone();
+    let ui_weak_nopen = ui.as_weak();
+    ui.on_open_note(move |name| {
+        let client = Arc::clone(&client_nopen);
+        let base   = base_nopen.clone();
+        let ui_w   = ui_weak_nopen.clone();
+        let n      = name.to_string();
+        rt_h_nopen.spawn(async move {
+            let content = fetch_note_content(&client, &base, &n).await;
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    ui.set_notes_current_name(n.into());
+                    ui.set_notes_current_text(content.into());
+                }
+            }).ok();
+        });
+    });
+
+    let rt_h_nsave   = rt.handle().clone();
+    let client_nsave = Arc::clone(&http_client);
+    let base_nsave   = http_base.clone();
+    ui.on_save_note(move |name, text| {
+        let client  = Arc::clone(&client_nsave);
+        let base    = base_nsave.clone();
+        let n       = name.to_string();
+        let content = text.to_string();
+        rt_h_nsave.spawn(async move {
+            let ok = client.post(format!("{base}/api/notes/write"))
+                .json(&serde_json::json!({ "name": n, "content": content }))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok {
+                notify(ToastKind::Success, "Note saved");
+                // Refresh the list so the size label reflects the save.
+                let items = fetch_notes(&client, &base).await;
+                slint::invoke_from_event_loop(move || replace_notes_files(items)).ok();
+            } else {
+                notify(ToastKind::Error, "Failed to save note");
+            }
+        });
+    });
+
+    let rt_h_ncreate    = rt.handle().clone();
+    let client_ncreate  = Arc::clone(&http_client);
+    let base_ncreate    = http_base.clone();
+    let ui_weak_ncreate = ui.as_weak();
+    ui.on_create_note(move |name| {
+        let client = Arc::clone(&client_ncreate);
+        let base   = base_ncreate.clone();
+        let ui_w   = ui_weak_ncreate.clone();
+        let n      = name.to_string();
+        rt_h_ncreate.spawn(async move {
+            // Create an empty note, then open it (server returns the sanitized name).
+            let created = client.post(format!("{base}/api/notes/write"))
+                .json(&serde_json::json!({ "name": n, "content": "" }))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .ok()
+                .and_then(|r| if r.status().is_success() { Some(r) } else { None });
+            let saved_name = match created {
+                Some(r) => r.json::<Value>().await.ok()
+                    .and_then(|v| v["name"].as_str().map(|s| s.to_string())),
+                None => None,
+            };
+            match saved_name {
+                Some(sn) => {
+                    let items = fetch_notes(&client, &base).await;
+                    slint::invoke_from_event_loop(move || {
+                        replace_notes_files(items);
+                        if let Some(ui) = ui_w.upgrade() {
+                            ui.set_notes_current_name(sn.into());
+                            ui.set_notes_current_text("".into());
+                        }
+                    }).ok();
+                }
+                None => notify(ToastKind::Error, "Failed to create note"),
+            }
         });
     });
 
