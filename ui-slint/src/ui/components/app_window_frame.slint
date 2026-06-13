@@ -131,6 +131,7 @@ export component AppWindowFrame inherits Rectangle {
     in property <[SketchStroke]> sketch-strokes;
     in property <int>            sketch-color;
     in property <int>            sketch-width;
+    in property <int>            sketch-tool;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -166,6 +167,7 @@ export component AppWindowFrame inherits Rectangle {
     callback sketch-send(float, float);       // canvas px w, h
     callback sketch-set-color(int);
     callback sketch-set-width(int);
+    callback sketch-set-tool(int);
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -510,6 +512,7 @@ export component AppWindowFrame inherits Rectangle {
             strokes: root.sketch-strokes;
             active-color: root.sketch-color;
             active-width: root.sketch-width;
+            active-tool: root.sketch-tool;
             down(x, y) => { root.sketch-down(x, y); }
             move(x, y) => { root.sketch-move(x, y); }
             up => { root.sketch-up(); }
@@ -517,6 +520,7 @@ export component AppWindowFrame inherits Rectangle {
             send(w, h) => { root.sketch-send(w, h); }
             set-color(i) => { root.sketch-set-color(i); }
             set-width(i) => { root.sketch-set-width(i); }
+            set-tool(i) => { root.sketch-set-tool(i); }
         }
     }
 

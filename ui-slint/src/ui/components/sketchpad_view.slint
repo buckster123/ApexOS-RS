@@ -19,6 +19,7 @@ export component SketchpadView {
     in property <[SketchStroke]> strokes;
     in property <int> active-color;   // index into the swatch row
     in property <int> active-width;   // 0 = thin, 1 = thick
+    in property <int> active-tool;    // 0 freehand · 1 line · 2 rect · 3 ellipse
 
     callback down(float, float);      // canvas-px x, y
     callback move(float, float);
@@ -27,6 +28,10 @@ export component SketchpadView {
     callback send(float, float);      // canvas px width, height
     callback set-color(int);
     callback set-width(int);
+    callback set-tool(int);
+
+    // Tool glyphs — index mirrors active-tool / the Rust SKETCH_TOOL map.
+    property <[string]> tool-glyphs: ["✎", "╱", "▭", "◯"];
 
     // Swatch palette — must mirror the Rust index→colour map.
     property <[color]> swatches: [#e6e6eb, #00d4ff, #eab308, #39ff14, #ef4444];
@@ -138,6 +143,39 @@ export component SketchpadView {
                 moved => {
                     if (self.pressed) {
                         root.move(self.mouse-x / 1px, self.mouse-y / 1px);
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Tool row (shapes) ────────────────────────────────────────────────
+        Rectangle {
+            height: 44px;
+            background: Palette.surface;
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 8px;
+                alignment: start;
+
+                for g[i] in root.tool-glyphs: Rectangle {
+                    width: 40px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: i == root.active-tool ? Palette.primary-dim : Palette.surface;
+                    border-width: 1px;
+                    border-color: i == root.active-tool ? Palette.primary : Palette.border;
+                    y: (parent.height - self.height) / 2;
+                    animate background { duration: 120ms; }
+                    TouchArea { clicked => { root.set-tool(i); } }
+                    Text {
+                        text: g;
+                        color: i == root.active-tool ? Palette.text-bright : Palette.text-dim;
+                        font-size: 15px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
                     }
                 }
             }

@@ -73,6 +73,9 @@ thread_local! {
     static SKETCH_DATA: RefCell<Vec<StrokeData>> = const { RefCell::new(Vec::new()) };
     static SKETCH_COLOR: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
     static SKETCH_WIDTH: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    // Shape tool: 0 freehand · 1 line · 2 rect · 3 ellipse; + the drag anchor.
+    static SKETCH_TOOL: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    static SKETCH_ANCHOR: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((0.0, 0.0)) };
 }
 
 // Raw geometry for one stroke — mirrored into a SketchStroke (for rendering) and
@@ -856,6 +859,63 @@ fn sketch_extend_stroke(x: f32, y: f32) {
             if n > 0 {
                 if let Some(mut row) = model.row_data(n - 1) {
                     row.commands = format!("{} L {x} {y}", row.commands).into();
+                    model.set_row_data(n - 1, row);
+                }
+            }
+        }
+    });
+}
+
+/// Build an SVG polyline command string from a point list.
+fn sketch_points_to_commands(points: &[(f32, f32)]) -> String {
+    let mut s = String::new();
+    for (i, (x, y)) in points.iter().enumerate() {
+        if i == 0 { s.push_str(&format!("M {x} {y}")); }
+        else      { s.push_str(&format!(" L {x} {y}")); }
+    }
+    s
+}
+
+/// Point list for a shape tool dragged from anchor (ax, ay) to (x, y).
+/// tool: 1 line · 2 rectangle · 3 ellipse (else: a single point).
+fn sketch_shape_points(tool: i32, ax: f32, ay: f32, x: f32, y: f32) -> Vec<(f32, f32)> {
+    match tool {
+        1 => vec![(ax, ay), (x, y)],
+        2 => vec![(ax, ay), (x, ay), (x, y), (ax, y), (ax, ay)],
+        3 => {
+            let (cx, cy) = ((ax + x) / 2.0, (ay + y) / 2.0);
+            let (rx, ry) = ((x - ax).abs() / 2.0, (y - ay).abs() / 2.0);
+            const N: usize = 48;
+            (0..=N).map(|i| {
+                let t = (i as f32 / N as f32) * std::f32::consts::TAU;
+                (cx + rx * t.cos(), cy + ry * t.sin())
+            }).collect()
+        }
+        _ => vec![(x, y)],
+    }
+}
+
+/// Begin a shape: anchor the drag and seed a one-point stroke.
+fn sketch_begin_shape(x: f32, y: f32) {
+    SKETCH_ANCHOR.with(|a| a.set((x, y)));
+    sketch_begin_stroke(x, y);
+}
+
+/// Update the in-progress shape stroke to span anchor → (x, y).
+fn sketch_update_shape(x: f32, y: f32) {
+    let tool = SKETCH_TOOL.with(|t| t.get());
+    let (ax, ay) = SKETCH_ANCHOR.with(|a| a.get());
+    let points = sketch_shape_points(tool, ax, ay, x, y);
+    let commands = sketch_points_to_commands(&points);
+    SKETCH_DATA.with(|d| {
+        if let Some(s) = d.borrow_mut().last_mut() { s.points = points; }
+    });
+    SKETCH_STROKES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            let n = model.row_count();
+            if n > 0 {
+                if let Some(mut row) = model.row_data(n - 1) {
+                    row.commands = commands.into();
                     model.set_row_data(n - 1, row);
                 }
             }
@@ -2408,12 +2468,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Sketchpad callbacks ─────────────────────────────────────────────────────
     // Drawing is pure Slint-thread state; only "send" touches the network.
-    ui.on_sketch_down(|x, y| sketch_begin_stroke(x, y));
-    ui.on_sketch_move(|x, y| sketch_extend_stroke(x, y));
-    ui.on_sketch_up(|| { /* stroke complete; nothing to finalise */ });
+    ui.on_sketch_down(|x, y| {
+        if SKETCH_TOOL.with(|t| t.get()) == 0 { sketch_begin_stroke(x, y); }
+        else { sketch_begin_shape(x, y); }
+    });
+    ui.on_sketch_move(|x, y| {
+        if SKETCH_TOOL.with(|t| t.get()) == 0 { sketch_extend_stroke(x, y); }
+        else { sketch_update_shape(x, y); }
+    });
+    ui.on_sketch_up(|| { /* stroke/shape complete; nothing to finalise */ });
     ui.on_sketch_clear(|| sketch_clear_all());
     ui.on_sketch_set_color(|i| SKETCH_COLOR.with(|c| c.set(i)));
     ui.on_sketch_set_width(|i| SKETCH_WIDTH.with(|c| c.set(i)));
+    ui.on_sketch_set_tool(|i| SKETCH_TOOL.with(|t| t.set(i)));
 
     let rt_h_sk     = rt.handle().clone();
     let client_sk   = Arc::clone(&http_client);
