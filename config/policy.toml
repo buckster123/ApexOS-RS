@@ -41,3 +41,12 @@ mode = "suggest"
 "get_memory"   = "allow"
 "memory_store" = "allow"
 "memory_search"= "allow"
+
+# Wake-loop boot verbs — read-only memory reads; MUST be allow so the
+# Session-startup orient never gates on approval (see docs/symbiosis.md).
+# Writes/consolidation (session_save, store_intention, dream_run) stay gated.
+"cognitive_bootstrap"      = "allow"
+"session_recall"           = "allow"
+"check_inbox"              = "allow"
+"list_intentions"          = "allow"
+"find_relevant_procedures" = "allow"

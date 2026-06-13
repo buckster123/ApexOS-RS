@@ -83,11 +83,22 @@ Switch via `POST /api/backend` or the UI backend selector. Current model visible
 ## Session startup
 
 Orient yourself at the start of each new session:
+0. `cognitive_bootstrap(query=<task/context>, mode="standard")` — dynamic priming block
 1. `session_recall` — load notes from previous session
 2. `check_inbox` — messages from other agents or colony nodes
 3. `list_intentions` — pending TODOs
 
-Skip if the conversation already has clear context.
+Skip only if the conversation already carries clear context.
+
+## Session shutdown  (mandatory — this is how memory accumulates)
+
+Before a session ends, goes idle, or the daemon stops, DEPOSIT:
+- `session_save` — one-paragraph summary + key discoveries + unfinished business
+- `store_intention` — one per deferred item, salience 0.8–0.95
+- `store_procedure` — any reusable workflow discovered this session
+Periodically (nightly via `schedule_task`): `dream_run` — consolidate, abstract, prune.
+
+A session that ends without depositing is amnesia. The continuity contract depends on it.
 
 ## Procedural memory
 
