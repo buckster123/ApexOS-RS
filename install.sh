@@ -561,11 +561,15 @@ if [[ -z "$REPO_DIR" ]]; then
   if [[ -d "$REPO_DIR/.git" ]]; then
     [[ "$BUILD_USER" != "root" ]] && chown -R "$BUILD_USER:" "$REPO_DIR"
     info "Updating existing clone at $REPO_DIR …"
-    if [[ "$BUILD_USER" != "root" ]]; then
-      sudo -u "$BUILD_USER" git -C "$REPO_DIR" pull --ff-only
-    else
-      git -C "$REPO_DIR" pull --ff-only
-    fi
+    # A prior `cargo build` (without --locked) can rewrite the tracked Cargo.lock,
+    # leaving the deploy tree dirty so the next `git pull --ff-only` aborts. Discard
+    # that drift before pulling — the /opt clone mirrors remote, it is not a dev tree.
+    # (target/ is gitignored; the build below now uses --locked so future builds stay
+    # clean, but legacy clones still carry the old drift, so we self-heal here.)
+    GIT_RUN=(git -C "$REPO_DIR")
+    [[ "$BUILD_USER" != "root" ]] && GIT_RUN=(sudo -u "$BUILD_USER" git -C "$REPO_DIR")
+    "${GIT_RUN[@]}" checkout -- Cargo.lock 2>/dev/null || true
+    "${GIT_RUN[@]}" pull --ff-only
   else
     info "Cloning ApexOS-RS …"
     git clone --depth=1 https://github.com/buckster123/ApexOS-RS "$REPO_DIR"
@@ -644,7 +648,10 @@ hdr "Building ApexOS-RS (this takes ~8 min on Pi 5, ~2 min on x86)"
 
 cd "$REPO_DIR"
 
-BUILD_ARGS="--release --workspace"
+# --locked: build strictly against the committed Cargo.lock so cargo never rewrites
+# it (which would dirty the deploy tree and break the next `git pull --ff-only`). A
+# genuinely stale lock now fails loudly here instead of silently — commit the lock.
+BUILD_ARGS="--release --workspace --locked"
 if $NO_UI; then
   BUILD_ARGS+=" --exclude ui-slint"
   info "Skipping ui-slint (headless/desktop mode)"
