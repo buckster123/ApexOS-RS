@@ -248,23 +248,46 @@ export component NotesView {
                         wrap: word-wrap;
                     }
 
-                    if root.current-name != "": Flickable {
-                        x: 14px; y: 12px;
-                        width: parent.width - 28px;
+                    // Bordered text-area chrome so an open (even empty) note reads
+                    // as an editable field — mirrors the Settings soul.md editor.
+                    if root.current-name != "": Rectangle {
+                        x: 12px; y: 12px;
+                        width: parent.width - 24px;
                         height: parent.height - 24px;
-                        interactive: true;
-                        viewport-height: body-field.preferred-height + 20px;
+                        border-radius: Palette.radius;
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: body-field.has-focus ? Palette.primary : Palette.border-hi;
+                        animate border-color { duration: 150ms; }
+                        clip: true;
 
-                        body-field := TextInput {
-                            width: parent.width;
-                            height: max(self.preferred-height, parent.height);
-                            single-line: false;
-                            wrap: TextWrap.word-wrap;
+                        Flickable {
+                            x: 10px; y: 10px;
+                            width: parent.width - 20px;
+                            height: parent.height - 20px;
+                            interactive: true;
+                            viewport-height: body-field.preferred-height + 20px;
+
+                            body-field := TextInput {
+                                width: parent.width;
+                                height: max(self.preferred-height, parent.height);
+                                single-line: false;
+                                wrap: TextWrap.word-wrap;
+                                font-size: 13px;
+                                color: Palette.text;
+                                selection-background-color: Palette.primary-dim;
+                                selection-foreground-color: Palette.text-bright;
+                                text <=> root.current-text;
+                            }
+                        }
+
+                        // Placeholder for an empty note (Text doesn't capture clicks,
+                        // so the field below still focuses on click).
+                        if root.current-text == "": Text {
+                            x: 12px; y: 12px;
+                            text: "Empty note — click here and type, then SAVE.";
+                            color: Palette.text-dim;
                             font-size: 13px;
-                            color: Palette.text;
-                            selection-background-color: Palette.primary-dim;
-                            selection-foreground-color: Palette.text-bright;
-                            text <=> root.current-text;
                         }
                     }
                 }
