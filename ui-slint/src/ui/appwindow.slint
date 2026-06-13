@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
@@ -15,7 +15,7 @@ import { StartMenu, Win98StartMenu } from "components/start_menu.slint";
 import { NotifCenter } from "components/notif_center.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
-export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode }
+export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -61,6 +61,13 @@ export component AppWindow inherits Window {
     in-out property <string>         inference-backend: "—";
     in-out property <string>         inference-base-url: "";
     in-out property <[ModelItem]>    inference-models;
+    in-out property <[AudioFileItem]> audio-files;
+    in-out property <string>         audio-selected-path: "";
+    in-out property <string>         audio-selected-name: "";
+    in-out property <[float]>        audio-waveform;
+    in-out property <string>         audio-stats: "";
+    in-out property <string>         audio-duration: "";
+    in-out property <bool>           audio-busy: false;
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id /
@@ -101,6 +108,9 @@ export component AppWindow inherits Window {
     callback add-peer(string, string);       // node_id, ws_url
     callback remove-peer(string);            // node_id
     callback refresh-inference();
+    callback refresh-audio();
+    callback select-audio(string, string);   // path, name
+    callback process-audio(string, string);  // path, op
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -561,6 +571,13 @@ export component AppWindow inherits Window {
                         inference-backend: root.inference-backend;
                         inference-base-url: root.inference-base-url;
                         inference-models: root.inference-models;
+                        audio-files: root.audio-files;
+                        audio-selected-path: root.audio-selected-path;
+                        audio-selected-name: root.audio-selected-name;
+                        audio-waveform: root.audio-waveform;
+                        audio-stats: root.audio-stats;
+                        audio-duration: root.audio-duration;
+                        audio-busy: root.audio-busy;
 
                         send-message(t) => { root.send-message(t); }
                         stop-turn => { root.stop-turn(); }
@@ -577,6 +594,9 @@ export component AppWindow inherits Window {
                         add-peer(id, url) => { root.add-peer(id, url); }
                         remove-peer(id) => { root.remove-peer(id); }
                         refresh-inference => { root.refresh-inference(); }
+                        refresh-audio => { root.refresh-audio(); }
+                        select-audio(p, n) => { root.select-audio(p, n); }
+                        process-audio(p, op) => { root.process-audio(p, op); }
 
                         req-focus => { root.focus-window(w.id); }
                         req-close => { root.close-window(w.id); }

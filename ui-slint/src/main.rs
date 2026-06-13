@@ -58,6 +58,10 @@ thread_local! {
         const { RefCell::new(None) };
     static INFER_MODELS: RefCell<Option<Rc<slint::VecModel<ModelItem>>>> =
         const { RefCell::new(None) };
+    static AUDIO_FILES: RefCell<Option<Rc<slint::VecModel<AudioFileItem>>>> =
+        const { RefCell::new(None) };
+    static WAVEFORM: RefCell<Option<Rc<slint::VecModel<f32>>>> =
+        const { RefCell::new(None) };
 }
 
 // ── Feedback subsystem (toasts) ───────────────────────────────────────────────
@@ -127,6 +131,7 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::EventLog => 7,
         AppKind::Mesh => 8,
         AppKind::Inference => 9,
+        AppKind::AudioEditor => 10,
     }
 }
 
@@ -141,6 +146,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         7 => AppKind::EventLog,
         8 => AppKind::Mesh,
         9 => AppKind::Inference,
+        10 => AppKind::AudioEditor,
         _ => AppKind::Chat,
     }
 }
@@ -290,6 +296,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::EventLog => "Event Log",
         AppKind::Mesh => "Mesh",
         AppKind::Inference => "Inference",
+        AppKind::AudioEditor => "Audio Editor",
     }
 }
 
@@ -307,6 +314,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::EventLog => (560.0, 520.0),
         AppKind::Mesh => (520.0, 460.0),
         AppKind::Inference => (520.0, 520.0),
+        AppKind::AudioEditor => (660.0, 600.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -703,6 +711,32 @@ fn replace_infer_models(items: Vec<ModelItem>) {
             }
             for item in items {
                 model.push(item);
+            }
+        }
+    });
+}
+
+fn replace_audio_files(items: Vec<AudioFileItem>) {
+    AUDIO_FILES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+            for item in items {
+                model.push(item);
+            }
+        }
+    });
+}
+
+fn replace_waveform(samples: Vec<f32>) {
+    WAVEFORM.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+            for s in samples {
+                model.push(s);
             }
         }
     });
@@ -1171,6 +1205,93 @@ async fn fetch_inference(client: &reqwest::Client, base_url: &str) -> InferenceD
     }
 }
 
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1 << 20 {
+        format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64)
+    } else if bytes >= 1 << 10 {
+        format!("{:.0} KB", bytes as f64 / (1u64 << 10) as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+// GET /api/audio/files → AudioFileItem list.
+async fn fetch_audio_files(client: &reqwest::Client, base_url: &str) -> Vec<AudioFileItem> {
+    let body = json_get(client, format!("{base_url}/api/audio/files")).await;
+    body["files"].as_array().unwrap_or(&vec![]).iter().map(|f| AudioFileItem {
+        path:       f["path"].as_str().unwrap_or("").into(),
+        name:       f["name"].as_str().unwrap_or("").into(),
+        size_label: human_size(f["size"].as_u64().unwrap_or(0)).into(),
+    }).collect()
+}
+
+// POST /api/audio/waveform → (normalised 0..1 envelope, duration label).
+async fn fetch_waveform(client: &reqwest::Client, base_url: &str, path: &str) -> (Vec<f32>, String) {
+    let resp = client.post(format!("{base_url}/api/audio/waveform"))
+        .json(&serde_json::json!({"path": path, "samples": 240}))
+        .timeout(std::time::Duration::from_secs(30))
+        .send().await;
+    let body: Value = match resp {
+        Ok(r) => r.json().await.unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
+    let raw: Vec<f32> = body["samples"].as_array().unwrap_or(&vec![])
+        .iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect();
+    // Normalise to the peak so quiet tracks still fill the view.
+    let peak = raw.iter().cloned().fold(0.0f32, f32::max).max(1e-6);
+    let norm: Vec<f32> = raw.iter().map(|s| (s / peak).clamp(0.0, 1.0)).collect();
+    let dur = body["duration_s"].as_f64().unwrap_or(0.0);
+    let dur_label = if dur > 0.0 {
+        format!("{}:{:02}", (dur as u64) / 60, (dur as u64) % 60)
+    } else {
+        String::new()
+    };
+    (norm, dur_label)
+}
+
+// POST /api/audio/analyze → one-line loudness summary.
+async fn fetch_audio_stats(client: &reqwest::Client, base_url: &str, path: &str) -> String {
+    let resp = client.post(format!("{base_url}/api/audio/analyze"))
+        .json(&serde_json::json!({"path": path}))
+        .timeout(std::time::Duration::from_secs(30))
+        .send().await;
+    let body: Value = match resp {
+        Ok(r) => r.json().await.unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
+    if !body["error"].is_null() {
+        return format!("analyze failed: {}", body["error"].as_str().unwrap_or("?"));
+    }
+    let fmt  = body["format"].as_str().unwrap_or("?");
+    let sr   = body["sample_rate"].as_u64().unwrap_or(0);
+    let ch   = body["channels"].as_u64().unwrap_or(0);
+    let lufs = body["lufs_integrated"].as_f64().unwrap_or(-99.0);
+    let peak = body["peak_db"].as_f64().unwrap_or(-99.0);
+    let rms  = body["rms_db"].as_f64().unwrap_or(-99.0);
+    let clip = body["has_clipping"].as_bool().unwrap_or(false);
+    format!(
+        "{fmt} · {} kHz · {}ch    LUFS {lufs:.1} · peak {peak:.1} dB · RMS {rms:.1} dB{}",
+        sr / 1000, ch,
+        if clip { " · ⚠ clipping" } else { "" },
+    )
+}
+
+// Map a one-click op name to the /api/audio/process ops array.
+fn audio_op_chain(op: &str) -> Vec<Value> {
+    match op {
+        "normalize"    => vec![serde_json::json!({"type": "normalize"})],
+        "trim_silence" => vec![serde_json::json!({"type": "trim_silence"})],
+        "peak_limit"   => vec![serde_json::json!({"type": "peak_limit"})],
+        // Composite "clean": strip silence, normalise loudness, then limit peaks.
+        "clean" => vec![
+            serde_json::json!({"type": "trim_silence"}),
+            serde_json::json!({"type": "normalize"}),
+            serde_json::json!({"type": "peak_limit"}),
+        ],
+        _ => Vec::new(),
+    }
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 #[derive(Default)]
 struct AppState {
@@ -1242,6 +1363,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let infer_models_vec: Rc<slint::VecModel<ModelItem>> = Rc::new(slint::VecModel::default());
     ui.set_inference_models(slint::ModelRc::from(infer_models_vec.clone()));
     INFER_MODELS.with(|m| *m.borrow_mut() = Some(infer_models_vec.clone()));
+
+    let audio_files_vec: Rc<slint::VecModel<AudioFileItem>> = Rc::new(slint::VecModel::default());
+    ui.set_audio_files(slint::ModelRc::from(audio_files_vec.clone()));
+    AUDIO_FILES.with(|m| *m.borrow_mut() = Some(audio_files_vec.clone()));
+
+    let waveform_vec: Rc<slint::VecModel<f32>> = Rc::new(slint::VecModel::default());
+    ui.set_audio_waveform(slint::ModelRc::from(waveform_vec.clone()));
+    WAVEFORM.with(|m| *m.borrow_mut() = Some(waveform_vec.clone()));
 
     // Feedback subsystem: bind the toast model + global callbacks.
     let toasts_vec: Rc<slint::VecModel<ToastItem>> = Rc::new(slint::VecModel::default());
@@ -1322,6 +1451,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     AppKind::EventLog => ui.invoke_refresh_events(),
                     AppKind::Mesh => ui.invoke_refresh_mesh(),
                     AppKind::Inference => ui.invoke_refresh_inference(),
+                    AppKind::AudioEditor => ui.invoke_refresh_audio(),
                     _ => {}
                 }
             }
@@ -1844,6 +1974,84 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_inference_base_url(data.base_url.into());
                     replace_infer_models(data.models);
                 }
+            }).ok();
+        });
+    });
+
+    // ── Audio Editor (🎛️) — list / select (waveform+analyze) / process ─────────
+    let rt_h_audio    = rt.handle().clone();
+    let client_audio  = Arc::clone(&http_client);
+    let base_audio    = http_base.clone();
+    ui.on_refresh_audio(move || {
+        let client = Arc::clone(&client_audio);
+        let base   = base_audio.clone();
+        rt_h_audio.spawn(async move {
+            let items = fetch_audio_files(&client, &base).await;
+            slint::invoke_from_event_loop(move || replace_audio_files(items)).ok();
+        });
+    });
+
+    let rt_h_asel    = rt.handle().clone();
+    let client_asel  = Arc::clone(&http_client);
+    let base_asel    = http_base.clone();
+    let ui_weak_asel = ui.as_weak();
+    ui.on_select_audio(move |path, name| {
+        let client = Arc::clone(&client_asel);
+        let base   = base_asel.clone();
+        let ui_w   = ui_weak_asel.clone();
+        let p      = path.to_string();
+        // Immediate UI feedback: set selection, clear stale waveform, mark busy.
+        if let Some(ui) = ui_w.upgrade() {
+            ui.set_audio_selected_path(path.clone());
+            ui.set_audio_selected_name(name.clone());
+            ui.set_audio_stats("".into());
+            ui.set_audio_duration("".into());
+            ui.set_audio_busy(true);
+        }
+        replace_waveform(Vec::new());
+        rt_h_asel.spawn(async move {
+            let (samples, dur) = fetch_waveform(&client, &base, &p).await;
+            let stats = fetch_audio_stats(&client, &base, &p).await;
+            slint::invoke_from_event_loop(move || {
+                replace_waveform(samples);
+                if let Some(ui) = ui_w.upgrade() {
+                    ui.set_audio_duration(dur.into());
+                    ui.set_audio_stats(stats.into());
+                    ui.set_audio_busy(false);
+                }
+            }).ok();
+        });
+    });
+
+    let rt_h_aproc    = rt.handle().clone();
+    let client_aproc  = Arc::clone(&http_client);
+    let base_aproc    = http_base.clone();
+    let ui_weak_aproc = ui.as_weak();
+    ui.on_process_audio(move |path, op| {
+        let ops = audio_op_chain(&op);
+        if ops.is_empty() { return; }
+        let client = Arc::clone(&client_aproc);
+        let base   = base_aproc.clone();
+        let ui_w   = ui_weak_aproc.clone();
+        let p      = path.to_string();
+        if let Some(ui) = ui_w.upgrade() { ui.set_audio_busy(true); }
+        rt_h_aproc.spawn(async move {
+            let resp = client.post(format!("{base}/api/audio/process"))
+                .json(&serde_json::json!({"path": p, "ops": ops}))
+                .timeout(std::time::Duration::from_secs(120))
+                .send().await;
+            let body: Value = match resp {
+                Ok(r) => r.json().await.unwrap_or(Value::Null),
+                Err(_) => Value::Null,
+            };
+            let ok = body["output_path"].as_str().is_some();
+            if ok { notify(ToastKind::Success, "Audio processed → _edit file"); }
+            else  { notify(ToastKind::Error, "Audio processing failed"); }
+            // Re-scan so the new _edit file appears in the list.
+            let items = fetch_audio_files(&client, &base).await;
+            slint::invoke_from_event_loop(move || {
+                replace_audio_files(items);
+                if let Some(ui) = ui_w.upgrade() { ui.set_audio_busy(false); }
             }).ok();
         });
     });

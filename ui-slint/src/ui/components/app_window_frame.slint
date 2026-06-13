@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -24,6 +24,7 @@ import { CouncilView } from "council_view.slint";
 import { EventLogView } from "event_log_view.slint";
 import { MeshView } from "mesh_view.slint";
 import { InferenceView } from "inference_view.slint";
+import { AudioEditorView } from "audio_editor_view.slint";
 
 component CaptionButton inherits Rectangle {
     in property <string> glyph;
@@ -109,6 +110,13 @@ export component AppWindowFrame inherits Rectangle {
     in property <string>         inference-backend;
     in property <string>         inference-base-url;
     in property <[ModelItem]>    inference-models;
+    in property <[AudioFileItem]> audio-files;
+    in property <string>         audio-selected-path;
+    in property <string>         audio-selected-name;
+    in property <[float]>        audio-waveform;
+    in property <string>         audio-stats;
+    in property <string>         audio-duration;
+    in property <bool>           audio-busy;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -127,6 +135,9 @@ export component AppWindowFrame inherits Rectangle {
     callback add-peer(string, string);   // node_id, ws_url
     callback remove-peer(string);        // node_id
     callback refresh-inference();
+    callback refresh-audio();
+    callback select-audio(string, string);   // path, name
+    callback process-audio(string, string);  // path, op
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -424,6 +435,20 @@ export component AppWindowFrame inherits Rectangle {
             current-model: root.current-model;
             refresh => { root.refresh-inference(); }
             set-model(id) => { root.set-model(id); }
+        }
+
+        if root.kind == AppKind.audio-editor: AudioEditorView {
+            vertical-stretch: 1;
+            files: root.audio-files;
+            selected-path: root.audio-selected-path;
+            selected-name: root.audio-selected-name;
+            waveform: root.audio-waveform;
+            stats: root.audio-stats;
+            duration: root.audio-duration;
+            busy: root.audio-busy;
+            refresh => { root.refresh-audio(); }
+            select(p, n) => { root.select-audio(p, n); }
+            process(p, op) => { root.process-audio(p, op); }
         }
     }
 
