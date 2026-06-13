@@ -50,6 +50,9 @@ petgraph      = "0.6"
 fastembed     = "4"
 # CLI
 clap          = { version = "4", features = ["derive", "env"] }
+# Vision (decode/downscale/re-encode — the image-into-context shim)
+image         = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64        = "0.22"
 # Utils
 subtle           = "2"
 percent-encoding = "2"

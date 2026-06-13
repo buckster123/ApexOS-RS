@@ -199,13 +199,93 @@ async fn collect_tool_results(
             )),
         });
         let api_id = id_map.get(&call.id).cloned().unwrap_or_default();
+        // A successful result carrying the vision sentinel gets its image shimmed and
+        // rewritten into a multimodal content array so the model actually sees it.
+        let content = if output.ok {
+            vision_rewrite(output.content).await
+        } else {
+            output.content
+        };
         out.push(ContentBlock::ToolResult {
             tool_use_id: api_id,
-            content:     output.content,
+            content,
             is_error:    !output.ok,
         });
     }
     Ok(out)
+}
+
+/// If the tool-result carries the vision sentinel `{ "vision": { "path"|"b64",
+/// "media_type"? }, "text"? }`, load the image, run it through the downscale shim,
+/// and return an Anthropic content-block array `[image, text?]`. Otherwise return
+/// `content` untouched. Once a sentinel is found it is always consumed — on any
+/// load/decode failure it is replaced with an explanatory text result, never left
+/// as raw JSON for the model.
+async fn vision_rewrite(content: serde_json::Value) -> serde_json::Value {
+    use apexos_core::vision;
+
+    let Some(sentinel) = find_vision_sentinel(&content) else { return content };
+    let v = &sentinel["vision"];
+    let caption = sentinel.get("text").and_then(|t| t.as_str()).map(str::to_owned);
+
+    let prepared = if let Some(path) = v.get("path").and_then(|p| p.as_str()) {
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || vision::load_and_prepare(&path)).await
+    } else if let Some(b64) = v.get("b64").and_then(|b| b.as_str()) {
+        let b64 = b64.to_owned();
+        tokio::task::spawn_blocking(move || vision::prepare_b64(&b64)).await
+    } else {
+        return serde_json::Value::String(
+            "[vision] tool-result had a `vision` field but neither `path` nor `b64`".into(),
+        );
+    };
+
+    match prepared {
+        Ok(Ok(img)) => {
+            // Token-bomb guard verification: the shim's ceiling is logged per frame.
+            eprintln!(
+                "[vision] prepared {}×{} {} (~{} tokens) for context",
+                img.width, img.height, img.media_type, img.est_tokens
+            );
+            vision::anthropic_tool_result_content(&img, caption.as_deref())
+        }
+        Ok(Err(e)) => serde_json::Value::String(format!("[vision] could not load image: {e}")),
+        Err(e)     => serde_json::Value::String(format!("[vision] image task panicked: {e}")),
+    }
+}
+
+/// The vision sentinel can reach the turn loop in three shapes depending on the tool
+/// transport: a bare object (built-in tools), a JSON string, or — for MCP tools like
+/// `sketch_snapshot` — wrapped and stringified inside an MCP text content block
+/// (`[{"type":"text","text":"<json>"}]`). Recover the sentinel object from any of them.
+fn find_vision_sentinel(content: &serde_json::Value) -> Option<serde_json::Value> {
+    // 1. Bare object.
+    if content.get("vision").is_some() {
+        return Some(content.clone());
+    }
+    // 2. A JSON string that decodes to a sentinel.
+    if let Some(s) = content.as_str() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+            if v.get("vision").is_some() {
+                return Some(v);
+            }
+        }
+    }
+    // 3. An MCP content array whose text block holds the stringified sentinel.
+    if let Some(arr) = content.as_array() {
+        for item in arr {
+            if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(s) = item.get("text").and_then(|t| t.as_str()) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+                        if v.get("vision").is_some() {
+                            return Some(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -394,5 +474,52 @@ mod tests {
                 matches!(b, ContentBlock::ToolResult { is_error, .. } if *is_error))),
             _ => panic!("expected synthesized tool_result"),
         }
+    }
+
+    // A real PNG, base64-encoded — mirrors what the gateway's tiny-skia rasteriser
+    // produces for a sketch (RGBA8), so the test exercises the actual decode path.
+    fn sketch_like_png_b64() -> String {
+        use base64::Engine as _;
+        let buf = image::RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([(x * 5) as u8, (y * 7) as u8, 90, 255])
+        });
+        let img = image::DynamicImage::ImageRgba8(buf);
+        let mut bytes = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[tokio::test]
+    async fn vision_rewrite_b64_sentinel_becomes_image_block() {
+        let content = serde_json::json!({ "vision": { "b64": sketch_like_png_b64() }, "text": "a sketch" });
+        let out = vision_rewrite(content).await;
+        let arr = out.as_array().expect("multimodal array");
+        assert_eq!(arr[0]["type"], "image");
+        assert_eq!(arr[0]["source"]["type"], "base64");
+        assert_eq!(arr[1]["text"], "a sketch");
+    }
+
+    #[tokio::test]
+    async fn vision_rewrite_handles_mcp_wrapped_sentinel() {
+        // The sketch_snapshot transport: stringified sentinel inside an MCP text block.
+        let inner = serde_json::json!({ "vision": { "b64": sketch_like_png_b64() } }).to_string();
+        let content = serde_json::json!([{ "type": "text", "text": inner }]);
+        let out = vision_rewrite(content).await;
+        assert!(out.as_array().unwrap().iter().any(|b| b["type"] == "image"));
+    }
+
+    #[tokio::test]
+    async fn vision_rewrite_leaves_non_vision_content_untouched() {
+        let content = serde_json::json!({ "ok": true, "data": 5 });
+        assert_eq!(vision_rewrite(content.clone()).await, content);
+    }
+
+    #[tokio::test]
+    async fn vision_rewrite_bad_image_falls_back_to_text() {
+        let content = serde_json::json!({ "vision": { "path": "/nope/missing.png" } });
+        let out = vision_rewrite(content).await;
+        assert!(out.is_string(), "load failure becomes an explanatory text result");
+        assert!(out.as_str().unwrap().contains("[vision]"));
     }
 }

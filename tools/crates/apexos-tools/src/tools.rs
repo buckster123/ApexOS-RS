@@ -688,14 +688,14 @@ fn notes_append(args: &Value) -> Value {
 
 fn sketch_snapshot() -> Value {
     // The Sketchpad app saves the current canvas to <workspace>/sketches/latest.png
-    // via the gateway. Hand APEX the path so it can view/describe the drawing.
+    // via the gateway. Return the vision sentinel so agentd's turn loop shims the PNG
+    // and hands APEX the image inline — it sees the drawing directly (see
+    // apexos_core::vision and agent/src/turn.rs::vision_rewrite).
     let path = resolve_path("sketches/latest.png");
     if path.exists() {
-        let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         tool_ok(json!({
-            "path": path.to_string_lossy(),
-            "size_bytes": size,
-            "hint": "Use your image-viewing ability (or describe_image) on this path to see the drawing.",
+            "vision": { "path": path.to_string_lossy() },
+            "text": "Here is the current sketch from the Sketchpad canvas.",
         }))
     } else {
         tool_ok(json!({ "path": null, "message": "No sketch yet — the user hasn't sent one from the Sketchpad." }))

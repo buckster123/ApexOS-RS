@@ -120,10 +120,13 @@ fn block_to_json(b: &ContentBlock) -> Value {
         ContentBlock::ToolUse { id, name, input } =>
             serde_json::json!({ "type": "tool_use", "id": id, "name": name, "input": input }),
         ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-            // Anthropic requires content to be a string or list of content blocks,
-            // not a raw JSON object/number/etc. Coerce anything non-string here.
+            // Anthropic requires content to be a string or a list of content blocks,
+            // not a raw JSON object/number/etc. A multimodal vision result is already
+            // a content-block array (image + text) — pass it through verbatim; coerce
+            // anything else to a string.
             let safe_content = match content {
                 serde_json::Value::String(_) => content.clone(),
+                v if apexos_core::vision::contains_image_block(v) => content.clone(),
                 other => serde_json::Value::String(other.to_string()),
             };
             serde_json::json!({ "type": "tool_result", "tool_use_id": tool_use_id,
@@ -289,6 +292,30 @@ fn sse_to_chunks(
 mod tests {
     use super::*;
     use futures_util::StreamExt;
+
+    #[test]
+    fn tool_result_with_image_array_passes_through() {
+        let content = serde_json::json!([
+            { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "AAAA" } },
+            { "type": "text", "text": "look" }
+        ]);
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "t1".into(), content: content.clone(), is_error: false,
+        };
+        let json = block_to_json(&block);
+        assert_eq!(json["type"], "tool_result");
+        assert!(json["content"].is_array(), "image array passes through, not stringified");
+        assert_eq!(json["content"][0]["type"], "image");
+    }
+
+    #[test]
+    fn tool_result_object_is_still_stringified() {
+        // Regression guard: non-image content keeps today's stringify behaviour.
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "t1".into(), content: serde_json::json!({ "ok": true }), is_error: false,
+        };
+        assert!(block_to_json(&block)["content"].is_string());
+    }
 
     fn make_sse(lines: &[&str]) -> impl futures_core::Stream<Item = Result<bytes::Bytes, reqwest::Error>> {
         let payload: bytes::Bytes = lines.join("\n").into();
