@@ -56,7 +56,7 @@ mod tests {
         let now = now_fixed();
         let times = vec![now - Duration::seconds(60)];
         let b = base_level_activation(&times, now, 0.5);
-        let expected = -2.04717228_f32;
+        let expected = -2.047_172_3_f32;
         assert!((b - expected).abs() < 1e-4, "got {b}, expected {expected}");
     }
 
@@ -86,7 +86,7 @@ mod tests {
             now - Duration::seconds(86400),
         ];
         let b = base_level_activation(&times, now, 0.5);
-        let expected = -1.90268088_f32;
+        let expected = -1.902_680_9_f32;
         assert!((b - expected).abs() < 1e-4, "got {b}, expected {expected}");
     }
 }

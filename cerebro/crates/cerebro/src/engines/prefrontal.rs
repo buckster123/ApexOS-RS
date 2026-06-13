@@ -14,6 +14,12 @@ use crate::{
 /// Mirrors Python engines/prefrontal.py ExecutiveEngine.
 pub struct ExecutiveEngine;
 
+impl Default for ExecutiveEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExecutiveEngine {
     pub fn new() -> Self { Self }
 
@@ -91,7 +97,7 @@ mod tests {
             n
         }).collect();
         for (_, score) in engine().rank_results(&nodes, None, None) {
-            assert!(score >= 0.0 && score <= 1.0, "score out of range: {score}");
+            assert!((0.0..=1.0).contains(&score), "score out of range: {score}");
         }
     }
 

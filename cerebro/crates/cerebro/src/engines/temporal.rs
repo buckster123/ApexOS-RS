@@ -7,6 +7,12 @@ use crate::models::MemoryNode;
 /// Mirrors Python engines/temporal.py SemanticEngine.
 pub struct SemanticEngine;
 
+impl Default for SemanticEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SemanticEngine {
     pub fn new() -> Self { Self }
 

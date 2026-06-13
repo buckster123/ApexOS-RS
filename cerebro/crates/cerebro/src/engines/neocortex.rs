@@ -4,6 +4,12 @@
 /// Mirrors Python engines/neocortex.py SchemaEngine.
 pub struct SchemaEngine;
 
+impl Default for SchemaEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SchemaEngine {
     pub fn new() -> Self { Self }
 

@@ -20,6 +20,12 @@ const HIGH_AROUSAL_MARKERS: &[&str] = &[
 /// Mirrors Python engines/amygdala.py AffectEngine.
 pub struct AffectEngine;
 
+impl Default for AffectEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AffectEngine {
     pub fn new() -> Self { Self }
 

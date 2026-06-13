@@ -16,6 +16,12 @@ const HIGH_SALIENCE_KEYWORDS: &[&str] = &[
 /// Mirrors Python engines/thalamus.py GatingEngine.
 pub struct GatingEngine;
 
+impl Default for GatingEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GatingEngine {
     pub fn new() -> Self { Self }
 
