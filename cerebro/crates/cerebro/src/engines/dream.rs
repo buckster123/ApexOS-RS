@@ -150,13 +150,17 @@ impl DreamEngine {
 
         // Persist to dream_reports table
         let report_id = format!("dream_{}", uuid::Uuid::new_v4().simple());
-        let _ = cortex.storage.read().await.sqlite
+        // CB-024: surface a failed report persist instead of silently dropping it.
+        if let Err(e) = cortex.storage.read().await.sqlite
             .save_dream_report(
                 &report_id,
                 scope.agent_id.as_ref().map(|a| a.0.as_str()),
                 &report,
             )
-            .await;
+            .await
+        {
+            tracing::warn!("dream report persist failed ({report_id}): {e}");
+        }
 
         Ok(report)
     }
@@ -421,10 +425,18 @@ impl DreamEngine {
                             } else {
                                 node.metadata = json!({ "derived_from": source_ids });
                             }
-                            let _ = cortex.storage.read().await.sqlite
-                                .update_memory(&node).await;
-                            total_schemas += 1;
-                            result.links_created += mem_ids.len();
+                            // CB-024: only count work that actually persisted.
+                            match cortex.storage.read().await.sqlite
+                                .update_memory(&node).await
+                            {
+                                Ok(_) => {
+                                    total_schemas += 1;
+                                    result.links_created += mem_ids.len();
+                                }
+                                Err(e) => tracing::warn!(
+                                    "Phase 3 schema persist failed for {}: {e}", node.id.0
+                                ),
+                            }
                         }
                     }
                 }
@@ -467,9 +479,15 @@ impl DreamEngine {
                     .get_memory(mid, scope).await?
                 {
                     let enriched = cortex.amygdala.apply_emotion(node);
-                    let _ = cortex.storage.read().await.sqlite
-                        .update_memory(&enriched).await;
-                    result.memories_processed += 1;
+                    // CB-024: only count memories whose re-scored state persisted.
+                    match cortex.storage.read().await.sqlite
+                        .update_memory(&enriched).await
+                    {
+                        Ok(_)  => result.memories_processed += 1,
+                        Err(e) => tracing::warn!(
+                            "Phase 4 emotional persist failed for {}: {e}", enriched.id.0
+                        ),
+                    }
                 }
             }
         }
@@ -512,9 +530,16 @@ impl DreamEngine {
                 .list_links_from(&node.id).await?;
             if !links.is_empty() { continue; }
 
-            let _ = cortex.storage.read().await.sqlite
-                .delete_memory(&node.id).await;
-            pruned += 1;
+            // CB-024: only count a prune that actually soft-deleted a live row.
+            match cortex.storage.read().await.sqlite
+                .delete_memory(&node.id).await
+            {
+                Ok(true)  => pruned += 1,
+                Ok(false) => {} // no-op (already deleted) — don't over-count
+                Err(e)    => tracing::warn!(
+                    "Phase 5 prune failed for {}: {e}", node.id.0
+                ),
+            }
         }
 
         result.memories_processed = all_memories.len();
