@@ -578,7 +578,9 @@ ok "Repo at $REPO_DIR (owner: $(stat -c '%U' "$REPO_DIR"))"
 # ── System deps ────────────────────────────────────────────────────────────────
 hdr "System dependencies"
 
-PKGS=(curl git pkg-config build-essential libssl-dev whiptail)
+# ffmpeg (ffprobe + ffplay) — runtime dep for the audio tools + Audio Editor
+# (/api/audio/* analyze/waveform/process) and Sonus playback (/api/sonus/play).
+PKGS=(curl git pkg-config build-essential libssl-dev whiptail ffmpeg)
 if ! $NO_UI; then
   PKGS+=(libfontconfig1-dev libgbm-dev libegl-dev libudev-dev libinput-dev libxkbcommon-dev)
 fi
