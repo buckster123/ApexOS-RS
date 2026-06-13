@@ -132,16 +132,26 @@ fn build_context(prior_rounds: &[CouncilRound], pending_butt_in: Option<&str>) -
 // ── Convergence ───────────────────────────────────────────────────────────────
 
 fn convergence_score(responses: &[(String, String)]) -> f32 {
-    const AGREE: &[&str] = &[
-        "agree", "consensus", "align", "concur", "support", "same conclusion",
-        "i think so too", "exactly", "in agreement", "we converge",
+    // Single-word markers matched on whole tokens (so "agree" does NOT match
+    // "disagree"/"disagreement"), plus multi-word phrases matched as substrings.
+    const AGREE_WORDS:   &[&str] = &["agree", "consensus", "align", "concur", "support", "exactly"];
+    const AGREE_PHRASES: &[&str] = &[
+        "same conclusion", "i think so too", "in agreement", "we converge",
     ];
+    let total = (AGREE_WORDS.len() + AGREE_PHRASES.len()) as f32;
     let joined = responses.iter()
         .map(|(_, t)| t.to_lowercase())
         .collect::<Vec<_>>()
         .join(" ");
-    let hits = AGREE.iter().filter(|&&w| joined.contains(w)).count() as f32;
-    (hits / AGREE.len() as f32 * 2.5).min(1.0)  // scale: 40% of keywords → 1.0
+    // Tokenize on non-alphanumeric boundaries; match whole tokens only.
+    let tokens: std::collections::HashSet<&str> = joined
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let word_hits   = AGREE_WORDS.iter().filter(|&&w| tokens.contains(w)).count();
+    let phrase_hits = AGREE_PHRASES.iter().filter(|&&p| joined.contains(p)).count();
+    let hits = (word_hits + phrase_hits) as f32;
+    (hits / total * 2.5).min(1.0)  // scale: 40% of keywords → 1.0
 }
 
 fn extract_agreements(responses: &[(String, String)]) -> Vec<String> {
@@ -374,4 +384,29 @@ pub async fn run_council(
     });
 
     synthesis
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disagree_does_not_count_as_agreement() {
+        // A flat disagreement must not inflate the consensus score: "disagree"
+        // contains the substring "agree" but is a distinct token.
+        let responses = vec![
+            ("A".to_string(), "I disagree with this entirely.".to_string()),
+            ("B".to_string(), "This is a disagreement; the disagreements remain.".to_string()),
+        ];
+        assert_eq!(convergence_score(&responses), 0.0);
+    }
+
+    #[test]
+    fn genuine_agreement_scores_above_zero() {
+        let responses = vec![
+            ("A".to_string(), "I agree, we have consensus here.".to_string()),
+            ("B".to_string(), "Exactly, I concur.".to_string()),
+        ];
+        assert!(convergence_score(&responses) > 0.0);
+    }
 }

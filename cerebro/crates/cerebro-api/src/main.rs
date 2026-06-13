@@ -26,6 +26,18 @@ use tracing::info;
 type Brain = Arc<CerebroCortex>;
 type AppResult<T = Value> = Result<Json<T>, ApiError>;
 
+/// Constant-time string equality for auth tokens. Guards on length first
+/// (lengths are not secret), then compares bytes via `subtle::ConstantTimeEq`
+/// so a mismatch does not leak the matching-prefix length through timing.
+fn ct_eq(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(b).into()
+}
+
 // ---------------------------------------------------------------------------
 // Error helper — any anyhow error → 500 JSON
 // ---------------------------------------------------------------------------
@@ -920,12 +932,12 @@ async fn main() -> Result<()> {
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.strip_prefix("Bearer "))
                     .unwrap_or("");
-                if from_header == tok.as_str() { return next.run(req).await; }
+                if ct_eq(from_header, tok.as_str()) { return next.run(req).await; }
                 let from_query = req.uri().query().unwrap_or("")
                     .split('&')
                     .find_map(|p| p.strip_prefix("token="))
                     .unwrap_or("");
-                if from_query == tok.as_str() { return next.run(req).await; }
+                if ct_eq(from_query, tok.as_str()) { return next.run(req).await; }
                 (StatusCode::UNAUTHORIZED, "invalid or missing token").into_response()
             }
         }

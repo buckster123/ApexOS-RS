@@ -61,6 +61,16 @@ Find an unexpected but meaningful connection.\n\
 - \"weight\": Connection strength 0.0-1.0\n\
 \nReturn ONLY valid JSON object.";
 
+/// Truncate `s` to at most `max_chars` characters on a char boundary.
+/// Byte-indexed slicing (`&s[..n]`) panics when `n` lands mid-multibyte-char
+/// (emoji, CJK, smart quotes); this is panic-safe.
+fn truncate_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DreamEngine — Default Mode Network for CerebroCortex
 // 6 biologically-inspired consolidation phases:
@@ -239,7 +249,7 @@ impl DreamEngine {
             let mem_text: String = indices.iter().take(10).enumerate()
                 .map(|(i, &idx)| {
                     let content = &memories[idx].content;
-                    format!("[{}] {}", i, &content[..content.len().min(200)])
+                    format!("[{}] {}", i, truncate_chars(content, 200))
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -263,7 +273,7 @@ impl DreamEngine {
                                 .unwrap_or_else(|| vec![tag.clone()]);
 
                             // Basic dedup: skip if first 40 chars match any existing memory
-                            let prefix = &content[..content.len().min(40)];
+                            let prefix = truncate_chars(content, 40);
                             if memories.iter().any(|n| n.content.starts_with(prefix)) {
                                 continue;
                             }
@@ -345,7 +355,7 @@ impl DreamEngine {
             let mem_text: String = nodes.iter().take(10).enumerate()
                 .map(|(i, n)| {
                     let content = &n.content;
-                    format!("[{}] {}", i, &content[..content.len().min(200)])
+                    format!("[{}] {}", i, truncate_chars(content, 200))
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -576,8 +586,8 @@ impl DreamEngine {
             }
 
             let prompt = PROMPT_REM_CONNECT
-                .replace("{memory_a}", &node_a.content[..node_a.content.len().min(300)])
-                .replace("{memory_b}", &node_b.content[..node_b.content.len().min(300)]);
+                .replace("{memory_a}", truncate_chars(&node_a.content, 300))
+                .replace("{memory_b}", truncate_chars(&node_b.content, 300));
 
             match llm_call(&key, SYSTEM_DREAM, &prompt).await {
                 Ok(resp) => {
@@ -746,5 +756,28 @@ impl PhaseResult {
         r.success = false;
         r.notes   = notes.into();
         r
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_chars;
+
+    #[test]
+    fn truncate_mid_emoji_does_not_panic() {
+        // "a" + 4-byte emoji repeated. A byte slice at e.g. 3 would split the
+        // emoji and panic; truncate_chars must cut on a char boundary instead.
+        let s = "a🦀🦀🦀🦀";
+        for n in 0..=10 {
+            let out = truncate_chars(s, n);
+            // valid UTF-8 prefix, never longer than the source
+            assert!(s.starts_with(out));
+        }
+        // first char only
+        assert_eq!(truncate_chars(s, 1), "a");
+        // two chars = "a" + one crab (1 + 4 bytes)
+        assert_eq!(truncate_chars(s, 2), "a🦀");
+        // beyond length returns the whole string
+        assert_eq!(truncate_chars(s, 100), s);
     }
 }

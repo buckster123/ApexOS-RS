@@ -202,7 +202,7 @@ fn tool_schema(name: &str) -> Value {
                 "type": "object",
                 "properties": {
                     "content":      { "type": "string", "description": "Session summary content" },
-                    "priority":     { "type": "string", "enum": ["LOW","MEDIUM","HIGH","CRITICAL"], "description": "Priority tag (default: medium)" },
+                    "priority":     { "type": "string", "enum": ["LOW","MEDIUM","HIGH","CRITICAL"], "description": "Priority tag (default: MEDIUM; case-insensitive)" },
                     "session_type": { "type": "string", "description": "Session type tag e.g. technical, planning (default: general)" },
                     "salience":     { "type": "number" },
                     "agent_id":     { "type": "string" }

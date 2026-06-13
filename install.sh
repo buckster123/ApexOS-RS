@@ -439,7 +439,7 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
   ADDONS=$(tui_checklist "Components" \
     "Select the components to install:\n(Space to toggle, Enter to confirm)" \
     "ui"      "apexos-rs-ui     Native Slint UI — KMS/DRM display"         "$UI_STATE" \
-    "cerebro" "Cerebro API      REST dashboard + memory UI on :8767"        "$API_STATE" \
+    "cerebro" "Cerebro API      REST dashboard + memory UI on :8765"        "$API_STATE" \
     "sensor"  "Sensor Head      BME688 air quality + MLX90640 thermal cam"  "$SENSOR_STATE" \
     "voice"   "Voice            Wake-word + whisper transcription"          "OFF")
 
@@ -516,7 +516,7 @@ fi
 if ! $YES; then
   ADDONS_LIST=""
   ! $NO_UI          && ADDONS_LIST+="  ✓ apexos-rs-ui  (KMS/DRM display)\n"
-  ! $NO_CEREBRO_API && ADDONS_LIST+="  ✓ cerebro-api   (REST dashboard :8767)\n"
+  ! $NO_CEREBRO_API && ADDONS_LIST+="  ✓ cerebro-api   (REST dashboard :8765)\n"
   ! $NO_SENSOR      && ADDONS_LIST+="  ✓ sensor-head   (BME688 + MLX90640)\n"
   ! $NO_VOICE       && ADDONS_LIST+="  ✓ voice         (whisper transcription)\n"
   [[ -n "$API_KEY" ]]        && KEY_STATUS="Anthropic key: set" \
@@ -644,7 +644,7 @@ if $NO_UI; then
   info "Skipping ui-slint (headless/desktop mode)"
 fi
 
-BUILD_LOG=/tmp/apexos-cargo-build.log
+BUILD_LOG=$(mktemp /tmp/apexos-cargo-build.XXXXXX.log)
 info "Build log → $BUILD_LOG"
 
 sudo -u "$BUILD_USER" "$CARGO" build $BUILD_ARGS 2>&1 \
@@ -731,9 +731,13 @@ touch "$ENV_FILE"; chmod 600 "$ENV_FILE"; chown root:root "$ENV_FILE"
 write_env_key() {
   local key="$1" val="$2"
   [[ -z "$val" ]] && return
-  grep -q "^${key}=" "$ENV_FILE" 2>/dev/null \
-    && sed -i "s|^${key}=.*|${key}=${val}|" "$ENV_FILE" \
-    || echo "${key}=${val}" >> "$ENV_FILE"
+  # Rewrite via a temp file so the value can contain any character (sed-special
+  # chars like '|' or '&' in API keys would corrupt an in-place s/// otherwise).
+  local tmp; tmp=$(mktemp "${ENV_FILE}.XXXXXX")
+  chmod 600 "$tmp"; chown root:root "$tmp"
+  grep -v "^${key}=" "$ENV_FILE" 2>/dev/null > "$tmp" || true
+  echo "${key}=${val}" >> "$tmp"
+  mv "$tmp" "$ENV_FILE"
 }
 
 # Generate gateway token once — never overwrite an existing one
@@ -879,8 +883,8 @@ $NO_SENSOR      || { systemctl is-active apex-sensor-bridge &>/dev/null \
     || check "apex-sensor-bridge" "not running"; }
 
 $NO_CEREBRO_API || { systemctl is-active cerebro-api &>/dev/null \
-    && check "cerebro-api on :8767" "pass" \
-    || check "cerebro-api on :8767" "not running"; }
+    && check "cerebro-api on :8765" "pass" \
+    || check "cerebro-api on :8765" "not running"; }
 
 $NO_UI          || { systemctl is-active apexos-rs-ui &>/dev/null \
     && check "apexos-rs-ui (KMS display)" "pass" \
@@ -897,7 +901,7 @@ echo -e "${GREEN}${BOLD}  ✓ ApexOS-RS installed — tier: $TIER / mode: $MODE$
 echo -e "  ${DIM}Health: ${HEALTH_PASS} passed, ${HEALTH_FAIL} warnings${NC}"
 echo ""
 echo -e "  ${DIM}Agent UI:         http://$(hostname -I | awk '{print $1}'):8787${NC}"
-! $NO_CEREBRO_API && echo -e "  ${DIM}Cerebro dash:     http://localhost:8767${NC}" || true
+! $NO_CEREBRO_API && echo -e "  ${DIM}Cerebro dash:     http://localhost:8765${NC}" || true
 ! $NO_UI          && echo -e "  ${DIM}Display:          KMS/DRM on /dev/tty7 (1920×1080)${NC}" || true
 [[ -n "$API_CHECK" ]] && \
   echo -e "  ${YELLOW}  ⚠  Set API key:  echo 'ANTHROPIC_API_KEY=sk-...' >> $ENV_FILE${NC}" || true
@@ -914,7 +918,7 @@ if ! $YES && $HAVE_WHIPTAIL; then
   (( HEALTH_FAIL > 0 )) && STATUS_BODY+=", ${HEALTH_FAIL} warnings" || STATUS_BODY+="."
   STATUS_BODY+="\n\nAccess points:\n"
   STATUS_BODY+="  • Agent UI:  http://$(hostname -I | awk '{print $1}'):8787\n"
-  ! $NO_CEREBRO_API && STATUS_BODY+="  • Cerebro:   http://localhost:8767\n" || true
+  ! $NO_CEREBRO_API && STATUS_BODY+="  • Cerebro:   http://localhost:8765\n" || true
   ! $NO_UI          && STATUS_BODY+="  • Display:   KMS/DRM on HDMI (auto-started)\n" || true
   [[ -n "$API_CHECK" ]] && STATUS_BODY+="\n⚠  Add your Anthropic key to $ENV_FILE\n   to enable LLM calls." || true
   STATUS_BODY+="\n\nInstall log: $LOG"

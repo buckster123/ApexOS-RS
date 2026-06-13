@@ -483,28 +483,48 @@ fn run_command(args: &Value) -> Value {
     }
 }
 
+/// Root a relative path onto the agent workspace; absolute paths pass through
+/// unchanged. Relative paths join `AGENTD_WORKSPACE` (default
+/// `/var/lib/agentd/workspace`) so e.g. `read_file("notes.txt")` resolves there
+/// instead of against the process CWD (which is `/` under systemd).
+fn resolve_path(path: &str) -> std::path::PathBuf {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    let ws = std::env::var("AGENTD_WORKSPACE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    Path::new(&ws).join(p)
+}
+
 fn read_file(args: &Value) -> Value {
     let path = match args["path"].as_str() {
         Some(p) => p,
         None => return tool_error("path is required"),
     };
+    let path = resolve_path(path);
     let max_bytes = args["max_bytes"].as_u64().unwrap_or(1_048_576) as usize;
 
-    let mut file = match fs::File::open(path) {
+    let file = match fs::File::open(&path) {
         Ok(f) => f,
-        Err(e) => return tool_error(format!("cannot open {}: {}", path, e)),
+        Err(e) => return tool_error(format!("cannot open {}: {}", path.display(), e)),
     };
 
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let mut buf = vec![0u8; max_bytes.min(size as usize + 1)];
-    let n = match file.read(&mut buf) {
-        Ok(n) => n,
-        Err(e) => return tool_error(format!("read error: {}", e)),
-    };
-    buf.truncate(n);
+
+    // Read up to max_bytes robustly. metadata().len() is 0 for /proc and /sys
+    // files and may lag for growing files, so we cannot size the buffer from it.
+    // Take one extra byte to detect whether the file continued past max_bytes.
+    let mut buf = Vec::new();
+    if let Err(e) = file.take(max_bytes as u64 + 1).read_to_end(&mut buf) {
+        return tool_error(format!("read error: {}", e));
+    }
+    let truncated = buf.len() > max_bytes;
+    buf.truncate(max_bytes);
 
     let content = String::from_utf8_lossy(&buf).to_string();
-    let truncated = n >= max_bytes && (size as usize) > max_bytes;
 
     tool_ok(json!({
         "content": content,
@@ -523,9 +543,10 @@ fn write_file(args: &Value) -> Value {
         None => return tool_error("content is required"),
     };
     let append = args["append"].as_bool().unwrap_or(false);
+    let path = resolve_path(path);
 
     // Create parent dirs if needed
-    if let Some(parent) = Path::new(path).parent() {
+    if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
 
@@ -537,10 +558,10 @@ fn write_file(args: &Value) -> Value {
         .create(true)
         .append(append)
         .truncate(!append)
-        .open(path)
+        .open(&path)
     {
         Ok(f) => f,
-        Err(e) => return tool_error(format!("cannot open {}: {}", path, e)),
+        Err(e) => return tool_error(format!("cannot open {}: {}", path.display(), e)),
     };
 
     match file.write_all(content.as_bytes()) {
@@ -555,9 +576,10 @@ fn list_dir(args: &Value) -> Value {
         None => return tool_error("path is required"),
     };
     let recursive = args["recursive"].as_bool().unwrap_or(false);
+    let path = resolve_path(path);
 
     let mut entries = Vec::new();
-    collect_dir(path, recursive, 0, &mut entries);
+    collect_dir(&path.to_string_lossy(), recursive, 0, &mut entries);
     tool_ok(json!(entries))
 }
 
@@ -597,8 +619,9 @@ fn create_dir(args: &Value) -> Value {
         Some(p) => p,
         None => return tool_error("path is required"),
     };
-    match fs::create_dir_all(path) {
-        Ok(_) => tool_ok(json!({ "created": path })),
+    let path = resolve_path(path);
+    match fs::create_dir_all(&path) {
+        Ok(_) => tool_ok(json!({ "created": path.to_string_lossy() })),
         Err(e) => tool_error(format!("create_dir failed: {}", e)),
     }
 }
@@ -668,11 +691,73 @@ fn delete_path(args: &Value) -> Value {
     }
 }
 
+/// Return true if an IP address must not be reachable via http_fetch
+/// (SSRF guard): loopback, link-local (incl. cloud metadata 169.254.169.254),
+/// and RFC1918 private ranges.
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()        // 127.0.0.0/8
+                || v4.is_link_local() // 169.254.0.0/16
+                || v4.is_private()    // 10/8, 172.16/12, 192.168/16
+                || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_unspecified() {
+                return true;
+            }
+            // IPv4-mapped (::ffff:a.b.c.d) — check the embedded v4 address.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_blocked_ip(IpAddr::V4(v4));
+            }
+            // Link-local fe80::/10 and unique-local fc00::/7.
+            let seg = v6.segments()[0];
+            (seg & 0xffc0) == 0xfe80 || (seg & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// Resolve a URL's host and reject it if any resolved address is in a blocked
+/// range. Returns Ok(()) for public hosts. A literal IP host is checked
+/// directly.
+fn ssrf_guard(url: &str) -> Result<(), String> {
+    use std::net::ToSocketAddrs;
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid url: {}", e))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "url has no host".to_string())?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+
+    // host:port → resolve to one or more socket addresses.
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("cannot resolve host {}: {}", host, e))?;
+    let mut any = false;
+    for sa in addrs {
+        any = true;
+        if is_blocked_ip(sa.ip()) {
+            return Err(format!(
+                "blocked: {} resolves to non-public address {}",
+                host,
+                sa.ip()
+            ));
+        }
+    }
+    if !any {
+        return Err(format!("cannot resolve host {}", host));
+    }
+    Ok(())
+}
+
 fn http_fetch(args: &Value) -> Value {
     let url = match args["url"].as_str() {
         Some(u) => u,
         None => return tool_error("url is required"),
     };
+    if let Err(e) = ssrf_guard(url) {
+        return tool_error(e);
+    }
     let method = args["method"].as_str().unwrap_or("GET").to_uppercase();
 
     let client = match reqwest::blocking::Client::builder()
@@ -705,7 +790,7 @@ fn http_fetch(args: &Value) -> Value {
         req = req.body(body.to_string());
     }
 
-    let resp = match req.send() {
+    let mut resp = match req.send() {
         Ok(r) => r,
         Err(e) => return tool_error(format!("request failed: {}", e)),
     };
@@ -715,10 +800,18 @@ fn http_fetch(args: &Value) -> Value {
         .map(|(k, v)| (k.as_str().to_string(), json!(v.to_str().unwrap_or(""))))
         .collect();
 
-    // Cap response body at 4MB
-    let body_bytes = resp.bytes().unwrap_or_default();
-    let body_str = if body_bytes.len() > 4_194_304 {
-        format!("[truncated at 4MB, total {} bytes]", body_bytes.len())
+    // Cap response body at 4MB by reading at most the limit (+1 to detect
+    // overflow) via a streaming take, rather than buffering the whole body.
+    const BODY_LIMIT: usize = 4_194_304;
+    let mut body_bytes = Vec::new();
+    if let Err(e) = (&mut resp)
+        .take(BODY_LIMIT as u64 + 1)
+        .read_to_end(&mut body_bytes)
+    {
+        return tool_error(format!("body read failed: {}", e));
+    }
+    let body_str = if body_bytes.len() > BODY_LIMIT {
+        "[truncated at 4MB]".to_string()
     } else {
         String::from_utf8_lossy(&body_bytes).to_string()
     };
@@ -1680,5 +1773,62 @@ fn display_face(args: &Value) -> Value {
             }
         }
         Err(e) => tool_error(format!("display connect: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn resolve_path_relative_vs_absolute() {
+        // Absolute paths pass through unchanged regardless of workspace.
+        std::env::set_var("AGENTD_WORKSPACE", "/srv/ws");
+        assert_eq!(resolve_path("/etc/hosts"), Path::new("/etc/hosts"));
+
+        // Relative paths root onto AGENTD_WORKSPACE.
+        assert_eq!(resolve_path("notes.txt"), Path::new("/srv/ws/notes.txt"));
+        assert_eq!(resolve_path("a/b.txt"), Path::new("/srv/ws/a/b.txt"));
+
+        // Empty workspace falls back to the default root.
+        std::env::set_var("AGENTD_WORKSPACE", "");
+        assert_eq!(
+            resolve_path("notes.txt"),
+            Path::new("/var/lib/agentd/workspace/notes.txt")
+        );
+
+        // Unset workspace falls back to the default root.
+        std::env::remove_var("AGENTD_WORKSPACE");
+        assert_eq!(
+            resolve_path("notes.txt"),
+            Path::new("/var/lib/agentd/workspace/notes.txt")
+        );
+        // Absolute still passes through with no workspace set.
+        assert_eq!(resolve_path("/tmp/x"), Path::new("/tmp/x"));
+    }
+
+    #[test]
+    fn ssrf_blocks_private_and_loopback() {
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))));
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))));
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        assert!(is_blocked_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        // IPv4-mapped loopback.
+        assert!(is_blocked_ip(IpAddr::V6("::ffff:127.0.0.1".parse().unwrap())));
+        // fe80:: link-local and fc00:: ULA.
+        assert!(is_blocked_ip(IpAddr::V6("fe80::1".parse().unwrap())));
+        assert!(is_blocked_ip(IpAddr::V6("fc00::1".parse().unwrap())));
+    }
+
+    #[test]
+    fn ssrf_allows_public() {
+        // 172.15 is NOT in 172.16/12; 8.8.8.8 is public.
+        assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(172, 15, 0, 1))));
+        assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+        assert!(!is_blocked_ip(IpAddr::V6("2606:4700:4700::1111".parse().unwrap())));
     }
 }
