@@ -1,0 +1,45 @@
+# ApexOS-RS Extension SDK
+
+> ApexOS-RS is a pure-Rust native-UI agent distro: one Cargo workspace with the
+> agent daemon (`agentd`), the cognitive memory cortex (`cerebro`), the
+> system-tool plugins (`apexos-tools`), and a Slint native UI (`ui-slint`). This
+> is the agent-facing index for *extending* it. The entire stack couples through
+> one contract — agentd's `Event` enum as JSON over `ws://HOST:8787/ws`; tools,
+> memory, UI, mesh, and self-evolution are all downstream of it. The only thing
+> an agent changes at runtime is config (`soul.md`/`policy.toml`/plugin set) via
+> the policy-gated, journaled, reversible `propose_evolution` path; all new Rust
+> code (events, tools, views, compiled plugins) is a human build + hot-swap.
+> Safety is enforced by `PolicyEngine` + the systemd sandbox, never by the
+> protocol enum or tool code. Every guide is ground-truthed to `file:line`; where
+> a guide and `CLAUDE.md` disagree, the guide wins.
+
+## Start here
+
+- [README](README.md): Human index — what the SDK is, the guide table, and the start-here path for humans and agents.
+- [extension-manifest.md](extension-manifest.md): Consolidated "to add X, edit these files, follow this schema" recipe table for every extension point, plus the full tool-name/arg and Event-variant catalog. Read this to recall how to add a tool / event / app / plugin / policy rule / node.
+
+## Extension surfaces (the guides)
+
+- [01 — Core types & the WebSocket/event protocol](01-core-and-protocol.md): The `Event` enum (tag `type`, snake_case), the in-process bus, and the gateway WS read/write path. Add an `Event` variant (4 layers: types.rs → state.rs → consumers → client), add a frontend intent, or write an alternate client. KEY: `session_init` is server-pushed; resume via `{type:hello,resume_session}`; `turn_started` is never emitted; busy is driven by `agent_text`; a frame failing deserialization is silently dropped.
+- [02 — MCP plugins](02-mcp-plugins.md): A child process agentd spawns over newline-delimited JSON-RPC stdio (protocol 2024-11-05), exposing agent tools. Implement 4 methods (initialize / notifications/initialized / tools/list / tools/call), then register a `[[plugin]]` stanza in `plugins.toml`. Tool names are global (last-up-wins); stdout is JSON-RPC only (log to stderr); only `restart="always"` auto-restarts.
+- [03 — Adding a tool to apexos-tools](03-adding-tools.md): The built-in system-tool plugin. Two edits in `tools/crates/apexos-tools/src/tools.rs` (schema in `list()`, dispatch arm + impl `fn` in `call()`) plus one `[rules]` line in `config/policy.toml`. No `plugins.toml` edit. Policy reads only the arg literally named `path`.
+- [04 — Cerebro: memory for agents](04-cerebro-for-agents.md): ~66 MCP memory verbs (remember/recall/episode_*/store_procedure/store_intention/session_save/session_recall/dream_run). Two axes: agents USING the Wake→Perceive→Act→Sleep loop, and humans ADDING a verb (TOOL_NAMES + schema arm in `tools.rs`, route arm in `dispatch.rs`). `agent_id` selects scope. Flags 4 unrouted stubs (cognitive_bootstrap/ingest_file/describe_image/search_vision).
+- [05 — Building a desktop app / UI view](05-desktop-apps.md): A Slint view in a window frame, fed from WS events or `/api/*` polls. ~5 files, almost always zero agentd code. Invariant: Slint owns the main thread (never `#[tokio::main]`), all UI mutation marshals through `slint::invoke_from_event_loop`, lists are `Rc<VecModel<T>>`. The `AppKind` ordinal is mirrored in Rust and must agree with enum order.
+- [06 — Self-evolution & policy](06-self-evolution-and-policy.md): How APEX changes its own config at runtime. Three virtual tools (`read_soul_md`, `propose_evolution`, `rollback_evolution`); five `EvolutionProposal` kinds (update_system_prompt / update_policy_rule / register|unregister_mcp_server / hot_reload_subsystem). KEY: there is NO `evolution.*` policy namespace — the gate is the literal tool name, unlisted → Ask under `suggest`. Rollback is in-memory, current-session-only, and uneven (hot_reload has no undo). Journal the rationale or it's identity drift.
+- [07 — Mesh colony & deployment](07-mesh-and-deploy.md): Install-time axes (hardware tier, deployment mode), the mDNS `_apexos._tcp` mesh + `peers.toml`, cross-node `send_to_agent`, the vast.ai GPU recipe model (`recipes.toml` → `vast_launch` → backend hot-swap), and the systemd hardening contract. All mesh/vast tools default to Ask.
+
+## Key source & docs
+
+- [core/src/types.rs](../../agentd/crates/core/src/types.rs): The `Event` enum (:162), `ToolCall`/`ToolOutput`/`ToolSpec`/`Message`, `SensorReading`/`EvolutionProposal` kinds, `PolicyMode`/`PolicyRule`/`Subsystem`, ID newtypes (serialize as bare numbers). The single source of truth for the wire contract.
+- [core/src/state.rs](../../agentd/crates/core/src/state.rs): `SystemState::apply` — the exhaustive match a new `Event` variant must add an arm to (no-op unless it mutates canonical state).
+- [core/src/bus.rs](../../agentd/crates/core/src/bus.rs): The emit→run→apply→broadcast fan-out (capacity 1024); the store writer + every gateway WS task relay all events automatically.
+- [plugins/src/supervisor.rs](../../agentd/crates/plugins/src/supervisor.rs): Spawns plugins, registers tools into the flat global registry, gates each call through PolicyEngine, intercepts the virtual tools (propose_evolution/rollback_evolution/read_soul_md/send_to_agent/vast_*).
+- [plugins/src/policy.rs](../../agentd/crates/plugins/src/policy.rs): `check()` (:88) — yolo → exact key → `prefix.*` wildcard → unknown defaults to Ask; `workspace` rule canonicalizes the `path` arg inside `AGENTD_WORKSPACE`.
+- [agentd/src/main.rs](../../agentd/crates/agentd/src/main.rs): Agent router, evolution applier (apply_evolution / compute_undo), virtual-tool specs, backend hot-swap, mesh discovery loop.
+- [tools/crates/apexos-tools/src/tools.rs](../../tools/crates/apexos-tools/src/tools.rs): `list()` (:10) / `call()` (:302) / `tool_ok` / `tool_error` — the edit points for a new system tool.
+- [cerebro-mcp/src/dispatch.rs](../../cerebro/crates/cerebro-mcp/src/dispatch.rs): `route()` (:70) + `agent_scope()` (:929) — where a memory verb's behaviour lives.
+- [config/policy.toml](../../config/policy.toml): The default approval policy (`mode` + `[rules]`) written to `/etc/agentd/policy.toml` at install.
+- [config/plugins.toml](../../config/plugins.toml): The default `[[plugin]]` stanzas (cmd/args/restart/env).
+- [CLAUDE.md](../../CLAUDE.md): Project blueprint — locked decisions, build order, Pi gotchas, deploy workflow. (Protocol table is stale; guide 01 supersedes it.)
+- [symbiosis.md](../symbiosis.md): The runtime cognitive architecture — the APEX⇄agentd⇄Cerebro loops and the self-evolution rationale doctrine (§5).
+- [architecture.md](../architecture.md): System layout, workspace crate structure, dependency graph.
