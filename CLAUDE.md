@@ -360,6 +360,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 | `docs/slint-reference/` | Exact widget/element API (vendored from official Slint repo) — look up before guessing syntax |
 | `docs/ui-glowup.md` | Desktop shell, persona skins, window manager, glowup roadmap (G0–G7) |
 | `docs/symbiosis.md` | Runtime cognitive architecture — APEX⇄agentd⇄Cerebro loops, the soul.md Sleep-loop gap, CCBS boot wiring |
+| `docs/evolutionary-layer.md` | Exo-evolution charter — competence grows in Cerebro (not the weights): the Darwinian skill loop, schematic layer, selection pressure, skill↔identity boundary |
 
 ---
 
