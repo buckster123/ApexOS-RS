@@ -578,7 +578,9 @@ ok "Repo at $REPO_DIR (owner: $(stat -c '%U' "$REPO_DIR"))"
 # ── System deps ────────────────────────────────────────────────────────────────
 hdr "System dependencies"
 
-PKGS=(curl git pkg-config build-essential libssl-dev whiptail)
+# ffmpeg (ffprobe + ffplay) — runtime dep for the audio tools + Audio Editor
+# (/api/audio/* analyze/waveform/process) and Sonus playback (/api/sonus/play).
+PKGS=(curl git pkg-config build-essential libssl-dev whiptail ffmpeg)
 if ! $NO_UI; then
   PKGS+=(libfontconfig1-dev libgbm-dev libegl-dev libudev-dev libinput-dev libxkbcommon-dev)
 fi
@@ -606,6 +608,10 @@ ok "Rust: $CARGO_VER"
 hdr "User and permissions"
 
 id agentd &>/dev/null || useradd -r -s /sbin/nologin -d /var/lib/agentd agentd
+
+# audio: TTS (/api/speak) + Sonus playback (/api/sonus/play) open the ALSA device
+# directly — needed on any node with speakers, so not gated behind the UI.
+getent group audio &>/dev/null && usermod -aG audio agentd || true
 
 if ! $NO_UI; then
   for grp in render video input; do

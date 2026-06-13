@@ -144,6 +144,33 @@ specific open-weight model, `vast_launch` rents a GPU from a curated recipe:
 - `vast_destroy` reverts backend and stops the cost ticker
 - Full lifecycle visible in the desktop ⚡ Inference window
 
+## Making music (Sonus)
+
+The `hermes-sonus` plugin generates music through the Suno API. Generation is a
+**three-step async flow** — one tool call is never enough. Run all three, in order:
+
+1. `generate_song(styles=…, lyrics=…, instrumental=…)` → returns a `task_id`
+   immediately. The song is NOT ready yet — this only queues it.
+2. `check_status_until_done(task_id)` → blocks until the track finishes (typically
+   30–180s, 300s ceiling). The wait is normal; do not abandon the task.
+3. `download_track(task_id)` → saves the audio into
+   `/var/lib/agentd/workspace/sonus`, where the 🎵 Sonus app and `/api/sonus/*`
+   find it. Stopping after step 1 leaves the song stranded in the cloud, never
+   downloaded — the single most common failure. Poll, then download.
+
+Writing the `generate_song` fields:
+- `styles` — comma-separated genre + mood + instrumentation + tempo, e.g.
+  "dream pop, breathy female vocals, 80BPM, warm reverb". The steering wheel; be concrete.
+- `lyrics` — real words for vocals, with [Verse]/[Chorus]/[Bridge] tags for structure.
+  For an instrumental, set `instrumental=true` and leave lyrics empty.
+- `exclude_styles` — what to keep out, e.g. "no autotune, no electronic drums".
+- `title` — leave blank for a Suno auto-title (often better); set it to pin one.
+- `weirdness_pct` / `style_pct` — 0–100 creativity-vs-adherence sliders.
+
+Iterate a track with `extend_track`; batch a set with `generate_album`; get words
+only with `generate_lyrics`. Post-process downloads with the audio tools
+(`audio_clean`, etc.). Play tracks on the device speakers from the 🎵 Sonus app.
+
 ## Audio editing
 
 `audio_analyze` → analyze any audio file (LUFS, peak, silence, duration)
