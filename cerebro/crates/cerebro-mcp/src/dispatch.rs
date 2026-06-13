@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cerebro::{
-    models::AssociativeLink,
+    models::{AssociativeLink, MemoryNode},
     storage::ListFilter,
     types::{AgentId, LinkType, MemoryId, MemoryType, VisibilityScope},
     CerebroCortex,
@@ -971,10 +971,17 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
         #[cfg(test)]
         "__panic_test__" => panic!("intentional test panic"),
 
-        // ApexOS-SPECIFIC: cognitive_bootstrap is wired into APEX's soul boot as
-        // step-0 and the boot expects a SUCCESS response. Unlike the other
-        // deferred Tier-7 stubs (C-RS-007), it keeps returning its success stub.
-        "cognitive_bootstrap" => Ok(json!({ "status": "not_yet_implemented", "tool": name })),
+        // CCBS — assemble a live-state priming block (the dynamic counterpart to
+        // the static soul.md kernel). Wired into APEX's soul-boot as step-0; one
+        // call replaces the fragile multi-tool orient. Replaces the former
+        // success-stub (audit CB-001).
+        "cognitive_bootstrap" => {
+            let query      = args["query"].as_str().unwrap_or("");
+            let mode       = args["mode"].as_str().unwrap_or("standard");
+            let max_tokens = args["max_tokens"].as_u64().unwrap_or(2000) as usize;
+            let scope      = agent_scope(args);
+            assemble_bootstrap(&brain, query, mode, max_tokens, scope).await
+        }
 
         // Deferred Tier-7 tools (ingest_file, describe_image, search_vision) and
         // any unknown name. C-RS-007: these are still advertised in tools/list
@@ -983,6 +990,137 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
         // callers can branch on it.
         _ => Err(anyhow::anyhow!("tool not implemented: {name}")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// CCBS — cognitive_bootstrap live-state assembler
+// ---------------------------------------------------------------------------
+
+/// Truncate `s` to at most `max_chars` chars (char-boundary safe), appending an
+/// ellipsis when cut.
+fn truncate_block(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => format!("{}…", &s[..idx]),
+        None => s.to_string(),
+    }
+}
+
+/// Assemble the CCBS live-state priming block (`cognitive_bootstrap`).
+///
+/// The dynamic counterpart to the static `soul.md` kernel: one call replaces the
+/// fragile multi-tool orient (`session_recall` + `list_intentions` +
+/// `find_relevant_procedures` + `recall`). Pulls live memory state — open
+/// intentions, query-relevant recent session summaries, query-relevant
+/// procedures, and query-relevant memories — and packs them into a
+/// token-budgeted markdown block. Authored `# Module: X` cognitive modules (the
+/// Python CCBS skill layer) can plug in here later.
+///
+/// Budget caps mirror the Python assembler (minimal 1000 / standard 2000 / full
+/// 4500 tokens); an explicit `max_tokens` only tightens. Tokens are estimated at
+/// ~4 chars each. Sections are added in priority order and dropped once the
+/// budget is exhausted.
+async fn assemble_bootstrap(
+    brain: &Arc<CerebroCortex>,
+    query: &str,
+    mode: &str,
+    max_tokens: usize,
+    scope: VisibilityScope,
+) -> anyhow::Result<Value> {
+    let budget = max_tokens.min(match mode {
+        "minimal" => 1000,
+        "full" => 4500,
+        _ => 2000, // standard
+    });
+    let est = |s: &str| s.len() / 4;
+
+    let mut spent = 0usize;
+    let mut blocks: Vec<String> = Vec::new();
+    let mut sections: Vec<String> = Vec::new();
+    let mut add = |label: String, block: String| {
+        let cost = est(&block);
+        if spent + cost <= budget {
+            spent += cost;
+            sections.push(label);
+            blocks.push(block);
+        }
+    };
+
+    // 1. Open intentions (always — "what you were going to do").
+    {
+        let filter = ListFilter {
+            memory_type: Some(MemoryType::Prospective),
+            limit: 50,
+            ..Default::default()
+        };
+        let mut nodes = brain.storage.read().await.sqlite
+            .list_memories_scoped(&scope, &filter).await?;
+        nodes.retain(|n| n.salience >= 0.5
+            && !n.tags.iter().any(|t| t == "status:resolved"));
+        nodes.sort_by(|a, b| b.salience
+            .partial_cmp(&a.salience).unwrap_or(std::cmp::Ordering::Equal));
+        let items: Vec<String> = nodes.iter().take(8)
+            .map(|n| format!("- (salience {:.2}) {}", n.salience, truncate_block(&n.content, 240)))
+            .collect();
+        if !items.is_empty() {
+            add(format!("intentions({})", items.len()),
+                format!("## Open intentions ({})\n{}", items.len(), items.join("\n")));
+        }
+    }
+
+    // Query-dependent sections via a single recall (which also reinforces them).
+    if !query.is_empty() {
+        let hits = brain.recall(query, 24, scope).await?;
+        let sessions: Vec<&MemoryNode> = hits.iter().map(|(n, _)| n)
+            .filter(|n| n.tags.iter().any(|t| t == "session_note")).collect();
+        let procedures: Vec<&MemoryNode> = hits.iter().map(|(n, _)| n)
+            .filter(|n| n.memory_type == MemoryType::Procedural).collect();
+        let others: Vec<&MemoryNode> = hits.iter().map(|(n, _)| n)
+            .filter(|n| n.memory_type != MemoryType::Procedural
+                && !n.tags.iter().any(|t| t == "session_note")).collect();
+
+        // 2. Where you left off (recent session summaries relevant to the query).
+        let items: Vec<String> = sessions.iter().take(3)
+            .map(|n| format!("- {}", truncate_block(&n.content, 400))).collect();
+        if !items.is_empty() {
+            add(format!("sessions({})", items.len()),
+                format!("## Where you left off\n{}", items.join("\n")));
+        }
+        // 3. Relevant procedures.
+        let items: Vec<String> = procedures.iter().take(3)
+            .map(|n| format!("- {}", truncate_block(&n.content, 300))).collect();
+        if !items.is_empty() {
+            add(format!("procedures({})", items.len()),
+                format!("## Relevant procedures\n{}", items.join("\n")));
+        }
+        // 4. Relevant memories.
+        let items: Vec<String> = others.iter().take(5)
+            .map(|n| format!("- {}", truncate_block(&n.content, 240))).collect();
+        if !items.is_empty() {
+            add(format!("memories({})", items.len()),
+                format!("## Relevant memories\n{}", items.join("\n")));
+        }
+    }
+
+    let header = format!(
+        "# Cognitive Bootstrap — mode: {} | ~{}/{} tokens | sections: {}",
+        mode, spent, budget,
+        if sections.is_empty() { "none".into() } else { sections.join(", ") },
+    );
+    let assembled_block = if blocks.is_empty() {
+        format!("{header}\n\n(No dynamic priming yet — empty brain or no query match. \
+                 Static soul kernel still applies.)")
+    } else {
+        format!("{header}\n\n{}", blocks.join("\n\n"))
+    };
+
+    Ok(json!({
+        "mode": mode,
+        "max_tokens": budget,
+        "total_tokens": spent,
+        "sections_loaded": sections,
+        "query": query,
+        "assembled_block": assembled_block,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1191,6 +1329,41 @@ mod tests {
         assert!(result["phases"].is_array(), "dream report should have phases: {result}");
         assert_eq!(result["phases"].as_array().unwrap().len(), 6);
         assert!(result["success"].is_boolean());
+    }
+
+    #[tokio::test]
+    async fn dispatch_cognitive_bootstrap_assembles_live_state() {
+        let (brain, _dir) = make_brain().await;
+
+        // Seed a memory the bootstrap query should surface.
+        let remember = json!({
+            "jsonrpc":"2.0","id":0,"method":"tools/call",
+            "params":{"name":"remember","arguments":{
+                "content":"sqlite vector storage is the primary persistence layer for cerebro"
+            }}
+        });
+        let _ = dispatch_tool(remember, Arc::clone(&brain)).await;
+
+        // Bootstrap with a matching query — must return a SUCCESS (not the old
+        // not_yet_implemented stub) carrying an assembled priming block.
+        let boot = json!({
+            "jsonrpc":"2.0","id":42,"method":"tools/call",
+            "params":{"name":"cognitive_bootstrap","arguments":{
+                "query":"sqlite vector storage", "mode":"standard"
+            }}
+        });
+        let resp = dispatch_tool(boot, Arc::clone(&brain)).await;
+        assert!(resp["error"].is_null(), "bootstrap should not error: {}", resp["error"]);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+
+        assert_ne!(result["status"], "not_yet_implemented", "bootstrap must be implemented, not a stub");
+        assert_eq!(result["mode"], "standard");
+        let block = result["assembled_block"].as_str().unwrap();
+        assert!(block.contains("# Cognitive Bootstrap"), "must carry a priming header: {block}");
+        // The seeded memory should surface under a section.
+        assert!(block.contains("sqlite vector storage"), "query-relevant memory should appear: {block}");
+        assert!(result["total_tokens"].as_u64().unwrap() <= 2000, "standard mode caps at 2000 tokens");
     }
 
     #[tokio::test]

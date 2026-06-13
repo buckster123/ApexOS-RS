@@ -567,6 +567,33 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Persist ACT-R access reinforcement for a batch of recalled memories.
+    ///
+    /// Only `access_count` + `access_times` are written (a lean UPDATE, not the
+    /// full-row `update_memory`), so the recall hot path stays cheap. All updates
+    /// run in one transaction. Rows that are soft-deleted are skipped by the
+    /// `deleted_at IS NULL` guard. Called by `recall()` so retrieval strengthens
+    /// base-level activation ("recall sharpens memory").
+    pub async fn record_accesses(
+        &self,
+        updates: &[(MemoryId, u32, String)],
+    ) -> Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        for (id, count, times_json) in updates {
+            tx.execute(
+                "UPDATE memories SET access_count = ?1, access_times = ?2 \
+                 WHERE id = ?3 AND deleted_at IS NULL",
+                params![*count as i64, times_json, id.0],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub async fn list_memories_scoped(
         &self,
         scope: &VisibilityScope,

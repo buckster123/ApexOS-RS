@@ -828,11 +828,24 @@ fn tool_schema(name: &str) -> Value {
             }
         }),
 
-        // Deferred Tier-7 tools (ingest_file, describe_image, search_vision,
-        // cognitive_bootstrap). Advertised for surface parity with Python, but
-        // calling the vision/ingest trio returns an honest "not implemented"
-        // error (see dispatch). cognitive_bootstrap remains a success stub in
-        // ApexOS — it is step-0 of APEX's soul boot.
+        "cognitive_bootstrap" => json!({
+            "name": "cognitive_bootstrap",
+            "description": "Assemble a token-budgeted priming block from live memory state — open intentions, recent session summaries, and query-relevant procedures and memories. Step-0 of session boot: one call replaces the multi-tool orient (session_recall + list_intentions + find_relevant_procedures + recall).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query":      { "type": "string", "description": "Current task or last-known context — drives which procedures/memories surface" },
+                    "mode":       { "type": "string", "description": "Token budget: minimal (1000) | standard (2000) | full (4500). Default: standard" },
+                    "max_tokens": { "type": "integer", "description": "Hard cap on the priming block (only tightens the mode budget; default 2000)" },
+                    "agent_id":   { "type": "string", "description": "Scope the priming to this agent's memories" }
+                },
+                "required": ["query"]
+            }
+        }),
+
+        // Deferred Tier-7 tools (ingest_file, describe_image, search_vision).
+        // Advertised for surface parity with Python, but calling them returns an
+        // honest "not implemented" error (see dispatch, C-RS-007).
         _ => json!({
             "name": name,
             "description": format!("(not yet implemented) {name}"),
