@@ -962,8 +962,13 @@ fn sonus_dir() -> std::path::PathBuf {
 
 // Server-side Sonus playback (kiosk speakers). A single current-player child,
 // held in a process-global so play/stop work without threading state through
-// GatewayState. ffplay is part of the ffmpeg family the Audio Editor already
-// requires; it decodes mp3/ogg/flac/etc and `-autoexit` quits at track end.
+// GatewayState. We decode + render with `ffmpeg -f alsa <device>` (ffmpeg is
+// already required by the Audio Editor) rather than ffplay: ffplay routes
+// through SDL → the ALSA `default` PCM, which on a Pi 5 points at a nonexistent
+// card 0 (no analog jack — HDMI only). ffmpeg's alsa muxer lets us target a real
+// device explicitly via SONUS_AUDIO_DEVICE (e.g. `plughw:1,0` for HDMI-0); it
+// paces to real time and exits at end-of-track. agentd must be in the `audio`
+// group to open the device.
 fn sonus_player() -> &'static std::sync::Mutex<Option<std::process::Child>> {
     static PLAYER: std::sync::OnceLock<std::sync::Mutex<Option<std::process::Child>>> =
         std::sync::OnceLock::new();
@@ -1000,9 +1005,18 @@ async fn sonus_play_handler(Json(body): Json<serde_json::Value>) -> impl IntoRes
 
     sonus_stop_current();
 
-    let spawned = std::process::Command::new("ffplay")
-        .args(["-nodisp", "-autoexit", "-loglevel", "quiet"])
+    // ALSA output device — overridable per-deployment; `default` works where a
+    // standard sink exists, but Pi 5 needs an explicit HDMI card (SONUS_AUDIO_DEVICE).
+    let device = std::env::var("SONUS_AUDIO_DEVICE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+
+    let spawned = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
         .arg(&path)
+        .args(["-f", "alsa"])
+        .arg(&device)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1016,7 +1030,7 @@ async fn sonus_play_handler(Json(body): Json<serde_json::Value>) -> impl IntoRes
             (StatusCode::OK, Json(serde_json::json!({"ok": true, "playing": name}))).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "ok": false, "error": format!("ffplay failed to start: {e}")
+            "ok": false, "error": format!("ffmpeg failed to start: {e}")
         }))).into_response(),
     }
 }

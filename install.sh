@@ -609,6 +609,10 @@ hdr "User and permissions"
 
 id agentd &>/dev/null || useradd -r -s /sbin/nologin -d /var/lib/agentd agentd
 
+# audio: TTS (/api/speak) + Sonus playback (/api/sonus/play) open the ALSA device
+# directly — needed on any node with speakers, so not gated behind the UI.
+getent group audio &>/dev/null && usermod -aG audio agentd || true
+
 if ! $NO_UI; then
   for grp in render video input; do
     getent group "$grp" &>/dev/null && usermod -aG "$grp" agentd || true
