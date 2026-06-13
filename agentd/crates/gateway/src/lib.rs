@@ -176,6 +176,9 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/audio/analyze",      post(audio_analyze_handler))
         .route("/api/audio/waveform",     post(audio_waveform_handler))
         .route("/api/audio/process",      post(audio_process_handler))
+        .route("/api/notes",              get(notes_list_handler))
+        .route("/api/notes/read",         post(notes_read_handler))
+        .route("/api/notes/write",        post(notes_write_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new()
@@ -1864,6 +1867,108 @@ fn urlencoding(s: &str) -> String {
         ' ' => "+".into(),
         c   => format!("%{:02X}", c as u32),
     }).collect()
+}
+
+// ── Notes API handlers ──────────────────────────────────────────────────────
+// Plain-text notebook shared with APEX: notes are `.md` files under
+// <workspace>/notes. The UI lists/reads/writes them here; APEX reads/appends
+// the same files via the notes_* tools (apexos-tools). One flat dir, no
+// subfolders — keep it dead simple.
+
+/// The notes directory: <AGENTD_WORKSPACE or /var/lib/agentd/workspace>/notes.
+fn notes_dir() -> std::path::PathBuf {
+    let ws = std::env::var("AGENTD_WORKSPACE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    std::path::Path::new(&ws).join("notes")
+}
+
+/// Reduce an arbitrary name to a safe `.md` filename inside the notes dir:
+/// strip any path components (defeats `../` traversal), default a blank stem,
+/// and force a `.md` extension. Returns None if nothing usable remains.
+fn sanitize_note_name(name: &str) -> Option<String> {
+    let stem = std::path::Path::new(name.trim())
+        .file_name()
+        .and_then(|s| s.to_str())?
+        .trim();
+    if stem.is_empty() || stem == "." || stem == ".." {
+        return None;
+    }
+    let stem = stem.strip_suffix(".md").unwrap_or(stem);
+    if stem.is_empty() { return None; }
+    Some(format!("{stem}.md"))
+}
+
+/// GET /api/notes — list note files in the workspace notes dir.
+async fn notes_list_handler() -> impl IntoResponse {
+    let dir = notes_dir();
+    let mut files: Vec<serde_json::Value> = Vec::new();
+
+    if let Ok(mut rd) = tokio::fs::read_dir(&dir).await {
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let p = entry.path();
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !matches!(ext, "md" | "markdown" | "txt") { continue; }
+            let meta = entry.metadata().await.ok();
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            files.push(serde_json::json!({
+                "name": p.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                "size": size,
+            }));
+        }
+    }
+
+    files.sort_by(|a, b| {
+        let an = a["name"].as_str().unwrap_or("");
+        let bn = b["name"].as_str().unwrap_or("");
+        an.cmp(bn)
+    });
+
+    Json(serde_json::json!({ "files": files }))
+}
+
+#[derive(Deserialize)]
+struct NoteReadBody {
+    name: String,
+}
+
+/// POST /api/notes/read — return the content of one note. Body: { name }.
+async fn notes_read_handler(
+    Json(body): Json<NoteReadBody>,
+) -> impl IntoResponse {
+    let Some(name) = sanitize_note_name(&body.name) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "invalid note name" }))).into_response();
+    };
+    let path = notes_dir().join(&name);
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => Json(serde_json::json!({ "name": name, "content": content })).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct NoteWriteBody {
+    name: String,
+    content: String,
+}
+
+/// POST /api/notes/write — create or overwrite a note. Body: { name, content }.
+async fn notes_write_handler(
+    Json(body): Json<NoteWriteBody>,
+) -> impl IntoResponse {
+    let Some(name) = sanitize_note_name(&body.name) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "invalid note name" }))).into_response();
+    };
+    let dir = notes_dir();
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
+    }
+    let path = dir.join(&name);
+    match tokio::fs::write(&path, body.content.as_bytes()).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "name": name })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
 }
 
 // ── Audio API handlers ────────────────────────────────────────────────────────

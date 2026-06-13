@@ -84,6 +84,34 @@ pub fn list() -> Value {
             }
         },
         {
+            "name": "notes_list",
+            "description": "List the user's notes (markdown files in the shared notebook). Returns each note's name and size.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "notes_read",
+            "description": "Read one of the user's notes from the shared notebook by name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Note name, e.g. 'groceries' or 'groceries.md'" }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "notes_append",
+            "description": "Append a line of text to one of the user's notes in the shared notebook, creating the note if it doesn't exist. Use this to leave the user a note.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Note name, e.g. 'ideas' or 'ideas.md'" },
+                    "text": { "type": "string", "description": "Text to append (a trailing newline is added)" }
+                },
+                "required": ["name", "text"]
+            }
+        },
+        {
             "name": "http_fetch",
             "description": "Make an HTTP request.",
             "inputSchema": {
@@ -305,6 +333,9 @@ pub fn call(name: &str, args: &Value) -> Value {
         "read_file" => read_file(args),
         "write_file" => write_file(args),
         "list_dir" => list_dir(args),
+        "notes_list" => notes_list(),
+        "notes_read" => notes_read(args),
+        "notes_append" => notes_append(args),
         "create_dir" => create_dir(args),
         "delete_path" => delete_path(args),
         "http_fetch" => http_fetch(args),
@@ -566,6 +597,85 @@ fn write_file(args: &Value) -> Value {
 
     match file.write_all(content.as_bytes()) {
         Ok(_) => tool_ok(json!({ "bytes_written": content.len() })),
+        Err(e) => tool_error(format!("write error: {}", e)),
+    }
+}
+
+// ─── Notes ───────────────────────────────────────────────────────────────────
+// The shared notebook: plain markdown files under <workspace>/notes, the same
+// dir the gateway's /api/notes routes (and the Notes UI app) read and write.
+// notes_append lets APEX leave the user a note without knowing the path.
+
+/// The notes directory: <AGENTD_WORKSPACE or /var/lib/agentd/workspace>/notes.
+fn notes_dir() -> std::path::PathBuf {
+    resolve_path("notes")
+}
+
+/// Reduce an arbitrary name to a safe `.md` filename: strip path components
+/// (defeats `../`), force a `.md` extension. None if nothing usable remains.
+fn sanitize_note_name(name: &str) -> Option<String> {
+    let stem = Path::new(name.trim()).file_name().and_then(|s| s.to_str())?.trim();
+    if stem.is_empty() || stem == "." || stem == ".." {
+        return None;
+    }
+    let stem = stem.strip_suffix(".md").unwrap_or(stem);
+    if stem.is_empty() { return None; }
+    Some(format!("{stem}.md"))
+}
+
+fn notes_list() -> Value {
+    let dir = notes_dir();
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(rd) = fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !matches!(ext, "md" | "markdown" | "txt") { continue; }
+            if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+                names.push(n.to_string());
+            }
+        }
+    }
+    names.sort();
+    tool_ok(json!({ "notes": names }))
+}
+
+fn notes_read(args: &Value) -> Value {
+    let name = match args["name"].as_str().and_then(sanitize_note_name) {
+        Some(n) => n,
+        None => return tool_error("a valid note name is required"),
+    };
+    let path = notes_dir().join(&name);
+    match fs::read_to_string(&path) {
+        Ok(content) => tool_ok(json!({ "name": name, "content": content })),
+        Err(e) => tool_error(format!("cannot read {}: {}", name, e)),
+    }
+}
+
+fn notes_append(args: &Value) -> Value {
+    let name = match args["name"].as_str().and_then(sanitize_note_name) {
+        Some(n) => n,
+        None => return tool_error("a valid note name is required"),
+    };
+    let text = match args["text"].as_str() {
+        Some(t) => t,
+        None => return tool_error("text is required"),
+    };
+    let dir = notes_dir();
+    if let Err(e) = fs::create_dir_all(&dir) {
+        return tool_error(format!("cannot create notes dir: {}", e));
+    }
+    let path = dir.join(&name);
+
+    use std::io::Write as IoWrite;
+    use std::fs::OpenOptions;
+    let mut file = match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(f) => f,
+        Err(e) => return tool_error(format!("cannot open {}: {}", name, e)),
+    };
+    let line = if text.ends_with('\n') { text.to_string() } else { format!("{text}\n") };
+    match file.write_all(line.as_bytes()) {
+        Ok(_) => tool_ok(json!({ "name": name, "appended_bytes": line.len() })),
         Err(e) => tool_error(format!("write error: {}", e)),
     }
 }
@@ -1780,6 +1890,22 @@ fn display_face(args: &Value) -> Value {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn sanitize_note_name_forces_md_and_blocks_traversal() {
+        // Stem gets a .md extension; an existing .md is not doubled.
+        assert_eq!(sanitize_note_name("ideas").as_deref(), Some("ideas.md"));
+        assert_eq!(sanitize_note_name("ideas.md").as_deref(), Some("ideas.md"));
+        assert_eq!(sanitize_note_name("  spaced  ").as_deref(), Some("spaced.md"));
+        // Path components are stripped → no traversal escapes the notes dir.
+        assert_eq!(sanitize_note_name("../../etc/passwd").as_deref(), Some("passwd.md"));
+        assert_eq!(sanitize_note_name("/abs/secret.md").as_deref(), Some("secret.md"));
+        // Nothing usable → None.
+        assert_eq!(sanitize_note_name(""), None);
+        assert_eq!(sanitize_note_name("   "), None);
+        assert_eq!(sanitize_note_name(".."), None);
+        assert_eq!(sanitize_note_name(".md"), None);
+    }
 
     #[test]
     fn resolve_path_relative_vs_absolute() {
