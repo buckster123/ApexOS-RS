@@ -155,6 +155,8 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/snapshot",           get(snapshot_handler))
         .route("/api/sonus/files",        get(sonus_files_handler))
         .route("/api/sonus/stream",       get(sonus_stream_handler))
+        .route("/api/sonus/play",         post(sonus_play_handler))
+        .route("/api/sonus/stop",         post(sonus_stop_handler))
         .route("/api/transcribe",         post(transcribe_handler))
         .route("/api/record/start",       post(record_start_handler))
         .route("/api/record/stop",        post(record_stop_handler))
@@ -956,6 +958,73 @@ fn sonus_dir() -> std::path::PathBuf {
     std::env::var("SUNO_DOWNLOAD_DIR")
         .unwrap_or_else(|_| "/var/lib/agentd/workspace/sonus".into())
         .into()
+}
+
+// Server-side Sonus playback (kiosk speakers). A single current-player child,
+// held in a process-global so play/stop work without threading state through
+// GatewayState. ffplay is part of the ffmpeg family the Audio Editor already
+// requires; it decodes mp3/ogg/flac/etc and `-autoexit` quits at track end.
+fn sonus_player() -> &'static std::sync::Mutex<Option<std::process::Child>> {
+    static PLAYER: std::sync::OnceLock<std::sync::Mutex<Option<std::process::Child>>> =
+        std::sync::OnceLock::new();
+    PLAYER.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+// Kill any current playback (best-effort). Returns true if something was stopped.
+fn sonus_stop_current() -> bool {
+    if let Ok(mut guard) = sonus_player().lock() {
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return true;
+        }
+    }
+    false
+}
+
+/// POST /api/sonus/play — play a downloaded track on the device's own speakers.
+/// Body: { name }. Replaces any current playback.
+async fn sonus_play_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let name = match body["name"].as_str().map(|s| s.trim().to_string()) {
+        Some(n) if !n.is_empty() => n,
+        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok": false, "error": "missing name"}))).into_response(),
+    };
+    // Same path-traversal guard as the stream handler.
+    if name.contains('/') || name.contains("..") || name.contains('\\') {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok": false, "error": "invalid name"}))).into_response();
+    }
+    let path = sonus_dir().join(&name);
+    if tokio::fs::metadata(&path).await.is_err() {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"ok": false, "error": "not found"}))).into_response();
+    }
+
+    sonus_stop_current();
+
+    let spawned = std::process::Command::new("ffplay")
+        .args(["-nodisp", "-autoexit", "-loglevel", "quiet"])
+        .arg(&path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    match spawned {
+        Ok(child) => {
+            if let Ok(mut guard) = sonus_player().lock() {
+                *guard = Some(child);
+            }
+            (StatusCode::OK, Json(serde_json::json!({"ok": true, "playing": name}))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "ok": false, "error": format!("ffplay failed to start: {e}")
+        }))).into_response(),
+    }
+}
+
+/// POST /api/sonus/stop — stop current playback.
+async fn sonus_stop_handler() -> impl IntoResponse {
+    let stopped = sonus_stop_current();
+    (StatusCode::OK, Json(serde_json::json!({"ok": true, "stopped": stopped})))
 }
 
 async fn sonus_files_handler() -> impl IntoResponse {

@@ -10,7 +10,7 @@ export enum ShellMode { desktop, focus }
 // Every app is a window. Rust owns the set (which windows exist, z-order =
 // model order with the last element on top); Slint owns live-drag geometry
 // for smoothness and commits back to Rust on release.
-export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus }
 
 // ── Persona system (glowup G4) ───────────────────────────────────────────
 // A persona is a named bundle: theme + chrome + wallpaper + default shell mode
@@ -145,6 +145,12 @@ export struct MeshNode {
 // One audio file in the Audio Editor (🎛️) list. /api/audio/files.
 export struct AudioFileItem {
     path:       string,
+    name:       string,
+    size-label: string,   // "3.2 MB"
+}
+
+// One track in the Sonus player (🎵). /api/sonus/files.
+export struct SonusFileItem {
     name:       string,
     size-label: string,   // "3.2 MB"
 }
