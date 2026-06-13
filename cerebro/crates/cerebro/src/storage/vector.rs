@@ -203,8 +203,13 @@ impl VectorStore {
         let safe_query = if safe_query.is_empty() { return Ok(Vec::new()); } else { safe_query };
         let k_i64 = k as i64;
 
+        // CB-014: surface FTS5's bm25() rank instead of a flat 0.5, so keyword
+        // relevance actually discriminates results when this score feeds
+        // recall_score (vector_sim, the largest weight) and the spreading seed.
+        // bm25() is more negative for a better match; map it monotonically into
+        // (0,1] via a logistic on the negated score so a better match scores higher.
         let sql = format!(
-            "SELECT m.id FROM memories_fts \
+            "SELECT m.id, bm25(memories_fts) FROM memories_fts \
              JOIN memories m ON m.id = memories_fts.id \
              WHERE memories_fts MATCH ? AND {scope_sql} AND m.deleted_at IS NULL \
              ORDER BY rank LIMIT ?"
@@ -216,12 +221,16 @@ impl VectorStore {
         all_params.push(&k_i64);
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(all_params.as_slice(), |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(all_params.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?;
 
         let mut results = Vec::new();
         for row in rows {
-            // FTS5 doesn't give a normalized [0,1] score easily; use 0.5 placeholder.
-            results.push((MemoryId(row?), 0.5_f32));
+            let (id, bm25) = row?;
+            // bm25 < 0 → relevance > 0.5 (good match); bm25 → 0 → relevance → 0.5.
+            let relevance = (1.0 / (1.0 + (bm25 as f32).exp())).clamp(0.0, 1.0);
+            results.push((MemoryId(id), relevance));
         }
         Ok(results)
     }
