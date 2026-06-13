@@ -102,6 +102,17 @@ pub fn method_not_found(req: &Value) -> Value {
     })
 }
 
+/// JSON-RPC parse error (-32700). Emitted per-frame for a malformed line so a
+/// single bad frame is isolated rather than fatal (CB-010). The spec mandates a
+/// null id when the request id can't be determined.
+pub fn parse_error() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "error": { "code": -32700, "message": "Parse error" }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tool routing
 // ---------------------------------------------------------------------------
@@ -113,9 +124,8 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 .ok_or_else(|| anyhow::anyhow!("content is required"))?.to_string();
             let memory_type: Option<MemoryType> =
                 serde_json::from_value(args["memory_type"].clone()).ok();
-            let tags: Option<Vec<String>> = args["tags"].as_array().map(|arr| {
-                arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
-            });
+            let tag_vec = coerce_str_list(&args["tags"]);
+            let tags = if tag_vec.is_empty() { None } else { Some(tag_vec) };
             let salience = args["salience"].as_f64().map(|f| f as f32);
             let scope    = agent_scope(args);
             let node = brain.remember(content, memory_type, tags, salience, scope).await?;
@@ -181,8 +191,8 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let content_changed = args["content"].as_str().is_some();
             if let Some(c) = args["content"].as_str()  { node.content = c.to_string(); }
             if let Some(s) = args["salience"].as_f64()  { node.salience = s as f32; }
-            if let Some(arr) = args["tags"].as_array() {
-                node.tags = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+            if !args["tags"].is_null() {
+                node.tags = coerce_str_list(&args["tags"]);
             }
 
             let storage = brain.storage.read().await;
@@ -687,9 +697,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let salience = args["salience"].as_f64().unwrap_or(0.7) as f32;
             let scope    = agent_scope(args);
             let mut tags = vec!["intention".to_string()];
-            if let Some(arr) = args["tags"].as_array() {
-                tags.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
-            }
+            tags.extend(coerce_str_list(&args["tags"]));
             let node = brain.remember(
                 content, Some(MemoryType::Prospective), Some(tags), Some(salience), scope,
             ).await?;
@@ -738,12 +746,24 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let salience = args["salience"].as_f64().unwrap_or(0.8) as f32;
             let scope    = agent_scope(args);
             let mut tags = vec!["procedure".to_string()];
-            if let Some(arr) = args["tags"].as_array() {
-                tags.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
-            }
-            let node = brain.remember(
+            tags.extend(coerce_str_list(&args["tags"]));
+            // CB-025: store_procedure advertises `derived_from` (also accept the
+            // sibling `source_ids` name) — mirror create_schema and persist the
+            // provenance into the procedure node's metadata so it is not silently
+            // discarded. Both shapes (array or bare string) are honored (CB-011).
+            let mut derived_from = coerce_str_list(&args["derived_from"]);
+            derived_from.extend(coerce_str_list(&args["source_ids"]));
+            let mut node = brain.remember(
                 content, Some(MemoryType::Procedural), Some(tags), Some(salience), scope,
             ).await?;
+            if !derived_from.is_empty() {
+                if let serde_json::Value::Object(ref mut map) = node.metadata {
+                    map.insert("derived_from".to_string(), json!(derived_from));
+                } else {
+                    node.metadata = json!({ "derived_from": derived_from });
+                }
+                brain.storage.read().await.sqlite.update_memory(&node).await?;
+            }
             Ok(json!({ "id": node.id, "status": "ok" }))
         }
 
@@ -765,12 +785,8 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
         }
 
         "find_relevant_procedures" => {
-            let tags: Vec<String>     = args["tags"].as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let concepts: Vec<String> = args["concepts"].as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
+            let tags     = coerce_str_list(&args["tags"]);
+            let concepts = coerce_str_list(&args["concepts"]);
             if tags.is_empty() && concepts.is_empty() {
                 return Ok(json!([]));
             }
@@ -827,15 +843,11 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
         "create_schema" => {
             let content    = args["content"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("content required"))?;
-            let source_ids: Vec<String> = args["source_ids"].as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
+            let source_ids = coerce_str_list(&args["source_ids"]);
             let salience   = args["salience"].as_f64().unwrap_or(0.7) as f32;
             let scope      = agent_scope(args);
             let mut tags   = vec!["schema".to_string(), "support_count:0".to_string()];
-            if let Some(arr) = args["tags"].as_array() {
-                tags.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
-            }
+            tags.extend(coerce_str_list(&args["tags"]));
             let mut node = brain.remember(
                 content, Some(MemoryType::Schematic), Some(tags), Some(salience), scope,
             ).await?;
@@ -864,12 +876,8 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
         }
 
         "find_matching_schemas" => {
-            let tags: Vec<String>     = args["tags"].as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let concepts: Vec<String> = args["concepts"].as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
+            let tags     = coerce_str_list(&args["tags"]);
+            let concepts = coerce_str_list(&args["concepts"]);
             if tags.is_empty() && concepts.is_empty() {
                 return Ok(json!([]));
             }
@@ -980,6 +988,23 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
 // ---------------------------------------------------------------------------
 // Helper: build a VisibilityScope from an agent_id argument
 // ---------------------------------------------------------------------------
+
+/// Coerce an `anyOf:[array,string]` schema field into `Vec<String>` (CB-011).
+///
+/// The inputSchemas advertise these fields as either a JSON array of strings or
+/// a bare string, but the handlers historically read only `.as_array()`, so a
+/// schema-sanctioned `"tags": "urgent"` was silently dropped. This honors both
+/// shapes: a string becomes a single-element vec; an array keeps its string
+/// elements; anything else (null/number/object) yields an empty vec.
+fn coerce_str_list(v: &Value) -> Vec<String> {
+    if let Some(arr) = v.as_array() {
+        arr.iter().filter_map(|e| e.as_str().map(String::from)).collect()
+    } else if let Some(s) = v.as_str() {
+        vec![s.to_string()]
+    } else {
+        Vec::new()
+    }
+}
 
 fn agent_scope(args: &Value) -> VisibilityScope {
     match args["agent_id"].as_str() {
@@ -1237,6 +1262,75 @@ mod tests {
         assert_eq!(normalize_priority("Medium"), "MEDIUM");
         assert_eq!(normalize_priority("MEDIUM"), "MEDIUM");
         assert_eq!(normalize_priority("high"), "HIGH");
+    }
+
+    // CB-011: anyOf[array,string] coercion — a bare string is a single-element
+    // vec, an array keeps its strings, other shapes are empty.
+    #[test]
+    fn coerce_str_list_accepts_array_and_bare_string() {
+        assert_eq!(coerce_str_list(&json!(["a", "b"])), vec!["a", "b"]);
+        assert_eq!(coerce_str_list(&json!("urgent")), vec!["urgent"]);
+        assert!(coerce_str_list(&Value::Null).is_empty());
+        assert!(coerce_str_list(&json!(42)).is_empty());
+        // mixed array drops non-strings
+        assert_eq!(coerce_str_list(&json!(["a", 1, "b"])), vec!["a", "b"]);
+    }
+
+    // CB-010: parse_error is a well-formed JSON-RPC -32700 with a null id.
+    #[test]
+    fn parse_error_is_jsonrpc_minus_32700_with_null_id() {
+        let e = parse_error();
+        assert_eq!(e["jsonrpc"], "2.0");
+        assert_eq!(e["error"]["code"], -32700);
+        assert!(e["id"].is_null());
+    }
+
+    // CB-011: remember with a bare-string `tags` must actually store the tag,
+    // not silently drop it (the schema advertises anyOf[array,string]).
+    #[tokio::test]
+    async fn dispatch_remember_accepts_bare_string_tag() {
+        let (brain, _dir) = make_brain().await;
+        let msg = json!({
+            "jsonrpc":"2.0","id":20,"method":"tools/call",
+            "params":{"name":"remember","arguments":{
+                "content":"a memory tagged with a single bare-string tag value",
+                "tags":"urgent"
+            }}
+        });
+        let resp = dispatch_tool(msg, brain).await;
+        assert!(resp["error"].is_null(), "unexpected error: {}", resp["error"]);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let node: Value = serde_json::from_str(text).unwrap();
+        let tags = node["tags"].as_array().unwrap();
+        assert!(tags.iter().any(|t| t == "urgent"),
+            "bare-string tag must be stored, got {:?}", tags);
+    }
+
+    // CB-025: store_procedure must persist `derived_from` provenance (mirrors
+    // create_schema), accepting a bare string too (CB-011).
+    #[tokio::test]
+    async fn dispatch_store_procedure_persists_derived_from() {
+        let (brain, _dir) = make_brain().await;
+        let msg = json!({
+            "jsonrpc":"2.0","id":21,"method":"tools/call",
+            "params":{"name":"store_procedure","arguments":{
+                "content":"how to safely hot-swap the cerebro-mcp binary on the Pi",
+                "derived_from":"mem-123"
+            }}
+        });
+        let resp = dispatch_tool(msg, Arc::clone(&brain)).await;
+        assert!(resp["error"].is_null(), "unexpected error: {}", resp["error"]);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        let id = result["id"].as_str().unwrap();
+
+        // Read the stored node back and confirm provenance landed in metadata.
+        let scope = VisibilityScope::global();
+        let node = brain.storage.read().await.sqlite
+            .get_memory(&MemoryId(id.to_string()), &scope).await.unwrap().unwrap();
+        let sources = node.metadata["derived_from"].as_array().unwrap();
+        assert!(sources.iter().any(|s| s == "mem-123"),
+            "derived_from must be persisted, got {:?}", node.metadata);
     }
 
     #[tokio::test]
