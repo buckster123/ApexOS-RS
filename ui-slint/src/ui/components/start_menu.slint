@@ -85,6 +85,7 @@ export component StartMenu inherits Rectangle {
         MenuRow { glyph: "🎨"; label: "Sketchpad"; clicked => { root.launch(14); } }
         MenuRow { glyph: "🕘"; label: "Sessions"; clicked => { root.launch(3); } }
         MenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
+        MenuRow { glyph: "🧮"; label: "Calculator"; clicked => { root.launch(16); } }
 
         // Deep-tech apps — hidden by the simple/warm persona (G5 surface gating).
         if Personas.show-tech-apps: MenuRow { glyph: "🌡"; label: "Sensors";  clicked => { root.launch(2); } }
@@ -140,8 +141,8 @@ export component Win98StartMenu inherits Rectangle {
     callback launch(int);     // AppKind ordinal — same contract as StartMenu
 
     width: 200px;
-    // 8 core rows + (optional separator + 8 tech rows), all 26px; + 4px pads.
-    height: (Personas.show-tech-apps ? 8 * 26px + 9px + 8 * 26px : 8 * 26px) + 8px;
+    // 9 core rows + (optional separator + 8 tech rows), all 26px; + 4px pads.
+    height: (Personas.show-tech-apps ? 9 * 26px + 9px + 8 * 26px : 9 * 26px) + 8px;
     background: Win98.face;
     drop-shadow-blur: 6px;
     drop-shadow-color: #00000088;
@@ -184,6 +185,7 @@ export component Win98StartMenu inherits Rectangle {
             WinMenuRow { glyph: "🎨"; label: "Sketchpad"; clicked => { root.launch(14); } }
             WinMenuRow { glyph: "🕘"; label: "Sessions"; clicked => { root.launch(3); } }
             WinMenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
+            WinMenuRow { glyph: "🧮"; label: "Calculator"; clicked => { root.launch(16); } }
 
             // Etched separator before the deep-tech group.
             if Personas.show-tech-apps: Rectangle {

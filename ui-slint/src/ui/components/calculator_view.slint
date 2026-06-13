@@ -1,0 +1,111 @@
+import { Palette } from "../palette.slint";
+
+// ── CalculatorView (🧮) ─────────────────────────────────────────────────────
+//
+// A basic immediate-execution calculator. Pure UI — the arithmetic state machine
+// lives in Rust (Calc); each button sends its `key` string and Rust returns the
+// new `display`. `glyph` is what's shown (÷ × −), `key` is what's sent (/ * -).
+//
+// preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
+
+component CalcButton inherits Rectangle {
+    in property <string> glyph;
+    in property <string> key;
+    in property <brush>  fill: Palette.surface;
+    in property <brush>  hover: Palette.surface-hi;
+    in property <color>  text-color: Palette.text-bright;
+    callback pressed(string);
+
+    border-radius: Palette.radius;
+    background: ta.has-hover ? root.hover : root.fill;
+    border-width: 1px;
+    border-color: Palette.border;
+    horizontal-stretch: 1;
+    animate background { duration: 100ms; }
+
+    ta := TouchArea { clicked => { root.pressed(root.key); } }
+    Text {
+        text: root.glyph;
+        color: root.text-color;
+        font-size: 20px;
+        font-weight: 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component CalculatorView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <string> display: "0";
+    callback key(string);
+
+    VerticalLayout {
+        // ── Display ───────────────────────────────────────────────────────
+        Rectangle {
+            height: 84px;
+            background: Palette.surface;
+            HorizontalLayout {
+                padding-right: 20px;
+                padding-left: 20px;
+                Text {
+                    text: root.display;
+                    color: Palette.text-bright;
+                    font-size: 34px;
+                    font-weight: 300;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Keypad ────────────────────────────────────────────────────────
+        Rectangle {
+            vertical-stretch: 1;
+            background: Palette.bg;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    CalcButton { glyph: "C"; key: "C"; text-color: #ef4444; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "±"; key: "±"; text-color: Palette.text-dim; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "%"; key: "%"; text-color: Palette.text-dim; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "÷"; key: "/"; fill: Palette.primary-dim; hover: Palette.primary; text-color: Palette.bg; pressed(k) => { root.key(k); } }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    CalcButton { glyph: "7"; key: "7"; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "8"; key: "8"; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "9"; key: "9"; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "×"; key: "*"; fill: Palette.primary-dim; hover: Palette.primary; text-color: Palette.bg; pressed(k) => { root.key(k); } }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    CalcButton { glyph: "4"; key: "4"; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "5"; key: "5"; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "6"; key: "6"; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "−"; key: "-"; fill: Palette.primary-dim; hover: Palette.primary; text-color: Palette.bg; pressed(k) => { root.key(k); } }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    CalcButton { glyph: "1"; key: "1"; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "2"; key: "2"; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "3"; key: "3"; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "+"; key: "+"; fill: Palette.primary-dim; hover: Palette.primary; text-color: Palette.bg; pressed(k) => { root.key(k); } }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    CalcButton { glyph: "0"; key: "0"; horizontal-stretch: 2; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "."; key: "."; pressed(k) => { root.key(k); } }
+                    CalcButton { glyph: "="; key: "="; fill: Palette.primary; hover: Palette.primary; text-color: Palette.bg; pressed(k) => { root.key(k); } }
+                }
+            }
+        }
+    }
+}

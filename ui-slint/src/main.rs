@@ -76,6 +76,83 @@ thread_local! {
     // Shape tool: 0 freehand · 1 line · 2 rect · 3 ellipse; + the drag anchor.
     static SKETCH_TOOL: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
     static SKETCH_ANCHOR: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((0.0, 0.0)) };
+    // Calculator — pure-UI immediate-execution state machine.
+    static CALC: RefCell<Calc> = RefCell::new(Calc::new());
+}
+
+// ── Calculator (🧮) — a basic immediate-execution calculator, no agentd ─────────
+#[derive(Default)]
+struct Calc {
+    entry: String,         // the number currently being typed / shown
+    acc: f64,              // accumulator (left operand)
+    pending: Option<char>, // pending operator
+    fresh: bool,           // next digit starts a new entry (after =, op, or boot)
+}
+
+impl Calc {
+    fn new() -> Self {
+        Calc { entry: "0".into(), acc: 0.0, pending: None, fresh: true }
+    }
+
+    fn cur(&self) -> f64 { self.entry.parse().unwrap_or(0.0) }
+
+    /// Format a value for the display: trim trailing zeros, guard non-finite.
+    fn fmt(v: f64) -> String {
+        if !v.is_finite() { return "Error".into(); }
+        let s = format!("{v:.10}");
+        let s = s.trim_end_matches('0').trim_end_matches('.');
+        if s.is_empty() || s == "-0" { "0".into() } else { s.to_string() }
+    }
+
+    fn apply_pending(&mut self) {
+        let rhs = self.cur();
+        self.acc = match self.pending.take() {
+            Some('+') => self.acc + rhs,
+            Some('-') => self.acc - rhs,
+            Some('*') => self.acc * rhs,
+            Some('/') => if rhs == 0.0 { f64::NAN } else { self.acc / rhs },
+            _ => rhs,
+        };
+    }
+
+    /// Feed one key; returns the new display string.
+    fn key(&mut self, k: &str) -> String {
+        match k {
+            "C" => { *self = Calc::new(); }
+            "+" | "-" | "*" | "/" => {
+                self.apply_pending();
+                self.pending = k.chars().next();
+                self.fresh = true;
+                return Self::fmt(self.acc);
+            }
+            "=" => {
+                self.apply_pending();
+                self.entry = Self::fmt(self.acc);
+                self.fresh = true;
+                return self.entry.clone();
+            }
+            "±" => {
+                if let Some(rest) = self.entry.strip_prefix('-') { self.entry = rest.to_string(); }
+                else if self.entry != "0" { self.entry.insert(0, '-'); }
+            }
+            "%" => {
+                self.entry = Self::fmt(self.cur() / 100.0);
+                self.fresh = false;
+            }
+            "." => {
+                if self.fresh { self.entry = "0".into(); self.fresh = false; }
+                if !self.entry.contains('.') { self.entry.push('.'); }
+            }
+            d if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => {
+                if self.fresh { self.entry.clear(); self.fresh = false; }
+                if self.entry == "0" { self.entry = d.to_string(); }
+                else { self.entry.push_str(d); }
+            }
+            _ => {}
+        }
+        if self.entry.is_empty() { self.entry = "0".into(); }
+        self.entry.clone()
+    }
 }
 
 // Raw geometry for one stroke — mirrored into a SketchStroke (for rendering) and
@@ -177,6 +254,7 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::Face => 13,
         AppKind::Sketchpad => 14,
         AppKind::Web => 15,
+        AppKind::Calculator => 16,
     }
 }
 
@@ -197,6 +275,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         13 => AppKind::Face,
         14 => AppKind::Sketchpad,
         15 => AppKind::Web,
+        16 => AppKind::Calculator,
         _ => AppKind::Chat,
     }
 }
@@ -352,6 +431,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Face => "APEX",
         AppKind::Sketchpad => "Sketchpad",
         AppKind::Web => "Web",
+        AppKind::Calculator => "Calculator",
     }
 }
 
@@ -375,6 +455,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Face => (380.0, 460.0),
         AppKind::Sketchpad => (600.0, 580.0),
         AppKind::Web => (460.0, 400.0),
+        AppKind::Calculator => (300.0, 440.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -2524,6 +2605,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     });
+
+    // ── Calculator: feed a key to the Rust state machine, show the result ───────
+    {
+        let ui_w = ui.as_weak();
+        ui.on_calc_key(move |k| {
+            let disp = CALC.with(|c| c.borrow_mut().key(&k));
+            if let Some(ui) = ui_w.upgrade() { ui.set_calc_display(disp.into()); }
+        });
+    }
 
     let rt_h_sk     = rt.handle().clone();
     let client_sk   = Arc::clone(&http_client);

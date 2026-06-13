@@ -95,9 +95,10 @@ when you build the app (no big upfront abstraction).
 ## New ideas — OS-standard gaps
 
 What a typical desktop OS ships that -RS lacks (Rust-doable, several with strong
-symbiosis): **Calculator**, **Clock/Timer/Alarm**, **Image Viewer**, **Color
-Picker**, **Screenshot**, **Calendar** (agent scheduling), **Clipboard manager**.
-Jot new ideas here as they come up.
+symbiosis): **Calculator** ✅ (`calculator_view`, pure-UI immediate-execution),
+**Clock/Timer/Alarm**, **Image Viewer**, **Color Picker**, **Screenshot**,
+**Calendar** (agent scheduling), **Clipboard manager**. Jot new ideas here as
+they come up.
 
 ---
 
