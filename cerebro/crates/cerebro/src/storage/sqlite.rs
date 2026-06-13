@@ -412,7 +412,14 @@ impl SqliteStore {
         // Register sqlite-vec before opening so the extension is available on this connection.
         register_sqlite_vec();
         let mut conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        // CB-002: two daemons (cerebro-mcp + cerebro-api) share one DB file. WAL allows
+        // N readers + 1 writer; a second cross-process writer otherwise fails instantly
+        // with SQLITE_BUSY. A busy_timeout makes colliding writers wait instead of dropping
+        // the write. synchronous=NORMAL is the standard durability/throughput tradeoff for WAL.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;",
+        )?;
 
         // Base schema (no vec0 dependency)
         conn.execute_batch(SCHEMA_SQL)?;
@@ -448,6 +455,19 @@ impl SqliteStore {
 
     pub async fn insert_memory(&self, node: &MemoryNode) -> Result<()> {
         let conn = self.conn.lock().await;
+        // CB-005: INSERT OR REPLACE on an existing id deletes the old row and
+        // reinserts, which can allocate a fresh integer rowid. The vec0 index
+        // (memory_vectors) is keyed by that rowid and is not FK/trigger-bound,
+        // so the prior vector would be orphaned (and its old rowid later reused
+        // by another memory → mis-ranked recall). Drop the stale vec row first;
+        // the caller re-embeds via embed_and_store after insert.
+        if self.vec_available {
+            conn.execute(
+                "DELETE FROM memory_vectors WHERE rowid IN \
+                 (SELECT rowid FROM memories WHERE id = ?)",
+                params![node.id.0],
+            )?;
+        }
         conn.execute(
             "INSERT OR REPLACE INTO memories \
              (id, content, memory_type, layer, salience, tags, agent_id, visibility, \
@@ -508,6 +528,9 @@ impl SqliteStore {
             "UPDATE memories SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             params![Utc::now().to_rfc3339(), id.0],
         )?;
+        // CB-020: the memories_au trigger now evicts a soft-deleted row from the
+        // FTS5 index (it only re-inserts when deleted_at IS NULL), so the keyword
+        // index shrinks on soft-delete and restore_memory's UPDATE re-indexes it.
         Ok(changed > 0)
     }
 
@@ -625,16 +648,56 @@ impl SqliteStore {
     }
 
     /// Hard-delete a single memory (use after backup/purge confirmation).
+    ///
+    /// Cleans dependent rows in the same transaction so the hard delete is
+    /// consistent: CB-022 — `links` FK-references `memories(id)` without
+    /// CASCADE, so a still-linked memory would otherwise fail the
+    /// `foreign_keys=ON` constraint; CB-005 — the `memory_vectors` vec0 index
+    /// is keyed by the reusable integer rowid and has no FK/trigger, so an
+    /// orphaned vector would bloat the index and, after rowid reuse, mis-rank
+    /// a future memory. The FTS5 index is cleaned by the `memories_ad` trigger.
     pub async fn purge_memory(&self, id: &MemoryId) -> Result<bool> {
-        let conn = self.conn.lock().await;
-        let changed = conn.execute("DELETE FROM memories WHERE id = ?", params![id.0])?;
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        if self.vec_available {
+            tx.execute(
+                "DELETE FROM memory_vectors WHERE rowid IN \
+                 (SELECT rowid FROM memories WHERE id = ?)",
+                params![id.0],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM links WHERE source_id = ?1 OR target_id = ?1",
+            params![id.0],
+        )?;
+        let changed = tx.execute("DELETE FROM memories WHERE id = ?", params![id.0])?;
+        tx.commit()?;
         Ok(changed > 0)
     }
 
     /// Hard-delete all soft-deleted memories.
+    ///
+    /// Same dependent-row cleanup as `purge_memory` (CB-005 / CB-022), applied
+    /// to the whole soft-deleted set inside one transaction.
     pub async fn purge_all_deleted(&self) -> Result<usize> {
-        let conn = self.conn.lock().await;
-        let changed = conn.execute("DELETE FROM memories WHERE deleted_at IS NOT NULL", [])?;
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        if self.vec_available {
+            tx.execute(
+                "DELETE FROM memory_vectors WHERE rowid IN \
+                 (SELECT rowid FROM memories WHERE deleted_at IS NOT NULL)",
+                [],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM links WHERE source_id IN \
+               (SELECT id FROM memories WHERE deleted_at IS NOT NULL) \
+             OR target_id IN \
+               (SELECT id FROM memories WHERE deleted_at IS NOT NULL)",
+            [],
+        )?;
+        let changed = tx.execute("DELETE FROM memories WHERE deleted_at IS NOT NULL", [])?;
+        tx.commit()?;
         Ok(changed)
     }
 
@@ -1046,7 +1109,10 @@ impl SqliteStore {
     }
 
     /// Memories whose FSRS retrievability falls below `threshold`.
-    /// R(t) = exp(-t / stability), where t = days since last review.
+    /// Uses the canonical FSRS power-law curve R(t) = (1 + t / (9·S))^-1
+    /// (crate::activation::retrievability), the same function store/recall
+    /// scheduling uses — so the `retrievability` value reported here is
+    /// consistent with the rest of the system (CB-013).
     pub async fn activation_at_risk(
         &self,
         scope: &VisibilityScope,
@@ -1077,7 +1143,7 @@ impl SqliteStore {
             let (id, content, stability, lr_str, salience, mem_type) = r?;
             if let Ok(lr) = DateTime::parse_from_rfc3339(&lr_str) {
                 let days = (now - lr.with_timezone(&Utc)).num_seconds() as f32 / 86400.0;
-                let ret = (-days / stability.max(0.001)).exp();
+                let ret = crate::activation::retrievability(days.max(0.0), stability);
                 if ret < threshold {
                     at_risk.push(serde_json::json!({
                         "id": id, "content": content,
@@ -1730,16 +1796,28 @@ CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
     VALUES (new.rowid, new.id, new.content, new.tags);
 END;
 
+-- CB-020: only evict from FTS if the row was still indexed. A soft-deleted row
+-- (deleted_at NOT NULL) was already removed from FTS by memories_au, so issuing
+-- a second 'delete' against an absent row corrupts the FTS index.
 CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
     INSERT INTO memories_fts(memories_fts, rowid, id, content, tags)
-    VALUES ('delete', old.rowid, old.id, old.content, old.tags);
+    SELECT 'delete', old.rowid, old.id, old.content, old.tags
+    WHERE old.deleted_at IS NULL;
 END;
 
+-- CB-020: re-insert into FTS only for a LIVE row. A soft-delete is an UPDATE
+-- setting deleted_at; without this guard the row would be re-indexed and the
+-- FTS5 index would never shrink. Restoring (deleted_at -> NULL) re-inserts it.
 CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+    -- Only evict the OLD image if it was actually indexed (was live). A row that
+    -- was already soft-deleted is absent from FTS; deleting it again corrupts the
+    -- index. This makes restore (NOT NULL -> NULL) a clean re-insert.
     INSERT INTO memories_fts(memories_fts, rowid, id, content, tags)
-    VALUES ('delete', old.rowid, old.id, old.content, old.tags);
+    SELECT 'delete', old.rowid, old.id, old.content, old.tags
+    WHERE old.deleted_at IS NULL;
     INSERT INTO memories_fts(rowid, id, content, tags)
-    VALUES (new.rowid, new.id, new.content, new.tags);
+    SELECT new.rowid, new.id, new.content, new.tags
+    WHERE new.deleted_at IS NULL;
 END;
 
 -- Indices for common query patterns

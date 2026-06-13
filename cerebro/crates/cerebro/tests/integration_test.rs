@@ -575,6 +575,132 @@ mod storage_basic {
             assert_eq!(r.memory_type, MemoryType::Episodic);
         }
     }
+
+    // CB-022: purging a still-linked memory used to fail with a FOREIGN KEY
+    // constraint error (links REFERENCES memories(id), foreign_keys=ON). The
+    // purge now deletes dependent link rows in the same transaction.
+    #[tokio::test]
+    async fn purge_memory_cleans_dependent_links() {
+        let (store, _dir) = make_store().await;
+
+        let a = MemoryNode::new("link source", MemoryType::Semantic);
+        let b = MemoryNode::new("link target", MemoryType::Semantic);
+        let a_id = a.id.clone();
+        let b_id = b.id.clone();
+        store.sqlite.insert_memory(&a).await.unwrap();
+        store.sqlite.insert_memory(&b).await.unwrap();
+        store.sqlite.insert_link(
+            &AssociativeLink::new(a_id.clone(), b_id.clone(), LinkType::Causal, 0.7),
+        ).await.unwrap();
+
+        // Soft-delete then purge the linked source — must not hit a FK error.
+        store.sqlite.delete_memory(&a_id).await.unwrap();
+        let purged = store.sqlite.purge_memory(&a_id).await.unwrap();
+        assert!(purged, "purge of a linked memory should succeed");
+
+        // The dependent link is gone too (both directions).
+        assert!(store.sqlite.list_links_from(&a_id).await.unwrap().is_empty());
+        assert!(store.sqlite.list_links_from(&b_id).await.unwrap().is_empty());
+    }
+
+    // CB-022 (set form): purge_all_deleted must also clear links of every
+    // soft-deleted memory before the bulk DELETE.
+    #[tokio::test]
+    async fn purge_all_deleted_cleans_dependent_links() {
+        let (store, _dir) = make_store().await;
+
+        let a = MemoryNode::new("bulk source", MemoryType::Semantic);
+        let b = MemoryNode::new("bulk target", MemoryType::Semantic);
+        let a_id = a.id.clone();
+        let b_id = b.id.clone();
+        store.sqlite.insert_memory(&a).await.unwrap();
+        store.sqlite.insert_memory(&b).await.unwrap();
+        store.sqlite.insert_link(
+            &AssociativeLink::new(a_id.clone(), b_id.clone(), LinkType::Causal, 0.7),
+        ).await.unwrap();
+
+        // Soft-delete both ends, then bulk-purge — no FK error.
+        store.sqlite.delete_memory(&a_id).await.unwrap();
+        store.sqlite.delete_memory(&b_id).await.unwrap();
+        let n = store.sqlite.purge_all_deleted().await.unwrap();
+        assert_eq!(n, 2, "both soft-deleted memories purged");
+        assert!(store.sqlite.list_links_from(&a_id).await.unwrap().is_empty());
+    }
+
+    // CB-020: a soft-deleted memory must be evicted from the FTS5 index so the
+    // keyword index shrinks (it is no longer MATCH-able), while restore re-indexes.
+    #[tokio::test]
+    async fn soft_delete_evicts_from_fts_index() {
+        let (store, _dir) = make_store().await;
+        let node = MemoryNode::new("zorblax keyword unique", MemoryType::Semantic);
+        let id = node.id.clone();
+        store.sqlite.insert_memory(&node).await.unwrap();
+
+        // Present in the raw FTS index before delete.
+        let count_before: i64 = {
+            let conn = store.sqlite.shared_conn();
+            let conn = conn.lock().await;
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'zorblax'",
+                [], |r| r.get(0),
+            ).unwrap()
+        };
+        assert_eq!(count_before, 1, "memory should be indexed before soft-delete");
+
+        store.sqlite.delete_memory(&id).await.unwrap();
+        let count_after: i64 = {
+            let conn = store.sqlite.shared_conn();
+            let conn = conn.lock().await;
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'zorblax'",
+                [], |r| r.get(0),
+            ).unwrap()
+        };
+        assert_eq!(count_after, 0, "soft-delete must evict the row from the FTS index");
+
+        // Restore re-indexes (memories_au trigger re-inserts).
+        store.sqlite.restore_memory(&id).await.unwrap();
+        let count_restored: i64 = {
+            let conn = store.sqlite.shared_conn();
+            let conn = conn.lock().await;
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'zorblax'",
+                [], |r| r.get(0),
+            ).unwrap()
+        };
+        assert_eq!(count_restored, 1, "restore must re-index the memory");
+    }
+
+    // CB-013: activation_at_risk must use the canonical FSRS power-law curve,
+    // not the divergent exp(-t/S). For t=1 day, S=1, FSRS R≈0.90 (NOT 0.368),
+    // so a high-stability 1-day-old memory is NOT at risk under the 0.7 default.
+    #[tokio::test]
+    async fn activation_at_risk_uses_fsrs_curve() {
+        use chrono::{Duration, Utc};
+        let (store, _dir) = make_store().await;
+
+        let mut node = MemoryNode::new("recently reviewed", MemoryType::Semantic);
+        node.strength.stability   = 1.0;
+        node.strength.last_review = Some(Utc::now() - Duration::days(1));
+        store.sqlite.insert_memory(&node).await.unwrap();
+
+        // FSRS R(1, 1) = 1/(1 + 1/9) = 0.9 > 0.7 → not at risk.
+        let at_risk = store.sqlite
+            .activation_at_risk(&VisibilityScope::global(), 0.7, 50)
+            .await.unwrap();
+        assert!(
+            at_risk.is_empty(),
+            "FSRS R≈0.90 should be above the 0.7 threshold; the old exp curve (0.368) would wrongly flag it"
+        );
+
+        // The reported retrievability is the FSRS value, ~0.90.
+        let all = store.sqlite
+            .activation_at_risk(&VisibilityScope::global(), 1.0, 50)
+            .await.unwrap();
+        assert_eq!(all.len(), 1);
+        let ret = all[0]["retrievability"].as_f64().unwrap();
+        assert!((ret - 0.9).abs() < 0.02, "expected FSRS R≈0.90, got {ret}");
+    }
 }
 
 // =============================================================================
@@ -695,6 +821,42 @@ mod vector_store {
         assert!(
             results.iter().all(|(rid, _)| rid != &id),
             "deleted memory must not appear in search results"
+        );
+    }
+
+    // CB-014: FTS5 fallback must surface a bm25-derived relevance, not a flat
+    // 0.5 for every row. The better keyword match must score strictly higher,
+    // and all scores must stay within (0,1].
+    #[tokio::test]
+    async fn fts5_search_scores_by_bm25_not_flat() {
+        let (store, _dir) = make_store().await;
+
+        // `a` mentions "vector" twice → better bm25 rank for the query "vector".
+        let a = MemoryNode::new("vector vector search index", MemoryType::Semantic);
+        let b = MemoryNode::new("vector and many other unrelated words here", MemoryType::Semantic);
+        let a_id = a.id.clone();
+        let b_id = b.id.clone();
+        store.sqlite.insert_memory(&a).await.unwrap();
+        store.sqlite.insert_memory(&b).await.unwrap();
+
+        let (scope_sql, scope_params) = VisibilityScope::global().sql_filter();
+        let results = store.vector.search("vector", 10, scope_sql, &scope_params).await.unwrap();
+        assert_eq!(results.len(), 2, "both memories match 'vector'");
+
+        // Scores stay in (0,1].
+        for (_, score) in &results {
+            assert!(*score > 0.0 && *score <= 1.0, "score {score} out of (0,1]");
+        }
+
+        // The bm25-derived score discriminates: the stronger keyword match (a, which
+        // mentions "vector" twice) scores strictly higher than b. The old flat-0.5
+        // placeholder made these exactly equal, so a strict inequality here proves
+        // keyword relevance now carries through (CB-014).
+        let score_a = results.iter().find(|(id, _)| id == &a_id).unwrap().1;
+        let score_b = results.iter().find(|(id, _)| id == &b_id).unwrap().1;
+        assert!(
+            score_a > score_b,
+            "the stronger keyword match must score strictly higher (was flat 0.5 before): a={score_a} b={score_b}"
         );
     }
 }
