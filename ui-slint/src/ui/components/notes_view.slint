@@ -270,7 +270,10 @@ export component NotesView {
 
                             body-field := TextInput {
                                 width: parent.width;
-                                height: max(self.preferred-height, parent.height);
+                                // Content height only — the Flickable scrolls it.
+                                // (max(.., parent.height) broke the viewport's
+                                // content-height contract and hid the text.)
+                                height: self.preferred-height;
                                 single-line: false;
                                 wrap: TextWrap.word-wrap;
                                 font-size: 13px;
