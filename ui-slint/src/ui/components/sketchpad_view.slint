@@ -1,0 +1,205 @@
+import { Palette } from "../palette.slint";
+import { SketchStroke } from "../types.slint";
+
+// ── SketchpadView (🎨) ──────────────────────────────────────────────────────
+//
+// A freehand drawing canvas. Slint can't mutate arrays, so Rust owns the
+// strokes: pointer-down/move/up are routed back as callbacks, Rust accumulates
+// points and rebuilds each stroke's SVG `commands`, and we render one Path per
+// stroke (viewbox == canvas pixels → 1:1). "Send 👁" posts the strokes to
+// /api/sketch (rasterised server-side) so APEX can view the drawing via the
+// sketch_snapshot tool.
+//
+// preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
+
+export component SketchpadView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <[SketchStroke]> strokes;
+    in property <int> active-color;   // index into the swatch row
+    in property <int> active-width;   // 0 = thin, 1 = thick
+
+    callback down(float, float);      // canvas-px x, y
+    callback move(float, float);
+    callback up();
+    callback clear();
+    callback send(float, float);      // canvas px width, height
+    callback set-color(int);
+    callback set-width(int);
+
+    // Swatch palette — must mirror the Rust index→colour map.
+    property <[color]> swatches: [#e6e6eb, #00d4ff, #eab308, #39ff14, #ef4444];
+
+    VerticalLayout {
+        // ── Header ────────────────────────────────────────────────────────
+        Rectangle {
+            height: 48px;
+            background: Palette.surface;
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 12px;
+                spacing: 8px;
+
+                Text {
+                    text: "SKETCHPAD";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 2px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                Rectangle {
+                    width: 64px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: clear-ta.has-hover ? rgba(239,68,68,0.2) : Palette.surface-hi;
+                    border-width: 1px;
+                    border-color: rgba(239,68,68,0.5);
+                    y: (parent.height - self.height) / 2;
+                    clear-ta := TouchArea { clicked => { root.clear(); } }
+                    Text {
+                        text: "CLEAR";
+                        color: #ef4444;
+                        font-size: 9px;
+                        font-weight: 700;
+                        letter-spacing: 1px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    width: 96px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: send-ta.has-hover ? Palette.primary : Palette.primary-dim;
+                    animate background { duration: 150ms; }
+                    y: (parent.height - self.height) / 2;
+                    send-ta := TouchArea {
+                        clicked => { root.send(canvas.width / 1px, canvas.height / 1px); }
+                    }
+                    Text {
+                        text: "SEND 👁";
+                        color: Palette.bg;
+                        font-size: 10px;
+                        font-weight: 700;
+                        letter-spacing: 1px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Canvas ──────────────────────────────────────────────────────────
+        canvas := Rectangle {
+            vertical-stretch: 1;
+            background: #0d0f18;   // mirrors the gateway's default sketch bg
+            clip: true;
+
+            // Empty-state hint.
+            if root.strokes.length == 0: Text {
+                text: "Draw with the mouse, then SEND 👁 to show APEX.";
+                color: Palette.text-dim;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: parent.width - 40px;
+                wrap: word-wrap;
+            }
+
+            // One Path per stroke; viewbox == canvas pixels → identity mapping.
+            for s in root.strokes: Path {
+                width: 100%;
+                height: 100%;
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: canvas.width / 1px;
+                viewbox-height: canvas.height / 1px;
+                commands: s.commands;
+                stroke: s.color;
+                stroke-width: s.width * 1px;
+                fill: transparent;
+            }
+
+            // Transparent capture layer on top.
+            draw-ta := TouchArea {
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) {
+                        root.down(self.mouse-x / 1px, self.mouse-y / 1px);
+                    } else if (e.kind == PointerEventKind.up) {
+                        root.up();
+                    }
+                }
+                moved => {
+                    if (self.pressed) {
+                        root.move(self.mouse-x / 1px, self.mouse-y / 1px);
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Tool footer ─────────────────────────────────────────────────────
+        Rectangle {
+            height: 52px;
+            background: Palette.surface;
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 10px;
+                alignment: start;
+
+                // Colour swatches.
+                for c[i] in root.swatches: Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 14px;
+                    background: c;
+                    border-width: i == root.active-color ? 3px : 1px;
+                    border-color: i == root.active-color ? Palette.text-bright : Palette.border;
+                    y: (parent.height - self.height) / 2;
+                    animate border-width { duration: 120ms; }
+                    TouchArea { clicked => { root.set-color(i); } }
+                }
+
+                Rectangle { width: 12px; }
+
+                // Width toggle.
+                Rectangle {
+                    width: 44px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: root.active-width == 0 ? Palette.surface-hi : Palette.surface;
+                    border-width: 1px;
+                    border-color: root.active-width == 0 ? Palette.primary : Palette.border;
+                    y: (parent.height - self.height) / 2;
+                    TouchArea { clicked => { root.set-width(0); } }
+                    Rectangle {
+                        width: 18px; height: 3px; border-radius: 1.5px;
+                        background: Palette.text;
+                    }
+                }
+                Rectangle {
+                    width: 44px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: root.active-width == 1 ? Palette.surface-hi : Palette.surface;
+                    border-width: 1px;
+                    border-color: root.active-width == 1 ? Palette.primary : Palette.border;
+                    y: (parent.height - self.height) / 2;
+                    TouchArea { clicked => { root.set-width(1); } }
+                    Rectangle {
+                        width: 18px; height: 7px; border-radius: 3.5px;
+                        background: Palette.text;
+                    }
+                }
+            }
+        }
+    }
+}

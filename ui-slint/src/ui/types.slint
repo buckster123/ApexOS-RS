@@ -10,7 +10,7 @@ export enum ShellMode { desktop, focus }
 // Every app is a window. Rust owns the set (which windows exist, z-order =
 // model order with the last element on top); Slint owns live-drag geometry
 // for smoothness and commits back to Rust on release.
-export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad }
 
 // ── Persona system (glowup G4) ───────────────────────────────────────────
 // A persona is a named bundle: theme + chrome + wallpaper + default shell mode
@@ -159,6 +159,15 @@ export struct SonusFileItem {
 export struct NoteItem {
     name:       string,   // "ideas.md"
     size-label: string,   // "1.2 KB"
+}
+
+// One drawn stroke in the Sketchpad (🎨). Rust owns the points; `commands` is
+// an SVG path string in canvas-pixel coords (rendered by a Path with a viewbox
+// matching the canvas). The same strokes are posted to /api/sketch for APEX.
+export struct SketchStroke {
+    commands: string,
+    color:    color,
+    width:    float,    // logical px; bound as stroke-width: width * 1px
 }
 
 export struct MessageItem {

@@ -179,6 +179,8 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/notes",              get(notes_list_handler))
         .route("/api/notes/read",         post(notes_read_handler))
         .route("/api/notes/write",        post(notes_write_handler))
+        .route("/api/sketch",             post(sketch_save_handler))
+        .route("/api/sketch/latest",      get(sketch_latest_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new()
@@ -1969,6 +1971,134 @@ async fn notes_write_handler(
         Ok(()) => Json(serde_json::json!({ "ok": true, "name": name })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
     }
+}
+
+// ── Sketch API handlers ─────────────────────────────────────────────────────
+// The Sketchpad app posts its strokes as JSON; we rasterise them to a PNG with
+// tiny-skia (server-side keeps the UI binary lean) under <workspace>/sketches.
+// APEX views the result via the sketch_snapshot tool → describe_image/read_file.
+
+/// The sketches directory: <AGENTD_WORKSPACE or default>/sketches.
+fn sketches_dir() -> std::path::PathBuf {
+    let ws = std::env::var("AGENTD_WORKSPACE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    std::path::Path::new(&ws).join("sketches")
+}
+
+#[derive(Deserialize)]
+struct SketchPoint { x: f32, y: f32 }
+
+#[derive(Deserialize)]
+struct SketchStroke {
+    color: String,          // "#rrggbb"
+    width: f32,
+    points: Vec<SketchPoint>,
+}
+
+#[derive(Deserialize)]
+struct SketchBody {
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    bg: Option<String>,     // "#rrggbb", default dark slate
+    strokes: Vec<SketchStroke>,
+}
+
+/// Parse "#rrggbb" (or "rrggbb") → (r,g,b). Falls back to the given default.
+fn parse_hex_rgb(s: &str, default: (u8, u8, u8)) -> (u8, u8, u8) {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() == 6 {
+        if let Ok(v) = u32::from_str_radix(h, 16) {
+            return (((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8);
+        }
+    }
+    default
+}
+
+/// POST /api/sketch — rasterise posted strokes to a PNG and save it.
+async fn sketch_save_handler(
+    Json(body): Json<SketchBody>,
+) -> impl IntoResponse {
+    let w = body.width.clamp(16, 4096);
+    let h = body.height.clamp(16, 4096);
+
+    let png = match tokio::task::spawn_blocking(move || rasterise_sketch(w, h, &body)).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e }))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    };
+
+    let dir = sketches_dir();
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
+    }
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let stamped = dir.join(format!("sketch-{stamp}.png"));
+    let latest  = dir.join("latest.png");
+    if let Err(e) = tokio::fs::write(&stamped, &png).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
+    }
+    let _ = tokio::fs::write(&latest, &png).await;
+
+    Json(serde_json::json!({
+        "ok": true,
+        "path": stamped.to_string_lossy(),
+        "latest": latest.to_string_lossy(),
+    })).into_response()
+}
+
+/// Draw the strokes onto a Pixmap and PNG-encode it. Runs on a blocking thread.
+fn rasterise_sketch(w: u32, h: u32, body: &SketchBody) -> Result<Vec<u8>, String> {
+    use tiny_skia::{Pixmap, Paint, PathBuilder, Stroke, Transform, Color, LineCap, LineJoin};
+
+    let mut pixmap = Pixmap::new(w, h).ok_or("invalid sketch dimensions")?;
+    let (br, bg_, bb) = parse_hex_rgb(body.bg.as_deref().unwrap_or("#0d0f18"), (13, 15, 24));
+    pixmap.fill(Color::from_rgba8(br, bg_, bb, 255));
+
+    let stroke_style = |width: f32| Stroke {
+        width: width.max(0.5),
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Default::default()
+    };
+
+    for s in &body.strokes {
+        if s.points.is_empty() { continue; }
+        let (r, g, b) = parse_hex_rgb(&s.color, (230, 230, 235));
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(r, g, b, 255);
+        paint.anti_alias = true;
+
+        let mut pb = PathBuilder::new();
+        if s.points.len() == 1 {
+            // A tap = a dot: round-capped zero-length segment renders a filled circle.
+            let p = &s.points[0];
+            pb.move_to(p.x, p.y);
+            pb.line_to(p.x + 0.01, p.y);
+        } else {
+            pb.move_to(s.points[0].x, s.points[0].y);
+            for p in &s.points[1..] {
+                pb.line_to(p.x, p.y);
+            }
+        }
+        if let Some(path) = pb.finish() {
+            pixmap.stroke_path(&path, &paint, &stroke_style(s.width), Transform::identity(), None);
+        }
+    }
+
+    pixmap.encode_png().map_err(|e| e.to_string())
+}
+
+/// GET /api/sketch/latest — path to the most recent saved sketch (if any).
+async fn sketch_latest_handler() -> impl IntoResponse {
+    let latest = sketches_dir().join("latest.png");
+    let exists = tokio::fs::metadata(&latest).await.is_ok();
+    Json(serde_json::json!({
+        "exists": exists,
+        "path": if exists { latest.to_string_lossy().to_string() } else { String::new() },
+    }))
 }
 
 // ── Audio API handlers ────────────────────────────────────────────────────────
