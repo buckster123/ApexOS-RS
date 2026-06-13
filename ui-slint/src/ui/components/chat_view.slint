@@ -46,11 +46,13 @@ export component ChatView {
                 horizontal-alignment: center;
             }
 
-            for item in root.messages: Rectangle {
+            for item in root.messages: VerticalLayout {
                 // Route to tool card or chat bubble based on role.
-                // NB: children of a plain Rectangle take their *content* size, not the
-                // row width — so each branch sets width:100% to span the row, otherwise
-                // the bubble's alignment/centering has no room to act (looks centered).
+                // NB: a real layout (not a plain Rectangle) so each row reports its
+                // child's height to the list — a bare Rectangle doesn't, which made
+                // rows collapse to ~0 height and draw on top of each other. The layout
+                // also stretches the child to full width so the bubble's left/right
+                // alignment has room to act.
                 if item.role == "tool": ToolCard {
                     width: 100%;
                     tool-name:          item.tool-name;
