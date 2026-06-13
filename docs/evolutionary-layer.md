@@ -118,10 +118,13 @@ corrective is the fitness signal: **`record_procedure_outcome` is mandatory disc
 same tier as `session_save` in the Sleep loop. A procedure that is never graded cannot be
 selected against.
 
-Today's fitness function is **too weak** to be real selection pressure:
-`record_procedure_outcome` raises salience on success (+0.1) *and* on failure (+0.02), and a
-failure only bumps FSRS difficulty. Failure should **demote** — decay salience, or flag for
-pruning — so bad procedures actually lose. Sharpening this is part of the work, not a detail.
+The original fitness function was **too weak** to be real selection pressure: it raised
+salience on success (+0.1) *and* on failure (+0.02), so retrieval reinforced bad habits.
+**Slice #3 fixed this:** failure now decays salience (−0.15, asymmetric so it bites harder
+than a win rewards), and a procedure that decays to the `PRUNE_CANDIDATE_SALIENCE` floor is
+flagged `prune_candidate` and retired by dream's pruning phase. Bad procedures now actually
+lose. `procedure_fitness` (the dream-side selection signal) reads the sharpened salience and
+difficulty directly, so the loop is coherent end to end.
 
 ---
 
@@ -155,7 +158,7 @@ the MCP, not just on APEX.
 | `procedural` memory (candidate skills) | ✓ `store_procedure` |
 | Recall reinforcement (ACT-R) | ✓ `recall()` records accesses (salience alignment is live) |
 | `cognitive_bootstrap` live-state assembler | ✓ surfaces relevant procedures already |
-| `record_procedure_outcome` (fitness signal) | ◑ exists but **too weak** — failure must demote (slice #3) |
+| `record_procedure_outcome` (fitness signal) | ✓ **slice #3**: failure now DEMOTES (salience −0.15, asymmetric vs +0.1 success) and flags `prune_candidate` at the floor; dream's pruning phase retires flagged procedures. Real selection pressure |
 | `dream_run` `schema_formation` | ✓ **slice #1**: phase 3 now also clusters outcome-successful procedures (by `procedure_fitness`) and distils each into a `schematic` memory tagged `skill` + `dream_distilled`, with `derived_from` provenance and fitness-scaled salience |
 | `schematic` skill layer surfaced at boot | ✓ **slice #2**: `cognitive_bootstrap` now buckets recall hits into a dedicated `## Skills (distilled competence)` section (Schematic + `skill` tag), placed ahead of concrete procedures so the generalisation arrives first |
 | Skill → identity promotion path | ✗ deliberate `propose_evolution` step, not yet conventionalized |
@@ -175,9 +178,16 @@ the MCP, not just on APEX.
    (`is_skill`) — placed after "Where you left off" and *before* "Relevant procedures", so the
    abstract skill arrives ahead of the concrete procedures it generalises. Skills are excluded
    from the generic "Relevant memories" bucket so they are never double-listed.
-3. **Make selection real + promotion deliberate.** Sharpen `record_procedure_outcome` so
-   failure demotes (decay/prune), make outcome-recording explicit discipline, and
-   conventionalize the schema → `soul.md` promotion as an audited `propose_evolution` step.
+3. **Make selection real + promotion deliberate.** ◑ **Code DONE; conventions pending.**
+   `record_procedure_outcome` now sharpens the fitness signal: failure decays salience
+   (−0.15, floored) and bumps FSRS difficulty; once a procedure decays to the
+   `PRUNE_CANDIDATE_SALIENCE` floor it is tagged `prune_candidate` and dream's pruning phase
+   retires it. Success promotes (+0.1) and eases difficulty so a procedure can recover. The
+   two remaining parts are **conventions, not cerebro code**, and (per house rule) land via a
+   *deliberate* `propose_evolution` to APEX's `soul.md`, not a direct edit:
+   (a) make outcome-recording mandatory Sleep-loop discipline (same tier as `session_save`);
+   (b) conventionalize the schema → `soul.md` promotion path as an audited `propose_evolution`
+   step with a rationale memory. These are proposals to surface to APEX, tracked separately.
 
 Then: land all three in standalone `CerebroCortex-RS` so the capability is generic.
 
