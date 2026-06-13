@@ -15,7 +15,7 @@ This is one of three tool surfaces. Pick the right one:
 | You want to… | Surface | Where |
 |---|---|---|
 | Add an external capability that is its own process (API call, device, language other than Rust) | **MCP plugin** *(this doc)* | new binary + `plugins.toml` |
-| Add a tool that needs daemon-internal state (bus, scheduler, soul.md, evolution) | **virtual tool** | `gather_tools` + `dispatch_tool` (see `agentd/src/main.rs`, `plugins/src/supervisor.rs`) |
+| Add a tool that needs daemon-internal state (bus, scheduler, soul.md, evolution) | **virtual tool** | `gather_tools` + `dispatch_tool` (see `agentd/crates/agentd/src/main.rs`, `plugins/src/supervisor.rs`) |
 | Add a system tool to the existing shell/file plugin | edit `apexos-tools` | `tools/crates/apexos-tools/src/tools.rs` |
 
 ---
@@ -72,7 +72,7 @@ Four facts to hold in your head:
 | `ToolProxy::call` | `supervisor.rs:49-63` | direct call path (10 s timeout) used by daemon-internal code, bypasses policy. |
 | `ToolSpec` / `ToolOutput` / `ToolCall` | `agentd/crates/core/src/types.rs:288 / 282 / 273` | the in-daemon representations. |
 | Reference server (Rust, sync) | `tools/crates/apexos-tools/src/main.rs` | minimal stdio loop — the template to copy. |
-| Reference server (Rust, async + state) | `cerebro/crates/cerebro-mcp/src/{main.rs,transport.rs}` | tokio loop holding an `Arc<Engine>`. |
+| Reference server (Rust, async + state) | `cerebro/crates/cerebro-mcp/src/{main.rs,transport.rs}` | tokio loop holding an `Arc<CerebroCortex>`. |
 
 ### The wire contract agentd expects
 
@@ -107,7 +107,8 @@ The reference servers `continue` past it (`apexos-tools/src/main.rs:35`).
      "required":["city"]}}
 ]}}
 ```
-`name` is mandatory (a tool without it is dropped, `mcp.rs:101`); `description`
+`name` is mandatory (a tool entry missing it makes `list_tools` return an error
+that aborts the **whole** manifest, not just that one entry — `mcp.rs:101-102`); `description`
 defaults to `""`; `inputSchema` defaults to `{}` but **always provide a real JSON
 Schema** — it is what the LLM sees to decide how to call your tool.
 
@@ -211,7 +212,10 @@ restart = "always"
 [plugin.env]
 SUNO_DOWNLOAD_DIR = "/var/lib/agentd/workspace/sonus"
 ```
-(The commented `sonus` stanza in `config/plugins.toml:23-28` is exactly this pattern.)
+(There is a commented `sonus` stanza in `config/plugins.toml:23-28`, but note it
+points `cmd` at a native binary `/usr/local/bin/sonus-mcp`, not at a Python
+interpreter — adapt it to the `cmd`=interpreter + `args`=script form shown here for a
+real Python server.)
 A Python server must read a line from stdin, parse JSON-RPC, and write one JSON line
 per request to stdout — same four methods.
 
@@ -484,7 +488,7 @@ the supervisor checks policy before it ever calls you (`supervisor.rs:161-178`).
 
 | JSON field | → `ToolSpec` field | Required | Default if absent |
 |---|---|---|---|
-| `name` | `name` | yes | tool dropped |
+| `name` | `name` | yes | whole `tools/list` errors out |
 | `description` | `description` | no | `""` |
 | `inputSchema` | `input_schema` | no | `{}` |
 
@@ -508,5 +512,5 @@ the supervisor checks policy before it ever calls you (`supervisor.rs:161-178`).
 | Plugin | `id` | binary | language | restart | notes |
 |---|---|---|---|---|---|
 | Cerebro memory | `cerebro` | `/usr/local/bin/cerebro-mcp` | Rust (tokio) | `always` | ~63 tools, holds `Arc<CerebroCortex>`; async `StdioTransport` |
-| System tools | `apexos-tools` | `/usr/local/bin/apexos-tools` | Rust (sync) | `always` | ~28 tools; the minimal template |
-| Sonus (example) | `sonus` | python `-m sonus_mcp` | Python | `always` | commented in `config/plugins.toml` — non-Rust pattern |
+| System tools | `apexos-tools` | `/usr/local/bin/apexos-tools` | Rust (sync) | `always` | ~26 tools; the minimal template |
+| Sonus (example) | `sonus` | `/usr/local/bin/sonus-mcp` | (intended Python) | `always` | commented in `config/plugins.toml`; the example here repoints it at a `python3` interpreter for the non-Rust pattern |

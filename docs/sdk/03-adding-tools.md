@@ -5,7 +5,7 @@
 > extend it when the agent needs a **new local-system capability** that is plain Rust
 > (a command, a file/device op, a small HTTP call) — not memory (that's `cerebro-mcp`)
 > and not a daemon-internal verb like `propose_evolution` (that's a *virtual tool*
-> intercepted in the supervisor; see `agentd/src/main.rs` `gather_tools`).
+> intercepted in the supervisor; see `agentd/crates/agentd/src/main.rs` `gather_tools`).
 >
 > A tool here is **two small edits in one file** (`tools/crates/apexos-tools/src/tools.rs`)
 > plus **one policy line** in `config/policy.toml`. There is no plugin manifest to touch —
@@ -197,7 +197,7 @@ Pick by analogy to the existing matrix: read-only telemetry/reads → `allow`
 (`policy.toml:7-13`); writes targeting a `path` → `workspace` (`:15-16`); deletes /
 shell / outbound HTTP → `ask` (`:18-20`); hardware that actuates → `ask` (`:32-35`).
 This is the repo default that `install.sh` writes to `/etc/agentd/policy.toml`; an
-operator (or APEX via `propose_evolution`/`update_policy_rule`) can loosen it later.
+operator (or APEX via `propose_evolution` with `kind=update_policy_rule`) can loosen it later.
 
 ### 5. Build + hot-swap
 
@@ -318,10 +318,11 @@ prompt. Verify by asking the agent: *"is port 8787 open on localhost?"*
   (`supervisor.rs:162`) — a path-mutating tool that names its arg `output_path` is invisible
   to it and will `Ask`. Default to `ask` for anything that writes outside the workspace,
   runs a shell, makes outbound requests, actuates hardware, or could exfiltrate/destroy.
-- **Direct-call bypass.** `SupervisorCmd::CallTool` (`supervisor.rs:30`) dispatches a tool
-  **without** the policy check — it's how agentd-internal machinery (e.g. the evolution
-  rollback journal) calls tools. Agent turns always go through the policy hop; only trusted
-  in-process callers use the bypass. Don't assume your tool is always policy-gated.
+- **Direct-call bypass.** `SupervisorCmd::DirectCall` (`supervisor.rs:31`, reached via the
+  `ToolProxy::call` handle, `supervisor.rs:52`) dispatches a tool **without** the policy
+  check — it's how agentd-internal machinery (e.g. the evolution rollback journal) calls
+  tools. Agent turns always go through the policy hop; only trusted in-process callers use
+  the bypass. Don't assume your tool is always policy-gated.
 - **systemd sandbox is the real boundary.** agentd (and therefore `apexos-tools`, its child)
   runs as the unprivileged `agentd` user under `NoNewPrivileges`, `ProtectSystem=strict`,
   `ProtectHome`, `PrivateTmp`, with writes confined to `ReadWritePaths=/var/lib/agentd
@@ -339,7 +340,7 @@ prompt. Verify by asking the agent: *"is port 8787 open on localhost?"*
   (`propose_evolution`) can only rewrite `soul.md` / `policy.toml` / `plugins.toml` /
   `peers.toml` and hot-reload them; it **cannot** add a new Rust tool fn at runtime. So an
   agent's path is: (a) propose the code change for a human/CI to build and deploy, then (b)
-  once the binary is live, use `update_policy_rule` / `propose_evolution` to add the
+  once the binary is live, use `propose_evolution` (`kind=update_policy_rule`) to add the
   `[rules]` line. Keep the two in lockstep — a tool present in the binary but absent from
   `policy.toml` silently defaults to `Ask`; a rule for a tool not in the binary is inert.
   Journal both moves (Cerebro `episode_add_step` / `session_save`) so the rollback story is

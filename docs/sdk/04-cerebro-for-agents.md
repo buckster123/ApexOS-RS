@@ -44,10 +44,14 @@ that text and re-parses it. Schemas live separately in `tools.rs` `tool_schema()
 
 - `agent_id` present and non-empty → `VisibilityScope::for_agent(AgentId(id))` — sees its own
   `private` memories **plus** all `shared` ones.
-- `agent_id` absent/empty → `VisibilityScope::global()` — sees only `shared` memories.
+- `agent_id` absent/empty → `VisibilityScope::global()` — the SQL read filter is `1=1`, so a
+  global *read* actually sees **everything**, including other agents' private memories (no
+  isolation). The "shared-only" notion applies only to what a global *write* produces (it
+  writes `Visibility::Shared`); it is not enforced on global reads.
 
-`sql_filter()` (`types.rs:144`) renders this to SQL:
-`(visibility='shared' OR (visibility='private' AND agent_id=?))`. The `visibility` field that
+`sql_filter()` (`types.rs:144`) renders the scoped (for_agent) case to SQL:
+`(visibility='shared' OR (visibility='private' AND agent_id=?))`, and the global case to
+`1=1`. The `visibility` field that
 appears in the `remember` schema (`tools.rs:31`) is **not read by dispatch** — visibility is
 *derived from scope* inside `remember` (`cortex.rs:74`): a scoped write is `Private`, an
 unscoped write is `Shared`. To make a memory shared, omit `agent_id` on the write or call
@@ -331,7 +335,7 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 | `agent_id` arg | Scope | SQL filter | Sees |
 |----------------|-------|-----------|------|
 | set, non-empty | `for_agent(id)` | `visibility='shared' OR (visibility='private' AND agent_id=?)` | own private + all shared |
-| absent / empty | `global()` | `1=1` (read) / shared-only semantics | shared only |
+| absent / empty | `global()` | `1=1` (read sees all rows) | everything (no isolation on read); global *writes* are `Shared` |
 
 ApexOS-RS conventions: FORGE → `agent_id="FORGE"`; APEX → `agent_id="CLAUDE-APEX"`.
 

@@ -398,7 +398,7 @@ silently keep a GPU billing — always reconcile `vast_status` after a restart.
 | `POST /api/mesh/peers` | `{node_id, ws_url, role?}` | add/update a peer (`role`: `full`\|`sensor`\|`thin`), emit `PeerRegistered` |
 | `DELETE /api/mesh/peers/{id}` | — | remove peer by `node_id` |
 | `GET /api/sessions/active` | — | in-memory sessions (id + msg count) — pick a target for `send_to_agent` |
-| `POST /api/sessions/{id}/message` | `{message}` *(also accepts `text`)* | inject a `UserPrompt` into session `id` — this is the A2A landing point |
+| `POST /api/sessions/{id}/message` | `{message}` *(`message` only — `text` is NOT accepted, see live bug below)* | inject a `UserPrompt` into session `id` — this is the A2A landing point |
 | `GET/POST /api/backend` | `{backend, oai_base_url?, model?}` | read / hot-swap inference backend (no restart) |
 
 > **Live bug — cross-node `send_to_agent` does not actually deliver.** The caller POSTs

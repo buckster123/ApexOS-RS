@@ -39,6 +39,13 @@ Two cross-cutting references live alongside the guides:
   "to add X, edit these files, follow this schema" recipe table for every
   extension point, plus the full tool/event catalog. Use it for fast recall.
 
+## Worked tutorials
+
+End-to-end, copy-pasteable builds that thread one real example through a whole surface:
+
+- **[Build a Weather MCP plugin](tutorial-weather-plugin.md)** — from an empty project to a `get_weather` tool the agent can call: the stdio handshake, the tool impl, `plugins.toml` registration, the policy rule, build + hot-swap, verify.
+- **[Build a desktop app window](tutorial-desktop-app.md)** — from nothing to a new app window in the shell: the `_view.slint` component, the `AppKind` wiring, the Rust data path (respecting the thread model), build + hot-swap.
+
 ---
 
 ## Start here

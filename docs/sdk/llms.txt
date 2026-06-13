@@ -28,6 +28,11 @@
 - [06 — Self-evolution & policy](06-self-evolution-and-policy.md): How APEX changes its own config at runtime. Three virtual tools (`read_soul_md`, `propose_evolution`, `rollback_evolution`); five `EvolutionProposal` kinds (update_system_prompt / update_policy_rule / register|unregister_mcp_server / hot_reload_subsystem). KEY: there is NO `evolution.*` policy namespace — the gate is the literal tool name, unlisted → Ask under `suggest`. Rollback is in-memory, current-session-only, and uneven (hot_reload has no undo). Journal the rationale or it's identity drift.
 - [07 — Mesh colony & deployment](07-mesh-and-deploy.md): Install-time axes (hardware tier, deployment mode), the mDNS `_apexos._tcp` mesh + `peers.toml`, cross-node `send_to_agent`, the vast.ai GPU recipe model (`recipes.toml` → `vast_launch` → backend hot-swap), and the systemd hardening contract. All mesh/vast tools default to Ask.
 
+## Worked tutorials (end-to-end)
+
+- [Build a Weather MCP plugin](tutorial-weather-plugin.md): empty project → a `get_weather` tool agentd spawns and the agent calls. The stdio handshake, tool impl, `plugins.toml` stanza, policy rule, build + hot-swap, verify.
+- [Build a desktop app window](tutorial-desktop-app.md): nothing → a new app window in the shell. The `components/<name>_view.slint`, `AppKind` enum + ordinal wiring, Rust data path via `invoke_from_event_loop`, build + hot-swap.
+
 ## Key source & docs
 
 - [core/src/types.rs](../../agentd/crates/core/src/types.rs): The `Event` enum (:162), `ToolCall`/`ToolOutput`/`ToolSpec`/`Message`, `SensorReading`/`EvolutionProposal` kinds, `PolicyMode`/`PolicyRule`/`Subsystem`, ID newtypes (serialize as bare numbers). The single source of truth for the wire contract.
