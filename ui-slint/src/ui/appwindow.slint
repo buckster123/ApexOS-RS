@@ -78,6 +78,7 @@ export component AppWindow inherits Window {
     in-out property <[SketchStroke]> sketch-strokes;
     in-out property <int>            sketch-color: 0;
     in-out property <int>            sketch-width: 0;
+    in-out property <int>            sketch-tool: 0;
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id /
@@ -135,6 +136,7 @@ export component AppWindow inherits Window {
     callback sketch-send(float, float);       // canvas px w, h
     callback sketch-set-color(int);
     callback sketch-set-width(int);
+    callback sketch-set-tool(int);
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -612,6 +614,7 @@ export component AppWindow inherits Window {
                         sketch-strokes: root.sketch-strokes;
                         sketch-color: root.sketch-color;
                         sketch-width: root.sketch-width;
+                        sketch-tool: root.sketch-tool;
 
                         send-message(t) => { root.send-message(t); }
                         stop-turn => { root.stop-turn(); }
@@ -645,6 +648,7 @@ export component AppWindow inherits Window {
                         sketch-send(w, h) => { root.sketch-send(w, h); }
                         sketch-set-color(i) => { root.sketch-set-color(i); }
                         sketch-set-width(i) => { root.sketch-set-width(i); }
+                        sketch-set-tool(i) => { root.sketch-set-tool(i); }
 
                         req-focus => { root.focus-window(w.id); }
                         req-close => { root.close-window(w.id); }
