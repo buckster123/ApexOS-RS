@@ -357,6 +357,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 | `docs/slint-notes.md` | Slint patterns, binding loop rules, layout gotchas |
 | `docs/slint-reference/` | Exact widget/element API (vendored from official Slint repo) — look up before guessing syntax |
 | `docs/ui-glowup.md` | Desktop shell, persona skins, window manager, glowup roadmap (G0–G7) |
+| `docs/symbiosis.md` | Runtime cognitive architecture — APEX⇄agentd⇄Cerebro loops, the soul.md Sleep-loop gap, CCBS boot wiring |
 
 ---
 
