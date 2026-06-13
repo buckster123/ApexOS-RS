@@ -157,7 +157,7 @@ the MCP, not just on APEX.
 | `cognitive_bootstrap` live-state assembler | ✓ surfaces relevant procedures already |
 | `record_procedure_outcome` (fitness signal) | ◑ exists but **too weak** — failure must demote (slice #3) |
 | `dream_run` `schema_formation` | ✓ **slice #1**: phase 3 now also clusters outcome-successful procedures (by `procedure_fitness`) and distils each into a `schematic` memory tagged `skill` + `dream_distilled`, with `derived_from` provenance and fitness-scaled salience |
-| `schematic` skill layer surfaced at boot | ✗ slice #2 — bootstrap pulls live-state, not yet a distilled "skills" section |
+| `schematic` skill layer surfaced at boot | ✓ **slice #2**: `cognitive_bootstrap` now buckets recall hits into a dedicated `## Skills (distilled competence)` section (Schematic + `skill` tag), placed ahead of concrete procedures so the generalisation arrives first |
 | Skill → identity promotion path | ✗ deliberate `propose_evolution` step, not yet conventionalized |
 
 ### Build slices (smallest first)
@@ -170,9 +170,11 @@ the MCP, not just on APEX.
    with `derived_from` provenance and salience set to the cluster's mean fitness (floored 0.7).
    The phase reserves ~half its LLM budget for this pass so an episode-rich brain still grows
    skills. `procedure_fitness` is the reusable selection signal slice #3 will sharpen.
-2. **Surface skills at boot.** Add a "skills" section to `cognitive_bootstrap` that pulls the
-   relevant `schematic` skill memories alongside the live state it already assembles — so
-   distilled competence arrives with orientation.
+2. **Surface skills at boot.** ✓ **DONE.** `cognitive_bootstrap` buckets the query recall into a
+   dedicated `## Skills (distilled competence)` section — Schematic memories tagged `skill`
+   (`is_skill`) — placed after "Where you left off" and *before* "Relevant procedures", so the
+   abstract skill arrives ahead of the concrete procedures it generalises. Skills are excluded
+   from the generic "Relevant memories" bucket so they are never double-listed.
 3. **Make selection real + promotion deliberate.** Sharpen `record_procedure_outcome` so
    failure demotes (decay/prune), make outcome-recording explicit discipline, and
    conventionalize the schema → `soul.md` promotion as an audited `propose_evolution` step.
