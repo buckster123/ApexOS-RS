@@ -62,6 +62,8 @@ thread_local! {
         const { RefCell::new(None) };
     static WAVEFORM: RefCell<Option<Rc<slint::VecModel<f32>>>> =
         const { RefCell::new(None) };
+    static SONUS_FILES: RefCell<Option<Rc<slint::VecModel<SonusFileItem>>>> =
+        const { RefCell::new(None) };
 }
 
 // ── Feedback subsystem (toasts) ───────────────────────────────────────────────
@@ -132,6 +134,7 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::Mesh => 8,
         AppKind::Inference => 9,
         AppKind::AudioEditor => 10,
+        AppKind::Sonus => 11,
     }
 }
 
@@ -147,6 +150,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         8 => AppKind::Mesh,
         9 => AppKind::Inference,
         10 => AppKind::AudioEditor,
+        11 => AppKind::Sonus,
         _ => AppKind::Chat,
     }
 }
@@ -297,6 +301,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Mesh => "Mesh",
         AppKind::Inference => "Inference",
         AppKind::AudioEditor => "Audio Editor",
+        AppKind::Sonus => "Sonus",
     }
 }
 
@@ -315,6 +320,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Mesh => (520.0, 460.0),
         AppKind::Inference => (520.0, 520.0),
         AppKind::AudioEditor => (660.0, 600.0),
+        AppKind::Sonus => (480.0, 540.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -737,6 +743,19 @@ fn replace_waveform(samples: Vec<f32>) {
             }
             for s in samples {
                 model.push(s);
+            }
+        }
+    });
+}
+
+fn replace_sonus_files(items: Vec<SonusFileItem>) {
+    SONUS_FILES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+            for item in items {
+                model.push(item);
             }
         }
     });
@@ -1292,6 +1311,15 @@ fn audio_op_chain(op: &str) -> Vec<Value> {
     }
 }
 
+// GET /api/sonus/files → SonusFileItem list (bare JSON array).
+async fn fetch_sonus_files(client: &reqwest::Client, base_url: &str) -> Vec<SonusFileItem> {
+    let body = json_get(client, format!("{base_url}/api/sonus/files")).await;
+    body.as_array().unwrap_or(&vec![]).iter().map(|f| SonusFileItem {
+        name:       f["name"].as_str().unwrap_or("").into(),
+        size_label: human_size(f["size"].as_u64().unwrap_or(0)).into(),
+    }).collect()
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 #[derive(Default)]
 struct AppState {
@@ -1371,6 +1399,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let waveform_vec: Rc<slint::VecModel<f32>> = Rc::new(slint::VecModel::default());
     ui.set_audio_waveform(slint::ModelRc::from(waveform_vec.clone()));
     WAVEFORM.with(|m| *m.borrow_mut() = Some(waveform_vec.clone()));
+
+    let sonus_files_vec: Rc<slint::VecModel<SonusFileItem>> = Rc::new(slint::VecModel::default());
+    ui.set_sonus_files(slint::ModelRc::from(sonus_files_vec.clone()));
+    SONUS_FILES.with(|m| *m.borrow_mut() = Some(sonus_files_vec.clone()));
 
     // Feedback subsystem: bind the toast model + global callbacks.
     let toasts_vec: Rc<slint::VecModel<ToastItem>> = Rc::new(slint::VecModel::default());
@@ -1452,6 +1484,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     AppKind::Mesh => ui.invoke_refresh_mesh(),
                     AppKind::Inference => ui.invoke_refresh_inference(),
                     AppKind::AudioEditor => ui.invoke_refresh_audio(),
+                    AppKind::Sonus => ui.invoke_refresh_sonus(),
                     _ => {}
                 }
             }
@@ -2053,6 +2086,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 replace_audio_files(items);
                 if let Some(ui) = ui_w.upgrade() { ui.set_audio_busy(false); }
             }).ok();
+        });
+    });
+
+    // ── Sonus player (🎵) — list / play (server-side) / stop ───────────────────
+    let rt_h_son    = rt.handle().clone();
+    let client_son  = Arc::clone(&http_client);
+    let base_son    = http_base.clone();
+    ui.on_refresh_sonus(move || {
+        let client = Arc::clone(&client_son);
+        let base   = base_son.clone();
+        rt_h_son.spawn(async move {
+            let items = fetch_sonus_files(&client, &base).await;
+            slint::invoke_from_event_loop(move || replace_sonus_files(items)).ok();
+        });
+    });
+
+    let rt_h_splay    = rt.handle().clone();
+    let client_splay  = Arc::clone(&http_client);
+    let base_splay    = http_base.clone();
+    let ui_weak_splay = ui.as_weak();
+    ui.on_play_sonus(move |name| {
+        let client = Arc::clone(&client_splay);
+        let base   = base_splay.clone();
+        let ui_w   = ui_weak_splay.clone();
+        let n      = name.to_string();
+        // Optimistic now-playing; cleared if the server rejects it.
+        if let Some(ui) = ui_w.upgrade() { ui.set_sonus_now_playing(name.clone()); }
+        rt_h_splay.spawn(async move {
+            let ok = client.post(format!("{base}/api/sonus/play"))
+                .json(&serde_json::json!({"name": n}))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if !ok {
+                notify(ToastKind::Error, "Playback failed (ffplay/track missing?)");
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_w.upgrade() { ui.set_sonus_now_playing("".into()); }
+                }).ok();
+            }
+        });
+    });
+
+    let rt_h_sstop    = rt.handle().clone();
+    let client_sstop  = Arc::clone(&http_client);
+    let base_sstop    = http_base.clone();
+    let ui_weak_sstop = ui.as_weak();
+    ui.on_stop_sonus(move || {
+        let client = Arc::clone(&client_sstop);
+        let base   = base_sstop.clone();
+        let ui_w   = ui_weak_sstop.clone();
+        if let Some(ui) = ui_w.upgrade() { ui.set_sonus_now_playing("".into()); }
+        rt_h_sstop.spawn(async move {
+            let _ = client.post(format!("{base}/api/sonus/stop"))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await;
         });
     });
 

@@ -297,6 +297,7 @@ Full event list: `agentd/crates/core/src/types.rs` — `Event` enum.
 - **Session replay** — send `{"type": "session_init", "session_id": 42}` to restore a prior session. agentd replays the full message history.
 - **A plain `Rectangle` is not a layout** — children are absolutely positioned and it does **not** report their size upward. A `for`-row built on a bare `Rectangle` collapses to ~0 height and rows draw on top of each other. Use a `VerticalLayout`/`HorizontalLayout` for any row that must size to its content.
 - **No key auto-repeat on linuxkms** — `i-slint-backend-linuxkms` dispatches one `KeyPressed`/`KeyReleased` per libinput event with no repeat synthesis (libinput doesn't repeat; a compositor normally does). Holding a key = one hop on the Pi. Works on desktop (winit). Backend limitation — not fixable in app code without forking the backend.
+- **Sonus playback needs `ffplay`** — the Sonus app's server-side playback (`POST /api/sonus/play`) shells `ffplay` (ffmpeg family, already required by the Audio Editor) to the device's ALSA out, same sink `/api/speak` uses. Missing ffplay → play 500s with "ffplay failed to start". One current track at a time (a process-global child); a new play or `/api/sonus/stop` kills the previous.
 
 ---
 

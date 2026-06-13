@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
@@ -15,7 +15,7 @@ import { StartMenu, Win98StartMenu } from "components/start_menu.slint";
 import { NotifCenter } from "components/notif_center.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
-export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem }
+export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -68,6 +68,8 @@ export component AppWindow inherits Window {
     in-out property <string>         audio-stats: "";
     in-out property <string>         audio-duration: "";
     in-out property <bool>           audio-busy: false;
+    in-out property <[SonusFileItem]> sonus-files;
+    in-out property <string>         sonus-now-playing: "";
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id /
@@ -111,6 +113,9 @@ export component AppWindow inherits Window {
     callback refresh-audio();
     callback select-audio(string, string);   // path, name
     callback process-audio(string, string);  // path, op
+    callback refresh-sonus();
+    callback play-sonus(string);              // name
+    callback stop-sonus();
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -578,6 +583,8 @@ export component AppWindow inherits Window {
                         audio-stats: root.audio-stats;
                         audio-duration: root.audio-duration;
                         audio-busy: root.audio-busy;
+                        sonus-files: root.sonus-files;
+                        sonus-now-playing: root.sonus-now-playing;
 
                         send-message(t) => { root.send-message(t); }
                         stop-turn => { root.stop-turn(); }
@@ -597,6 +604,9 @@ export component AppWindow inherits Window {
                         refresh-audio => { root.refresh-audio(); }
                         select-audio(p, n) => { root.select-audio(p, n); }
                         process-audio(p, op) => { root.process-audio(p, op); }
+                        refresh-sonus => { root.refresh-sonus(); }
+                        play-sonus(name) => { root.play-sonus(name); }
+                        stop-sonus => { root.stop-sonus(); }
 
                         req-focus => { root.focus-window(w.id); }
                         req-close => { root.close-window(w.id); }

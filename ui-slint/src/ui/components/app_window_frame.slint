@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -25,6 +25,7 @@ import { EventLogView } from "event_log_view.slint";
 import { MeshView } from "mesh_view.slint";
 import { InferenceView } from "inference_view.slint";
 import { AudioEditorView } from "audio_editor_view.slint";
+import { SonusView } from "sonus_view.slint";
 
 component CaptionButton inherits Rectangle {
     in property <string> glyph;
@@ -117,6 +118,8 @@ export component AppWindowFrame inherits Rectangle {
     in property <string>         audio-stats;
     in property <string>         audio-duration;
     in property <bool>           audio-busy;
+    in property <[SonusFileItem]> sonus-files;
+    in property <string>         sonus-now-playing;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -138,6 +141,9 @@ export component AppWindowFrame inherits Rectangle {
     callback refresh-audio();
     callback select-audio(string, string);   // path, name
     callback process-audio(string, string);  // path, op
+    callback refresh-sonus();
+    callback play-sonus(string);              // name
+    callback stop-sonus();
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -449,6 +455,15 @@ export component AppWindowFrame inherits Rectangle {
             refresh => { root.refresh-audio(); }
             select(p, n) => { root.select-audio(p, n); }
             process(p, op) => { root.process-audio(p, op); }
+        }
+
+        if root.kind == AppKind.sonus: SonusView {
+            vertical-stretch: 1;
+            files: root.sonus-files;
+            now-playing: root.sonus-now-playing;
+            refresh => { root.refresh-sonus(); }
+            play(name) => { root.play-sonus(name); }
+            stop => { root.stop-sonus(); }
         }
     }
 

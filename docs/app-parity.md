@@ -31,7 +31,7 @@ Original app catalogue lives in `../ApexOS/ui/desktop-app.js` (`WIN_DEFAULTS` +
 | 📝 Notes | ✗ | B | local + `write_file`/`read_file` |
 | 🎨 Sketchpad | ✗ | B | Slint canvas + **new** `sketch_snapshot` tool |
 | 😊 APEX Face | ✗ | B | custom painter + existing `display_face` tool |
-| 🎵 Sonus | ✗ (needs attention) | C | `/api/sonus/{files,stream}` exist; `sonus-mcp` plugin commented out |
+| 🎵 Sonus | ✅ player (list+play); gen needs APEX | C | `/api/sonus/{files,stream,play,stop}`; `sonus-mcp` plugin (ext. hermes-sonus) |
 | 📁 Explorer | ✗ | C | file ops are agent-tools, not HTTP — needs `/api/fs` or agent-driven |
 | 📷 Camera | ✗ | C | needs video frames into a custom painter |
 | 🧠 Cerebro | ✗ | D | was iframe → external-browser launcher tile |
@@ -52,8 +52,23 @@ Original app catalogue lives in `../ApexOS/ui/desktop-app.js` (`WIN_DEFAULTS` +
 
 1. **PR: Tier A batch** — Event Log · Mesh · Inference (read/light-action viewers).
 2. **PR: Audio Editor** — same Tier A bucket, split out for the waveform painter.
-3. **PR: Sonus attention** — uncomment/deploy `sonus-mcp`, debug Suno generation,
-   wire the player UI to `/api/sonus/*`. (Overlaps the parked Suno-flakiness item.)
+3. **PR: Sonus player** — ✅ shipped. Library UI over `/api/sonus/files` +
+   server-side playback on the device speakers via a new `/api/sonus/{play,stop}`
+   (agentd → `ffplay`). The actual song *generation* is an **external** Python MCP
+   (`hermes-sonus`), not -RS code. Diagnosis of the live flakiness:
+   - It's a **3-step async flow** the model must drive: `generate_song` → `task_id`,
+     then `check_status_until_done` (blocks ≤300s), then `download_track`. agentd's
+     MCP client has **no request timeout**, so the long poll isn't killed by -RS.
+   - **#1 cause:** a local model (Nemotron) fumbling that multi-step dance without
+     guidance → fix is a **soul.md/skill proposal to APEX** (house rule: propose,
+     don't edit). [[config-changes-suggest-to-agent]]
+   - **#2 cause:** download-dir seam — the MCP default is `./suno_downloads` (CWD),
+     but the gateway/UI look in `/var/lib/agentd/workspace/sonus`. The plugin stanza
+     sets `SUNO_DOWNLOAD_DIR` to bridge it; **verify it's set in the live env**.
+   - File-tool isolation is **not** a blocker: reads aren't jailed (only `delete_path`
+     checks containment), and the sonus dir is inside the workspace default anyway.
+   - Remaining: (a) APEX orchestration-guidance proposal; (b) flesh out the
+     `plugins.toml` deploy stanza; (c) confirm live env on the Pi.
 4. **Tier B apps** — Notes, Sketchpad (symbiosis showcase), APEX Face.
 5. **Tier D launcher tiles** — cheap external-browser stubs for Cerebro/SensorHead/Browser.
 6. **New OS-standard apps** — see ideas below.
