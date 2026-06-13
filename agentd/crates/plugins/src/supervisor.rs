@@ -9,6 +9,11 @@ use crate::mcp::McpClient;
 use crate::policy::{Decision, PolicyEngine};
 use crate::vast::{VastState, VastPhase, VastInstance, vastai, load_recipes};
 
+/// Process-global monotonic source of `EvolutionId`s. Each proposed evolution
+/// gets a unique id for the lifetime of the process, so the rollback-snapshot
+/// map (keyed by `EvolutionId`) never collides across turns.
+static NEXT_EVOLUTION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 struct Plugin {
     client: Arc<McpClient>,
 }
@@ -300,7 +305,10 @@ impl Supervisor {
         // Virtual tool: propose_evolution (Phase 0 stub — emits EvolutionProposed
         // and acks immediately; apply logic handled by evolution applier in main.rs).
         if call.tool == "propose_evolution" {
-            let evolution_id = EvolutionId(call.id.0);
+            // Process-global monotonic id — must NOT be derived from the per-turn
+            // ActionId (call.id resets each turn, so successive evolutions would
+            // collide and corrupt the rollback-snapshot map keyed by EvolutionId).
+            let evolution_id = EvolutionId(NEXT_EVOLUTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
             let call_id      = call.id;
             let bus          = self.bus.clone();
             match serde_json::from_value::<EvolutionProposal>(call.args.clone()) {
@@ -740,16 +748,21 @@ impl Supervisor {
                 }
 
                 // Step 3: install git if needed, clone repo
+                let repo_url_q = shell_single_quote(&repo_url);
                 let prep_cmd = format!(
                     "apt-get install -y -q git 2>/dev/null; \
-                     git clone {repo_url} /home/{ssh_user}/ApexOS 2>/dev/null || \
+                     git clone {repo_url_q} /home/{ssh_user}/ApexOS 2>/dev/null || \
                      git -C /home/{ssh_user}/ApexOS pull"
                 );
                 let prep = tokio::time::timeout(
                     tokio::time::Duration::from_secs(60),
                     tokio::process::Command::new(&ssh_base[0])
                         .args(&ssh_base[1..])
-                        .arg(format!("echo '{ssh_password}' | sudo -S bash -c {prep_cmd:?}"))
+                        .arg(format!(
+                            "echo {} | sudo -S bash -c {}",
+                            shell_single_quote(&ssh_password),
+                            shell_single_quote(&prep_cmd),
+                        ))
                         .output(),
                 ).await;
                 if prep.is_err() {
@@ -767,7 +780,7 @@ impl Supervisor {
                 let api_key_export = if api_key.is_empty() {
                     String::new()
                 } else {
-                    format!("export ANTHROPIC_API_KEY={api_key:?}; ")
+                    format!("export ANTHROPIC_API_KEY={}; ", shell_single_quote(&api_key))
                 };
                 let install_cmd = format!(
                     "cd /home/{ssh_user}/ApexOS && \
@@ -777,7 +790,11 @@ impl Supervisor {
                 );
                 let launch = tokio::process::Command::new(&ssh_base[0])
                     .args(&ssh_base[1..])
-                    .arg(format!("echo '{ssh_password}' | sudo -S bash -c {install_cmd:?}"))
+                    .arg(format!(
+                        "echo {} | sudo -S bash -c {}",
+                        shell_single_quote(&ssh_password),
+                        shell_single_quote(&install_cmd),
+                    ))
                     .output().await;
 
                 let pid_line = launch.as_ref().ok()
@@ -1542,6 +1559,24 @@ fn format_event_line(v: &serde_json::Value) -> Option<String> {
     Some(line)
 }
 
+/// Wrap `s` in single quotes, escaping any embedded single quote, so it is safe
+/// to interpolate into a POSIX shell command. `'` becomes `'\''` (close quote,
+/// escaped literal quote, reopen quote). Prevents command injection through
+/// interpolated user-supplied values (ssh password, repo url, api key).
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 // ── mesh helpers ──────────────────────────────────────────────────────────────
 
 /// Look up a peer's ws_url by node_id in peers.toml. Async because it reads a file.
@@ -1555,4 +1590,34 @@ async fn find_peer_ws_url(node_id: &str) -> Option<String> {
     let raw  = tokio::fs::read_to_string(&path).await.ok()?;
     let file: PeersFile = toml::from_str(&raw).ok()?;
     file.peer.into_iter().find(|p| p.node_id == node_id).map(|p| p.ws_url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn evolution_ids_are_distinct_across_proposals() {
+        // Two evolutions in the same process must receive distinct ids, even
+        // though the per-turn ActionId (call.id) resets each turn.
+        let a = EvolutionId(NEXT_EVOLUTION_ID.fetch_add(1, Ordering::Relaxed));
+        let b = EvolutionId(NEXT_EVOLUTION_ID.fetch_add(1, Ordering::Relaxed));
+        assert_ne!(a.0, b.0, "successive evolutions must not collide");
+        assert_eq!(b.0, a.0 + 1, "ids must be monotonic");
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_injection() {
+        // Normal input is just wrapped in quotes.
+        assert_eq!(shell_single_quote("https://x/repo.git"), "'https://x/repo.git'");
+        // Embedded single quote is neutralized: '\'' closes/reopens the quote.
+        assert_eq!(
+            shell_single_quote("a'; rm -rf / #"),
+            "'a'\\''; rm -rf / #'"
+        );
+        // Shell metacharacters stay inert because they remain inside the quotes.
+        let q = shell_single_quote("$(touch /tmp/pwned)");
+        assert_eq!(q, "'$(touch /tmp/pwned)'");
+    }
 }

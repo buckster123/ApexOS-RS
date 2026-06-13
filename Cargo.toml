@@ -50,6 +50,8 @@ fastembed     = "4"
 # CLI
 clap          = { version = "4", features = ["derive", "env"] }
 # Utils
+subtle           = "2"
+percent-encoding = "2"
 uuid          = { version = "1", features = ["v4", "serde"] }
 chrono        = { version = "0.4", features = ["serde"] }
 rand          = "0.8"

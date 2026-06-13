@@ -100,17 +100,32 @@ async fn require_token(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .unwrap_or("");
-    if from_header == token {
+    if tokens_match(from_header, token) {
         return next.run(req).await;
     }
-    let from_query = req.uri().query().unwrap_or("")
+    // URL-decode the ?token= value so percent-encoded tokens compare correctly.
+    let from_query_raw = req.uri().query().unwrap_or("")
         .split('&')
         .find_map(|p| p.strip_prefix("token="))
         .unwrap_or("");
-    if from_query == token {
+    let from_query = percent_encoding::percent_decode_str(from_query_raw)
+        .decode_utf8_lossy();
+    if tokens_match(&from_query, token) {
         return next.run(req).await;
     }
     (StatusCode::UNAUTHORIZED, "invalid or missing token").into_response()
+}
+
+/// Constant-time token comparison. Length is checked first (lengths are not
+/// secret); equal-length byte slices are then compared with `ConstantTimeEq`
+/// so a timing side-channel cannot leak how many leading bytes matched.
+fn tokens_match(provided: &str, expected: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    let (p, e) = (provided.as_bytes(), expected.as_bytes());
+    if p.len() != e.len() {
+        return false;
+    }
+    p.ct_eq(e).into()
 }
 
 pub fn router(state: GatewayState) -> Router {
@@ -414,9 +429,28 @@ async fn set_key_handler(
 
     let persist_path = std::env::var("AGENTD_KEY_FILE")
         .unwrap_or_else(|_| "/var/lib/agentd/.api_key".into());
-    let _ = tokio::fs::write(&persist_path, &key).await;
+    let _ = write_secret_file(&persist_path, &key);
 
     Json(serde_json::json!({ "ok": true }))
+}
+
+/// Write a secret (API key) to `path` with mode 0600, so it is not world- or
+/// group-readable. Truncates any existing file. Synchronous std I/O — key
+/// files are tiny and writes are infrequent (settings save only).
+fn write_secret_file(path: &str, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(contents.as_bytes())?;
+    // .mode() only applies on create; enforce 0600 on a pre-existing file too.
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    Ok(())
 }
 
 async fn get_keys_handler(State(state): State<GatewayState>) -> impl IntoResponse {
@@ -436,7 +470,7 @@ async fn set_keys_handler(
             *state.api_key.write().await = key.clone();
             let path = std::env::var("AGENTD_KEY_FILE")
                 .unwrap_or_else(|_| "/var/lib/agentd/.api_key".into());
-            let _ = tokio::fs::write(&path, &key).await;
+            let _ = write_secret_file(&path, &key);
         }
     }
     if let Some(key) = body["oai"].as_str() {
@@ -445,7 +479,7 @@ async fn set_keys_handler(
             *state.oai_api_key.write().await = key.clone();
             let path = std::env::var("AGENTD_OAI_KEY_FILE")
                 .unwrap_or_else(|_| "/var/lib/agentd/.oai_api_key".into());
-            let _ = tokio::fs::write(&path, &key).await;
+            let _ = write_secret_file(&path, &key);
         }
     }
     Json(serde_json::json!({ "ok": true }))
@@ -1295,7 +1329,16 @@ unsafe fn open_pty_session() -> Option<(i32, i32, std::process::Child)> {
     let mr = libc::dup(master_fd);
     let mw = libc::dup(master_fd);
     libc::close(master_fd);
-    if mr < 0 || mw < 0 { return None; }
+    if mr < 0 || mw < 0 {
+        // dup failed: reap the bash child and close whichever fd did succeed,
+        // so we don't leak a zombie process or a file descriptor.
+        if mr >= 0 { libc::close(mr); }
+        if mw >= 0 { libc::close(mw); }
+        let mut child = child;
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
 
     Some((mr, mw, child))
 }
@@ -2098,4 +2141,30 @@ pub async fn serve(state: GatewayState, addr: SocketAddr) -> anyhow::Result<()> 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router(state)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    #[test]
+    fn tokens_match_equal() {
+        assert!(tokens_match("s3cret-token", "s3cret-token"));
+    }
+
+    #[test]
+    fn tokens_match_rejects_mismatch_and_length() {
+        assert!(!tokens_match("s3cret-token", "wrong-token!"));
+        assert!(!tokens_match("short", "longer-token"));
+        assert!(!tokens_match("", "nonempty"));
+    }
+
+    #[test]
+    fn percent_encoded_query_token_decodes() {
+        // A token containing reserved chars arrives percent-encoded in ?token=.
+        let expected = "a b+c/d";
+        let encoded  = "a%20b%2Bc%2Fd";
+        let decoded  = percent_encoding::percent_decode_str(encoded).decode_utf8_lossy();
+        assert!(tokens_match(&decoded, expected));
+    }
 }
