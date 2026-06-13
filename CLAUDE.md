@@ -236,8 +236,8 @@ stringify it for the row key; don't expect a flat `call_id`.
 
 | Event | Fields | Action |
 |-------|--------|--------|
-| `agent_text` | `delta: string` | append to text buffer |
-| `turn_started` | — | clear buffer, set busy |
+| `agent_text` | `delta: string` | append to text buffer (lazily creates the agent bubble + sets busy — Rust agentd has no `turn_started`) |
+| `turn_started` | — | **Python agentd only — Rust agentd never emits it.** UI keeps a handler for cross-compat; on Rust the `agent_text` lazy-bubble path sets busy instead |
 | `turn_complete` | — | clear busy, TTS if enabled |
 | `tool_requested` | `call: {id, tool, args, needs_approval}` | push tool block (status=running) |
 | `tool_result` | `call: <id>, output: {ok, content}` | update block by `call`; ok→done, !ok→error |
