@@ -1635,6 +1635,81 @@ struct AppState {
     subagents: std::collections::HashSet<u64>,
 }
 
+// ── Screen mirror (#36): serve a PNG of APEX's own screen ────────────────────
+// APEX's `screenshot_mirror` tool GETs http://127.0.0.1:8788/snapshot. We render
+// the live window via Slint's renderer-agnostic Window::take_snapshot() — works
+// on winit/femtovg (desktop), linuxkms/skia (Pi 5) and femtovg-software (Pi
+// Zero) alike, so there's no DRM framebuffer readback and no Wayland screencopy
+// to fight. Loopback-only: the screen is never exposed on the network.
+
+fn snapshot_addr() -> String {
+    std::env::var("APEXOS_UI_SNAPSHOT_ADDR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "127.0.0.1:8788".to_string())
+}
+
+async fn run_snapshot_server(addr: String, ui_weak: slint::Weak<AppWindow>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[mirror] snapshot server bind {addr} failed: {e}");
+            return;
+        }
+    };
+    eprintln!("[mirror] screen-snapshot server on http://{addr}/snapshot");
+    loop {
+        let (mut stream, _) = match listener.accept().await {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let uw = ui_weak.clone();
+        tokio::spawn(async move {
+            // Drain the request head; any GET is served the same way (no parse).
+            let mut scratch = [0u8; 1024];
+            let _ = stream.read(&mut scratch).await;
+            let (status, ctype, body) = match capture_png(uw).await {
+                Ok(png) => ("200 OK", "image/png", png),
+                Err(e) => ("500 Internal Server Error", "text/plain", e.into_bytes()),
+            };
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(&body).await;
+            let _ = stream.shutdown().await;
+        });
+    }
+}
+
+/// Snapshot the live window on the Slint thread, then PNG-encode off-thread.
+async fn capture_png(ui_weak: slint::Weak<AppWindow>) -> Result<Vec<u8>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    slint::invoke_from_event_loop(move || {
+        let res = match ui_weak.upgrade() {
+            Some(ui) => ui
+                .window()
+                .take_snapshot()
+                .map_err(|e| format!("take_snapshot: {e}")),
+            None => Err("UI window gone".to_string()),
+        };
+        let _ = tx.send(res);
+    })
+    .map_err(|e| format!("event loop: {e}"))?;
+    let buf = rx.await.map_err(|_| "snapshot canceled".to_string())??;
+    // SharedPixelBuffer<Rgba8Pixel> → PNG, off the Slint thread.
+    let (w, h) = (buf.width(), buf.height());
+    let img = image::RgbaImage::from_raw(w, h, buf.as_bytes().to_vec())
+        .ok_or_else(|| "pixel buffer size mismatch".to_string())?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png)
+        .map_err(|e| format!("png encode: {e}"))?;
+    Ok(out.into_inner())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -2783,6 +2858,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         );
     }
+
+    // ── Screen mirror (#36): self-snapshot server for APEX's screenshot tool ──
+    rt.spawn(run_snapshot_server(snapshot_addr(), ui.as_weak()));
 
     ui.run()?;
     Ok(())

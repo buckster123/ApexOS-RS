@@ -1,3 +1,7 @@
 /target
 *.swp
 .DS_Store
+
+# Very-future side projects parked in-tree (not part of the RS distro build)
+/docs/rust-ai-3d-hud-skill/
+/world/
