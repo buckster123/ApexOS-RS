@@ -117,6 +117,11 @@ pub fn list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "screenshot_mirror",
+            "description": "Capture and SEE your own live screen — the ApexOS-RS UI as it is rendered right now. Use this to look in the mirror: inspect the current interface, verify a UI change you just made, or check what the user is looking at. Returns the screenshot inline so you see it directly. Only works on a node with a display (kiosk or desktop); returns a note when headless.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "http_fetch",
             "description": "Make an HTTP request.",
             "inputSchema": {
@@ -342,6 +347,7 @@ pub fn call(name: &str, args: &Value) -> Value {
         "notes_read" => notes_read(args),
         "notes_append" => notes_append(args),
         "sketch_snapshot" => sketch_snapshot(),
+        "screenshot_mirror" => screenshot_mirror(),
         "create_dir" => create_dir(args),
         "delete_path" => delete_path(args),
         "http_fetch" => http_fetch(args),
@@ -700,6 +706,58 @@ fn sketch_snapshot() -> Value {
     } else {
         tool_ok(json!({ "path": null, "message": "No sketch yet — the user hasn't sent one from the Sketchpad." }))
     }
+}
+
+/// Screen mirror (#36): capture APEX's own live UI and hand it back via the
+/// vision sentinel. The Slint UI serves a PNG of itself at a loopback endpoint
+/// (renderer-agnostic Window::take_snapshot — no DRM/Wayland capture needed); we
+/// fetch it, persist under the workspace, and return {vision:{path}} so the turn
+/// loop downscales it and APEX sees its screen inline. Path form (not b64) keeps
+/// the tool-result JSON small for a full-screen image.
+fn screenshot_mirror() -> Value {
+    let url = std::env::var("APEXOS_UI_SNAPSHOT_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8788/snapshot".to_string());
+
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return tool_error(format!("client build failed: {}", e)),
+    };
+
+    let resp = match client.get(&url).send() {
+        Ok(r) => r,
+        // Connection refused / unreachable = no UI on this node (headless, or the
+        // kiosk UI is down). Not an error — just nothing to mirror.
+        Err(_) => {
+            return tool_ok(json!({
+                "screen": null,
+                "message": "No display attached — the ApexOS-RS UI isn't running on this node (headless, or the kiosk display is down). Nothing to mirror."
+            }))
+        }
+    };
+    if !resp.status().is_success() {
+        return tool_error(format!("snapshot endpoint returned HTTP {}", resp.status().as_u16()));
+    }
+    let bytes = match resp.bytes() {
+        Ok(b) => b,
+        Err(e) => return tool_error(format!("reading snapshot failed: {}", e)),
+    };
+
+    let path = resolve_path("screenshots/latest.png");
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Err(e) = fs::write(&path, &bytes) {
+        return tool_error(format!("cannot write screenshot {}: {}", path.display(), e));
+    }
+    tool_ok(json!({
+        "vision": { "path": path.to_string_lossy() },
+        "text": "This is APEX's current screen — the live ApexOS-RS UI as rendered right now.",
+    }))
 }
 
 fn list_dir(args: &Value) -> Value {

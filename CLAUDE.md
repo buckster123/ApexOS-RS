@@ -275,6 +275,7 @@ Full event list: `agentd/crates/core/src/types.rs` — `Event` enum.
 | `SLINT_FULLSCREEN` | unset | `1` = fullscreen, no window chrome |
 | `RUST_LOG` | `info` | tracing filter |
 | `VISION_MAX_EDGE` | `1024` | agentd: longest-edge px cap for images entering model context (the token-bomb shim, clamped 128–4096) |
+| `APEXOS_UI_SNAPSHOT_ADDR` | `127.0.0.1:8788` | ui-slint: loopback bind for the screen-mirror snapshot server (`take_snapshot`→PNG); the `screenshot_mirror` tool fetches from the matching `APEXOS_UI_SNAPSHOT_URL` (`http://127.0.0.1:8788/snapshot`) |
 
 ---
 
@@ -377,7 +378,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 - Sub-agent windows — `Popup` per child session, maps to `SubAgentStarted` events
 - `apexos-core` vendor — optionally vendor agentd's core crate for shared `Event` types (avoids JSON string matching), blocked on agentd publishing it as a library crate
 - ~~Vision input — core eyes~~ — shipped: the downscale **shim** (`apexos_core::vision`, `VISION_MAX_EDGE` cap = the SensorHead token-bomb guard) + the **vision tool-result path** (a tool returns `{"vision":{"path"|"b64"},"text"}` → `turn.rs::vision_rewrite` shims it → multimodal content block; Anthropic native, OAI/Ollama follow-up user msg). `sketch_snapshot` now hands APEX the drawing inline. Remaining vision follow-ups still deferred:
-  - **Screenshot "mirror" tool** (next up) — APEX snaps its own screen for self-modification feedback. Pure capture → PNG → the *same* `{vision:{path}}` sentinel, zero agentd changes. Open unknown: the capture backend on Pi linuxkms (no compositor → DRM/GL readback) / Wayland laptop.
+  - ~~**Screenshot "mirror" tool**~~ — shipped: `screenshot_mirror` (apexos-tools) → ui-slint serves its own `Window::take_snapshot()` PNG over a loopback endpoint (renderer-agnostic — winit/femtovg, linuxkms/skia, femtovg-software all snapshot the rendered scene, so **no** DRM readback and **no** Wayland screencopy) → tool writes it under the workspace and returns the same `{vision:{path}}` sentinel, zero agentd changes. Graceful "no display" when headless.
   - **User-attached images** — webcam / laptop camera / arbitrary image handed to APEX via UI/PWA (upload endpoint + WS `user_prompt` image; needs a first-class `ContentBlock::Image` for user messages).
   - **cerebro `describe_image` / `search_vision`** — still stubbed; describe_image wants a VLM, search_vision wants CLIP-style image embeddings.
 
