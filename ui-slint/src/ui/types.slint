@@ -10,7 +10,7 @@ export enum ShellMode { desktop, focus }
 // Every app is a window. Rust owns the set (which windows exist, z-order =
 // model order with the last element on top); Slint owns live-drag geometry
 // for smoothness and commits back to Rust on release.
-export enum AppKind { chat, system, sensor, sessions, settings, terminal, council }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference }
 
 // ── Persona system (glowup G4) ───────────────────────────────────────────
 // A persona is a named bundle: theme + chrome + wallpaper + default shell mode
@@ -121,6 +121,25 @@ export struct SessionItem {
     time-ago:      string,   // "2 min ago", "3 hr ago", etc.
     message-count: int,
     preview:       string,   // first 80 chars of first user message
+}
+
+// ── App-parity Tier A: read/light-action viewers over existing agentd routes ──
+
+// One row in the Event Log app (📜) — a filtered entry from /api/events/recent.
+export struct EventLogItem {
+    ev-type: string,   // raw Event "type" (e.g. "tool_requested", "wake_triggered")
+    summary: string,   // one-line detail derived from the event's notable fields
+    accent:  color,    // severity/category tint
+}
+
+// One node in the Mesh app (🕸). `is-peer` true = saved peer (peers.toml);
+// false = an mDNS-discovered node not yet added. /api/mesh/{peers,nodes}.
+export struct MeshNode {
+    node-id: string,
+    detail:  string,   // ws_url (peer) or "ip:port" (discovered)
+    role:    string,   // "full" | "sensor" | "thin" | "—"
+    status:  string,   // "online" | "discovered" | …
+    is-peer: bool,
 }
 
 export struct MessageItem {

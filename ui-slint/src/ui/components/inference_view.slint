@@ -1,0 +1,181 @@
+import { Palette } from "../palette.slint";
+import { ModelItem } from "../types.slint";
+
+// ── InferenceView (⚡) ─────────────────────────────────────────────────────────
+//
+// The inference backend at a glance: which backend serves the agent + its base
+// URL (/api/backend), plus a quick model switcher (/api/models + the shared
+// set-model callback). A focused fast-swap panel — the full editor lives in
+// Settings; this is the "what's running right now" view for the mesh.
+//
+// preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
+
+export component InferenceView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <string>      backend: "—";
+    in property <string>      base-url: "";
+    in property <[ModelItem]> models;
+    in property <string>      current-model;
+
+    callback refresh();
+    callback set-model(string);
+
+    VerticalLayout {
+        // ── Header ────────────────────────────────────────────────────────
+        Rectangle {
+            height: 48px;
+            background: Palette.surface;
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 14px;
+
+                Text {
+                    text: "INFERENCE";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 2px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                Rectangle {
+                    width: 72px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface-hi;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    y: (parent.height - self.height) / 2;
+
+                    TouchArea { clicked => { root.refresh(); } }
+
+                    Text {
+                        text: "REFRESH";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 1px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Backend info card ────────────────────────────────────────────────
+        Rectangle {
+            height: card.preferred-height + 24px;
+            background: Palette.bg;
+
+            card := HorizontalLayout {
+                padding: 16px;
+                spacing: 24px;
+
+                VerticalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "BACKEND";
+                        color: Palette.text-dim;
+                        font-size: 8px;
+                        letter-spacing: 1.5px;
+                    }
+                    Text {
+                        text: root.backend;
+                        color: Palette.primary;
+                        font-size: 16px;
+                        font-weight: 700;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 4px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "BASE URL";
+                        color: Palette.text-dim;
+                        font-size: 8px;
+                        letter-spacing: 1.5px;
+                    }
+                    Text {
+                        text: root.base-url == "" ? "(default)" : root.base-url;
+                        color: Palette.text;
+                        font-size: 12px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Model switcher ───────────────────────────────────────────────────
+        Flickable {
+            vertical-stretch: 1;
+            interactive: true;
+            viewport-height: model-col.preferred-height;
+
+            model-col := VerticalLayout {
+                padding: 12px;
+                spacing: 6px;
+                alignment: start;
+
+                if root.models.length == 0: Text {
+                    text: "Tap REFRESH to load models…";
+                    color: Palette.text-dim;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
+
+                for m in root.models: Rectangle {
+                    height: 44px;
+                    border-radius: Palette.radius;
+                    background: m.model-id == root.current-model ? Palette.surface-hi : Palette.surface;
+                    border-width: 1px;
+                    border-color: m.model-id == root.current-model ? Palette.primary : Palette.border;
+                    animate border-color { duration: 200ms; }
+
+                    TouchArea {
+                        clicked => {
+                            if m.model-id != root.current-model { root.set-model(m.model-id); }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 10px;
+
+                        Rectangle {
+                            width: 3px;
+                            border-radius: 2px;
+                            background: m.model-id == root.current-model ? Palette.primary : transparent;
+                        }
+
+                        Text {
+                            text: m.model-name == "" ? m.model-id : m.model-name;
+                            color: m.model-id == root.current-model ? Palette.text-bright : Palette.text;
+                            font-size: 12px;
+                            font-weight: m.model-id == root.current-model ? 700 : 400;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        if m.model-id == root.current-model: Text {
+                            text: "ACTIVE";
+                            color: Palette.primary;
+                            font-size: 9px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,128 @@
+import { Palette } from "../palette.slint";
+import { EventLogItem } from "../types.slint";
+
+// ── EventLogView (📜) ────────────────────────────────────────────────────────
+//
+// Read-only feed of recent agentd events (/api/events/recent — noisy streaming
+// events filtered server-side). Newest at the top. Each row shows the event
+// type as a tinted badge + a one-line summary derived by Rust.
+//
+// preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
+
+export component EventLogView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <[EventLogItem]> events;
+
+    callback refresh();
+
+    VerticalLayout {
+        // ── Header ────────────────────────────────────────────────────────
+        Rectangle {
+            height: 48px;
+            background: Palette.surface;
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 14px;
+
+                Text {
+                    text: "EVENT LOG";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 2px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                Rectangle {
+                    width: 72px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface-hi;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    y: (parent.height - self.height) / 2;
+
+                    TouchArea { clicked => { root.refresh(); } }
+
+                    Text {
+                        text: "REFRESH";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 1px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Scrollable feed ─────────────────────────────────────────────────
+        Flickable {
+            vertical-stretch: 1;
+            interactive: true;
+            viewport-height: ev-col.preferred-height;
+
+            ev-col := VerticalLayout {
+                padding: 12px;
+                spacing: 6px;
+                alignment: start;
+
+                if root.events.length == 0: Text {
+                    text: "Tap REFRESH to load recent events…";
+                    color: Palette.text-dim;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
+
+                for item in root.events: Rectangle {
+                    height: row.preferred-height;
+                    border-radius: Palette.radius;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border;
+
+                    row := HorizontalLayout {
+                        padding: 10px;
+                        spacing: 10px;
+                        alignment: start;
+
+                        // Type badge
+                        Rectangle {
+                            width: badge.preferred-width + 16px;
+                            height: 22px;
+                            border-radius: Palette.radius-sm;
+                            background: item.accent.with-alpha(0.18);
+                            border-width: 1px;
+                            border-color: item.accent.with-alpha(0.5);
+                            y: (parent.height - self.height) / 2;
+
+                            badge := Text {
+                                text: item.ev-type;
+                                color: item.accent;
+                                font-size: 10px;
+                                font-weight: 700;
+                                letter-spacing: 0.5px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            text: item.summary;
+                            color: Palette.text;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

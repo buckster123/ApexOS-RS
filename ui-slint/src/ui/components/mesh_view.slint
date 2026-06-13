@@ -1,0 +1,177 @@
+import { Palette } from "../palette.slint";
+import { MeshNode } from "../types.slint";
+
+// ── MeshView (🕸) ─────────────────────────────────────────────────────────────
+//
+// The cluster: saved peers (peers.toml, /api/mesh/peers) + mDNS-discovered
+// nodes not yet added (/api/mesh/nodes). A discovered node offers "+ ADD"
+// (POST /api/mesh/peers); a saved peer offers "✕" (DELETE /api/mesh/peers/:id).
+//
+// preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
+
+export component MeshView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <[MeshNode]> nodes;
+
+    callback refresh();
+    callback add-peer(string, string);   // node_id, ws_url
+    callback remove-peer(string);        // node_id
+
+    VerticalLayout {
+        // ── Header ────────────────────────────────────────────────────────
+        Rectangle {
+            height: 48px;
+            background: Palette.surface;
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 14px;
+
+                Text {
+                    text: "MESH";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 2px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                Rectangle {
+                    width: 72px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface-hi;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    y: (parent.height - self.height) / 2;
+
+                    TouchArea { clicked => { root.refresh(); } }
+
+                    Text {
+                        text: "REFRESH";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 1px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Node list ───────────────────────────────────────────────────────
+        Flickable {
+            vertical-stretch: 1;
+            interactive: true;
+            viewport-height: mesh-col.preferred-height;
+
+            mesh-col := VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                alignment: start;
+
+                if root.nodes.length == 0: Text {
+                    text: "Tap REFRESH to scan the mesh…";
+                    color: Palette.text-dim;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
+
+                for item in root.nodes: Rectangle {
+                    height: 60px;
+                    border-radius: Palette.radius;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: item.is-peer ? Palette.primary.with-alpha(0.4) : Palette.border;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 12px;
+                        spacing: 12px;
+
+                        // Online/known dot
+                        Rectangle {
+                            width: 8px; height: 8px;
+                            border-radius: 4px;
+                            y: (parent.height - self.height) / 2;
+                            background: item.is-peer ? Palette.primary : Palette.text-dim;
+                        }
+
+                        VerticalLayout {
+                            spacing: 4px;
+                            alignment: center;
+                            horizontal-stretch: 1;
+
+                            Text {
+                                text: item.node-id;
+                                color: Palette.text-bright;
+                                font-size: 12px;
+                                font-weight: 600;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: item.detail;
+                                color: Palette.text-dim;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
+                        }
+
+                        // Role / status badge
+                        Rectangle {
+                            width: rbadge.preferred-width + 14px;
+                            height: 20px;
+                            border-radius: Palette.radius-sm;
+                            background: Palette.surface-hi;
+                            y: (parent.height - self.height) / 2;
+                            rbadge := Text {
+                                text: item.is-peer ? item.role : item.status;
+                                color: Palette.text-dim;
+                                font-size: 9px;
+                                letter-spacing: 0.5px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Action: ADD (discovered) / ✕ (saved peer)
+                        Rectangle {
+                            width: 56px;
+                            height: 28px;
+                            border-radius: Palette.radius;
+                            background: act.has-hover
+                                ? (item.is-peer ? rgba(239,68,68,0.2) : Palette.primary-dim)
+                                : Palette.surface-hi;
+                            border-width: 1px;
+                            border-color: item.is-peer ? rgba(239,68,68,0.5) : Palette.primary;
+                            y: (parent.height - self.height) / 2;
+                            animate background { duration: 150ms; }
+
+                            act := TouchArea {
+                                clicked => {
+                                    if item.is-peer {
+                                        root.remove-peer(item.node-id);
+                                    } else {
+                                        root.add-peer(item.node-id, item.detail);
+                                    }
+                                }
+                            }
+                            Text {
+                                text: item.is-peer ? "✕" : "+ ADD";
+                                color: item.is-peer ? #ef4444 : Palette.primary;
+                                font-size: 10px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

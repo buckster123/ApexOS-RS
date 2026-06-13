@@ -51,6 +51,13 @@ thread_local! {
     // Council app (G3d): the deliberating-agent model, driven by Council* events.
     static COUNCIL: RefCell<Option<Rc<slint::VecModel<CouncilAgent>>>> =
         const { RefCell::new(None) };
+    // Tier-A parity apps: each replaced wholesale on REFRESH.
+    static EVENTS: RefCell<Option<Rc<slint::VecModel<EventLogItem>>>> =
+        const { RefCell::new(None) };
+    static MESH: RefCell<Option<Rc<slint::VecModel<MeshNode>>>> =
+        const { RefCell::new(None) };
+    static INFER_MODELS: RefCell<Option<Rc<slint::VecModel<ModelItem>>>> =
+        const { RefCell::new(None) };
 }
 
 // ── Feedback subsystem (toasts) ───────────────────────────────────────────────
@@ -117,6 +124,9 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::Settings => 4,
         AppKind::Terminal => 5,
         AppKind::Council => 6,
+        AppKind::EventLog => 7,
+        AppKind::Mesh => 8,
+        AppKind::Inference => 9,
     }
 }
 
@@ -128,6 +138,9 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         4 => AppKind::Settings,
         5 => AppKind::Terminal,
         6 => AppKind::Council,
+        7 => AppKind::EventLog,
+        8 => AppKind::Mesh,
+        9 => AppKind::Inference,
         _ => AppKind::Chat,
     }
 }
@@ -274,6 +287,9 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Settings => "Settings",
         AppKind::Terminal => "Terminal",
         AppKind::Council => "Council",
+        AppKind::EventLog => "Event Log",
+        AppKind::Mesh => "Mesh",
+        AppKind::Inference => "Inference",
     }
 }
 
@@ -288,6 +304,9 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Settings => (660.0, 560.0),
         AppKind::Terminal => (640.0, 420.0),
         AppKind::Council => (560.0, 560.0),
+        AppKind::EventLog => (560.0, 520.0),
+        AppKind::Mesh => (520.0, 460.0),
+        AppKind::Inference => (520.0, 520.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -650,6 +669,45 @@ fn replace_models(items: Vec<ModelItem>) {
     });
 }
 
+fn replace_events(items: Vec<EventLogItem>) {
+    EVENTS.with(|e| {
+        if let Some(model) = e.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+            for item in items {
+                model.push(item);
+            }
+        }
+    });
+}
+
+fn replace_mesh(items: Vec<MeshNode>) {
+    MESH.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+            for item in items {
+                model.push(item);
+            }
+        }
+    });
+}
+
+fn replace_infer_models(items: Vec<ModelItem>) {
+    INFER_MODELS.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+            for item in items {
+                model.push(item);
+            }
+        }
+    });
+}
+
 fn find_tool_row(call_id: &str) -> Option<usize> {
     MESSAGES.with(|m| {
         if let Some(model) = m.borrow().as_ref() {
@@ -990,6 +1048,129 @@ async fn fetch_sys_stats(client: &reqwest::Client, base_url: &str) -> Option<(f3
     Some((cpu_pct, ram_pct, disk_pct))
 }
 
+// ── Tier-A parity app fetchers ──────────────────────────────────────────────
+
+fn event_accent(ty: &str) -> slint::Color {
+    let hex: u32 = match ty {
+        t if t.contains("error") || t.contains("denied") || t.contains("reject") => 0xef4444,
+        "tool_requested" | "approval_pending" => 0xeab308,
+        "tool_result" => 0x39ff14,
+        "wake_triggered" => 0x00d4ff,
+        "sensor_reading" | "thermal_frame" => 0x6c8aff,
+        _ => 0x8b93a7,
+    };
+    slint::Color::from_rgb_u8((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+// One-line detail from an event's notable fields; falls back to compacting the
+// top-level scalar fields so unknown event shapes still read sensibly.
+fn event_summary(ev: &Value) -> String {
+    let trunc = |s: &str, n: usize| -> String {
+        let t: String = s.chars().take(n).collect();
+        if s.chars().count() > n { format!("{t}…") } else { t }
+    };
+    if let Some(tool) = ev["call"]["tool"].as_str() {
+        return tool.to_string();
+    }
+    if let Some(kind) = ev["reading"]["kind"].as_str() {
+        return kind.to_string();
+    }
+    if let Some(text) = ev["text"].as_str().filter(|s| !s.is_empty()) {
+        return trunc(text, 120);
+    }
+    let Some(obj) = ev.as_object() else { return String::new() };
+    let parts: Vec<String> = obj.iter()
+        .filter(|(k, _)| k.as_str() != "type")
+        .filter_map(|(k, v)| match v {
+            Value::String(s) => Some(format!("{k}={}", trunc(s, 40))),
+            Value::Number(n) => Some(format!("{k}={n}")),
+            Value::Bool(b)   => Some(format!("{k}={b}")),
+            _ => None,
+        })
+        .take(4)
+        .collect();
+    parts.join("  ")
+}
+
+// GET /api/events/recent → newest-first EventLogItem list.
+async fn fetch_events(client: &reqwest::Client, base_url: &str) -> Vec<EventLogItem> {
+    let body = json_get(client, format!("{base_url}/api/events/recent?max=200")).await;
+    let arr = match body.as_array() { Some(a) => a.clone(), None => return Vec::new() };
+    arr.iter().rev().map(|ev| {
+        let ty = ev["type"].as_str().unwrap_or("event");
+        EventLogItem {
+            ev_type: ty.into(),
+            summary: event_summary(ev).into(),
+            accent:  event_accent(ty),
+        }
+    }).collect()
+}
+
+// GET /api/mesh/{peers,nodes} → saved peers first, then discovered-but-unsaved.
+async fn fetch_mesh(client: &reqwest::Client, base_url: &str) -> Vec<MeshNode> {
+    let (peers_resp, nodes_resp) = tokio::join!(
+        json_get(client, format!("{base_url}/api/mesh/peers")),
+        json_get(client, format!("{base_url}/api/mesh/nodes")),
+    );
+    let mut out: Vec<MeshNode> = Vec::new();
+    if let Some(peers) = peers_resp["peers"].as_array() {
+        for p in peers {
+            out.push(MeshNode {
+                node_id: p["node_id"].as_str().unwrap_or("").into(),
+                detail:  p["ws_url"].as_str().unwrap_or("").into(),
+                role:    p["role"].as_str().unwrap_or("full").into(),
+                status:  p["status"].as_str().unwrap_or("online").into(),
+                is_peer: true,
+            });
+        }
+    }
+    if let Some(nodes) = nodes_resp["nodes"].as_array() {
+        for n in nodes {
+            // Skip nodes already saved as peers (server flags them "known").
+            if n["known"].as_bool() == Some(true) { continue; }
+            let ip   = n["ip"].as_str().unwrap_or("");
+            let port = n["port"].as_u64().unwrap_or(8787);
+            out.push(MeshNode {
+                node_id: n["node_id"].as_str().unwrap_or("").into(),
+                detail:  n["ws_url"].as_str().map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("{ip}:{port}")).into(),
+                role:    "—".into(),
+                status:  "discovered".into(),
+                is_peer: false,
+            });
+        }
+    }
+    out
+}
+
+struct InferenceData {
+    backend:  String,
+    base_url: String,
+    models:   Vec<ModelItem>,
+}
+
+// GET /api/backend + /api/models → current backend + the model list.
+async fn fetch_inference(client: &reqwest::Client, base_url: &str) -> InferenceData {
+    let (backend_resp, models_resp) = tokio::join!(
+        json_get(client, format!("{base_url}/api/backend")),
+        json_get(client, format!("{base_url}/api/models")),
+    );
+    let models: Vec<ModelItem> = models_resp["models"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(|m| ModelItem {
+            model_id:   m["id"].as_str().unwrap_or("").into(),
+            model_name: m["name"].as_str().unwrap_or("").into(),
+        })
+        .collect();
+    InferenceData {
+        backend:  backend_resp["backend"].as_str().unwrap_or("—").to_string(),
+        base_url: backend_resp["oai_base_url"].as_str().unwrap_or("").to_string(),
+        models,
+    }
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 #[derive(Default)]
 struct AppState {
@@ -1048,6 +1229,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let models_vec: Rc<slint::VecModel<ModelItem>> = Rc::new(slint::VecModel::default());
     ui.set_available_models(slint::ModelRc::from(models_vec.clone()));
     MODELS.with(|m| *m.borrow_mut() = Some(models_vec.clone()));
+
+    // Tier-A parity app models — each replaced wholesale on the app's REFRESH.
+    let events_vec: Rc<slint::VecModel<EventLogItem>> = Rc::new(slint::VecModel::default());
+    ui.set_event_log(slint::ModelRc::from(events_vec.clone()));
+    EVENTS.with(|e| *e.borrow_mut() = Some(events_vec.clone()));
+
+    let mesh_vec: Rc<slint::VecModel<MeshNode>> = Rc::new(slint::VecModel::default());
+    ui.set_mesh_nodes(slint::ModelRc::from(mesh_vec.clone()));
+    MESH.with(|m| *m.borrow_mut() = Some(mesh_vec.clone()));
+
+    let infer_models_vec: Rc<slint::VecModel<ModelItem>> = Rc::new(slint::VecModel::default());
+    ui.set_inference_models(slint::ModelRc::from(infer_models_vec.clone()));
+    INFER_MODELS.with(|m| *m.borrow_mut() = Some(infer_models_vec.clone()));
 
     // Feedback subsystem: bind the toast model + global callbacks.
     let toasts_vec: Rc<slint::VecModel<ToastItem>> = Rc::new(slint::VecModel::default());
@@ -1125,6 +1319,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     AppKind::Settings => ui.invoke_refresh_settings(),
                     AppKind::Sessions => ui.invoke_refresh_sessions(),
                     AppKind::Terminal => start_terminal(&rt_h_term, &term_url, ui.as_weak()),
+                    AppKind::EventLog => ui.invoke_refresh_events(),
+                    AppKind::Mesh => ui.invoke_refresh_mesh(),
+                    AppKind::Inference => ui.invoke_refresh_inference(),
                     _ => {}
                 }
             }
@@ -1558,6 +1755,94 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_settings_model(data.current_model.into());
                     ui.set_settings_api_key_set(data.api_key_set);
                     replace_models(data.models);
+                }
+            }).ok();
+        });
+    });
+
+    // ── Tier-A parity apps: refresh + mesh peer actions ───────────────────────
+    let rt_h_ev    = rt.handle().clone();
+    let client_ev  = Arc::clone(&http_client);
+    let base_ev    = http_base.clone();
+    ui.on_refresh_events(move || {
+        let client = Arc::clone(&client_ev);
+        let base   = base_ev.clone();
+        rt_h_ev.spawn(async move {
+            let items = fetch_events(&client, &base).await;
+            slint::invoke_from_event_loop(move || replace_events(items)).ok();
+        });
+    });
+
+    let rt_h_mesh   = rt.handle().clone();
+    let client_mesh = Arc::clone(&http_client);
+    let base_mesh   = http_base.clone();
+    ui.on_refresh_mesh(move || {
+        let client = Arc::clone(&client_mesh);
+        let base   = base_mesh.clone();
+        rt_h_mesh.spawn(async move {
+            let items = fetch_mesh(&client, &base).await;
+            slint::invoke_from_event_loop(move || replace_mesh(items)).ok();
+        });
+    });
+
+    let rt_h_addp    = rt.handle().clone();
+    let client_addp  = Arc::clone(&http_client);
+    let base_addp    = http_base.clone();
+    ui.on_add_peer(move |node_id, ws_url| {
+        let client = Arc::clone(&client_addp);
+        let base   = base_addp.clone();
+        let id     = node_id.to_string();
+        let url    = ws_url.to_string();
+        rt_h_addp.spawn(async move {
+            let ok = client.post(format!("{base}/api/mesh/peers"))
+                .json(&serde_json::json!({"node_id": id, "ws_url": url}))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok { notify(ToastKind::Success, "Peer added"); }
+            else  { notify(ToastKind::Error, "Failed to add peer"); }
+            // Re-scan so the row moves from discovered → saved.
+            let items = fetch_mesh(&client, &base).await;
+            slint::invoke_from_event_loop(move || replace_mesh(items)).ok();
+        });
+    });
+
+    let rt_h_rmp    = rt.handle().clone();
+    let client_rmp  = Arc::clone(&http_client);
+    let base_rmp    = http_base.clone();
+    ui.on_remove_peer(move |node_id| {
+        let client = Arc::clone(&client_rmp);
+        let base   = base_rmp.clone();
+        let id     = node_id.to_string();
+        rt_h_rmp.spawn(async move {
+            let ok = client.delete(format!("{base}/api/mesh/peers/{id}"))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok { notify(ToastKind::Info, "Peer removed"); }
+            else  { notify(ToastKind::Error, "Failed to remove peer"); }
+            let items = fetch_mesh(&client, &base).await;
+            slint::invoke_from_event_loop(move || replace_mesh(items)).ok();
+        });
+    });
+
+    let rt_h_inf    = rt.handle().clone();
+    let client_inf  = Arc::clone(&http_client);
+    let base_inf    = http_base.clone();
+    let ui_weak_inf = ui.as_weak();
+    ui.on_refresh_inference(move || {
+        let client = Arc::clone(&client_inf);
+        let base   = base_inf.clone();
+        let ui_w   = ui_weak_inf.clone();
+        rt_h_inf.spawn(async move {
+            let data = fetch_inference(&client, &base).await;
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    ui.set_inference_backend(data.backend.into());
+                    ui.set_inference_base_url(data.base_url.into());
+                    replace_infer_models(data.models);
                 }
             }).ok();
         });

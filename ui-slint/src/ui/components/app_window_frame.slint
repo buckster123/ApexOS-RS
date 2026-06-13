@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -21,6 +21,9 @@ import { SessionView } from "session_view.slint";
 import { SettingsView } from "settings_view.slint";
 import { TerminalView } from "terminal_view.slint";
 import { CouncilView } from "council_view.slint";
+import { EventLogView } from "event_log_view.slint";
+import { MeshView } from "mesh_view.slint";
+import { InferenceView } from "inference_view.slint";
 
 component CaptionButton inherits Rectangle {
     in property <string> glyph;
@@ -100,6 +103,12 @@ export component AppWindowFrame inherits Rectangle {
     in property <string>         council-status;
     in property <string>         council-synthesis;
     in property <int>            council-scroll-tick;
+    // Tier-A parity apps (Event Log / Mesh / Inference).
+    in property <[EventLogItem]> event-log;
+    in property <[MeshNode]>     mesh-nodes;
+    in property <string>         inference-backend;
+    in property <string>         inference-base-url;
+    in property <[ModelItem]>    inference-models;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -112,6 +121,13 @@ export component AppWindowFrame inherits Rectangle {
     callback set-model(string);
     callback refresh-settings();
     callback terminal-send(string);
+    // Tier-A parity apps.
+    callback refresh-events();
+    callback refresh-mesh();
+    callback add-peer(string, string);   // node_id, ws_url
+    callback remove-peer(string);        // node_id
+    callback refresh-inference();
+    // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
     callback req-focus();
@@ -384,6 +400,30 @@ export component AppWindowFrame inherits Rectangle {
             status: root.council-status;
             synthesis: root.council-synthesis;
             scroll-tick: root.council-scroll-tick;
+        }
+
+        if root.kind == AppKind.event-log: EventLogView {
+            vertical-stretch: 1;
+            events: root.event-log;
+            refresh => { root.refresh-events(); }
+        }
+
+        if root.kind == AppKind.mesh: MeshView {
+            vertical-stretch: 1;
+            nodes: root.mesh-nodes;
+            refresh => { root.refresh-mesh(); }
+            add-peer(id, url) => { root.add-peer(id, url); }
+            remove-peer(id) => { root.remove-peer(id); }
+        }
+
+        if root.kind == AppKind.inference: InferenceView {
+            vertical-stretch: 1;
+            backend: root.inference-backend;
+            base-url: root.inference-base-url;
+            models: root.inference-models;
+            current-model: root.current-model;
+            refresh => { root.refresh-inference(); }
+            set-model(id) => { root.set-model(id); }
         }
     }
 
