@@ -138,6 +138,7 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::AudioEditor => 10,
         AppKind::Sonus => 11,
         AppKind::Notes => 12,
+        AppKind::Face => 13,
     }
 }
 
@@ -155,6 +156,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         10 => AppKind::AudioEditor,
         11 => AppKind::Sonus,
         12 => AppKind::Notes,
+        13 => AppKind::Face,
         _ => AppKind::Chat,
     }
 }
@@ -307,6 +309,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::AudioEditor => "Audio Editor",
         AppKind::Sonus => "Sonus",
         AppKind::Notes => "Notes",
+        AppKind::Face => "APEX",
     }
 }
 
@@ -327,6 +330,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::AudioEditor => (660.0, 600.0),
         AppKind::Sonus => (480.0, 540.0),
         AppKind::Notes => (640.0, 540.0),
+        AppKind::Face => (380.0, 460.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -1837,6 +1841,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         clear_pending_tools();
         if let Some(ui) = stop_weak.upgrade() {
             ui.set_agent_busy(false);
+            ui.set_face_state("idle".into());
         }
     });
 
@@ -1903,7 +1908,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or(false);
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_w.upgrade() {
-                        if ok { ui.set_recording(true); }
+                        if ok { ui.set_recording(true); ui.set_face_state("listening".into()); }
                         else  { toast(ToastKind::Error, "Microphone unavailable"); }
                     }
                 }).ok();
@@ -1914,6 +1919,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_w.upgrade() {
                         ui.set_recording(false);
+                        if !ui.get_agent_busy() { ui.set_face_state("idle".into()); }
                         if !text.is_empty() {
                             maybe_push_time_divider();
                             push_message(MessageItem {
@@ -2397,6 +2403,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // ── APEX face (😊) — a slow tick drives blink / talk / aura motion. Held
+    // until run() returns so it isn't dropped (which would stop it).
+    let face_timer = slint::Timer::default();
+    {
+        let ui_weak = ui.as_weak();
+        face_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(450),
+            move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_face_tick((ui.get_face_tick() + 1) % 100_000);
+                }
+            },
+        );
+    }
+
     ui.run()?;
     Ok(())
 }
@@ -2444,6 +2466,7 @@ fn dispatch_event(
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
                     ui.set_agent_busy(true);
+                    ui.set_face_state("thinking".into());
                     push_message(MessageItem {
                         role: "agent".into(),
                         text: "".into(),
@@ -2488,6 +2511,8 @@ fn dispatch_event(
                         });
                         ui.set_agent_busy(true);
                     }
+                    // Streaming text → APEX is speaking.
+                    ui.set_face_state("speaking".into());
                     update_last_agent_message(&delta);
                     bump_scroll(&ui);
                 }
@@ -2515,6 +2540,8 @@ fn dispatch_event(
                     }
                     finish_last_agent_message();
                     ui.set_agent_busy(false);
+                    // Turn done — back to a calm ready face (unless mic is live; see below).
+                    if !ui.get_recording() { ui.set_face_state("idle".into()); }
                     if tts {
                         // Grab last agent bubble text for TTS
                         let text = MESSAGES.with(|m| {
@@ -2550,6 +2577,7 @@ fn dispatch_event(
             let ui_w2  = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = ui_w1.upgrade() {
+                    ui.set_face_state("listening".into());
                     if !ui.get_recording() {
                         ui.set_current_view(0);
                         rt_h.spawn(async move {
@@ -2561,7 +2589,7 @@ fn dispatch_event(
                                 .unwrap_or(false);
                             slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = ui_w2.upgrade() {
-                                    if ok { ui.set_recording(true); }
+                                    if ok { ui.set_recording(true); ui.set_face_state("listening".into()); }
                                 }
                             }).ok();
                         });
@@ -2595,6 +2623,8 @@ fn dispatch_event(
                         tool_status: "running".into(),
                         awaiting_approval: false,
                     });
+                    // Running a tool — APEX is working.
+                    ui.set_face_state("thinking".into());
                     bump_scroll(&ui);
                 }
             })
@@ -2660,6 +2690,7 @@ fn dispatch_event(
                 // Pin the latest into view whether the card was just created or
                 // an existing one flipped to awaiting-approval (e.g. 3 at once).
                 if let Some(ui) = w.upgrade() {
+                    ui.set_face_state("alert".into());
                     bump_scroll(&ui);
                 }
             })

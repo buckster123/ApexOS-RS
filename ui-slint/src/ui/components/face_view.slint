@@ -1,0 +1,157 @@
+import { Palette } from "../palette.slint";
+
+// ── FaceView (😊) ───────────────────────────────────────────────────────────
+//
+// APEX's face, back in -RS. The original ApexOS drove a round GC9A01A TFT via
+// the display_face tool; here we paint the same expressive states into a Slint
+// window so headless/desktop nodes get the face too. No new backend: `state` is
+// set by Rust from the agentd event stream (idle/thinking/speaking/listening/
+// alert/sleeping/happy), and `tick` is a slow timer that animates blink, talk
+// and the listening/speaking aura. Built from rounded rectangles + a radial
+// gradient (house style — no Path), so it renders on every backend incl. femtovg.
+//
+// preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
+
+export component FaceView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <string> state: "idle";
+    in property <int>    tick: 0;
+
+    // Per-state accent — carries most of the emotional read.
+    property <color> accent:
+        root.state == "thinking"  ? #eab308
+        : root.state == "speaking" ? Palette.primary
+        : root.state == "listening" ? #00d4ff
+        : root.state == "alert"    ? #ef4444
+        : root.state == "sleeping" ? Palette.text-dim
+        : root.state == "happy"    ? #39ff14
+        : Palette.primary;
+
+    // Eye openness (0 closed … 1 wide). Blink every 7 ticks unless asleep.
+    property <float> eye-base:
+        root.state == "sleeping" ? 0.10
+        : root.state == "thinking" ? 0.55
+        : root.state == "listening" ? 1.0
+        : 0.85;
+    property <float> eye-open:
+        (root.state != "sleeping" && Math.mod(root.tick, 7) == 0) ? 0.10 : root.eye-base;
+
+    // Mouth openness — talking oscillates with the tick.
+    property <float> mouth-open:
+        root.state == "speaking" ? (Math.mod(root.tick, 2) == 0 ? 0.9 : 0.3)
+        : root.state == "alert"  ? 0.7
+        : root.state == "happy"  ? 0.45
+        : 0.0;
+
+    property <string> label:
+        root.state == "thinking"  ? "THINKING…"
+        : root.state == "speaking" ? "SPEAKING"
+        : root.state == "listening" ? "LISTENING"
+        : root.state == "alert"    ? "NEEDS YOU"
+        : root.state == "sleeping" ? "ASLEEP"
+        : root.state == "happy"    ? "☺"
+        : "READY";
+
+    VerticalLayout {
+        // ── Face stage ────────────────────────────────────────────────────
+        stage := Rectangle {
+            vertical-stretch: 1;
+            background: Palette.bg;
+            clip: true;
+
+            // Head diameter from the smaller stage axis.
+            property <length> hd: min(self.width, self.height) - 56px;
+
+            // Aura ring — pulses when listening / speaking.
+            Rectangle {
+                width: stage.hd + 30px;
+                height: self.width;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: self.width / 2;
+                border-width: 3px;
+                border-color: root.accent;
+                opacity: (root.state == "listening" || root.state == "speaking")
+                    ? (Math.mod(root.tick, 2) == 0 ? 0.55 : 0.12)
+                    : 0.0;
+                animate opacity { duration: 420ms; }
+            }
+
+            // Head.
+            head := Rectangle {
+                width: stage.hd;
+                height: stage.hd;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: self.width / 2;
+                background: @radial-gradient(circle, Palette.surface-hi 0%, Palette.surface 68%, Palette.bg 100%);
+                border-width: 2px;
+                border-color: root.accent;
+                animate border-color { duration: 300ms; }
+
+                property <length> eye-w: self.width * 0.15;
+                property <length> eye-y: self.height * 0.40;
+
+                // Left eye.
+                Rectangle {
+                    width: head.eye-w;
+                    height: max(2px, head.eye-w * root.eye-open);
+                    x: head.width * 0.35 - self.width / 2;
+                    y: head.eye-y - self.height / 2;
+                    border-radius: self.height / 2;
+                    background: root.accent;
+                    animate height { duration: 120ms; }
+                }
+                // Right eye.
+                Rectangle {
+                    width: head.eye-w;
+                    height: max(2px, head.eye-w * root.eye-open);
+                    x: head.width * 0.65 - self.width / 2;
+                    y: head.eye-y - self.height / 2;
+                    border-radius: self.height / 2;
+                    background: root.accent;
+                    animate height { duration: 120ms; }
+                }
+
+                // Mouth — a capsule whose height grows as the mouth opens.
+                Rectangle {
+                    width: head.width * (root.state == "happy" ? 0.42 : 0.30);
+                    height: max(4px, head.width * 0.20 * root.mouth-open);
+                    x: (head.width - self.width) / 2;
+                    y: head.height * 0.66 - self.height / 2;
+                    border-radius: min(self.width, self.height) / 2;
+                    background: root.accent;
+                    animate width, height { duration: 130ms; }
+                }
+            }
+        }
+
+        // ── Status footer ─────────────────────────────────────────────────
+        Rectangle {
+            height: 48px;
+            background: Palette.surface;
+            Rectangle { y: 0px; height: 1px; background: Palette.border; }
+            HorizontalLayout {
+                alignment: center;
+                spacing: 10px;
+                Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: root.accent;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: root.label;
+                    color: Palette.text-bright;
+                    font-size: 12px;
+                    font-weight: 700;
+                    letter-spacing: 2px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
