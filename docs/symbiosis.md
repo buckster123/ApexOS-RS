@@ -154,12 +154,13 @@ verbs (`cognitive_bootstrap`, `session_recall`, `check_inbox`, `list_intentions`
 |-------|--------|
 | Static `soul.md` injected as system prompt | ✓ (`agentd/main.rs` `load_soul` → engine system Arc) |
 | Embodiment self-model in `soul.md` | ✓ (already strong) |
-| Boot orient instruction (3 read-only tools) | ✓ but fragile / approval-gated |
-| Cerebro memory types, episodes, `dream_run`, CCBS | ✓ (in the cortex) |
-| **Sleep loop — `session_save` + `dream_run` mandate** | ✗ soul.md never tells APEX to save/consolidate |
-| **CCBS fused into the boot** (`cognitive_bootstrap`) | ✗ tool exists; soul.md & agentd don't use it |
+| Boot orient instruction (now incl. `cognitive_bootstrap`) | ✓ soul.md Session-startup patched (`fa2eba8`) |
+| Cerebro memory types, episodes, `dream_run` | ✓ (in the cortex) |
+| **Sleep loop — `session_save` + `dream_run` mandate** | ✓ soul.md Session-shutdown section (`fa2eba8`, deployed) |
+| **Boot verbs auto-approved in policy** | ✓ `config/policy.toml` allow-list (`fa2eba8`, deployed) |
+| `cognitive_bootstrap` (CCBS) actually implemented | ✗ **stub** — `cerebro-mcp dispatch.rs` has no route; returns fake success (audit 2026-06-13) |
+| **CCBS fused into the boot** (`cognitive_bootstrap`) | ✗ soul.md calls it (step 0) but the tool is a stub |
 | **agentd auto-injects a CCBS block at session start** | ✗ agentd injects static soul only |
-| **Boot verbs auto-approved in policy** | ✗ default policy gates them |
 
 ### Concrete next steps (smallest first)
 

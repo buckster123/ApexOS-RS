@@ -352,6 +352,8 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 
 | File | Load when working on |
 |------|----------------------|
+| `docs/repo-map.md` | Navigation — crate tree, per-crate key files, "how a message flows", "where do I change X?" |
+| `BACKLOG.md` (repo root) | Outstanding work — audited findings + parked items, de-duped & prioritized |
 | `docs/architecture.md` | System layout, workspace crate structure, dependency graph |
 | `docs/build-roadmap.md` | Build order, step-by-step detail, deferred items |
 | `docs/slint-notes.md` | Slint patterns, binding loop rules, layout gotchas |
