@@ -237,7 +237,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
         "session_save" => {
             let content = args["content"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("content is required"))?.to_string();
-            let priority     = args["priority"].as_str().unwrap_or("medium");
+            let priority     = normalize_priority(args["priority"].as_str().unwrap_or("MEDIUM"));
             let session_type = args["session_type"].as_str().unwrap_or("general");
             let scope        = agent_scope(args);
             let mut tags = vec![
@@ -269,8 +269,10 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let results = brain.recall(query, k * 5, scope).await?;
             let out: Vec<Value> = results.into_iter()
                 .filter(|(n, _)| n.tags.iter().any(|t| t == "session_note"))
-                .filter(|(n, _)| priority_filter.map_or(true, |p|
-                    n.tags.iter().any(|t| t == &format!("priority:{p}"))))
+                .filter(|(n, _)| priority_filter.map_or(true, |p| {
+                    let want = format!("priority:{}", normalize_priority(p));
+                    n.tags.iter().any(|t| t == &want)
+                }))
                 .filter(|(n, _)| type_filter.map_or(true, |st|
                     n.tags.iter().any(|t| t == &format!("session_type:{st}"))))
                 .take(k)
@@ -933,6 +935,13 @@ fn agent_scope(args: &Value) -> VisibilityScope {
     }
 }
 
+/// Canonicalize a session priority to uppercase (the schema enum case), so the
+/// `priority:<p>` tag written on session_save and the filter on session_recall
+/// agree regardless of input casing ("medium"/"MEDIUM"/"Medium" all match).
+fn normalize_priority(p: &str) -> String {
+    p.to_uppercase()
+}
+
 // ---------------------------------------------------------------------------
 // Tests — dispatch logic without stdio (no actual MCP session required)
 // ---------------------------------------------------------------------------
@@ -1104,5 +1113,45 @@ mod tests {
         assert!(result["phases"].is_array(), "dream report should have phases: {result}");
         assert_eq!(result["phases"].as_array().unwrap().len(), 6);
         assert!(result["success"].is_boolean());
+    }
+
+    #[test]
+    fn normalize_priority_is_case_insensitive() {
+        assert_eq!(normalize_priority("medium"), "MEDIUM");
+        assert_eq!(normalize_priority("Medium"), "MEDIUM");
+        assert_eq!(normalize_priority("MEDIUM"), "MEDIUM");
+        assert_eq!(normalize_priority("high"), "HIGH");
+    }
+
+    #[tokio::test]
+    async fn session_save_recall_priority_casing_matches() {
+        let (brain, _dir) = make_brain().await;
+
+        // Save with lowercase priority — the store path must canonicalize it.
+        let save_msg = json!({
+            "jsonrpc":"2.0","id":10,"method":"tools/call",
+            "params":{"name":"session_save","arguments":{
+                "content": "FORGE session: wired constant-time token compare and char-safe truncation",
+                "priority": "high"
+            }}
+        });
+        let save_resp = dispatch_tool(save_msg, Arc::clone(&brain)).await;
+        assert!(save_resp["error"].is_null(), "session_save error: {}", save_resp["error"]);
+
+        // Recall with uppercase filter — must still match the lowercase save.
+        let recall_msg = json!({
+            "jsonrpc":"2.0","id":11,"method":"tools/call",
+            "params":{"name":"session_recall","arguments":{
+                "query": "FORGE session constant-time token truncation",
+                "priority": "HIGH",
+                "top_k": 5
+            }}
+        });
+        let recall_resp = dispatch_tool(recall_msg, Arc::clone(&brain)).await;
+        assert!(recall_resp["error"].is_null(), "session_recall error: {}", recall_resp["error"]);
+        let text = recall_resp["result"]["content"][0]["text"].as_str().unwrap();
+        let results: Vec<Value> = serde_json::from_str(text).unwrap();
+        assert!(!results.is_empty(),
+            "uppercase priority filter must match the lowercase-saved note");
     }
 }
