@@ -369,11 +369,12 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 ## Deferred / post-v1
 
 - ~~PTY terminal~~ — shipped (libc `openpty`, `/terminal-ws` WebSocket endpoint in agentd gateway)
+- ~~Sketchpad~~ — shipped (`sketchpad_view`: `Path`-stroke canvas + `POST /api/sketch` tiny-skia raster + `sketch_snapshot` tool + line/rect/ellipse shape tools)
+- ~~Cerebro web UI integration~~ — shipped as the `Web` launcher (🌐): external-browser tiles for Cerebro/Sensor Head + open-any-URL bar (Slint can't embed a webview; opens via `xdg-open`/`$BROWSER`)
 - Monaco / code editor — SSH/vim or embedded webkit2gtk webview for soul.md heavy editing
 - Sub-agent windows — `Popup` per child session, maps to `SubAgentStarted` events
-- Sketchpad — Slint custom painter, post-v1 complexity
-- Cerebro web UI integration — iframe not possible in Slint; link opens in external browser
 - `apexos-core` vendor — optionally vendor agentd's core crate for shared `Event` types (avoids JSON string matching), blocked on agentd publishing it as a library crate
+- **Vision input** (dedicated session) — give APEX real eyes: multimodal image→model in agentd's API path + un-stub cerebro `describe_image`/`search_vision`. Hard precondition: a frame **compression/downscale shim** (SensorHead high-res ≈ 500k tok/frame). Generalize beyond SensorHead to **webcam / laptop camera / arbitrary image**. Sibling: a **screenshot "mirror" tool** so APEX can snap its own screen (self-modification feedback). `sketch_snapshot` PNGs are a ready test target.
 
 ---
 
