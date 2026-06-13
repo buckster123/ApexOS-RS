@@ -1005,15 +1005,25 @@ fn truncate_block(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// A distilled *skill* memory (evolutionary layer, slice #1): a `Schematic` node
+/// tagged `skill` by dream's procedure-cluster distillation. Surfaced as its own
+/// bootstrap section so abstract competence ("how X is done in general") arrives
+/// with orientation, ahead of the concrete procedures it was distilled from.
+fn is_skill(n: &MemoryNode) -> bool {
+    n.memory_type == MemoryType::Schematic && n.tags.iter().any(|t| t == "skill")
+}
+
 /// Assemble the CCBS live-state priming block (`cognitive_bootstrap`).
 ///
 /// The dynamic counterpart to the static `soul.md` kernel: one call replaces the
 /// fragile multi-tool orient (`session_recall` + `list_intentions` +
 /// `find_relevant_procedures` + `recall`). Pulls live memory state — open
 /// intentions, query-relevant recent session summaries, query-relevant
+/// distilled skills (the evolutionary `schematic` layer), query-relevant
 /// procedures, and query-relevant memories — and packs them into a
-/// token-budgeted markdown block. Authored `# Module: X` cognitive modules (the
-/// Python CCBS skill layer) can plug in here later.
+/// token-budgeted markdown block. The skills section (slice #2) is the
+/// distilled-competence counterpart the authored Python CCBS modules were meant
+/// to be, but grown from the agent's own graded procedures, not hand-written.
 ///
 /// Budget caps mirror the Python assembler (minimal 1000 / standard 2000 / full
 /// 4500 tokens); an explicit `max_tokens` only tightens. Tokens are estimated at
@@ -1072,11 +1082,14 @@ async fn assemble_bootstrap(
         let hits = brain.recall(query, 24, scope).await?;
         let sessions: Vec<&MemoryNode> = hits.iter().map(|(n, _)| n)
             .filter(|n| n.tags.iter().any(|t| t == "session_note")).collect();
+        let skills: Vec<&MemoryNode> = hits.iter().map(|(n, _)| n)
+            .filter(|n| is_skill(n)).collect();
         let procedures: Vec<&MemoryNode> = hits.iter().map(|(n, _)| n)
             .filter(|n| n.memory_type == MemoryType::Procedural).collect();
         let others: Vec<&MemoryNode> = hits.iter().map(|(n, _)| n)
             .filter(|n| n.memory_type != MemoryType::Procedural
-                && !n.tags.iter().any(|t| t == "session_note")).collect();
+                && !n.tags.iter().any(|t| t == "session_note")
+                && !is_skill(n)).collect();
 
         // 2. Where you left off (recent session summaries relevant to the query).
         let items: Vec<String> = sessions.iter().take(3)
@@ -1084,6 +1097,14 @@ async fn assemble_bootstrap(
         if !items.is_empty() {
             add(format!("sessions({})", items.len()),
                 format!("## Where you left off\n{}", items.join("\n")));
+        }
+        // 2b. Distilled skills (evolutionary layer): abstract competence, surfaced
+        // ahead of concrete procedures since a skill is the generalisation of them.
+        let items: Vec<String> = skills.iter().take(3)
+            .map(|n| format!("- {}", truncate_block(&n.content, 300))).collect();
+        if !items.is_empty() {
+            add(format!("skills({})", items.len()),
+                format!("## Skills (distilled competence)\n{}", items.join("\n")));
         }
         // 3. Relevant procedures.
         let items: Vec<String> = procedures.iter().take(3)
@@ -1364,6 +1385,44 @@ mod tests {
         // The seeded memory should surface under a section.
         assert!(block.contains("sqlite vector storage"), "query-relevant memory should appear: {block}");
         assert!(result["total_tokens"].as_u64().unwrap() <= 2000, "standard mode caps at 2000 tokens");
+    }
+
+    #[tokio::test]
+    async fn dispatch_cognitive_bootstrap_surfaces_distilled_skills() {
+        let (brain, _dir) = make_brain().await;
+
+        // A distilled skill is a Schematic memory tagged `skill` (what dream's
+        // slice-#1 procedure-cluster distillation writes). create_schema gives us
+        // a Schematic node; we add the `skill` tag so is_skill() classifies it.
+        let skill = json!({
+            "jsonrpc":"2.0","id":0,"method":"tools/call",
+            "params":{"name":"create_schema","arguments":{
+                "content":"To debug async Rust, confirm the runtime is multi-threaded then trace each await for a held lock",
+                "tags":["skill","async","rust"]
+            }}
+        });
+        let resp = dispatch_tool(skill, Arc::clone(&brain)).await;
+        assert!(resp["error"].is_null(), "create_schema should not error: {}", resp["error"]);
+
+        // Bootstrap with a query that matches the skill — it must appear under the
+        // dedicated Skills section, not buried in "Relevant memories".
+        let boot = json!({
+            "jsonrpc":"2.0","id":43,"method":"tools/call",
+            "params":{"name":"cognitive_bootstrap","arguments":{
+                "query":"debug async rust runtime", "mode":"standard"
+            }}
+        });
+        let resp = dispatch_tool(boot, Arc::clone(&brain)).await;
+        assert!(resp["error"].is_null(), "bootstrap should not error: {}", resp["error"]);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+
+        let block = result["assembled_block"].as_str().unwrap();
+        assert!(block.contains("## Skills (distilled competence)"),
+            "distilled skill must surface under its own section: {block}");
+        let sections = result["sections_loaded"].as_array().unwrap();
+        assert!(sections.iter().any(|s| s.as_str().unwrap_or("").starts_with("skills(")),
+            "skills section must be listed in sections_loaded: {sections:?}");
     }
 
     #[tokio::test]
