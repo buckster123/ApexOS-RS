@@ -212,14 +212,14 @@ counterpart to CLAUDE.md (static blueprint) and git (code truth).
 
 ### Known gaps (do not assume these work)
 
-- **CCBS / `cognitive_bootstrap` is stubbed (not implemented).** `dispatch.rs` has a
-  deliberate route arm for it that returns a *success* `not_yet_implemented` stub (kept as
-  a success so APEX's soul-boot step-0 doesn't hard-fail), but it injects **zero** priming
-  content. The two-tier soul / 12-slot bootstrap is **not load-bearing** in the Rust port
-  yet; a Wake-loop calling `cognitive_bootstrap` as "step 0" silently primes nothing
-  (audit finding CB-001).
-- **Reinforcement is inert.** `recall` does not update FSRS/ACT-R activation; the memory-tier
-  reinforcement story in CLAUDE.md is aspirational, not wired.
+- **`cognitive_bootstrap` (CCBS) is implemented** as a live-state assembler — one call pulls
+  open intentions + query-relevant session summaries, procedures, and memories into a
+  token-budgeted priming block (`dispatch.rs::assemble_bootstrap`, CB-001 closed). Still
+  *agent-driven* (APEX calls it as soul-boot step-0); daemon auto-injection at session start
+  remains a roadmap item, as does the authored `# Module: X` skill-module layer.
+- **Recall reinforcement is wired.** `recall()` records an access on the returned memories so
+  ACT-R base-level activation rises ("recall sharpens memory"). FSRS *grading* still happens
+  only via `record_procedure_outcome`, not on ordinary reads.
 - **`ingest_file` / `describe_image` / `search_vision` are unimplemented** — they return an
   honest `-32601` not-implemented error (C-RS-007), and their advertised schemas are still
   placeholders (Step 9 schema work). (Spreading activation **does** enforce scope as of
