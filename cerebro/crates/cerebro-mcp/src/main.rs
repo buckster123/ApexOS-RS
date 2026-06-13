@@ -10,7 +10,8 @@ mod transport;
 
 use transport::StdioTransport;
 
-/// cerebro-mcp — MCP-over-stdio server exposing all 63 CerebroCortex tools.
+/// cerebro-mcp — MCP-over-stdio server exposing the CerebroCortex tool surface:
+/// 66 advertised tools (63 functional + 3 deferred Tier-7 stubs).
 /// Drop-in replacement for `python -m cerebrocortex.mcp` in plugins.toml.
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,9 +27,15 @@ async fn main() -> Result<()> {
 
     let mut transport = StdioTransport::new();
 
-    // MCP initialize handshake
+    // MCP initialize handshake (C-RS-006: guard on the method — a non-initialize
+    // first message must get a proper method_not_found, not an init response).
     let init_req = transport.read().await?;
-    let init_resp = dispatch::handle_initialize(&init_req);
+    let init_resp = if init_req["method"].as_str() == Some("initialize") {
+        dispatch::handle_initialize(&init_req)
+    } else {
+        tracing::warn!("first message was not 'initialize': {:?}", init_req["method"]);
+        dispatch::method_not_found(&init_req)
+    };
     transport.write(&init_resp).await?;
 
     // Main dispatch loop

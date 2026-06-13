@@ -24,6 +24,9 @@ const PRUNING_MAX_SALIENCE: f32 = 0.3;
 const REM_SAMPLE_SIZE: usize = 20;
 const REM_PAIR_CHECKS: usize = 10;
 const REM_MIN_CONN_STRENGTH: f32 = 0.4;
+// Python config.py EPISODE_AUTO_CLOSE_HOURS. Used by the pre-phase cleanup
+// in run_cycle to auto-close stale open episodes.
+const EPISODE_AUTO_CLOSE_HOURS: i64 = 24;
 
 const SYSTEM_DREAM: &str =
     "You are the Dream Engine of CerebroCortex, a brain-analogous AI memory system. \
@@ -102,20 +105,29 @@ impl DreamEngine {
         let mut calls_used = 0usize;
         let effective_budget = max_llm_calls.min(MAX_LLM_CALLS);
 
+        // Pre-phase cleanup (C-RS-004): auto-close stale open episodes so they
+        // don't accumulate across cycles. Mirrors Python's pre-phase step.
+        match cortex.storage.read().await.sqlite
+            .close_stale_episodes(EPISODE_AUTO_CLOSE_HOURS).await {
+            Ok(n) if n > 0 => tracing::info!("dream pre-phase: auto-closed {n} stale episodes"),
+            Ok(_)          => {}
+            Err(e)         => tracing::warn!("dream pre-phase: close_stale_episodes failed: {e}"),
+        }
+
         let p1 = self.sws_replay(&scope, &cortex).await;
         let p2 = self.pattern_extraction(
             &scope, &cortex, &mut calls_used,
-            effective_budget.min(LLM_BUDGET_PATTERN),
+            effective_budget.min(LLM_BUDGET_PATTERN), effective_budget,
         ).await;
         let p3 = self.schema_formation(
             &scope, &cortex, &mut calls_used,
-            effective_budget.min(LLM_BUDGET_SCHEMA),
+            effective_budget.min(LLM_BUDGET_SCHEMA), effective_budget,
         ).await;
         let p4 = self.emotional_reprocessing(&scope, &cortex).await;
         let p5 = self.pruning(&scope, &cortex).await;
         let p6 = self.rem_recombination(
             &scope, &cortex, &mut calls_used,
-            effective_budget.min(LLM_BUDGET_REM),
+            effective_budget.min(LLM_BUDGET_REM), effective_budget,
         ).await;
 
         let phases: Vec<PhaseResult> = [p1, p2, p3, p4, p5, p6]
@@ -123,9 +135,13 @@ impl DreamEngine {
             .map(|r| r.unwrap_or_else(|e| PhaseResult::failed(&e.to_string())))
             .collect();
 
+        // Episodes consolidated = those replayed in phase 1 (SWS) — no longer
+        // hardcoded 0 (C-RS-004).
+        let episodes_consolidated = phases.first().map(|p| p.episodes_consolidated).unwrap_or(0);
+
         let report = DreamReport {
             agent_id:              scope.agent_id.as_ref().map(|a| a.0.clone()),
-            episodes_consolidated: 0,
+            episodes_consolidated,
             total_llm_calls:       calls_used,
             total_duration_secs:   cycle_start.elapsed().as_secs_f64(),
             success:               phases.iter().all(|p| p.success),
@@ -168,6 +184,7 @@ impl DreamEngine {
 
             if mem_ids.len() < 2 { continue; }
             result.memories_processed += mem_ids.len();
+            result.episodes_consolidated += 1;
 
             for window in mem_ids.windows(2) {
                 let (src, tgt) = (window[0].clone(), window[1].clone());
@@ -209,10 +226,11 @@ impl DreamEngine {
     // -------------------------------------------------------------------------
     async fn pattern_extraction(
         &self,
-        scope:       &VisibilityScope,
-        cortex:      &Arc<CerebroCortex>,
-        calls_used:  &mut usize,
-        budget:      usize,
+        scope:          &VisibilityScope,
+        cortex:         &Arc<CerebroCortex>,
+        calls_used:     &mut usize,
+        budget:         usize,
+        overall_budget: usize,
     ) -> Result<PhaseResult> {
         let start = std::time::Instant::now();
         let mut result = PhaseResult::new("pattern_extraction");
@@ -244,7 +262,7 @@ impl DreamEngine {
 
         for (tag, indices) in &tag_map {
             if indices.len() < CLUSTER_MIN_SIZE { continue; }
-            if budget_remaining == 0 || *calls_used >= MAX_LLM_CALLS { break; }
+            if budget_remaining == 0 || *calls_used >= overall_budget { break; }
 
             let mem_text: String = indices.iter().take(10).enumerate()
                 .map(|(i, &idx)| {
@@ -314,10 +332,11 @@ impl DreamEngine {
     // -------------------------------------------------------------------------
     async fn schema_formation(
         &self,
-        scope:      &VisibilityScope,
-        cortex:     &Arc<CerebroCortex>,
-        calls_used: &mut usize,
-        budget:     usize,
+        scope:          &VisibilityScope,
+        cortex:         &Arc<CerebroCortex>,
+        calls_used:     &mut usize,
+        budget:         usize,
+        overall_budget: usize,
     ) -> Result<PhaseResult> {
         let start = std::time::Instant::now();
         let mut result = PhaseResult::new("schema_formation");
@@ -339,7 +358,7 @@ impl DreamEngine {
         let mut total_schemas = 0usize;
 
         for ep in &episodes {
-            if budget_remaining == 0 || *calls_used >= MAX_LLM_CALLS { break; }
+            if budget_remaining == 0 || *calls_used >= overall_budget { break; }
 
             let ep_id = ep["id"].as_str().unwrap_or("");
             let mem_ids = cortex.storage.read().await.sqlite
@@ -514,10 +533,11 @@ impl DreamEngine {
     // -------------------------------------------------------------------------
     async fn rem_recombination(
         &self,
-        scope:      &VisibilityScope,
-        cortex:     &Arc<CerebroCortex>,
-        calls_used: &mut usize,
-        budget:     usize,
+        scope:          &VisibilityScope,
+        cortex:         &Arc<CerebroCortex>,
+        calls_used:     &mut usize,
+        budget:         usize,
+        overall_budget: usize,
     ) -> Result<PhaseResult> {
         let start = std::time::Instant::now();
         let mut result = PhaseResult::new("rem_recombination");
@@ -563,7 +583,7 @@ impl DreamEngine {
         let mut pairs_checked = 0usize;
 
         for _ in 0..REM_PAIR_CHECKS {
-            if budget_remaining == 0 || *calls_used >= MAX_LLM_CALLS { break; }
+            if budget_remaining == 0 || *calls_used >= overall_budget { break; }
             if nodes.len() < 2 { break; }
 
             let i = rng.gen_range(0..nodes.len());
@@ -722,6 +742,7 @@ pub struct DreamReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhaseResult {
     pub phase:                String,
+    pub episodes_consolidated: usize,
     pub memories_processed:   usize,
     pub links_created:        usize,
     pub links_strengthened:   usize,
@@ -738,6 +759,7 @@ impl PhaseResult {
     fn new(phase: &str) -> Self {
         Self {
             phase:                phase.into(),
+            episodes_consolidated: 0,
             memories_processed:   0,
             links_created:        0,
             links_strengthened:   0,

@@ -115,14 +115,34 @@ impl CerebroCortex {
             return Ok(vec![]);
         }
 
-        // 2. Spreading activation from vector-search seeds
-        let seeds: Vec<NodeIndex> = candidates.iter()
-            .filter_map(|(id, _)| storage.graph.index.get(id).copied())
+        // 2. Spreading activation from vector-search seeds.
+        //    Seeds carry their vector-similarity score (not a flat 1.0) so the
+        //    spread is similarity-weighted, matching Python.
+        let seeds: Vec<(NodeIndex, f32)> = candidates.iter()
+            .filter_map(|(id, sim)| storage.graph.index.get(id).map(|&idx| (idx, *sim)))
             .collect();
-        let visible_nodes: HashMap<NodeIndex, bool> = storage.graph.index.values()
-            .map(|&idx| (idx, true))
-            .collect();
-        let activated = spread(&storage.graph.graph, &seeds, &scope, &visible_nodes);
+
+        // Scope-visibility map (C-RS-003): a node participates in the spread only
+        // if the caller can see it, so another agent's private/thread memories
+        // can't shape the activations of nodes we *do* return. Global scope
+        // (agent_id == None) short-circuits to all-visible, matching Python's
+        // `agent_id is None` path in `_check_access`.
+        let visible_nodes: HashMap<NodeIndex, bool> = if scope.agent_id.is_none() {
+            storage.graph.index.values().map(|&idx| (idx, true)).collect()
+        } else {
+            let all_ids: Vec<MemoryId> = storage.graph.index.keys().cloned().collect();
+            let vis_meta = storage.sqlite.get_visibility_meta(&all_ids).await?;
+            storage.graph.index.iter()
+                .map(|(id, &idx)| {
+                    let visible = match vis_meta.get(id) {
+                        Some((vis, owner)) => scope.can_access(*vis, owner.as_ref()),
+                        None => true, // not in DB → final SQLite filter handles it
+                    };
+                    (idx, visible)
+                })
+                .collect()
+        };
+        let activated = spread(&storage.graph.graph, &seeds, &visible_nodes);
 
         // 3. Build score maps and union ID set
         let sims_map: HashMap<MemoryId, f32> = candidates.into_iter().collect();
@@ -165,6 +185,18 @@ impl CerebroCortex {
         link:    AssociativeLink,
     ) -> Result<()> {
         let mut storage = self.storage.write().await;
+
+        // C-RS-010: validate both endpoints exist (and are live) BEFORE writing,
+        // so a typo'd/nonexistent id can't leave a dangling orphan row in `links`
+        // that the graph silently skips. The graph index is rebuilt from
+        // non-deleted memories, so membership there == exists & not soft-deleted.
+        if !storage.graph.index.contains_key(&link.source_id) {
+            anyhow::bail!("associate: source memory does not exist: {}", link.source_id.0);
+        }
+        if !storage.graph.index.contains_key(&link.target_id) {
+            anyhow::bail!("associate: target memory does not exist: {}", link.target_id.0);
+        }
+
         storage.sqlite.insert_link(&link).await?;
         if let Err(e) = storage.graph.add_edge(link) {
             tracing::warn!("associate: graph edge not added — {e}");

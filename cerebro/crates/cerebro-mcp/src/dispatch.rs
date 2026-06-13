@@ -35,23 +35,62 @@ pub fn tools_list(req: &Value) -> Value {
 }
 
 pub async fn dispatch_tool(msg: Value, brain: Arc<CerebroCortex>) -> Value {
-    let id     = msg["id"].clone();
-    let params = &msg["params"];
-    let name   = params["name"].as_str().unwrap_or("");
-    let args   = &params["arguments"];
+    let id = msg["id"].clone();
 
-    let result = route(name, args, brain).await;
-    match result {
-        Ok(v)  => json!({
+    // C-RS-002: per-call panic isolation. `cerebro-mcp` is a long-running daemon
+    // that multiple agents depend on; a panic in any handler (a stray slice
+    // index, a downstream unwrap, a sqlite edge case) must NOT unwind into the
+    // main loop and take the whole memory subsystem down. We run the routing on
+    // a dedicated task — a panic there surfaces as a JoinError we convert into a
+    // JSON-RPC error, and the loop lives on. (tokio RwLock does not poison, so a
+    // panic mid-write leaves the store usable for the next call.)
+    let handle = tokio::spawn(async move {
+        let params = &msg["params"];
+        let name   = params["name"].as_str().unwrap_or("").to_string();
+        let args   = params["arguments"].clone();
+        route(&name, &args, brain).await
+    });
+
+    match handle.await {
+        Ok(Ok(v)) => json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": { "content": [{ "type": "text", "text": v.to_string() }] }
         }),
-        Err(e) => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": -32603, "message": e.to_string() }
-        }),
+        Ok(Err(e)) => {
+            let msg = e.to_string();
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": error_code(&msg), "message": msg }
+            })
+        }
+        Err(join_err) => {
+            // Panicked (or was cancelled) — isolate and keep serving.
+            tracing::error!("tool handler panicked: {join_err}");
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32603, "message": "internal error: tool handler panicked" }
+            })
+        }
+    }
+}
+
+/// Map a handler error message to a JSON-RPC error code (C-RS-006).
+///
+/// Per the audit's sanctioned "inspect the message" approach: every
+/// argument-validation error in `route()` is phrased with the word `required`,
+/// and the not-implemented fallthrough says `not implemented`. Everything else
+/// is a genuine internal failure (sqlite, serde, downstream engines).
+fn error_code(message: &str) -> i64 {
+    let m = message.to_ascii_lowercase();
+    if m.contains("not implemented") {
+        -32601 // Method not found / not implemented
+    } else if m.contains("required") {
+        -32602 // Invalid params
+    } else {
+        -32603 // Internal error
     }
 }
 
@@ -920,7 +959,21 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             Ok(report.unwrap_or(json!({ "status": "no_cycles_run" })))
         }
 
-        _ => Ok(json!({ "status": "not_yet_implemented", "tool": name })),
+        // Test-only hook: deterministically trip the panic-isolation boundary.
+        #[cfg(test)]
+        "__panic_test__" => panic!("intentional test panic"),
+
+        // ApexOS-SPECIFIC: cognitive_bootstrap is wired into APEX's soul boot as
+        // step-0 and the boot expects a SUCCESS response. Unlike the other
+        // deferred Tier-7 stubs (C-RS-007), it keeps returning its success stub.
+        "cognitive_bootstrap" => Ok(json!({ "status": "not_yet_implemented", "tool": name })),
+
+        // Deferred Tier-7 tools (ingest_file, describe_image, search_vision) and
+        // any unknown name. C-RS-007: these are still advertised in tools/list
+        // (surface parity with Python's 66) but must NOT return a success payload
+        // — that reads as "it worked." Return an honest not-implemented error so
+        // callers can branch on it.
+        _ => Err(anyhow::anyhow!("tool not implemented: {name}")),
     }
 }
 
@@ -974,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_echoes_id_and_contains_63_tools() {
+    fn tools_list_echoes_id_and_contains_66_tools() {
         let req  = json!({"jsonrpc":"2.0","id":42,"method":"tools/list","params":{}});
         let resp = tools_list(&req);
         assert_eq!(resp["id"], 42, "id must be echoed");
@@ -1113,6 +1166,69 @@ mod tests {
         assert!(result["phases"].is_array(), "dream report should have phases: {result}");
         assert_eq!(result["phases"].as_array().unwrap().len(), 6);
         assert!(result["success"].is_boolean());
+    }
+
+    #[tokio::test]
+    async fn dispatch_isolates_handler_panic_and_keeps_serving() {
+        let (brain, _dir) = make_brain().await;
+
+        // A handler that panics must NOT unwind the daemon — it must come back
+        // as a JSON-RPC internal error (-32603).
+        let panic_msg = json!({
+            "jsonrpc":"2.0","id":99,"method":"tools/call",
+            "params":{"name":"__panic_test__","arguments":{}}
+        });
+        let resp = dispatch_tool(panic_msg, Arc::clone(&brain)).await;
+        assert_eq!(resp["id"], 99, "id must still be echoed after a panic");
+        assert_eq!(resp["error"]["code"], -32603, "panic should map to internal error");
+
+        // The brain is still usable for the very next call (no poisoning).
+        let next = json!({
+            "jsonrpc":"2.0","id":100,"method":"tools/call",
+            "params":{"name":"remember","arguments":{
+                "content":"the daemon survived a panicking handler and still serves"
+            }}
+        });
+        let resp2 = dispatch_tool(next, brain).await;
+        assert!(resp2["error"].is_null(), "post-panic call should succeed: {}", resp2["error"]);
+    }
+
+    #[tokio::test]
+    async fn dispatch_missing_required_arg_is_invalid_params() {
+        let (brain, _dir) = make_brain().await;
+        // remember with no content → argument validation failure → -32602.
+        let msg = json!({
+            "jsonrpc":"2.0","id":11,"method":"tools/call",
+            "params":{"name":"remember","arguments":{}}
+        });
+        let resp = dispatch_tool(msg, brain).await;
+        assert_eq!(resp["error"]["code"], -32602,
+            "missing required arg should be Invalid params, got {}", resp["error"]);
+    }
+
+    #[tokio::test]
+    async fn dispatch_deferred_tool_errors_not_success() {
+        let (brain, _dir) = make_brain().await;
+        // A deferred Tier-7 tool must return an honest error, never a success stub.
+        let msg = json!({
+            "jsonrpc":"2.0","id":12,"method":"tools/call",
+            "params":{"name":"ingest_file","arguments":{"path":"/tmp/x"}}
+        });
+        let resp = dispatch_tool(msg, brain).await;
+        assert!(resp["result"].is_null(), "deferred tool must not return a success result");
+        assert_eq!(resp["error"]["code"], -32601,
+            "deferred tool should map to method-not-found, got {}", resp["error"]);
+    }
+
+    #[test]
+    fn handshake_guards_on_initialize_method() {
+        // A non-initialize first message must get method_not_found, not an init reply.
+        let bad = json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}});
+        assert_eq!(bad["method"].as_str(), Some("tools/list"));
+        // (The guard itself lives in main.rs; here we assert method_not_found shape.)
+        let resp = method_not_found(&bad);
+        assert_eq!(resp["error"]["code"], -32601);
+        assert_eq!(resp["id"], 1);
     }
 
     #[test]

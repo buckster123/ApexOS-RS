@@ -108,7 +108,6 @@ mod activation_fixtures {
         update_difficulty_on_recall, update_stability_on_lapse, update_stability_on_recall,
     };
     use chrono::{DateTime, Duration, TimeZone, Utc};
-    use serde::Deserialize;
 
     // Fixed reference time matching the fixture generator: 2025-01-01T12:00:00Z
     fn now_fixed() -> DateTime<Utc> {
@@ -304,6 +303,97 @@ mod activation_fixtures {
                 (got - exp).abs() < TOL,
                 "link_decay case {i}: w={w} age={age_days}d H={halflife}d → got {got}, expected {exp}"
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Spreading activation fixtures (C-RS-001) — full-pipeline parity with the
+    // real Python spreading_activation() over fixed graphs. Covers seed
+    // weighting, undirected BFS, per-hop decay, link-type weights, sublinear
+    // accumulation, and [0,1] normalisation.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spreading_all_fixture_cases() {
+        use cerebro::activation::spread;
+        use cerebro::models::AssociativeLink;
+        use cerebro::storage::graph::GraphStore;
+        use cerebro::types::{LinkType, MemoryId};
+
+        fn link_type(s: &str) -> LinkType {
+            match s {
+                "temporal"    => LinkType::Temporal,
+                "causal"      => LinkType::Causal,
+                "semantic"    => LinkType::Semantic,
+                "affective"   => LinkType::Affective,
+                "contextual"  => LinkType::Contextual,
+                "contradicts" => LinkType::Contradicts,
+                "supports"    => LinkType::Supports,
+                "derived_from"=> LinkType::DerivedFrom,
+                "part_of"     => LinkType::PartOf,
+                other         => panic!("unknown link_type {other}"),
+            }
+        }
+
+        let fixtures = load_fixtures();
+        let cases = fixtures["spreading"].as_array().unwrap();
+        assert!(!cases.is_empty(), "no spreading fixtures — regenerate fixtures");
+
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+
+            // Rebuild the identical graph.
+            let mut store = GraphStore::new();
+            for n in case["nodes"].as_array().unwrap() {
+                store.add_node(MemoryId(n.as_str().unwrap().to_string()));
+            }
+            for l in case["links"].as_array().unwrap() {
+                let link = AssociativeLink::new(
+                    MemoryId(l["source"].as_str().unwrap().to_string()),
+                    MemoryId(l["target"].as_str().unwrap().to_string()),
+                    link_type(l["link_type"].as_str().unwrap()),
+                    l["weight"].as_f64().unwrap() as f32,
+                );
+                store.add_edge(link).unwrap();
+            }
+
+            // Seeds (id, weight) → (NodeIndex, weight). All nodes visible.
+            let seeds: Vec<_> = case["seeds"].as_array().unwrap().iter()
+                .map(|s| {
+                    let id  = MemoryId(s["id"].as_str().unwrap().to_string());
+                    let idx = *store.index.get(&id).unwrap();
+                    (idx, s["weight"].as_f64().unwrap() as f32)
+                })
+                .collect();
+            let visible: std::collections::HashMap<_, _> =
+                store.index.values().map(|&idx| (idx, true)).collect();
+
+            let activated = spread(&store.graph, &seeds, &visible);
+
+            // Map NodeIndex → id, compare against expected per-node.
+            let got: std::collections::HashMap<String, f32> = activated.iter()
+                .map(|(&idx, &score)| (store.graph[idx].0.clone(), score))
+                .collect();
+
+            let expected = case["expected"].as_object().unwrap();
+
+            // Same node set (no extra/missing activated nodes).
+            assert_eq!(
+                got.len(), expected.len(),
+                "spreading '{name}': node count differs — got {:?}, expected {:?}",
+                got.keys().collect::<Vec<_>>(), expected.keys().collect::<Vec<_>>()
+            );
+
+            for (id, exp_v) in expected {
+                let exp = exp_v.as_f64().unwrap() as f32;
+                let g = *got.get(id).unwrap_or_else(||
+                    panic!("spreading '{name}': node {id} missing from result {got:?}"));
+                assert!(
+                    (g - exp).abs() < TOL,
+                    "spreading '{name}' node {id}: got {g}, expected {exp} (diff {})",
+                    (g - exp).abs()
+                );
+            }
         }
     }
 }
@@ -819,6 +909,26 @@ mod cortex_pipeline {
         cortex.remember("second memory about databases and storage", None, None, None, VisibilityScope::global()).await.unwrap();
         let storage = cortex.storage.read().await;
         assert_eq!(storage.graph.graph.node_count(), 2);
+    }
+
+    // C-RS-010: associating with a nonexistent endpoint must error and must NOT
+    // leave a dangling orphan row in `links`.
+    #[tokio::test]
+    async fn associate_rejects_nonexistent_endpoint() {
+        use cerebro::types::MemoryId;
+        let (cortex, _dir) = make_cortex().await;
+        let a = cortex.remember("a real memory about graph databases and edges",
+            None, None, None, VisibilityScope::global()).await.unwrap();
+
+        let bogus = MemoryId("mem_does_not_exist".into());
+        let link = AssociativeLink::new(a.id.clone(), bogus.clone(), LinkType::Semantic, 0.8);
+        let res = cortex.associate(a.id.clone(), bogus, link).await;
+        assert!(res.is_err(), "associate with bogus target should error");
+
+        // No edge persisted.
+        let storage = cortex.storage.read().await;
+        assert!(storage.graph.neighbors(&a.id).is_empty(),
+            "no edge should be created for a bogus endpoint");
     }
 }
 
