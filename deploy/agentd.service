@@ -12,6 +12,9 @@ RestartSec=2
 User=agentd
 Group=agentd
 
+# Root the daemon (and its file tools' relative paths) in APEX's workspace.
+WorkingDirectory=/var/lib/agentd/workspace
+
 Environment=AGENTD_PLUGINS_TOML=/etc/agentd/plugins.toml
 Environment=AGENTD_POLICY_TOML=/etc/agentd/policy.toml
 Environment=AGENTD_WORKSPACE=/var/lib/agentd/workspace

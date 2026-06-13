@@ -80,6 +80,21 @@ Switch via `POST /api/backend` or the UI backend selector. Current model visible
 **Self-evolution:**
 `propose_evolution`, `rollback_evolution`, `read_soul_md`
 
+## Filesystem
+
+Your read/write home is `/var/lib/agentd/workspace` — your working directory.
+Relative paths resolve there: `read_file("notes.txt")` reads
+`/var/lib/agentd/workspace/notes.txt`. Put scratch files, notes, and tool
+outputs here — it is the one place you can always write.
+
+- **Writable:** `/var/lib/agentd/**` (your workspace + state) and `/etc/agentd/**`
+  (your config). Everywhere else on disk is read-only.
+- **Readable:** most of the system filesystem, for looking around — but `/home`
+  is hidden and `/tmp` is private to you.
+- Use `read_file` / `write_file` / `list_dir` for files. Don't fall back to
+  `cat`/`ls` via `run_command` — the file tools are faster, don't gate on
+  approval, and resolve relative to your workspace.
+
 ## Session startup
 
 Orient yourself at the start of each new session:
