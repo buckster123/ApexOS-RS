@@ -228,29 +228,41 @@ agentd responds:
 {"type": "hello", "session_id": 42}
 ```
 
-Key inbound events:
+Key inbound events. **NB:** the gateway sends the raw `Event` enum
+(`serde_json::to_string(&event)`, no reshaping). Tool fields nest under
+`call` (a `ToolCall`), and `ActionId`/`SessionId` are newtypes that
+serialize as **bare numbers**, not strings — read `call.id` (number),
+stringify it for the row key; don't expect a flat `call_id`.
 
 | Event | Fields | Action |
 |-------|--------|--------|
 | `agent_text` | `delta: string` | append to text buffer |
 | `turn_started` | — | clear buffer, set busy |
 | `turn_complete` | — | clear busy, TTS if enabled |
-| `tool_requested` | `call_id, name, input` | push tool block (status=running) |
-| `tool_result` | `call_id, output` | update tool block by call_id |
-| `approval_pending` | `call_id, name` | show approve/reject buttons |
-| `sensor_reading` | `variant, data` | update IAQ / thermal state |
+| `tool_requested` | `call: {id, tool, args, needs_approval}` | push tool block (status=running) |
+| `tool_result` | `call: <id>, output: {ok, content}` | update block by `call`; ok→done, !ok→error |
+| `approval_pending` | `call: {id, tool, args}` | show approve/reject buttons |
+| `sensor_reading` | `reading: {kind, …}` | update IAQ / thermal state |
 | `wake_triggered` | — | flash wake indicator |
 
 Send user message:
 ```json
 {"type": "user_prompt", "text": "hello"}
 ```
-Send approval:
+Send approval (`action` = the numeric `ToolCall.id`; **not** `call_id`/`approved`):
 ```json
-{"type": "user_approval", "call_id": "abc", "approved": true}
+{"type": "user_approval", "action": 5, "granted": true}
 ```
+Cancel a turn (agentd `cascade_cancel` aborts it but emits no `TurnComplete`,
+so the UI must also clear its own busy + pending tool cards):
+```json
+{"type": "user_cancel"}
+```
+The gateway injects `session` into every inbound frame before deserializing
+into `Event`, so frontends omit it. A frame that fails to deserialize is
+**silently dropped** — wrong field names = no error, just nothing happens.
 
-Full event list: `../ApexOS/agentd/crates/core/src/types.rs` — `Event` enum.
+Full event list: `agentd/crates/core/src/types.rs` — `Event` enum.
 
 ---
 
@@ -283,6 +295,8 @@ Full event list: `../ApexOS/agentd/crates/core/src/types.rs` — `Event` enum.
 - **Pi Zero 2W rendering** — BCM2837 uses `vc4` not `v3d`. Set `SLINT_BACKEND=linuxkms-femtovg` for software rendering; no GPU required.
 - **agentd must be running** — the UI will retry the WS connection on disconnect. In dev, agentd can be on a remote Pi; just set `AGENTD_WS`.
 - **Session replay** — send `{"type": "session_init", "session_id": 42}` to restore a prior session. agentd replays the full message history.
+- **A plain `Rectangle` is not a layout** — children are absolutely positioned and it does **not** report their size upward. A `for`-row built on a bare `Rectangle` collapses to ~0 height and rows draw on top of each other. Use a `VerticalLayout`/`HorizontalLayout` for any row that must size to its content.
+- **No key auto-repeat on linuxkms** — `i-slint-backend-linuxkms` dispatches one `KeyPressed`/`KeyReleased` per libinput event with no repeat synthesis (libinput doesn't repeat; a compositor normally does). Holding a key = one hop on the Pi. Works on desktop (winit). Backend limitation — not fixable in app code without forking the backend.
 
 ---
 
