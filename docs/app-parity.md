@@ -34,9 +34,9 @@ Original app catalogue lives in `../ApexOS/ui/desktop-app.js` (`WIN_DEFAULTS` +
 | 🎵 Sonus | ✅ player (list+play); gen needs APEX | C | `/api/sonus/{files,stream,play,stop}`; `sonus-mcp` plugin (ext. hermes-sonus) |
 | 📁 Explorer | ✗ | C | file ops are agent-tools, not HTTP — needs `/api/fs` or agent-driven |
 | 📷 Camera | ✗ | C | needs video frames into a custom painter |
-| 🧠 Cerebro | ✗ | D | was iframe → external-browser launcher tile |
-| 👁 Sensor Head | ✗ | D | was iframe (`:8080`) → external-browser tile |
-| 🌐 Browser | ✗ | D | Slint can't embed a webview → external-browser tile |
+| 🧠 Cerebro | ✅ `web_view` tile | D | external-browser tile (`:8765`, host from agentd) |
+| 👁 Sensor Head | ✅ `web_view` tile | D | external-browser tile (`:8080`, host from agentd) |
+| 🌐 Browser | ✅ `web_view` URL bar | D | open-arbitrary-URL bar in the Web launcher |
 | 🖥 IDE (Monaco) | ✗ | D | external editor / SSH+vim (deferred, CLAUDE.md) |
 
 **Tiers** = real build effort, not priority:
@@ -70,7 +70,7 @@ Original app catalogue lives in `../ApexOS/ui/desktop-app.js` (`WIN_DEFAULTS` +
    - Remaining: (a) APEX orchestration-guidance proposal; (b) flesh out the
      `plugins.toml` deploy stanza; (c) confirm live env on the Pi.
 4. **Tier B apps** — Notes ✅, APEX Face ✅, Sketchpad ✅. **Tier B complete.**
-5. **Tier D launcher tiles** — cheap external-browser stubs for Cerebro/SensorHead/Browser.
+5. **Tier D launcher tiles** ✅ — consolidated into one `Web` launcher (🌐): Cerebro + Sensor Head tiles (host derived from the agentd URL) + an open-any-URL bar. Opens via the host browser (xdg-open / `$BROWSER`), best-effort, and shows the URL so it's usable from any LAN device.
 6. **New OS-standard apps** — see ideas below.
 
 ---
