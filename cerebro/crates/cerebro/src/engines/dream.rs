@@ -684,7 +684,11 @@ impl DreamEngine {
 
     // -------------------------------------------------------------------------
     // Phase 5: Pruning — algorithmic
-    // Soft-delete isolated, low-salience, stale sensory-layer memories
+    // Soft-delete two classes of stale memory:
+    //   A) isolated, low-salience sensory-layer memories (original rule)
+    //   B) `prune_candidate`-flagged memories — procedures demoted to the floor
+    //      by repeated failure (evolutionary layer, slice #3). This is what makes
+    //      the failure → demote → flag → retire selection loop actually retire.
     // -------------------------------------------------------------------------
     async fn pruning(
         &self,
@@ -704,20 +708,36 @@ impl DreamEngine {
             .await?;
 
         let mut pruned = 0usize;
+        let mut demoted_pruned = 0usize;
         for node in &all_memories {
-            if node.layer    != MemoryLayer::Sensory       { continue; }
-            if node.salience >  PRUNING_MAX_SALIENCE       { continue; }
-            if node.created_at > cutoff                    { continue; }
+            // Both prune classes require the memory to be stale.
+            if node.created_at > cutoff { continue; }
 
-            let links = cortex.storage.read().await.sqlite
-                .list_links_from(&node.id).await?;
-            if !links.is_empty() { continue; }
+            let prune_candidate = node.tags.iter().any(|t| t == "prune_candidate");
+
+            let should_prune = if prune_candidate {
+                // Class B: explicitly demoted by repeated failure (slice #3) —
+                // retire regardless of layer or links; the flag IS the decision.
+                true
+            } else if node.layer == MemoryLayer::Sensory
+                && node.salience <= PRUNING_MAX_SALIENCE
+            {
+                // Class A: isolated, low-salience, stale sensory memory.
+                cortex.storage.read().await.sqlite
+                    .list_links_from(&node.id).await?.is_empty()
+            } else {
+                false
+            };
+            if !should_prune { continue; }
 
             // CB-024: only count a prune that actually soft-deleted a live row.
             match cortex.storage.read().await.sqlite
                 .delete_memory(&node.id).await
             {
-                Ok(true)  => pruned += 1,
+                Ok(true)  => {
+                    pruned += 1;
+                    if prune_candidate { demoted_pruned += 1; }
+                }
                 Ok(false) => {} // no-op (already deleted) — don't over-count
                 Err(e)    => tracing::warn!(
                     "Phase 5 prune failed for {}: {e}", node.id.0
@@ -728,8 +748,8 @@ impl DreamEngine {
         result.memories_processed = all_memories.len();
         result.memories_pruned    = pruned;
         result.notes = format!(
-            "Pruned {} isolated sensory memories (of {} scanned)",
-            pruned, all_memories.len(),
+            "Pruned {} memories of {} scanned ({} demoted procedures, {} isolated sensory)",
+            pruned, all_memories.len(), demoted_pruned, pruned - demoted_pruned,
         );
         result.duration_secs = start.elapsed().as_secs_f64();
         Ok(result)

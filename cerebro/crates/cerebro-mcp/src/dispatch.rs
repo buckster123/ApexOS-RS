@@ -11,6 +11,13 @@ use uuid::Uuid;
 
 use crate::tools;
 
+/// Evolutionary layer, slice #3: a procedure whose salience has decayed to (or
+/// below) this floor through repeated failure is tagged `prune_candidate` —
+/// selection pressure made concrete, so dream's pruning phase can retire it.
+/// Procedures start at salience 0.8; at −0.15 per failure this is reached after
+/// ~4 net failures, and any success clears the flag.
+const PRUNE_CANDIDATE_SALIENCE: f32 = 0.25;
+
 pub fn handle_initialize(req: &Value) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -821,18 +828,39 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let storage = brain.storage.read().await;
             let mut node = storage.sqlite.get_memory(&mid, &scope).await?
                 .ok_or_else(|| anyhow::anyhow!("procedure not found: {procedure_id}"))?;
+            // Real selection pressure (evolutionary layer, slice #3): success
+            // promotes, failure DEMOTES. Asymmetric — a failure (−0.15) bites
+            // harder than a success rewards (+0.1), so a procedure must earn
+            // net-positive outcomes to stay above the skill-distillation bar; a
+            // single failure already drops a default procedure below it.
+            // Previously failure *raised* salience (+0.02), which made the
+            // ACT-R/retrieval signal reinforce bad habits — the charter's flag.
             if success {
                 node.salience = (node.salience + 0.1).min(1.0);
+                // A good outcome also eases FSRS difficulty back toward baseline,
+                // so a procedure that failed once can recover its fitness through
+                // repeated wins rather than being penalised forever.
+                node.strength.difficulty = (node.strength.difficulty - 0.3).max(1.0);
+                node.tags.retain(|t| t != "prune_candidate");
             } else {
-                node.salience = (node.salience + 0.02).min(1.0);
+                node.salience = (node.salience - 0.15).max(0.0);
                 node.strength.difficulty = (node.strength.difficulty + 0.5).min(10.0);
+                // Once decayed to the floor, flag for pruning: a chronically
+                // failing procedure is actively retired, not merely ignored.
+                if node.salience <= PRUNE_CANDIDATE_SALIENCE
+                    && !node.tags.iter().any(|t| t == "prune_candidate")
+                {
+                    node.tags.push("prune_candidate".to_string());
+                }
             }
             storage.sqlite.update_memory(&node).await?;
             Ok(json!({
-                "status":       "ok",
-                "procedure_id": procedure_id,
-                "success":      success,
-                "new_salience": node.salience,
+                "status":          "ok",
+                "procedure_id":    procedure_id,
+                "success":         success,
+                "new_salience":    node.salience,
+                "new_difficulty":  node.strength.difficulty,
+                "prune_candidate": node.tags.iter().any(|t| t == "prune_candidate"),
             }))
         }
 
@@ -1423,6 +1451,52 @@ mod tests {
         let sections = result["sections_loaded"].as_array().unwrap();
         assert!(sections.iter().any(|s| s.as_str().unwrap_or("").starts_with("skills(")),
             "skills section must be listed in sections_loaded: {sections:?}");
+    }
+
+    #[tokio::test]
+    async fn record_procedure_outcome_failure_demotes_and_flags() {
+        let (brain, _dir) = make_brain().await;
+
+        // Store a procedure (default salience 0.8) and capture its id.
+        let store = json!({
+            "jsonrpc":"2.0","id":0,"method":"tools/call",
+            "params":{"name":"store_procedure","arguments":{
+                "content":"flaky approach: restart the service and hope it sticks",
+                "tags":["ops"]
+            }}
+        });
+        let resp = dispatch_tool(store, Arc::clone(&brain)).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let id = serde_json::from_str::<Value>(text).unwrap()["id"].as_str().unwrap().to_string();
+
+        let outcome = |success: bool| json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"record_procedure_outcome","arguments":{
+                "procedure_id": id, "success": success
+            }}
+        });
+        let read = |resp: &Value| -> Value {
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+        };
+
+        // One failure must DEMOTE (the old code raised salience +0.02).
+        let r = read(&dispatch_tool(outcome(false), Arc::clone(&brain)).await);
+        let after_one = r["new_salience"].as_f64().unwrap();
+        assert!(after_one < 0.8 - 1e-6, "failure must lower salience, got {after_one}");
+        assert!(!r["prune_candidate"].as_bool().unwrap(), "one failure shouldn't yet flag");
+
+        // Keep failing until it decays to the prune floor → flagged for retirement.
+        let mut flagged = false;
+        for _ in 0..5 {
+            let r = read(&dispatch_tool(outcome(false), Arc::clone(&brain)).await);
+            if r["prune_candidate"].as_bool().unwrap() { flagged = true; break; }
+        }
+        assert!(flagged, "repeated failure must eventually flag prune_candidate");
+
+        // A success clears the flag (a recovering procedure isn't retired).
+        let r = read(&dispatch_tool(outcome(true), Arc::clone(&brain)).await);
+        assert!(!r["prune_candidate"].as_bool().unwrap(),
+            "success must clear the prune_candidate flag");
     }
 
     #[tokio::test]
