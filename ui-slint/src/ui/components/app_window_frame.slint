@@ -27,6 +27,7 @@ import { InferenceView } from "inference_view.slint";
 import { AudioEditorView } from "audio_editor_view.slint";
 import { SonusView } from "sonus_view.slint";
 import { NotesView } from "notes_view.slint";
+import { FaceView } from "face_view.slint";
 
 component CaptionButton inherits Rectangle {
     in property <string> glyph;
@@ -124,6 +125,8 @@ export component AppWindowFrame inherits Rectangle {
     in property <[NoteItem]>     notes;
     in-out property <string>     notes-current-name;
     in-out property <string>     notes-current-text;
+    in property <string>         face-state;
+    in property <int>            face-tick;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -483,6 +486,12 @@ export component AppWindowFrame inherits Rectangle {
             open(name) => { root.open-note(name); }
             save(name, text) => { root.save-note(name, text); }
             create(name) => { root.create-note(name); }
+        }
+
+        if root.kind == AppKind.face: FaceView {
+            vertical-stretch: 1;
+            state: root.face-state;
+            tick: root.face-tick;
         }
     }
 

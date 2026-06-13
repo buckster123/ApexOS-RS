@@ -73,6 +73,8 @@ export component AppWindow inherits Window {
     in-out property <[NoteItem]>     notes;
     in-out property <string>         notes-current-name: "";
     in-out property <string>         notes-current-text: "";
+    in-out property <string>         face-state: "idle";
+    in-out property <int>            face-tick: 0;
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id /
@@ -595,6 +597,8 @@ export component AppWindow inherits Window {
                         notes: root.notes;
                         notes-current-name <=> root.notes-current-name;
                         notes-current-text <=> root.notes-current-text;
+                        face-state: root.face-state;
+                        face-tick: root.face-tick;
 
                         send-message(t) => { root.send-message(t); }
                         stop-turn => { root.stop-turn(); }
