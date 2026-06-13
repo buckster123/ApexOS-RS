@@ -129,9 +129,9 @@ makes the agent *see* the tool; the route in `dispatch.rs` makes it *do* somethi
    - **Scope:** always `let scope = agent_scope(args);` for anything that reads/writes
      user-visible memory, and thread it into the storage call.
    - **Errors are values, not panics** — return `anyhow::Result`; never `.unwrap()` on input.
-   - The fall-through `_ => Ok(json!({ "status": "not_yet_implemented", … }))`
-     (`dispatch.rs:921`) returns *success*, so a tool with a schema but no route silently
-     no-ops. Always add the route.
+   - The fall-through `_` arm returns an honest JSON-RPC `-32601` not-implemented **error**
+     (C-RS-007), so a tool with a schema but no route fails loudly rather than silently
+     no-opping. Still always add the route — but a missing one now errors, not lies.
 
 4. **(Optional) engine logic.** If the verb needs new behaviour rather than a storage call,
    add a method to the relevant engine in `cerebro/crates/cerebro/src/engines/` and call it
@@ -266,17 +266,20 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 
 **Known stubs & inert paths (do NOT rely on these).** Grounded in `dispatch.rs` + symbiosis.md:
 
-- `cognitive_bootstrap`, `ingest_file`, `describe_image`, `search_vision` are in `TOOL_NAMES`
-  and advertised, but **have no route arm** — they hit the `_` fallback (`dispatch.rs:921`)
-  and return `{"status":"not_yet_implemented"}` as a *successful* result. Any Wake-loop
-  pseudocode calling `cognitive_bootstrap` as "step 0" is a no-op today; use `session_recall`
-  + `check_inbox` + `list_intentions` for orient.
+- `ingest_file`, `describe_image`, `search_vision` are advertised in `TOOL_NAMES` but
+  unimplemented — they now return an honest `-32601` not-implemented **error** (C-RS-007).
+  `cognitive_bootstrap` has a deliberate route arm that returns a *success*
+  `{"status":"not_yet_implemented"}` stub (kept successful so APEX's soul-boot step-0 doesn't
+  hard-fail) — but it injects **zero** priming. So any Wake-loop calling it as "step 0" is a
+  silent no-op today (audit CB-001); use `session_recall` + `check_inbox` + `list_intentions`
+  to orient.
 - **Reinforcement is inert.** `recall`/`get_memory` do not bump FSRS/ACT-R activation. The
   "recall sharpens memory" story is aspirational, not wired. `record_procedure_outcome` *does*
   nudge salience/difficulty (`dispatch.rs:757`), but ordinary reads do not.
-- **Spreading activation ignores the scope param** (`spreading.rs`), so cross-agent leakage is
-  possible via graph traversal even though the SQL filter is scoped. Treat scope as a
-  best-effort filter on direct reads, not a hard isolation boundary.
+- **Spreading activation enforces scope** as of C-RS-003: `recall` builds a per-node
+  visibility map and `spread()` skips non-visible neighbors, so cross-agent leakage via graph
+  traversal is closed. (Note CB-017: `agent_id` is still self-asserted at the MCP boundary —
+  scope isolates *between declared identities*, it doesn't authenticate the identity itself.)
 - `dream_run`'s LLM-assisted phases (pattern extraction, schema formation, REM) **skip
   gracefully** when no Anthropic key is configured; the report still returns 6 phases but the
   LLM phases are empty. `max_llm_calls` is capped at 20.
@@ -358,9 +361,11 @@ Allowed without approval even in `suggest`: `remember`, `recall`, `associate`, `
 mode default (incl. `session_save`, `store_intention`, `store_procedure`, `dream_run`,
 `delete_memory`, `purge_*`, `bulk_delete`).
 
-### Known stubs (advertised, no route — return `not_yet_implemented`)
+### Known stubs (advertised but unimplemented)
 
-`cognitive_bootstrap` · `ingest_file` · `describe_image` · `search_vision`
+`ingest_file` · `describe_image` · `search_vision` — return an honest `-32601` error.
+`cognitive_bootstrap` — routed to a *success* `not_yet_implemented` stub (soul-boot step-0),
+but primes nothing yet (CB-001).
 
 ### Files
 

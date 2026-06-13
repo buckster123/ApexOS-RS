@@ -212,14 +212,18 @@ counterpart to CLAUDE.md (static blueprint) and git (code truth).
 
 ### Known gaps (do not assume these work)
 
-- **CCBS / `cognitive_bootstrap` is unimplemented in the Rust port.** `dispatch.rs` has no
-  route for it — it falls through to a not-yet-implemented stub that returns a fake success.
-  The two-tier soul / 12-slot bootstrap is **not load-bearing** in the Rust port yet; any
-  Wake-loop pseudocode that calls `cognitive_bootstrap` as "step 0" hits the stub.
+- **CCBS / `cognitive_bootstrap` is stubbed (not implemented).** `dispatch.rs` has a
+  deliberate route arm for it that returns a *success* `not_yet_implemented` stub (kept as
+  a success so APEX's soul-boot step-0 doesn't hard-fail), but it injects **zero** priming
+  content. The two-tier soul / 12-slot bootstrap is **not load-bearing** in the Rust port
+  yet; a Wake-loop calling `cognitive_bootstrap` as "step 0" silently primes nothing
+  (audit finding CB-001).
 - **Reinforcement is inert.** `recall` does not update FSRS/ACT-R activation; the memory-tier
   reinforcement story in CLAUDE.md is aspirational, not wired.
-- **`spreading.rs` ignores the scope param**; `ingest_file` / `describe_image` /
-  `search_vision` schemas were never completed (Step 9 schema work).
+- **`ingest_file` / `describe_image` / `search_vision` are unimplemented** — they return an
+  honest `-32601` not-implemented error (C-RS-007), and their advertised schemas are still
+  placeholders (Step 9 schema work). (Spreading activation **does** enforce scope as of
+  C-RS-003 — the earlier "ignores scope" claim is no longer true.)
 
 See [symbiosis.md](symbiosis.md) for the full loop and the Sleep-loop gap.
 
