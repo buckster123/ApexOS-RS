@@ -112,6 +112,11 @@ pub fn list() -> Value {
             }
         },
         {
+            "name": "sketch_snapshot",
+            "description": "Get the path to the latest drawing from the user's Sketchpad (a PNG under the workspace). Use this when the user says they drew something or asks you to look at their sketch, then view/describe the returned image path.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "http_fetch",
             "description": "Make an HTTP request.",
             "inputSchema": {
@@ -336,6 +341,7 @@ pub fn call(name: &str, args: &Value) -> Value {
         "notes_list" => notes_list(),
         "notes_read" => notes_read(args),
         "notes_append" => notes_append(args),
+        "sketch_snapshot" => sketch_snapshot(),
         "create_dir" => create_dir(args),
         "delete_path" => delete_path(args),
         "http_fetch" => http_fetch(args),
@@ -677,6 +683,22 @@ fn notes_append(args: &Value) -> Value {
     match file.write_all(line.as_bytes()) {
         Ok(_) => tool_ok(json!({ "name": name, "appended_bytes": line.len() })),
         Err(e) => tool_error(format!("write error: {}", e)),
+    }
+}
+
+fn sketch_snapshot() -> Value {
+    // The Sketchpad app saves the current canvas to <workspace>/sketches/latest.png
+    // via the gateway. Hand APEX the path so it can view/describe the drawing.
+    let path = resolve_path("sketches/latest.png");
+    if path.exists() {
+        let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        tool_ok(json!({
+            "path": path.to_string_lossy(),
+            "size_bytes": size,
+            "hint": "Use your image-viewing ability (or describe_image) on this path to see the drawing.",
+        }))
+    } else {
+        tool_ok(json!({ "path": null, "message": "No sketch yet — the user hasn't sent one from the Sketchpad." }))
     }
 }
 
