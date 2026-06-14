@@ -276,6 +276,15 @@ async fn main() -> anyhow::Result<()> {
     supervisor.set_rollback_tx(rollback_tx);
     supervisor.set_events_dir(log_dir.clone());
     supervisor.set_vast_state(vast_state.clone());
+    // Subscribe the agent-router's receiver BEFORE the supervisor starts. The
+    // supervisor emits PluginUp (carrying each plugin's tools) the moment a plugin
+    // finishes enumerating; a broadcast Receiver created afterwards misses those
+    // events (tokio drops messages sent before subscribe), leaving tool_reg holding
+    // only the virtual tools — the model then sees no plugin tools at all. On a fast
+    // host the supervisor reliably wins that race, so this MUST be subscribed here,
+    // not down by spawn_agent_router. The receiver buffers (cap 1024) until the
+    // router task drains it.
+    let agent_rx = bcast.subscribe();
     tokio::spawn(supervisor.run(plugin_configs, bcast.subscribe()));
 
     // Agent turn engine — RoutingProvider dispatches per-call based on backend_arc
@@ -365,8 +374,8 @@ async fn main() -> anyhow::Result<()> {
         council_proxy,
     );
 
-    // Subscribe before supervisor so no early PluginUp events are missed.
-    let agent_rx = bcast.subscribe();
+    // agent_rx was subscribed above, before the supervisor spawned, so the early
+    // PluginUp events that populate tool_reg are captured (see the comment there).
     spawn_agent_router(agent_rx, bcast.clone(), handle.clone(),
                        tool_reg, histories, engine, max_depth, session_store);
 
