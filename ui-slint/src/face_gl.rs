@@ -66,10 +66,17 @@ void main() { gl_Position = vec4(pos, 0.0, 1.0); }
 // expression uniforms as slice 2. Gaze turns the head; an idle bob keeps it
 // alive. y is bottom-up (gl_FragCoord, localised to the face rect via u_origin).
 //
-// highp in the fragment stage for stable marching — supported on desktop GL and
-// the Pi's V3D GLES2 (the GL tiers); the Nano software path never runs this.
+// Precision: prefer highp for stable marching, but guard it — GLSL ES 1.00 makes
+// highp in the fragment stage OPTIONAL, and declaring it where unsupported is a
+// compile error. Where it's missing (some V3D/GLES2 drivers) we fall back to
+// mediump; the normal-gradient epsilon below is sized to survive that (a too-small
+// epsilon underflows at mediump → zero normals → the face collapses to a blob).
 const FRAG: &str = r#"#version 100
+#ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
+#else
+precision mediump float;
+#endif
 uniform float u_time;
 uniform vec2  u_res;       // face-rect size in physical px
 uniform vec2  u_origin;    // face-rect bottom-left in physical px (gl_FragCoord frame)
@@ -98,7 +105,9 @@ float mapHead(vec3 p) {
     return smin(head, nose, 0.10);
 }
 vec3 calcNormal(vec3 p) {
-    vec2 e = vec2(0.0016, 0.0);
+    // Epsilon kept comfortably above mediump's ~0.001 resolution near r≈0.9 so the
+    // central differences don't cancel to zero on a mediump fallback driver.
+    vec2 e = vec2(0.005, 0.0);
     return normalize(vec3(
         mapHead(p + e.xyy) - mapHead(p - e.xyy),
         mapHead(p + e.yxy) - mapHead(p - e.yxy),
@@ -178,7 +187,8 @@ void main() {
         col = mix(col, ink, (1.0 - smoothstep(0.92, 1.08, mo)) * front);
     } else {
         float halfW = 0.40;
-        float yc = mc.y - u_mouth.x * 0.34 * (1.0 - pow(fc.x / halfW, 2.0));
+        float nx = fc.x / halfW;   // pow(x,2) is undefined for x<0 in GLSL ES — square it
+        float yc = mc.y - u_mouth.x * 0.34 * (1.0 - nx * nx);
         float line = smoothstep(0.055, 0.028, abs(fc.y - yc))
                    * step(abs(fc.x - mc.x), halfW) * front;
         col = mix(col, ink, line);
