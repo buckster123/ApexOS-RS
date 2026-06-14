@@ -122,6 +122,16 @@ pub fn list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "camera_capture",
+            "description": "SEE the physical world through this device's camera — take a photo and look at it. Use this when the user asks what you see, to look at something they're holding up, check the room, or read a label/screen in front of the camera. Auto-detects the camera backend (Raspberry Pi CSI camera via rpicam/libcamera, or a USB/laptop webcam via V4L2), captures one frame, and returns it inline so you see it directly. Returns a note (not an error) when no camera is attached.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "device": { "type": "string", "description": "Optional V4L2 device path to force, e.g. '/dev/video0'. Omit to auto-detect (Pi CSI camera first, then the first USB/webcam node)." }
+                }
+            }
+        },
+        {
             "name": "http_fetch",
             "description": "Make an HTTP request.",
             "inputSchema": {
@@ -348,6 +358,7 @@ pub fn call(name: &str, args: &Value) -> Value {
         "notes_append" => notes_append(args),
         "sketch_snapshot" => sketch_snapshot(),
         "screenshot_mirror" => screenshot_mirror(),
+        "camera_capture" => camera_capture(args),
         "create_dir" => create_dir(args),
         "delete_path" => delete_path(args),
         "http_fetch" => http_fetch(args),
@@ -758,6 +769,140 @@ fn screenshot_mirror() -> Value {
         "vision": { "path": path.to_string_lossy() },
         "text": "This is APEX's current screen — the live ApexOS-RS UI as rendered right now.",
     }))
+}
+
+/// Camera eyes: snap one frame from whatever camera this device has and hand it
+/// back via the vision sentinel — APEX sees the physical world inline, the same
+/// path as screenshot_mirror / sketch_snapshot. Renderer of capture is chosen at
+/// runtime (the capture half of HW-tier detection): Pi CSI camera (rpicam /
+/// libcamera) first, then a USB / laptop webcam over V4L2 (ffmpeg), then fswebcam.
+/// Self-contained — no agentd coupling. Graceful "no camera" like screenshot_mirror's
+/// "no display": a note, not an error.
+fn camera_capture(args: &Value) -> Value {
+    let out = resolve_path("camera/latest.jpg");
+    if let Some(parent) = out.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let out_s = out.to_string_lossy().to_string();
+    let _ = fs::remove_file(&out); // ensure a stale frame can't masquerade as fresh
+
+    // 1) Operator override — a full custom capture command with a {out} placeholder.
+    //    Lets any exotic backend (gphoto2, a network cam grab, …) feed the same flow.
+    if let Some(cmd) = std::env::var("APEXOS_CAMERA_CMD").ok().filter(|s| !s.is_empty()) {
+        let cmd = cmd.replace("{out}", &out_s);
+        let (_o, err, ok) = cmd_capture("/bin/sh", &["-c", &cmd]);
+        if ok && jpeg_ok(&out) {
+            return camera_ok(&out, "custom", None);
+        }
+        return tool_error(format!("APEXOS_CAMERA_CMD failed: {}", err.trim()));
+    }
+
+    // 2) Explicit device → V4L2 (USB / laptop webcam) via ffmpeg.
+    let forced = args["device"].as_str()
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("APEXOS_CAMERA_DEVICE").ok().filter(|s| !s.is_empty()));
+    if let Some(dev) = forced {
+        if try_v4l2_ffmpeg(&dev, &out) && jpeg_ok(&out) {
+            return camera_ok(&out, "v4l2-ffmpeg", Some(&dev));
+        }
+        if try_fswebcam(&dev, &out) && jpeg_ok(&out) {
+            return camera_ok(&out, "fswebcam", Some(&dev));
+        }
+        return tool_error(format!("camera device {} produced no frame (is it a capture node, and is the agentd user in the 'video' group?)", dev));
+    }
+
+    // 3) Auto-detect. On a Pi, try the CSI camera first (rpicam/libcamera).
+    if gpio_detect_model().to_lowercase().contains("raspberry") {
+        for prog in ["rpicam-jpeg", "libcamera-jpeg"] {
+            if try_rpicam(prog, &out) && jpeg_ok(&out) {
+                return camera_ok(&out, prog, Some("csi:0"));
+            }
+        }
+    }
+    // Then any USB / webcam V4L2 nodes, in order.
+    for dev in list_video_nodes() {
+        if try_v4l2_ffmpeg(&dev, &out) && jpeg_ok(&out) {
+            return camera_ok(&out, "v4l2-ffmpeg", Some(&dev));
+        }
+        if try_fswebcam(&dev, &out) && jpeg_ok(&out) {
+            return camera_ok(&out, "fswebcam", Some(&dev));
+        }
+    }
+
+    // Nothing captured — not an error, just no eyes on this node.
+    tool_ok(json!({
+        "camera": null,
+        "message": "No camera detected on this device — no Pi CSI camera (rpicam) and no working /dev/video* webcam. Attach a camera, or set APEXOS_CAMERA_DEVICE / APEXOS_CAMERA_CMD."
+    }))
+}
+
+fn camera_ok(path: &Path, backend: &str, device: Option<&str>) -> Value {
+    tool_ok(json!({
+        "vision": { "path": path.to_string_lossy() },
+        "text": "Live frame from this device's camera — what APEX sees through its eye right now.",
+        "backend": backend,
+        "device": device,
+    }))
+}
+
+/// A captured frame must exist and be non-trivially sized — guards against a
+/// backend that exits 0 but writes an empty/truncated file.
+fn jpeg_ok(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.len() > 1024).unwrap_or(false)
+}
+
+/// Sorted list of `/dev/video*` capture nodes (video0, video1, …). A USB cam often
+/// exposes several nodes (the extras are metadata-only and simply fail to capture,
+/// so we just try them in order).
+fn list_video_nodes() -> Vec<String> {
+    let mut nodes: Vec<(u32, String)> = fs::read_dir("/dev")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let num = name.strip_prefix("video")?;
+            let n: u32 = num.parse().ok()?;
+            Some((n, format!("/dev/{}", name)))
+        })
+        .collect();
+    nodes.sort_by_key(|(n, _)| *n);
+    nodes.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Pi CSI camera via rpicam-jpeg / libcamera-jpeg. `-t 1200` gives ~1.2s of
+/// auto-exposure/white-balance warmup before the still — a black frame otherwise.
+fn try_rpicam(prog: &str, out: &Path) -> bool {
+    let out_s = out.to_string_lossy();
+    let (_o, _e, ok) = cmd_capture(prog, &[
+        "--nopreview", "--camera", "0", "-t", "1200", "-q", "85",
+        "-o", &out_s,
+    ]);
+    ok
+}
+
+/// USB / laptop webcam via ffmpeg's V4L2 input. `-frames:v 5 -update 1` grabs five
+/// frames into the same file (last wins) so the sensor has a moment to auto-expose;
+/// native resolution (no -video_size) maximizes device compatibility — the vision
+/// shim downscales to VISION_MAX_EDGE regardless.
+fn try_v4l2_ffmpeg(dev: &str, out: &Path) -> bool {
+    let out_s = out.to_string_lossy();
+    let (_o, _e, ok) = cmd_capture("ffmpeg", &[
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "v4l2", "-i", dev,
+        "-frames:v", "5", "-update", "1",
+        &out_s,
+    ]);
+    ok
+}
+
+/// Last-resort webcam grab via fswebcam (`-S 8` skips warmup frames).
+fn try_fswebcam(dev: &str, out: &Path) -> bool {
+    let out_s = out.to_string_lossy();
+    let (_o, _e, ok) = cmd_capture("fswebcam", &[
+        "-d", dev, "-S", "8", "--no-banner", "-q", &out_s,
+    ]);
+    ok
 }
 
 fn list_dir(args: &Value) -> Value {

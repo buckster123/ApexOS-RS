@@ -1012,41 +1012,91 @@ async fn snapshot_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let night = params.get("night").map(|v| v == "true" || v == "1").unwrap_or(false);
+    match capture_camera_jpeg(night).await {
+        Ok(bytes) => {
+            (StatusCode::OK, [(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response()
+        }
+        Err(e) => {
+            eprintln!("[snapshot] {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+        }
+    }
+}
+
+/// Sorted `/dev/video*` capture nodes (video0, video1, …). A USB cam often exposes
+/// several nodes; the extras are metadata-only and just fail to capture, so we try
+/// them in order until one yields a frame.
+fn video_nodes() -> Vec<String> {
+    let mut nodes: Vec<(u32, String)> = std::fs::read_dir("/dev")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let n: u32 = name.strip_prefix("video")?.parse().ok()?;
+            Some((n, format!("/dev/{name}")))
+        })
+        .collect();
+    nodes.sort_by_key(|(n, _)| *n);
+    nodes.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Capture one JPEG frame from whatever camera this device has — the device-agnostic
+/// backend pick (the capture half of HW-tier detection): Pi CSI camera (rpicam-jpeg,
+/// honoring `night`) first, then a USB / laptop webcam over V4L2 (ffmpeg), then
+/// fswebcam. Each backend gets a 10s timeout; a >1KB output file counts as a frame.
+/// Returns the JPEG bytes, or an error string if no camera produced one.
+async fn capture_camera_jpeg(night: bool) -> Result<Vec<u8>, String> {
+    use tokio::process::Command;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_micros();
     let out = format!("/tmp/apex_snapshot_{stamp}.jpg");
+    let dur = std::time::Duration::from_secs(10);
 
-    let mut cmd = tokio::process::Command::new("rpicam-jpeg");
+    // Run one capture command, return Some(bytes) only on a real (>1KB) frame.
+    async fn grab(mut cmd: Command, out: &str, dur: std::time::Duration) -> Option<Vec<u8>> {
+        match tokio::time::timeout(dur, cmd.output()).await {
+            Ok(Ok(o)) if o.status.success() => match tokio::fs::read(out).await {
+                Ok(bytes) if bytes.len() > 1024 => {
+                    let _ = tokio::fs::remove_file(out).await;
+                    Some(bytes)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    // 1) Pi CSI camera (rpicam-jpeg). `--timeout 3000` = ~3s AE/AWB warmup.
+    let mut cmd = Command::new("rpicam-jpeg");
     cmd.args(["--output", &out, "--timeout", "3000",
-              "--width",  "1280", "--height", "720",
+              "--width", "1280", "--height", "720",
               "--nopreview", "--camera", "0", "-q", "85"]);
     if night {
         cmd.args(["--ev", "2", "--awb", "fluorescent", "--shutter", "100000"]);
     }
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        cmd.output(),
-    ).await;
-
-    match result {
-        Ok(Ok(o)) if o.status.success() => {
-            match tokio::fs::read(&out).await {
-                Ok(bytes) => {
-                    let _ = tokio::fs::remove_file(&out).await;
-                    (StatusCode::OK, [(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response()
-                }
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-            }
-        }
-        Ok(Ok(o)) => {
-            let err = String::from_utf8_lossy(&o.stderr).to_string();
-            eprintln!("[snapshot] rpicam-jpeg failed: {err}");
-            (StatusCode::INTERNAL_SERVER_ERROR, err).into_response()
-        }
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        Err(_)     => (StatusCode::GATEWAY_TIMEOUT, "camera timeout (10s)").into_response(),
+    if let Some(bytes) = grab(cmd, &out, dur).await {
+        return Ok(bytes);
     }
+
+    // 2) USB / laptop webcam over V4L2 (ffmpeg), then fswebcam, per node.
+    for dev in video_nodes() {
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(["-hide_banner", "-loglevel", "error", "-y",
+                  "-f", "v4l2", "-i", &dev,
+                  "-frames:v", "5", "-update", "1", &out]);
+        if let Some(bytes) = grab(cmd, &out, dur).await {
+            return Ok(bytes);
+        }
+        let mut cmd = Command::new("fswebcam");
+        cmd.args(["-d", &dev, "-S", "8", "--no-banner", "-q", &out]);
+        if let Some(bytes) = grab(cmd, &out, dur).await {
+            return Ok(bytes);
+        }
+    }
+
+    let _ = tokio::fs::remove_file(&out).await;
+    Err("no camera available (no Pi CSI camera and no working /dev/video* webcam)".into())
 }
 
 // ── Sonus / media ────────────────────────────────────────────────────────────
