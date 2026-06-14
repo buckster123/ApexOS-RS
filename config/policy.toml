@@ -27,6 +27,9 @@ mode = "suggest"
 "audio_trim"         = "allow"
 "audio_clean"        = "allow"
 "display_face"       = "allow"
+# Camera eyes: read-only "look", same vision flow as screenshot_mirror. Allowed so
+# APEX can see fluidly; privacy-conscious operators may set this to "ask".
+"camera_capture"     = "allow"
 "gpio_read"          = "allow"
 "gpio_info"          = "allow"
 "gpio_write"         = "ask"

@@ -594,6 +594,16 @@ apt-get install -y --no-install-recommends "${PKGS[@]}" 2>&1 \
   | grep -E "(installed|upgraded|error)" || true
 ok "System packages installed"
 
+# Camera eyes: USB/laptop webcams are captured via ffmpeg's V4L2 input (installed
+# above). The Raspberry Pi CSI camera needs rpicam-apps (older name: libcamera-apps).
+# Best-effort + separate from the main install so a generic Debian without the RPi
+# package feed can't fail the whole run — APEX just falls back to a USB cam there.
+if $IS_PI; then
+  apt-get install -y --no-install-recommends rpicam-apps >/dev/null 2>&1 \
+    || apt-get install -y --no-install-recommends libcamera-apps >/dev/null 2>&1 \
+    || warn "rpicam-apps not installed — Pi CSI camera unavailable until 'apt install rpicam-apps'"
+fi
+
 # ── Rust toolchain ─────────────────────────────────────────────────────────────
 hdr "Rust toolchain"
 
@@ -614,11 +624,16 @@ hdr "User and permissions"
 id agentd &>/dev/null || useradd -r -s /sbin/nologin -d /var/lib/agentd agentd
 
 # audio: TTS (/api/speak) + Sonus playback (/api/sonus/play) open the ALSA device
-# directly — needed on any node with speakers, so not gated behind the UI.
-getent group audio &>/dev/null && usermod -aG audio agentd || true
+# directly. video: camera eyes (camera_capture tool + /api/snapshot) read /dev/video*
+# and the Pi CSI camera. Both are display-independent — a headless laptop/USB-cam node
+# needs them too — so they are NOT gated behind the UI.
+for grp in audio video; do
+  getent group "$grp" &>/dev/null && usermod -aG "$grp" agentd || true
+done
 
 if ! $NO_UI; then
-  for grp in render video input; do
+  # render + input: KMS/DRM display only.
+  for grp in render input; do
     getent group "$grp" &>/dev/null && usermod -aG "$grp" agentd || true
   done
 fi
