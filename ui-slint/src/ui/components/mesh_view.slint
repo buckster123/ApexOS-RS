@@ -42,16 +42,19 @@ export component MeshView {
                     width: 72px;
                     height: 28px;
                     border-radius: Palette.radius;
-                    background: Palette.surface-hi;
+                    background: ref_ta.pressed ? Palette.primary-dim
+                              : ref_ta.has-hover ? Palette.surface
+                              : Palette.surface-hi;
                     border-width: 1px;
-                    border-color: Palette.border;
+                    border-color: ref_ta.has-hover ? Palette.primary : Palette.border;
                     y: (parent.height - self.height) / 2;
+                    animate background, border-color { duration: 150ms; }
 
-                    TouchArea { clicked => { root.refresh(); } }
+                    ref_ta := TouchArea { clicked => { root.refresh(); } }
 
                     Text {
                         text: "REFRESH";
-                        color: Palette.text-dim;
+                        color: ref_ta.has-hover ? Palette.primary : Palette.text-dim;
                         font-size: 9px;
                         letter-spacing: 1px;
                         horizontal-alignment: center;

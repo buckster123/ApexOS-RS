@@ -584,7 +584,11 @@ hdr "System dependencies"
 
 # ffmpeg (ffprobe + ffplay) — runtime dep for the audio tools + Audio Editor
 # (/api/audio/* analyze/waveform/process) and Sonus playback (/api/sonus/play).
-PKGS=(curl git pkg-config build-essential libssl-dev whiptail ffmpeg)
+# avahi-daemon + avahi-utils — mesh discovery (mDNS): avahi-daemon advertises this
+# node's _apexos._tcp service (see the service file dropped below) and avahi-utils
+# provides avahi-browse, which agentd's discovery loop + /api/mesh/nodes shell out to.
+# Both halves are mode-independent — a headless inference node still joins the mesh.
+PKGS=(curl git pkg-config build-essential libssl-dev whiptail ffmpeg avahi-daemon avahi-utils)
 if ! $NO_UI; then
   PKGS+=(libfontconfig1-dev libgbm-dev libegl-dev libudev-dev libinput-dev libxkbcommon-dev)
 fi
@@ -602,6 +606,20 @@ if $IS_PI; then
   apt-get install -y --no-install-recommends rpicam-apps >/dev/null 2>&1 \
     || apt-get install -y --no-install-recommends libcamera-apps >/dev/null 2>&1 \
     || warn "rpicam-apps not installed — Pi CSI camera unavailable until 'apt install rpicam-apps'"
+fi
+
+# Mesh advertisement (mDNS): drop the _apexos._tcp service file so avahi-daemon
+# advertises THIS node. Without it the node browses an empty mesh — nothing to find.
+# avahi watches /etc/avahi/services live, so a reload (not restart) picks it up.
+if systemctl list-unit-files avahi-daemon.service &>/dev/null; then
+  mkdir -p /etc/avahi/services
+  install -m 644 "$REPO_DIR/deploy/avahi/apexos-rs.service" /etc/avahi/services/apexos-rs.service
+  systemctl enable --now avahi-daemon >/dev/null 2>&1 || true
+  systemctl reload avahi-daemon >/dev/null 2>&1 \
+    || systemctl restart avahi-daemon >/dev/null 2>&1 || true
+  ok "Mesh advertisement registered (_apexos._tcp)"
+else
+  warn "avahi-daemon unavailable — this node won't appear on the mesh"
 fi
 
 # ── Rust toolchain ─────────────────────────────────────────────────────────────

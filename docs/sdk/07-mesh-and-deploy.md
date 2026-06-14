@@ -57,10 +57,13 @@ nodes then reach that model by being routed at the renting node (`send_to_agent 
 | Install-time tier/mode detection & embed-model gating | `install.sh` — tier detect :359-377, mode detect :367-368, `NO_UI` gating :430, embed model :692-700, peers.toml seed :713-715, env/token :727-746, service install/enable :760-781 |
 | systemd hardening template | `deploy/agentd.service` (jailed daemon), `deploy/apexos-rs-ui.service` (root + device allowlist), `deploy/cerebro-api.service`, `deploy/apex-sensor-bridge.service` |
 
-> **Reality check — three install gaps.** `install.sh` does **not** install `avahi-daemon`
-> (discovery needs it), does **not** install `sshpass` (`bootstrap_node` needs it), and does
-> **not** create `recipes.toml` (vast needs it at `/etc/agentd/recipes.toml`). All three are
-> manual prerequisites today. Ground any "it just works" claim against this.
+> **Reality check — install gaps.** Mesh discovery is now handled: `install.sh` installs
+> `avahi-daemon` + `avahi-utils` and drops `deploy/avahi/apexos-rs.service` →
+> `/etc/avahi/services/apexos-rs.service`, so each node **advertises** `_apexos._tcp` *and*
+> has `avahi-browse` — the publish half that was previously missing (every node browsed an
+> empty mesh). Two gaps remain: `install.sh` does **not** install `sshpass` (`bootstrap_node`
+> needs it), and does **not** create `recipes.toml` (vast needs it at
+> `/etc/agentd/recipes.toml`). Ground any "it just works" claim against these.
 
 ---
 
@@ -126,10 +129,11 @@ Two ways: **manual** (you provision the box yourself) or **agent-driven** (`boot
 1. **Provision the new box** by running `install.sh` on it (or `curl … | sudo bash`). It will
    come up as an independent `agentd`. Give it a stable identity with `APEX_NODE_ID` (defaults to
    `hostname`, `main.rs` :200).
-2. **Install + start avahi on both nodes** so they advertise/see `_apexos._tcp` (NOT done by
-   `install.sh`): `sudo apt-get install -y avahi-daemon && sudo systemctl enable --now avahi-daemon`.
-   You must *also* publish the service — the simplest is an `avahi` static service file or
-   `avahi-publish -s "ApexOS $(hostname)" _apexos._tcp 8787` on each node.
+2. **Avahi advertise/browse — now handled by `install.sh`.** It installs `avahi-daemon` +
+   `avahi-utils` and drops `/etc/avahi/services/apexos-rs.service` (from `deploy/avahi/`), so the
+   node both advertises `_apexos._tcp` and can `avahi-browse`. To wire an *already-deployed* node
+   that predates this, just `apexos-update` it (re-runs `install.sh`), or drop the file by hand:
+   `sudo install -D -m 644 deploy/avahi/apexos-rs.service /etc/avahi/services/apexos-rs.service && sudo systemctl reload avahi-daemon`.
 3. **Register the peer** on the node that will route to it. Either let discovery surface it (watch
    for `[mesh] new peer discovered` and a `PeerSeen` event) and then commit it, or POST directly:
    ```bash
@@ -270,11 +274,13 @@ delegates via `send_to_agent`.
      -d '{"backend":"ollama","oai_base_url":"http://localhost:11434/v1","model":"qwen2.5:32b"}'
    ```
 
-2. **Avahi on both** (the missing-prereq step):
+2. **Avahi on both** — `install.sh` already did this (installs `avahi-daemon` + `avahi-utils`,
+   drops the static `/etc/avahi/services/apexos-rs.service`). Only needed by hand on a node that
+   predates the change and hasn't been `apexos-update`d:
    ```bash
    sudo apt-get install -y avahi-daemon avahi-utils
-   sudo systemctl enable --now avahi-daemon
-   avahi-publish -s "ApexOS $(hostname)" _apexos._tcp 8787 &   # or a static .service file
+   sudo install -D -m 644 deploy/avahi/apexos-rs.service /etc/avahi/services/apexos-rs.service
+   sudo systemctl reload avahi-daemon   # avahi watches the dir; reload, no restart needed
    ```
 
 3. **Register the peer on the Pi:**
