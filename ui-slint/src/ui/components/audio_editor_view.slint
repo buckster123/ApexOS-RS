@@ -1,3 +1,4 @@
+import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { AudioFileItem } from "../types.slint";
 
@@ -120,8 +121,11 @@ export component AudioEditorView {
             height: 132px;
             background: Palette.bg;
 
-            Flickable {
-                interactive: true;
+            // ScrollView (not Flickable): drag-able scrollbar — linuxkms has no
+            // scroll-wheel events on the kiosk.
+            ScrollView {
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                viewport-width: self.visible-width;
                 viewport-height: file-col.preferred-height;
 
                 file-col := VerticalLayout {

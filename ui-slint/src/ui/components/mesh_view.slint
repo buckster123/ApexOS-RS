@@ -1,3 +1,4 @@
+import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { MeshNode } from "../types.slint";
 
@@ -109,9 +110,13 @@ export component MeshView {
         Rectangle { height: 1px; background: Palette.border; }
 
         // ── Node list ───────────────────────────────────────────────────────
-        Flickable {
+        // ScrollView (not Flickable): draws a drag-able scrollbar. The linuxkms
+        // backend drops scroll-wheel events, so the bar is the only way to scroll
+        // on the kiosk. See the "No mouse-wheel scroll on linuxkms" gotcha.
+        ScrollView {
             vertical-stretch: 1;
-            interactive: true;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            viewport-width: self.visible-width;
             viewport-height: mesh-col.preferred-height;
 
             mesh-col := VerticalLayout {

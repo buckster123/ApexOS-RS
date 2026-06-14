@@ -7,6 +7,7 @@
 // rendering — curses apps (htop, vim) will look garbled. This is the cheap
 // "log-watching / run-a-command" intermediate before a real VTE (deferred).
 
+import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 
 export component TerminalView {
@@ -15,14 +16,17 @@ export component TerminalView {
     callback send(string);                  // a submitted command line (no trailing \n)
 
     changed scroll-tick => {
-        flick.viewport-y = min(0px, -(flick.viewport-height - flick.height));
+        sv.viewport-y = min(0px, -(sv.viewport-height - sv.visible-height));
     }
 
     VerticalLayout {
         // ── Output pane ────────────────────────────────────────────────
-        flick := Flickable {
+        // ScrollView (not Flickable): the drag-able scrollbar is the only way to
+        // scroll on the kiosk — linuxkms drops scroll-wheel events.
+        sv := ScrollView {
             vertical-stretch: 1;
-            interactive: true;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            viewport-width: sv.visible-width;
             viewport-height: term-col.preferred-height;
 
             term-col := VerticalLayout {

@@ -99,11 +99,14 @@ export component SettingsView {
                         border-color: Palette.border-hi;
                         clip: true;
 
-                        Flickable {
+                        // ScrollView (not Flickable): drag-able scrollbar for a
+                        // long soul.md — linuxkms has no scroll-wheel on the kiosk.
+                        ScrollView {
                             x: 10px; y: 10px;
                             width: parent.width - 20px;
                             height: parent.height - 20px;
-                            interactive: true;
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                            viewport-width: self.visible-width;
                             viewport-height: soul-field.preferred-height + 20px;
 
                             soul-field := TextInput {
