@@ -3377,10 +3377,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         eye_r: g.get_eye_r(),
                         brow: g.get_brow(),
                         brow_skew: g.get_brow_skew(),
+                        brow_angle: g.get_brow_angle(),
                         mouth: g.get_mouth(),
                         open: g.get_mouth_open(),
                         gaze: [g.get_gaze_x(), g.get_gaze_y()],
                         intensity: g.get_intensity(),
+                        blush: g.get_blush(),
                     };
                     f.draw(
                         start.elapsed().as_secs_f32(),
