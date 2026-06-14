@@ -132,6 +132,35 @@ impl PeerRegistry {
     }
 }
 
+// ── Mesh pairing (kiosk-friendly onboarding) ────────────────────────────────────
+//
+// To pair node A ↔ B without hand-typing a 64-char token (and without a phone),
+// B shows a short code; A redeems it to exchange tokens. The offer lives in
+// memory only — never persisted — and is single-use, expiring, and locks out
+// after too many bad guesses.
+
+/// One active pairing offer (one per node at a time).
+pub struct Pairing {
+    pub code:       String,
+    pub expires_at: std::time::Instant,
+    pub attempts:   u8,
+}
+
+/// Pairing-code lifetime and the bad-guess lockout (which invalidates the code).
+pub const PAIR_TTL_SECS:     u64 = 300;
+pub const PAIR_MAX_ATTEMPTS: u8  = 5;
+
+/// A fresh 6-digit pairing code from the OS CSPRNG (/dev/urandom).
+pub fn gen_pair_code() -> String {
+    use std::io::Read;
+    let mut buf = [0u8; 4];
+    let n = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf).map(|_| u32::from_le_bytes(buf)))
+        .unwrap_or(0)
+        % 1_000_000;
+    format!("{n:06}")
+}
+
 /// Parse `avahi-browse -rpt _apexos._tcp --no-db-lookup` stdout into (node_id, ip) pairs.
 /// Only processes fully-resolved lines (starting with `=`).
 pub fn parse_avahi_output(raw: &str) -> Vec<(String, String)> {
@@ -237,5 +266,14 @@ mod tests {
         assert_eq!(mode, 0o600, "peers.toml holds secrets — must be owner-only");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pair_code_is_six_digits() {
+        for _ in 0..50 {
+            let c = gen_pair_code();
+            assert_eq!(c.len(), 6, "code {c:?} must be 6 chars");
+            assert!(c.chars().all(|ch| ch.is_ascii_digit()), "code {c:?} must be all digits");
+        }
     }
 }
