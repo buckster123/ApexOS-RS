@@ -1507,11 +1507,12 @@ async fn fetch_mesh(client: &reqwest::Client, base_url: &str) -> Vec<MeshNode> {
     if let Some(peers) = peers_resp["peers"].as_array() {
         for p in peers {
             out.push(MeshNode {
-                node_id: p["node_id"].as_str().unwrap_or("").into(),
-                detail:  p["ws_url"].as_str().unwrap_or("").into(),
-                role:    p["role"].as_str().unwrap_or("full").into(),
-                status:  p["status"].as_str().unwrap_or("online").into(),
-                is_peer: true,
+                node_id:   p["node_id"].as_str().unwrap_or("").into(),
+                detail:    p["ws_url"].as_str().unwrap_or("").into(),
+                role:      p["role"].as_str().unwrap_or("full").into(),
+                status:    p["status"].as_str().unwrap_or("online").into(),
+                is_peer:   true,
+                has_token: p["has_token"].as_bool().unwrap_or(false),
             });
         }
     }
@@ -1522,12 +1523,13 @@ async fn fetch_mesh(client: &reqwest::Client, base_url: &str) -> Vec<MeshNode> {
             let ip   = n["ip"].as_str().unwrap_or("");
             let port = n["port"].as_u64().unwrap_or(8787);
             out.push(MeshNode {
-                node_id: n["node_id"].as_str().unwrap_or("").into(),
-                detail:  n["ws_url"].as_str().map(|s| s.to_string())
+                node_id:   n["node_id"].as_str().unwrap_or("").into(),
+                detail:    n["ws_url"].as_str().map(|s| s.to_string())
                             .unwrap_or_else(|| format!("{ip}:{port}")).into(),
-                role:    "—".into(),
-                status:  "discovered".into(),
-                is_peer: false,
+                role:      "—".into(),
+                status:    "discovered".into(),
+                is_peer:   false,
+                has_token: false,
             });
         }
     }
@@ -2500,17 +2502,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt_h_addp    = rt.handle().clone();
     let client_addp  = Arc::clone(&http_client);
     let base_addp    = http_base.clone();
-    ui.on_add_peer(move |node_id, ws_url| {
+    ui.on_add_peer(move |node_id, ws_url, token| {
         let client = Arc::clone(&client_addp);
         let base   = base_addp.clone();
         let id     = node_id.to_string();
         let url    = ws_url.to_string();
+        let tok    = token.trim().to_string();
         rt_h_addp.spawn(async move {
+            // token is the peer's AGENTD_TOKEN, needed for cross-node a2a. Optional —
+            // omit for an auth-disabled peer. Send it only when non-empty.
+            let mut body = serde_json::json!({"node_id": id, "ws_url": url});
+            if !tok.is_empty() { body["token"] = serde_json::Value::String(tok); }
             // The handler returns {ok:false} as HTTP 200, so check the body, not the
             // status — otherwise a failed save() (e.g. EPERM on peers.toml) would
             // flash "Peer added" while the row never moves to saved.
             let ok = match client.post(format!("{base}/api/mesh/peers"))
-                .json(&serde_json::json!({"node_id": id, "ws_url": url}))
+                .json(&body)
                 .timeout(std::time::Duration::from_secs(8))
                 .send().await
             {
