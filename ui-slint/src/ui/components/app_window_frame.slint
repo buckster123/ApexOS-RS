@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -31,6 +31,7 @@ import { FaceView } from "face_view.slint";
 import { SketchpadView } from "sketchpad_view.slint";
 import { WebView } from "web_view.slint";
 import { CalculatorView } from "calculator_view.slint";
+import { ExplorerView } from "explorer_view.slint";
 
 component CaptionButton inherits Rectangle {
     in property <string> glyph;
@@ -139,11 +140,27 @@ export component AppWindowFrame inherits Rectangle {
     in-out property <string>     web-custom-url;
     in property <string>         calc-display;
     in property <string>         staged-image-name;
+    // Explorer (📁 Files)
+    in property <[ExplorerEntry]> explorer-entries;
+    in property <string>         explorer-current-path;
+    in property <string>         explorer-selected-path;
+    in property <string>         explorer-selected-name;
+    in property <string>         explorer-selected-info;
+    in property <string>         explorer-preview-kind;
+    in property <image>          explorer-preview-image;
+    in property <string>         explorer-preview-text;
+    in property <bool>           explorer-can-attach;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
     callback attach-image();
     callback clear-attachment();
+    // Explorer
+    callback refresh-explorer();
+    callback explorer-navigate(string);            // dir rel path
+    callback explorer-up();
+    callback explorer-select(string, string, string); // path, abs, ext
+    callback explorer-attach();
     callback toggle-recording();
     callback stop-turn();
     callback restore-session(int);
@@ -513,6 +530,24 @@ export component AppWindowFrame inherits Rectangle {
             open(name) => { root.open-note(name); }
             save(name, text) => { root.save-note(name, text); }
             create(name) => { root.create-note(name); }
+        }
+
+        if root.kind == AppKind.explorer: ExplorerView {
+            vertical-stretch: 1;
+            entries: root.explorer-entries;
+            current-path: root.explorer-current-path;
+            selected-path: root.explorer-selected-path;
+            selected-name: root.explorer-selected-name;
+            selected-info: root.explorer-selected-info;
+            preview-kind: root.explorer-preview-kind;
+            preview-image: root.explorer-preview-image;
+            preview-text: root.explorer-preview-text;
+            can-attach: root.explorer-can-attach;
+            refresh => { root.refresh-explorer(); }
+            navigate(p) => { root.explorer-navigate(p); }
+            up => { root.explorer-up(); }
+            select(p, a, e) => { root.explorer-select(p, a, e); }
+            attach => { root.explorer-attach(); }
         }
 
         if root.kind == AppKind.face: FaceView {

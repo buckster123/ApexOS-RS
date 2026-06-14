@@ -1,0 +1,272 @@
+import { Palette } from "../palette.slint";
+import { ExplorerEntry } from "../types.slint";
+
+// ── ExplorerView (📁 Files) ─────────────────────────────────────────────────
+//
+// A workspace file browser: navigate directories, preview files. Left pane = the
+// entry list (dirs first), right pane = a preview (image / text / info). The
+// "Attach" action stages an image into the chat composer (reuses the 🖼 picker
+// flow). Reads /api/workspace/{list,read}; image previews load from the absolute
+// path (UI + agentd are co-located on the kiosk / desktop).
+//
+// preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
+
+export component ExplorerView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <[ExplorerEntry]> entries;
+    in property <string> current-path;    // "" = workspace root
+    in property <string> selected-path;   // selected file ("" = none)
+    in property <string> selected-name;
+    in property <string> selected-info;   // "PNG · 1.2 KB"
+    in property <string> preview-kind;    // "image" | "text" | "binary" | "none"
+    in property <image>  preview-image;
+    in property <string> preview-text;
+    in property <bool>   can-attach;      // selected is an image
+
+    callback refresh();
+    callback navigate(string);            // enter dir (rel path)
+    callback up();                        // parent dir
+    callback select(string, string, string);   // path, abs, ext
+    callback attach();                    // attach selected image to chat
+
+    HorizontalLayout {
+        // ── Left: entry list ─────────────────────────────────────────────────
+        Rectangle {
+            width: 260px;
+            background: Palette.surface;
+
+            VerticalLayout {
+                // Header: up · path · refresh
+                Rectangle {
+                    height: 48px;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 10px;
+                        spacing: 6px;
+
+                        Rectangle {
+                            width: 28px;
+                            height: 28px;
+                            border-radius: Palette.radius;
+                            background: up-ta.has-hover ? Palette.surface-hi : Palette.bg;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "↑";
+                                color: Palette.text-dim;
+                                font-size: 14px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            up-ta := TouchArea { clicked => { root.up(); } }
+                        }
+
+                        Text {
+                            text: root.current-path == "" ? "workspace" : root.current-path;
+                            color: Palette.text-bright;
+                            font-size: 11px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+
+                        Rectangle {
+                            width: 28px;
+                            height: 28px;
+                            border-radius: Palette.radius;
+                            background: rf-ta.has-hover ? Palette.surface-hi : Palette.bg;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "⟳";
+                                color: Palette.text-dim;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            rf-ta := TouchArea { clicked => { root.refresh(); } }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                Flickable {
+                    vertical-stretch: 1;
+                    interactive: true;
+                    viewport-height: list-col.preferred-height;
+
+                    list-col := VerticalLayout {
+                        padding: 6px;
+                        spacing: 3px;
+                        alignment: start;
+
+                        if root.entries.length == 0: Text {
+                            text: "Empty folder.";
+                            color: Palette.text-dim;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                        }
+
+                        for e in root.entries: Rectangle {
+                            height: 34px;
+                            border-radius: Palette.radius;
+                            background: e.path == root.selected-path ? Palette.surface-hi
+                                      : (row-ta.has-hover ? Palette.surface-hi : transparent);
+                            border-width: 1px;
+                            border-color: e.path == root.selected-path ? Palette.primary : transparent;
+                            row-ta := TouchArea {
+                                clicked => {
+                                    if (e.kind == "dir") {
+                                        root.navigate(e.path);
+                                    } else {
+                                        root.select(e.path, e.abs, e.ext);
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 8px;
+                                Text {
+                                    text: e.glyph;
+                                    font-size: 14px;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: e.name;
+                                    color: Palette.text;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: e.size-label;
+                                    color: Palette.text-dim;
+                                    font-size: 9px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle { width: 1px; background: Palette.border; }
+
+        // ── Right: preview ────────────────────────────────────────────────────
+        Rectangle {
+            horizontal-stretch: 1;
+            background: Palette.bg;
+
+            VerticalLayout {
+                // Preview header: name/info + Attach (images only)
+                Rectangle {
+                    height: 48px;
+                    background: Palette.surface;
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 12px;
+                        spacing: 8px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: root.selected-name == "" ? "— no file selected —" : root.selected-name;
+                                color: root.selected-name == "" ? Palette.text-dim : Palette.text-bright;
+                                font-size: 12px;
+                                font-weight: 700;
+                                overflow: elide;
+                            }
+                            if root.selected-info != "": Text {
+                                text: root.selected-info;
+                                color: Palette.text-dim;
+                                font-size: 9px;
+                            }
+                        }
+
+                        if root.can-attach: Rectangle {
+                            width: 104px;
+                            height: 30px;
+                            border-radius: Palette.radius;
+                            background: at-ta.has-hover ? Palette.primary : Palette.primary-dim;
+                            animate background { duration: 150ms; }
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "🖼 Attach";
+                                color: Palette.bg;
+                                font-size: 11px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            at-ta := TouchArea { clicked => { root.attach(); } }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                // Preview body
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: Palette.bg;
+                    clip: true;
+
+                    if root.preview-kind == "none": Text {
+                        text: "Select a file to preview it here.";
+                        color: Palette.text-dim;
+                        font-size: 13px;
+                        width: parent.width;
+                        height: parent.height;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    if root.preview-kind == "image": Image {
+                        x: 12px;
+                        y: 12px;
+                        width: parent.width - 24px;
+                        height: parent.height - 24px;
+                        source: root.preview-image;
+                        image-fit: contain;
+                    }
+
+                    if root.preview-kind == "binary": Text {
+                        text: "Binary file — no text preview.";
+                        color: Palette.text-dim;
+                        font-size: 13px;
+                        width: parent.width;
+                        height: parent.height;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    if root.preview-kind == "text": Flickable {
+                        x: 12px;
+                        y: 12px;
+                        width: parent.width - 24px;
+                        height: parent.height - 24px;
+                        interactive: true;
+                        viewport-height: txt.preferred-height;
+                        txt := Text {
+                            width: parent.width;
+                            text: root.preview-text;
+                            color: Palette.text;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

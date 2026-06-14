@@ -153,6 +153,8 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/sessions/{id}/message", post(session_message_handler))
         .route("/api/sessions/{id}/image",   post(session_image_handler))
         .route("/api/workspace/images",      get(workspace_images_handler))
+        .route("/api/workspace/list",        get(workspace_list_handler))
+        .route("/api/workspace/read",        get(workspace_read_handler))
         .route("/api/run",                post(run_command_handler))
         .route("/api/snapshot",           get(snapshot_handler))
         .route("/api/sonus/files",        get(sonus_files_handler))
@@ -776,11 +778,11 @@ async fn session_message_handler(
     Json(serde_json::json!({ "ok": true, "session_id": id }))
 }
 
-/// Resolve a user-supplied image path. Relative paths join `AGENTD_WORKSPACE`;
-/// the canonical result must stay inside the workspace — a path-form image would
-/// otherwise let a frontend read any file on disk into the model context, so
-/// arbitrary local images must come in as base64 instead.
-fn resolve_workspace_image_path(path: &str) -> Result<std::path::PathBuf, String> {
+/// Resolve a user-supplied workspace path. Relative paths join `AGENTD_WORKSPACE`;
+/// the canonical result must stay inside the workspace (defeats `../` + absolute
+/// escapes) — a frontend must never reach a file outside the workspace through any
+/// of these routes (image attach, explorer list/read).
+fn resolve_workspace_path(path: &str) -> Result<std::path::PathBuf, String> {
     let ws = std::env::var("AGENTD_WORKSPACE")
         .ok().filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
@@ -805,7 +807,7 @@ async fn prepare_user_images(raw: &[serde_json::Value]) -> Vec<apexos_core::Imag
     let mut out = Vec::new();
     for item in raw {
         let prepared = if let Some(p) = item.get("path").and_then(|v| v.as_str()) {
-            match resolve_workspace_image_path(p) {
+            match resolve_workspace_path(p) {
                 Ok(path) => tokio::task::spawn_blocking(move || apexos_core::vision::load_and_prepare(&path)).await,
                 Err(e) => { eprintln!("[vision] user image path rejected: {e}"); continue; }
             }
@@ -2279,6 +2281,84 @@ async fn workspace_images_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "images": images }))
 }
 
+/// GET /api/workspace/list?path=<rel> — browse the workspace tree for the Explorer
+/// app. Returns the entries directly under <workspace>/<path>: directories first,
+/// then files, alpha within each. Confined to the workspace. `path` is
+/// workspace-relative; `abs` lets a co-located UI load image previews directly.
+async fn workspace_list_handler(
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let rel = params.get("path").map(|s| s.as_str()).unwrap_or("");
+    let dir = match resolve_workspace_path(rel) {
+        Ok(d) => d,
+        Err(e) => return Json(serde_json::json!({ "error": e, "path": rel, "entries": [] })),
+    };
+    let ws = std::env::var("AGENTD_WORKSPACE").ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    let ws_canon = std::fs::canonicalize(&ws).unwrap_or_else(|_| std::path::PathBuf::from(&ws));
+
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    let mut rd = match tokio::fs::read_dir(&dir).await {
+        Ok(r) => r,
+        Err(e) => return Json(serde_json::json!({ "error": format!("read dir: {e}"), "path": rel, "entries": [] })),
+    };
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let p = entry.path();
+        let name = match p.file_name().and_then(|n| n.to_str()) { Some(n) => n.to_string(), None => continue };
+        if name.starts_with('.') { continue; } // skip dotfiles
+        let meta = entry.metadata().await.ok();
+        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        let size = meta.as_ref().filter(|m| m.is_file()).map(|m| m.len()).unwrap_or(0);
+        let modified = meta.as_ref().and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs()).unwrap_or(0);
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let rel_path = p.strip_prefix(&ws_canon).map(|r| r.to_string_lossy().to_string())
+            .unwrap_or_else(|_| name.clone());
+        entries.push(serde_json::json!({
+            "name": name,
+            "kind": if is_dir { "dir" } else { "file" },
+            "size": size,
+            "modified": modified,
+            "ext": ext,
+            "path": rel_path,
+            "abs": p.to_string_lossy(),
+        }));
+    }
+    // Dirs first, then files; alpha (case-insensitive) within each group.
+    entries.sort_by(|a, b| {
+        let ad = a["kind"] == "dir"; let bd = b["kind"] == "dir";
+        bd.cmp(&ad).then_with(|| {
+            a["name"].as_str().unwrap_or("").to_ascii_lowercase()
+                .cmp(&b["name"].as_str().unwrap_or("").to_ascii_lowercase())
+        })
+    });
+    Json(serde_json::json!({ "path": rel, "entries": entries }))
+}
+
+/// GET /api/workspace/read?path=<rel> — read a workspace text file for the Explorer
+/// preview pane. Capped at 256 KB; a binary file (NUL byte) reports binary:true
+/// with no content.
+async fn workspace_read_handler(
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    const CAP: usize = 256 * 1024;
+    let rel = params.get("path").map(|s| s.as_str()).unwrap_or("");
+    let path = match resolve_workspace_path(rel) {
+        Ok(p) => p,
+        Err(e) => return Json(serde_json::json!({ "error": e })),
+    };
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(e) => return Json(serde_json::json!({ "error": format!("read: {e}") })),
+    };
+    let truncated = bytes.len() > CAP;
+    let slice = &bytes[..bytes.len().min(CAP)];
+    let binary = slice.contains(&0u8);
+    let content = if binary { String::new() } else { String::from_utf8_lossy(slice).to_string() };
+    Json(serde_json::json!({ "content": content, "truncated": truncated, "binary": binary }))
+}
+
 #[derive(Deserialize)]
 struct AudioPathBody {
     path: String,
@@ -2657,9 +2737,9 @@ mod image_input_tests {
     fn workspace_path_confinement_rejects_escape() {
         std::env::set_var("AGENTD_WORKSPACE", "/tmp");
         // An absolute system file outside the workspace is rejected …
-        assert!(resolve_workspace_image_path("/etc/passwd").is_err());
+        assert!(resolve_workspace_path("/etc/passwd").is_err());
         // … as is a `../` traversal escape.
-        assert!(resolve_workspace_image_path("../etc/passwd").is_err());
+        assert!(resolve_workspace_path("../etc/passwd").is_err());
         std::env::remove_var("AGENTD_WORKSPACE");
     }
 }

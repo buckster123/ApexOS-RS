@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { ImagePicker } from "components/image_picker.slint";
 import { ChatView } from "components/chat_view.slint";
@@ -85,6 +85,17 @@ export component AppWindow inherits Window {
     in-out property <string>         web-custom-url: "";
     in-out property <string>         calc-display: "0";
 
+    // ── Explorer (📁 Files) ─────────────────────────────────────────────
+    in-out property <[ExplorerEntry]> explorer-entries;
+    in-out property <string>         explorer-current-path: "";
+    in-out property <string>         explorer-selected-path: "";
+    in-out property <string>         explorer-selected-name: "";
+    in-out property <string>         explorer-selected-info: "";
+    in-out property <string>         explorer-preview-kind: "none";  // none|image|text|binary
+    in-out property <image>          explorer-preview-image;
+    in-out property <string>         explorer-preview-text: "";
+    in-out property <bool>           explorer-can-attach: false;
+
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id /
     // focused-kind are Rust-maintained for chrome highlight + dock state.
@@ -141,6 +152,12 @@ export component AppWindow inherits Window {
     callback open-note(string);               // name
     callback save-note(string, string);       // name, text
     callback create-note(string);             // new note name
+    // Explorer (📁 Files)
+    callback refresh-explorer();
+    callback explorer-navigate(string);       // dir rel path
+    callback explorer-up();
+    callback explorer-select(string, string, string);  // path, abs, ext
+    callback explorer-attach();
     callback sketch-down(float, float);
     callback sketch-move(float, float);
     callback sketch-up();
@@ -637,10 +654,24 @@ export component AppWindow inherits Window {
                         web-custom-url <=> root.web-custom-url;
                         calc-display: root.calc-display;
                         staged-image-name: root.staged-image-name;
+                        explorer-entries: root.explorer-entries;
+                        explorer-current-path: root.explorer-current-path;
+                        explorer-selected-path: root.explorer-selected-path;
+                        explorer-selected-name: root.explorer-selected-name;
+                        explorer-selected-info: root.explorer-selected-info;
+                        explorer-preview-kind: root.explorer-preview-kind;
+                        explorer-preview-image: root.explorer-preview-image;
+                        explorer-preview-text: root.explorer-preview-text;
+                        explorer-can-attach: root.explorer-can-attach;
 
                         send-message(t) => { root.send-message(t); }
                         attach-image => { root.refresh-workspace-images(); root.image-picker-open = true; }
                         clear-attachment => { root.staged-image-path = ""; root.staged-image-name = ""; }
+                        refresh-explorer => { root.refresh-explorer(); }
+                        explorer-navigate(p) => { root.explorer-navigate(p); }
+                        explorer-up => { root.explorer-up(); }
+                        explorer-select(p, a, e) => { root.explorer-select(p, a, e); }
+                        explorer-attach => { root.explorer-attach(); }
                         stop-turn => { root.stop-turn(); }
                         terminal-send(line) => { root.terminal-send(line); }
                         toggle-recording => { root.toggle-recording(); }

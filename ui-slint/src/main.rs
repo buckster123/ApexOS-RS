@@ -69,6 +69,9 @@ thread_local! {
     // Chat-composer image attach: workspace images offered in the 🖼 picker.
     static WORKSPACE_IMAGES: RefCell<Option<Rc<slint::VecModel<ImageItem>>>> =
         const { RefCell::new(None) };
+    // Explorer (📁 Files): the current directory's entries.
+    static EXPLORER_ENTRIES: RefCell<Option<Rc<slint::VecModel<ExplorerEntry>>>> =
+        const { RefCell::new(None) };
     // Sketchpad: the rendered stroke model (Slint Paths) + the raw point data we
     // post to /api/sketch. Index into SKETCH_PALETTE drives colour; width index 0/1.
     static SKETCH_STROKES: RefCell<Option<Rc<slint::VecModel<SketchStroke>>>> =
@@ -258,6 +261,7 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::Sketchpad => 14,
         AppKind::Web => 15,
         AppKind::Calculator => 16,
+        AppKind::Explorer => 17,
     }
 }
 
@@ -279,6 +283,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         14 => AppKind::Sketchpad,
         15 => AppKind::Web,
         16 => AppKind::Calculator,
+        17 => AppKind::Explorer,
         _ => AppKind::Chat,
     }
 }
@@ -435,6 +440,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Sketchpad => "Sketchpad",
         AppKind::Web => "Web",
         AppKind::Calculator => "Calculator",
+        AppKind::Explorer => "Files",
     }
 }
 
@@ -459,6 +465,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Sketchpad => (600.0, 580.0),
         AppKind::Web => (460.0, 400.0),
         AppKind::Calculator => (300.0, 440.0),
+        AppKind::Explorer => (680.0, 520.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -923,6 +930,39 @@ fn replace_workspace_images(items: Vec<ImageItem>) {
             }
         }
     });
+}
+
+fn replace_explorer_entries(items: Vec<ExplorerEntry>) {
+    EXPLORER_ENTRIES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+            for item in items {
+                model.push(item);
+            }
+        }
+    });
+}
+
+/// Icon for an Explorer entry — directory or file-by-extension.
+fn explorer_glyph(is_dir: bool, ext: &str) -> &'static str {
+    if is_dir { return "📁"; }
+    match ext {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => "🖼",
+        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac"  => "🎵",
+        "md" | "txt" | "log"                            => "📄",
+        "json" | "toml" | "yaml" | "yml" | "rs" | "py" | "js" | "sh" | "css" | "html" => "⚙",
+        "pdf"                                           => "📕",
+        "zip" | "gz" | "tar" | "xz"                     => "🗜",
+        _                                               => "📄",
+    }
+}
+
+/// True when an extension is a previewable raster image (loaded directly from the
+/// absolute path — UI + agentd are co-located on the kiosk / desktop).
+fn is_image_ext(ext: &str) -> bool {
+    matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
 }
 
 // ── Sketchpad helpers (run on the Slint thread) ────────────────────────────────
@@ -1636,6 +1676,50 @@ async fn fetch_workspace_images(client: &reqwest::Client, base_url: &str) -> Vec
     }).collect()
 }
 
+async fn fetch_explorer_list(client: &reqwest::Client, base_url: &str, path: &str) -> Vec<ExplorerEntry> {
+    // GET /api/workspace/list?path= → { entries: [{ name, kind, size, ext, path, abs }] }
+    let body: Value = match client.get(format!("{base_url}/api/workspace/list"))
+        .query(&[("path", path)])
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await
+    {
+        Ok(r) => r.json().await.unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
+    body["entries"].as_array().unwrap_or(&vec![]).iter().map(|e| {
+        let is_dir = e["kind"].as_str() == Some("dir");
+        let ext = e["ext"].as_str().unwrap_or("");
+        ExplorerEntry {
+            name:       e["name"].as_str().unwrap_or("").into(),
+            kind:       e["kind"].as_str().unwrap_or("file").into(),
+            size_label: if is_dir { "".into() } else { human_size(e["size"].as_u64().unwrap_or(0)).into() },
+            ext:        ext.into(),
+            path:       e["path"].as_str().unwrap_or("").into(),
+            abs:        e["abs"].as_str().unwrap_or("").into(),
+            glyph:      explorer_glyph(is_dir, ext).into(),
+        }
+    }).collect()
+}
+
+/// GET /api/workspace/read?path= → (content, binary). Empty + binary=true on a
+/// non-text file; empty + false on error.
+async fn fetch_explorer_read(client: &reqwest::Client, base_url: &str, path: &str) -> (String, bool) {
+    let body: Value = match client.get(format!("{base_url}/api/workspace/read"))
+        .query(&[("path", path)])
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await
+    {
+        Ok(r) => r.json().await.unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
+    let binary = body["binary"].as_bool().unwrap_or(false);
+    let mut content = body["content"].as_str().unwrap_or("").to_string();
+    if body["truncated"].as_bool().unwrap_or(false) {
+        content.push_str("\n\n… (truncated)");
+    }
+    (content, binary)
+}
+
 /// POST /api/notes/read → the note's content (empty string on any error).
 async fn fetch_note_content(client: &reqwest::Client, base_url: &str, name: &str) -> String {
     match client.post(format!("{base_url}/api/notes/read"))
@@ -1818,6 +1902,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_workspace_images(slint::ModelRc::from(workspace_images_vec.clone()));
     WORKSPACE_IMAGES.with(|m| *m.borrow_mut() = Some(workspace_images_vec.clone()));
 
+    let explorer_entries_vec: Rc<slint::VecModel<ExplorerEntry>> = Rc::new(slint::VecModel::default());
+    ui.set_explorer_entries(slint::ModelRc::from(explorer_entries_vec.clone()));
+    EXPLORER_ENTRIES.with(|m| *m.borrow_mut() = Some(explorer_entries_vec.clone()));
+
     let sketch_strokes_vec: Rc<slint::VecModel<SketchStroke>> = Rc::new(slint::VecModel::default());
     ui.set_sketch_strokes(slint::ModelRc::from(sketch_strokes_vec.clone()));
     SKETCH_STROKES.with(|m| *m.borrow_mut() = Some(sketch_strokes_vec.clone()));
@@ -1904,6 +1992,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     AppKind::AudioEditor => ui.invoke_refresh_audio(),
                     AppKind::Sonus => ui.invoke_refresh_sonus(),
                     AppKind::Notes => ui.invoke_refresh_notes(),
+                    AppKind::Explorer => ui.invoke_refresh_explorer(),
                     _ => {}
                 }
             }
@@ -2629,6 +2718,125 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let items = fetch_workspace_images(&client, &base).await;
             slint::invoke_from_event_loop(move || replace_workspace_images(items)).ok();
         });
+    });
+
+    // ── Explorer (📁 Files) ───────────────────────────────────────────────────
+    // refresh: re-list the current directory.
+    let rt_h_exr    = rt.handle().clone();
+    let client_exr  = Arc::clone(&http_client);
+    let base_exr    = http_base.clone();
+    let ui_weak_exr = ui.as_weak();
+    ui.on_refresh_explorer(move || {
+        let client = Arc::clone(&client_exr);
+        let base   = base_exr.clone();
+        let path   = ui_weak_exr.upgrade().map(|ui| ui.get_explorer_current_path().to_string()).unwrap_or_default();
+        rt_h_exr.spawn(async move {
+            let items = fetch_explorer_list(&client, &base, &path).await;
+            slint::invoke_from_event_loop(move || replace_explorer_entries(items)).ok();
+        });
+    });
+
+    // navigate: enter a directory (clears any selection).
+    let rt_h_exn    = rt.handle().clone();
+    let client_exn  = Arc::clone(&http_client);
+    let base_exn    = http_base.clone();
+    let ui_weak_exn = ui.as_weak();
+    ui.on_explorer_navigate(move |path| {
+        let client = Arc::clone(&client_exn);
+        let base   = base_exn.clone();
+        let p      = path.to_string();
+        if let Some(ui) = ui_weak_exn.upgrade() {
+            ui.set_explorer_current_path(path.clone());
+            ui.set_explorer_selected_path("".into());
+            ui.set_explorer_selected_name("".into());
+            ui.set_explorer_selected_info("".into());
+            ui.set_explorer_preview_kind("none".into());
+            ui.set_explorer_preview_text("".into());
+            ui.set_explorer_can_attach(false);
+        }
+        rt_h_exn.spawn(async move {
+            let items = fetch_explorer_list(&client, &base, &p).await;
+            slint::invoke_from_event_loop(move || replace_explorer_entries(items)).ok();
+        });
+    });
+
+    // up: navigate to the parent of the current directory.
+    let ui_weak_exu = ui.as_weak();
+    ui.on_explorer_up(move || {
+        if let Some(ui) = ui_weak_exu.upgrade() {
+            let cur = ui.get_explorer_current_path().to_string();
+            if cur.is_empty() { return; }
+            let parent = cur.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+            ui.invoke_explorer_navigate(parent.into());
+        }
+    });
+
+    // select: a file was clicked — load its preview (image from abs path; text via
+    // the read endpoint; otherwise binary/no-preview).
+    let rt_h_exs    = rt.handle().clone();
+    let client_exs  = Arc::clone(&http_client);
+    let base_exs    = http_base.clone();
+    let ui_weak_exs = ui.as_weak();
+    ui.on_explorer_select(move |path, abs, ext| {
+        let p    = path.to_string();
+        let a    = abs.to_string();
+        let e    = ext.to_string();
+        let name = p.rsplit('/').next().unwrap_or(&p).to_string();
+        let Some(ui) = ui_weak_exs.upgrade() else { return };
+        ui.set_explorer_selected_path(path.clone());
+        ui.set_explorer_selected_name(name.into());
+
+        if is_image_ext(&e) {
+            // Load directly from the absolute path (UI + agentd co-located).
+            match slint::Image::load_from_path(std::path::Path::new(&a)) {
+                Ok(img) => {
+                    let sz = img.size();
+                    ui.set_explorer_preview_image(img);
+                    ui.set_explorer_preview_kind("image".into());
+                    ui.set_explorer_selected_info(format!("{} · {}×{}", e.to_uppercase(), sz.width, sz.height).into());
+                }
+                Err(_) => {
+                    ui.set_explorer_preview_kind("binary".into());
+                    ui.set_explorer_selected_info(format!("{} image (no preview)", e.to_uppercase()).into());
+                }
+            }
+            ui.set_explorer_preview_text("".into());
+            ui.set_explorer_can_attach(true);
+        } else {
+            ui.set_explorer_can_attach(false);
+            ui.set_explorer_selected_info(if e.is_empty() { "file".into() } else { format!("{} file", e.to_uppercase()).into() });
+            let client = Arc::clone(&client_exs);
+            let base   = base_exs.clone();
+            let uw     = ui_weak_exs.clone();
+            rt_h_exs.spawn(async move {
+                let (content, binary) = fetch_explorer_read(&client, &base, &p).await;
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = uw.upgrade() {
+                        if binary {
+                            ui.set_explorer_preview_kind("binary".into());
+                            ui.set_explorer_preview_text("".into());
+                        } else {
+                            ui.set_explorer_preview_text(content.into());
+                            ui.set_explorer_preview_kind("text".into());
+                        }
+                    }
+                }).ok();
+            });
+        }
+    });
+
+    // attach: stage the selected image into the chat composer (reuses the 🖼 flow).
+    let ui_weak_exa = ui.as_weak();
+    ui.on_explorer_attach(move || {
+        if let Some(ui) = ui_weak_exa.upgrade() {
+            let path = ui.get_explorer_selected_path().to_string();
+            let name = ui.get_explorer_selected_name().to_string();
+            if path.is_empty() { return; }
+            ui.set_staged_image_path(path.into());
+            ui.set_staged_image_name(name.into());
+            ui.set_current_view(0); // focus mode → chat (desktop shows the chip in-place)
+            notify(ToastKind::Success, "Image attached — open Chat and send");
+        }
     });
 
     let rt_h_nopen    = rt.handle().clone();

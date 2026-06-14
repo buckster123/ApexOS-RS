@@ -32,7 +32,7 @@ Original app catalogue lives in `../ApexOS/ui/desktop-app.js` (`WIN_DEFAULTS` +
 | 🎨 Sketchpad | ✅ `sketchpad_view` | B | `POST /api/sketch` (tiny-skia raster) + `sketch_snapshot` tool |
 | 😊 APEX Face | ✅ `face_view` | B | custom painter; `face-state` derived from the WS event stream (parity w/ `display_face` states) |
 | 🎵 Sonus | ✅ player (list+play); gen needs APEX | C | `/api/sonus/{files,stream,play,stop}`; `sonus-mcp` plugin (ext. hermes-sonus) |
-| 📁 Explorer | ✗ | C | file ops are agent-tools, not HTTP — needs `/api/fs` or agent-driven |
+| 📁 Explorer | ✅ `explorer_view` | C | `/api/workspace/{list,read}` (browse + preview) + `list_dir`/`read_file`/`write_file` tools; "Attach" stages an image into chat |
 | 📷 Camera | ✗ | C | needs video frames into a custom painter |
 | 🧠 Cerebro | ✅ `web_view` tile | D | external-browser tile (`:8765`, host from agentd) |
 | 👁 Sensor Head | ✅ `web_view` tile | D | external-browser tile (`:8080`, host from agentd) |

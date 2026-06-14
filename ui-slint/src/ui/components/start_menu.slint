@@ -86,6 +86,7 @@ export component StartMenu inherits Rectangle {
         MenuRow { glyph: "🕘"; label: "Sessions"; clicked => { root.launch(3); } }
         MenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
         MenuRow { glyph: "🧮"; label: "Calculator"; clicked => { root.launch(16); } }
+        MenuRow { glyph: "📁"; label: "Files";     clicked => { root.launch(17); } }
 
         // Deep-tech apps — hidden by the simple/warm persona (G5 surface gating).
         if Personas.show-tech-apps: MenuRow { glyph: "🌡"; label: "Sensors";  clicked => { root.launch(2); } }
@@ -186,6 +187,7 @@ export component Win98StartMenu inherits Rectangle {
             WinMenuRow { glyph: "🕘"; label: "Sessions"; clicked => { root.launch(3); } }
             WinMenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
             WinMenuRow { glyph: "🧮"; label: "Calculator"; clicked => { root.launch(16); } }
+            WinMenuRow { glyph: "📁"; label: "Files";     clicked => { root.launch(17); } }
 
             // Etched separator before the deep-tech group.
             if Personas.show-tech-apps: Rectangle {
