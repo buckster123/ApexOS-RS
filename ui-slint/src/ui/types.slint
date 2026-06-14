@@ -135,11 +135,12 @@ export struct EventLogItem {
 // One node in the Mesh app (🕸). `is-peer` true = saved peer (peers.toml);
 // false = an mDNS-discovered node not yet added. /api/mesh/{peers,nodes}.
 export struct MeshNode {
-    node-id: string,
-    detail:  string,   // ws_url (peer) or "ip:port" (discovered)
-    role:    string,   // "full" | "sensor" | "thin" | "—"
-    status:  string,   // "online" | "discovered" | …
-    is-peer: bool,
+    node-id:   string,
+    detail:    string,   // ws_url (peer) or "ip:port" (discovered)
+    role:      string,   // "full" | "sensor" | "thin" | "—"
+    status:    string,   // "online" | "discovered" | …
+    is-peer:   bool,
+    has-token: bool,     // saved peer carries an a2a token (GET /api/mesh/peers has_token)
 }
 
 // One audio file in the Audio Editor (🎛️) list. /api/audio/files.
