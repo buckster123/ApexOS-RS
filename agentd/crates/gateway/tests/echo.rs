@@ -39,6 +39,7 @@ fn make_state(handle: apexos_core::BusHandle, bcast: tokio::sync::broadcast::Sen
         peer_registry:        Arc::new(tokio::sync::RwLock::new(
             apexos_gateway::PeerRegistry::load(std::path::Path::new("/dev/null"))
         )),
+        pairing:              Arc::new(std::sync::Mutex::new(None)),
         node_id:              Arc::new("test-node".into()),
         vast_state:           VastState::new(),
     }
@@ -152,4 +153,62 @@ async fn multiple_clients_both_receive_broadcast() {
         assert!(matches!(event, Event::UserPrompt { session: SessionId(1), .. }),
             "unexpected event: {r}");
     }
+}
+
+/// Spawn a gateway server on an ephemeral port; returns its http base.
+async fn spawn_gateway() -> String {
+    let (bus_actor, handle, bcast) = Bus::new(SystemState::default());
+    tokio::spawn(bus_actor.run());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = make_state(handle, bcast);
+    tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn pairing_claim_exchanges_creds_and_is_single_use() {
+    let base = spawn_gateway().await;
+    let http = reqwest::Client::new();
+
+    // start → a 6-digit code
+    let started: serde_json::Value = http.post(format!("{base}/api/mesh/pair/start"))
+        .send().await.unwrap().json().await.unwrap();
+    let code = started["code"].as_str().unwrap().to_string();
+    assert_eq!(code.len(), 6);
+
+    // claim with the right code → 200 + our node creds, requester registered reciprocally
+    let claim = serde_json::json!({
+        "code": code, "node_id": "peer-x",
+        "ws_url": "ws://10.0.0.9:8787", "token": "peer-token",
+    });
+    let resp = http.post(format!("{base}/api/mesh/pair/claim")).json(&claim).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let claimed: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(claimed["ok"], true);
+    assert_eq!(claimed["node_id"], "test-node");
+
+    // the requester is now a saved peer (token redacted → has_token:true)
+    let peers: serde_json::Value = http.get(format!("{base}/api/mesh/peers"))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(peers["peers"].as_array().unwrap().iter()
+        .any(|p| p["node_id"] == "peer-x" && p["has_token"] == true),
+        "requester should be registered with a token");
+
+    // same code again → consumed (single-use) → 403
+    let again = http.post(format!("{base}/api/mesh/pair/claim")).json(&claim).send().await.unwrap();
+    assert_eq!(again.status(), 403, "code must be single-use");
+}
+
+#[tokio::test]
+async fn pairing_claim_wrong_code_rejected() {
+    let base = spawn_gateway().await;
+    let http = reqwest::Client::new();
+    http.post(format!("{base}/api/mesh/pair/start")).send().await.unwrap();
+    // "BADCODE" can never equal a 6-digit numeric code → guaranteed rejection.
+    let resp = http.post(format!("{base}/api/mesh/pair/claim"))
+        .json(&serde_json::json!({ "code": "BADCODE", "node_id": "x", "ws_url": "ws://10.0.0.9:8787", "token": "t" }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 403);
 }

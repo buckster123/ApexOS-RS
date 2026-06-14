@@ -234,6 +234,7 @@ async fn main() -> anyhow::Result<()> {
         council_sessions:     Arc::clone(&council_sessions),
         council_next_id:      Arc::clone(&council_next_id),
         peer_registry:        Arc::clone(&peer_registry),
+        pairing:              Arc::new(std::sync::Mutex::new(None)),
         node_id:              Arc::clone(&node_id),
         vast_state:           vast_state.clone(),
     };

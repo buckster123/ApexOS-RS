@@ -77,6 +77,8 @@ pub struct GatewayState {
     pub council_next_id:   Arc<std::sync::atomic::AtomicU64>,
     /// Mesh peer registry — peers.toml backed, hot-reloadable
     pub peer_registry:     Arc<RwLock<PeerRegistry>>,
+    /// Active mesh pairing offer (in-memory only, never persisted). See mesh::Pairing.
+    pub pairing:           Arc<std::sync::Mutex<Option<mesh::Pairing>>>,
     /// Own node_id (hostname) — used by discovery loop to avoid self-bootstrap
     pub node_id:           Arc<String>,
     /// Vast.ai instance + tunnel state — shared with supervisor for virtual tools
@@ -172,6 +174,9 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/mesh/nodes",         get(mesh_nodes_handler))
         .route("/api/mesh/peers",         get(mesh_peers_get_handler).post(mesh_peers_post_handler))
         .route("/api/mesh/peers/{id}",    delete(mesh_peers_delete_handler))
+        .route("/api/mesh/pair/start",    post(pair_start_handler))
+        .route("/api/mesh/pair/status",   get(pair_status_handler))
+        .route("/api/mesh/pair/redeem",   post(pair_redeem_handler))
         .route("/api/vast/recipes",       get(vast_recipes_handler).post(vast_recipes_save_handler))
         .route("/api/vast/status",        get(vast_status_handler))
         .route("/api/vast/offers",        get(vast_offers_handler))
@@ -190,6 +195,9 @@ pub fn router(state: GatewayState) -> Router {
     Router::new()
         .merge(gated)
         .route("/sensor-bridge",   get(sensor_bridge_ws_handler))
+        // UNgated: the pairing claim is authenticated by the short-lived code itself,
+        // not the api_token (the whole point is the caller doesn't have our token yet).
+        .route("/api/mesh/pair/claim", post(pair_claim_handler))
         .fallback(static_handler)
         .with_state(state)
 }
@@ -1828,6 +1836,147 @@ async fn mesh_peers_delete_handler(
         Ok(true)  => Json(serde_json::json!({ "ok": true })),
         Ok(false) => Json(serde_json::json!({ "ok": false, "error": "peer not found" })),
         Err(e)    => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+// ── Mesh pairing — kiosk-friendly token exchange ────────────────────────────────
+
+/// First local IPv4 (from `hostname -I`).
+fn own_ipv4() -> Option<String> {
+    let out = std::process::Command::new("hostname").arg("-I").output().ok()?;
+    String::from_utf8(out.stdout).ok()?
+        .split_whitespace()
+        .find(|t| t.contains('.') && t.split('.').count() == 4)
+        .map(|t| t.to_string())
+}
+
+/// This node's ws_url to advertise to a peer.
+fn own_ws_url() -> String {
+    format!("ws://{}:8787", own_ipv4().unwrap_or_else(|| "127.0.0.1".into()))
+}
+
+/// POST /api/mesh/pair/start — generate a fresh pairing code (this node's own UI).
+async fn pair_start_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let code = mesh::gen_pair_code();
+    {
+        let mut p = state.pairing.lock().unwrap();
+        *p = Some(mesh::Pairing {
+            code:       code.clone(),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(mesh::PAIR_TTL_SECS),
+            attempts:   0,
+        });
+    }
+    Json(serde_json::json!({ "ok": true, "code": code, "ttl_secs": mesh::PAIR_TTL_SECS }))
+}
+
+/// GET /api/mesh/pair/status — current code + remaining seconds (UI countdown).
+async fn pair_status_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let p = state.pairing.lock().unwrap();
+    match p.as_ref() {
+        Some(pair) if pair.expires_at > std::time::Instant::now() => Json(serde_json::json!({
+            "active":         true,
+            "code":           pair.code,
+            "remaining_secs": (pair.expires_at - std::time::Instant::now()).as_secs(),
+        })),
+        _ => Json(serde_json::json!({ "active": false })),
+    }
+}
+
+/// POST /api/mesh/pair/claim — UNAUTHENTICATED, gated by the short-lived code. A peer
+/// presents the code + its own creds; we register it reciprocally and hand back ours.
+async fn pair_claim_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let code      = body["code"].as_str().unwrap_or_default().to_string();
+    let req_node  = body["node_id"].as_str().unwrap_or_default().to_string();
+    let req_url   = body["ws_url"].as_str().unwrap_or_default().to_string();
+    let req_token = body["token"].as_str().unwrap_or_default().to_string();
+    if code.is_empty() || req_node.is_empty() || req_url.is_empty() {
+        return (StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": "missing fields" })));
+    }
+    // Security is the code itself: single-use, 5-min expiry, lockout after
+    // PAIR_MAX_ATTEMPTS bad guesses. (No subnet guard — would block legit
+    // cross-subnet/VPN mesh nodes; discovery already has its own opt-out one.)
+    // Validate + consume under the lock.
+    let ok = {
+        let mut p = state.pairing.lock().unwrap();
+        match p.as_mut() {
+            Some(pair) if pair.expires_at <= std::time::Instant::now() => { *p = None; false }
+            Some(pair) if pair.code == code => { *p = None; true }
+            Some(pair) => {
+                pair.attempts += 1;
+                if pair.attempts >= mesh::PAIR_MAX_ATTEMPTS { *p = None; }
+                false
+            }
+            None => false,
+        }
+    };
+    if !ok {
+        return (StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "ok": false, "error": "invalid or expired code" })));
+    }
+    // Register the requester reciprocally, with the token THEY gave us.
+    {
+        let mut registry = state.peer_registry.write().await;
+        let _ = registry.add(PeerRecord {
+            node_id: req_node, ws_url: req_url, role: PeerRole::Full,
+            status: "online".into(), token: Some(req_token),
+        });
+    }
+    // Hand back OUR creds so they can store us.
+    (StatusCode::OK, Json(serde_json::json!({
+        "ok":      true,
+        "node_id": state.node_id.as_str(),
+        "ws_url":  own_ws_url(),
+        "token":   state.api_token.as_str(),
+    })))
+}
+
+/// POST /api/mesh/pair/redeem — this node's UI hands us a discovered peer's ws_url +
+/// the code shown on it; we claim it (presenting OUR creds) and store the peer.
+async fn pair_redeem_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let peer_ws = body["ws_url"].as_str().unwrap_or_default().to_string();
+    let code    = body["code"].as_str().unwrap_or_default().to_string();
+    if peer_ws.is_empty() || code.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "missing ws_url or code" }));
+    }
+    let http_base = peer_ws.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1);
+    let claim = serde_json::json!({
+        "code":    code,
+        "node_id": state.node_id.as_str(),
+        "ws_url":  own_ws_url(),
+        "token":   state.api_token.as_str(),
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{http_base}/api/mesh/pair/claim"))
+        .json(&claim)
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await;
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            let v: serde_json::Value = r.json().await.unwrap_or_default();
+            let node = v["node_id"].as_str().unwrap_or_default().to_string();
+            let url  = v["ws_url"].as_str().unwrap_or(peer_ws.as_str()).to_string();
+            let tok  = v["token"].as_str().map(|s| s.to_string());
+            if node.is_empty() || tok.is_none() {
+                return Json(serde_json::json!({ "ok": false, "error": "peer returned no credentials" }));
+            }
+            {
+                let mut registry = state.peer_registry.write().await;
+                let _ = registry.add(PeerRecord {
+                    node_id: node.clone(), ws_url: url, role: PeerRole::Full,
+                    status: "online".into(), token: tok,
+                });
+            }
+            Json(serde_json::json!({ "ok": true, "node_id": node }))
+        }
+        Ok(r)  => Json(serde_json::json!({ "ok": false, "error": format!("pairing rejected ({})", r.status().as_u16()) })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
 }
 
