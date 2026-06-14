@@ -79,7 +79,7 @@ mod tests {
         let log_dir = dir.path().to_path_buf();
         let handle = tokio::spawn(run_log_writer(log_dir.clone(), rx));
 
-        tx.send(Event::UserPrompt { session: SessionId(1), text: "hello".into() }).unwrap();
+        tx.send(Event::UserPrompt { session: SessionId(1), text: "hello".into(), images: vec![] }).unwrap();
         tx.send(Event::AgentText  { session: SessionId(1), delta: "hi".into() }).unwrap();
         tx.send(Event::TurnComplete { session: SessionId(1) }).unwrap();
 
@@ -122,6 +122,7 @@ mod tests {
             let _ = tx.send(Event::UserPrompt {
                 session: SessionId(i),
                 text: format!("msg {i}"),
+                images: vec![],
             });
         }
 

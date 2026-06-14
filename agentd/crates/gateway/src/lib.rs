@@ -151,6 +151,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/sessions/active",    get(active_sessions_handler))
         .route("/api/events/recent",      get(events_recent_handler))
         .route("/api/sessions/{id}/message", post(session_message_handler))
+        .route("/api/sessions/{id}/image",   post(session_image_handler))
         .route("/api/run",                post(run_command_handler))
         .route("/api/snapshot",           get(snapshot_handler))
         .route("/api/sonus/files",        get(sonus_files_handler))
@@ -265,6 +266,17 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                     // Regular frame — inject WS-bound session_id and emit as Event.
                     let mut frame = val;
                     frame["session"] = serde_json::json!(session_id);
+                    // A user_prompt may carry raw image refs (path|b64). Shim them
+                    // through the vision downscaler here so UserPrompt.images is the
+                    // prepared {media_type,data} form the event deserializes into.
+                    if frame.get("type").and_then(|v| v.as_str()) == Some("user_prompt") {
+                        if let Some(raw) = frame.get("images").and_then(|v| v.as_array()).cloned() {
+                            if !raw.is_empty() {
+                                let prepared = prepare_user_images(&raw).await;
+                                frame["images"] = serde_json::to_value(prepared).unwrap_or_default();
+                            }
+                        }
+                    }
                     if let Ok(event) = serde_json::from_value::<Event>(frame) {
                         bus.emit(event).await;
                     }
@@ -759,8 +771,85 @@ async fn session_message_handler(
         Some(s) if !s.trim().is_empty() => s.to_string(),
         _ => return Json(serde_json::json!({ "ok": false, "error": "missing message" })),
     };
-    state.bus.emit(Event::UserPrompt { session: SessionId(id), text: message }).await;
+    state.bus.emit(Event::UserPrompt { session: SessionId(id), text: message, images: vec![] }).await;
     Json(serde_json::json!({ "ok": true, "session_id": id }))
+}
+
+/// Resolve a user-supplied image path. Relative paths join `AGENTD_WORKSPACE`;
+/// the canonical result must stay inside the workspace — a path-form image would
+/// otherwise let a frontend read any file on disk into the model context, so
+/// arbitrary local images must come in as base64 instead.
+fn resolve_workspace_image_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let ws = std::env::var("AGENTD_WORKSPACE")
+        .ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    let ws_canon = std::fs::canonicalize(&ws).map_err(|e| format!("workspace {ws}: {e}"))?;
+    let p = std::path::Path::new(path);
+    let joined = if p.is_absolute() { p.to_path_buf() } else { ws_canon.join(p) };
+    let canon = std::fs::canonicalize(&joined).map_err(|e| format!("{}: {e}", joined.display()))?;
+    if !canon.starts_with(&ws_canon) {
+        return Err(format!("path {} escapes workspace", canon.display()));
+    }
+    Ok(canon)
+}
+
+/// Run raw user-attached image refs through the vision shim, returning prepared
+/// images ready to drop into `Event::UserPrompt.images`. Each ref is either
+/// `{ "path": "<workspace file>" }` or `{ "b64": "<base64>", "media_type": ... }`.
+/// Every image is decoded → downscaled (≤ `VISION_MAX_EDGE`) → re-encoded (the same
+/// token-bomb guard as the SensorHead path). A bad or unsafe ref is logged and
+/// skipped so one bad image never sinks the whole prompt. CPU-bound decode runs on
+/// a blocking thread.
+async fn prepare_user_images(raw: &[serde_json::Value]) -> Vec<apexos_core::ImageSource> {
+    let mut out = Vec::new();
+    for item in raw {
+        let prepared = if let Some(p) = item.get("path").and_then(|v| v.as_str()) {
+            match resolve_workspace_image_path(p) {
+                Ok(path) => tokio::task::spawn_blocking(move || apexos_core::vision::load_and_prepare(&path)).await,
+                Err(e) => { eprintln!("[vision] user image path rejected: {e}"); continue; }
+            }
+        } else if let Some(b64) = item.get("b64").and_then(|v| v.as_str()) {
+            let b64 = b64.to_string();
+            tokio::task::spawn_blocking(move || apexos_core::vision::prepare_b64(&b64)).await
+        } else {
+            continue;
+        };
+        match prepared {
+            Ok(Ok(p)) => {
+                eprintln!("[vision] user image prepared {}x{} ~{} tokens", p.width, p.height, p.est_tokens);
+                out.push(apexos_core::ImageSource { media_type: p.media_type, data: p.b64 });
+            }
+            Ok(Err(e)) => eprintln!("[vision] user image prepare failed: {e}"),
+            Err(e)      => eprintln!("[vision] user image task join error: {e}"),
+        }
+    }
+    out
+}
+
+/// POST /api/sessions/:id/image — inject a user message carrying attached image(s).
+/// Body: `{ "text": "<optional caption>", "images": [ {"path":...} | {"b64":...,"media_type":...} ] }`,
+/// or a single inline `{"b64":...}` / `{"path":...}` shorthand. The PWA / a phone
+/// camera upload / curl all use this; images run through the vision shim first.
+async fn session_image_handler(
+    State(state): State<GatewayState>,
+    Path(id):     Path<u64>,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let text = body["text"].as_str().unwrap_or("").to_string();
+    let raw: Vec<serde_json::Value> = if let Some(arr) = body["images"].as_array() {
+        arr.clone()
+    } else if body.get("b64").is_some() || body.get("path").is_some() {
+        vec![body.clone()]
+    } else {
+        vec![]
+    };
+    let images = prepare_user_images(&raw).await;
+    if images.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "no usable image (need path|b64)" }));
+    }
+    let n = images.len();
+    state.bus.emit(Event::UserPrompt { session: SessionId(id), text, images }).await;
+    Json(serde_json::json!({ "ok": true, "session_id": id, "images": n }))
 }
 
 async fn sessions_handler(State(state): State<GatewayState>) -> impl IntoResponse {
@@ -2484,5 +2573,43 @@ mod auth_tests {
         let encoded  = "a%20b%2Bc%2Fd";
         let decoded  = percent_encoding::percent_decode_str(encoded).decode_utf8_lossy();
         assert!(tokens_match(&decoded, expected));
+    }
+}
+
+#[cfg(test)]
+mod image_input_tests {
+    use super::*;
+
+    // A valid 1×1 transparent PNG — exercises the real vision shim end-to-end.
+    const PNG_1X1_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+    #[tokio::test]
+    async fn prepare_user_images_shims_a_b64_png() {
+        let raw = vec![serde_json::json!({ "b64": PNG_1X1_B64 })];
+        let prepared = prepare_user_images(&raw).await;
+        assert_eq!(prepared.len(), 1);
+        assert!(prepared[0].media_type.starts_with("image/"));
+        assert!(!prepared[0].data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prepare_user_images_skips_garbage_and_missing_refs() {
+        // A non-image b64 and a ref with neither path nor b64 are both dropped —
+        // one bad image must never sink the whole prompt.
+        let raw = vec![
+            serde_json::json!({ "b64": "bm90LWFuLWltYWdl" }), // "not-an-image"
+            serde_json::json!({ "note": "neither path nor b64" }),
+        ];
+        assert!(prepare_user_images(&raw).await.is_empty());
+    }
+
+    #[test]
+    fn workspace_path_confinement_rejects_escape() {
+        std::env::set_var("AGENTD_WORKSPACE", "/tmp");
+        // An absolute system file outside the workspace is rejected …
+        assert!(resolve_workspace_image_path("/etc/passwd").is_err());
+        // … as is a `../` traversal escape.
+        assert!(resolve_workspace_image_path("../etc/passwd").is_err());
+        std::env::remove_var("AGENTD_WORKSPACE");
     }
 }

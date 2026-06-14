@@ -96,6 +96,7 @@ pub async fn run_scheduler(
                 bus.emit(Event::UserPrompt {
                     session,
                     text: task.prompt.clone(),
+                    images: vec![],
                 }).await;
 
                 task.last_run = Some(now);

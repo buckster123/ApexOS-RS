@@ -85,9 +85,45 @@ async fn user_prompt_echoes_back() {
     let response = recv_event(&mut ws).await;
     let event: Event = serde_json::from_str(&response).unwrap();
     assert!(
-        matches!(event, Event::UserPrompt { session: SessionId(1), ref text } if text == "hello"),
+        matches!(event, Event::UserPrompt { session: SessionId(1), ref text, .. } if text == "hello"),
         "unexpected event: {response}"
     );
+}
+
+#[tokio::test]
+async fn user_prompt_with_image_is_shimmed_and_echoed() {
+    // A valid 1×1 PNG — the gateway runs it through the real vision shim.
+    const PNG_1X1_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+    let (bus_actor, handle, bcast) = Bus::new(SystemState::default());
+    tokio::spawn(bus_actor.run());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let state = make_state(handle, bcast);
+    tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+
+    let (mut ws, _) = connect_async(format!("ws://{}/ws", addr)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // user_prompt carrying a raw b64 image ref → gateway shims it → the echoed
+    // event carries a prepared {media_type,data} image block.
+    let frame = serde_json::json!({
+        "type": "user_prompt",
+        "text": "what is this?",
+        "images": [ { "b64": PNG_1X1_B64 } ],
+    }).to_string();
+    ws.send(Message::Text(frame.into())).await.unwrap();
+
+    let response = recv_event(&mut ws).await;
+    let val: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(val["type"], "user_prompt");
+    assert_eq!(val["text"], "what is this?");
+    let images = val["images"].as_array().expect("prepared images array");
+    assert_eq!(images.len(), 1, "one image, shimmed");
+    assert!(images[0]["media_type"].as_str().unwrap().starts_with("image/"));
+    assert!(!images[0]["data"].as_str().unwrap().is_empty(), "carries prepared b64");
 }
 
 #[tokio::test]

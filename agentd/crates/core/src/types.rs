@@ -163,7 +163,7 @@ pub struct CouncilAgentDef {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     // ── from frontends (intents) ──────────────────────────
-    UserPrompt   { session: SessionId, text: String },
+    UserPrompt   { session: SessionId, text: String, #[serde(default)] images: Vec<ImageSource> },
     UserApproval { session: SessionId, action: ActionId, granted: bool },
     UserCancel   { session: SessionId },
 
@@ -333,4 +333,18 @@ pub enum ContentBlock {
     Thinking { thinking: String, signature: String },
     ToolUse  { id: String, name: String, input: serde_json::Value },
     ToolResult { tool_use_id: String, content: serde_json::Value, is_error: bool },
+    /// A user-attached image, already shimmed through `vision::prepare_*`
+    /// (decoded → downscaled ≤ `VISION_MAX_EDGE` → re-encoded → base64). `data`
+    /// is that base64; `media_type` is `image/jpeg` or `image/png`. Providers
+    /// render it natively (Anthropic `image` block / OpenAI `image_url`).
+    Image    { media_type: String, data: String },
+}
+
+/// A prepared image riding on an inbound [`Event::UserPrompt`]. Same shape as the
+/// `image` content the providers emit — the gateway runs raw uploads through the
+/// vision shim before constructing the event, so this is always downscaled b64.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageSource {
+    pub media_type: String,
+    pub data: String,
 }
