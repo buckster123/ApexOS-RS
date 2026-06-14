@@ -88,7 +88,8 @@ fn build_body(model: &str, history: &[Message], tools: &[ToolSpec], system: Opti
                 // Tool results must precede any new user text in OAI ordering.
                 let mut tool_results: Vec<Value> = Vec::new();
                 let mut text_parts:   Vec<String> = Vec::new();
-                let mut vision_parts: Vec<Value>  = Vec::new(); // OpenAI image_url items
+                let mut vision_parts: Vec<Value>  = Vec::new(); // OpenAI image_url items (from tool-results)
+                let mut user_image_parts: Vec<Value> = Vec::new(); // user-attached images
 
                 for block in content {
                     match block {
@@ -134,16 +135,34 @@ fn build_body(model: &str, history: &[Message], tools: &[ToolSpec], system: Opti
                             }));
                         }
                         ContentBlock::Text { text } => text_parts.push(text.clone()),
+                        ContentBlock::Image { media_type, data } => {
+                            user_image_parts.push(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": { "url": format!("data:{media_type};base64,{data}") },
+                            }));
+                        }
                         _ => {}
                     }
                 }
 
                 messages.extend(tool_results);
-                if !text_parts.is_empty() {
-                    messages.push(serde_json::json!({
-                        "role":    "user",
-                        "content": text_parts.join("\n"),
-                    }));
+                // User text + any attached images → one (possibly multimodal) user
+                // message: OpenAI carries images inline as image_url parts. A
+                // non-vision model simply ignores the image parts and sees the text.
+                if !text_parts.is_empty() || !user_image_parts.is_empty() {
+                    if user_image_parts.is_empty() {
+                        messages.push(serde_json::json!({
+                            "role":    "user",
+                            "content": text_parts.join("\n"),
+                        }));
+                    } else {
+                        let mut parts: Vec<Value> = Vec::new();
+                        if !text_parts.is_empty() {
+                            parts.push(serde_json::json!({ "type": "text", "text": text_parts.join("\n") }));
+                        }
+                        parts.extend(user_image_parts);
+                        messages.push(serde_json::json!({ "role": "user", "content": parts }));
+                    }
                 }
                 // Images from vision tool-results ride in their own user message
                 // (OpenAI multimodal shape); a non-vision model just ignores them.
@@ -176,6 +195,7 @@ fn build_body(model: &str, history: &[Message], tools: &[ToolSpec], system: Opti
                             }));
                         }
                         ContentBlock::ToolResult { .. } => {}
+                        ContentBlock::Image { .. } => {} // user-only; never in assistant turns
                     }
                 }
 
@@ -400,5 +420,26 @@ mod tests {
         assert_eq!(msgs[2]["role"], "tool");
         assert_eq!(msgs[2]["tool_call_id"], "call_1");
         assert_eq!(msgs[2]["content"], "file.txt");
+    }
+
+    #[test]
+    fn user_attached_image_rides_inline_as_multimodal() {
+        let history = vec![
+            Message::User { content: vec![
+                ContentBlock::Text { text: "what is this?".into() },
+                ContentBlock::Image { media_type: "image/jpeg".into(), data: "QUJD".into() },
+            ]},
+        ];
+        let body = build_body("test-model", &history, &[], None);
+        let msgs = body["messages"].as_array().unwrap();
+
+        // One user message whose content is a multimodal parts array: text + image_url.
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        let parts = msgs[0]["content"].as_array().expect("multimodal content array");
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "what is this?");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/jpeg;base64,QUJD");
     }
 }

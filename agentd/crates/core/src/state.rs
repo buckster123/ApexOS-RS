@@ -18,13 +18,24 @@ impl SystemState {
     pub fn apply(&mut self, event: &Event) {
         match event {
             // ── session lifecycle ──────────────────────────────────────────
-            Event::UserPrompt { session, text } => {
+            Event::UserPrompt { session, text, images } => {
                 let ctx = self.sessions
                     .entry(*session)
                     .or_insert_with(|| AgentContext::root(*session));
-                ctx.history.push(Message::User {
-                    content: vec![ContentBlock::Text { text: text.clone() }],
-                });
+                // Text first (skipped when empty — e.g. an image-only prompt),
+                // then any attached images as native Image blocks. The gateway has
+                // already shimmed each image through vision::prepare.
+                let mut content = Vec::with_capacity(1 + images.len());
+                if !text.is_empty() {
+                    content.push(ContentBlock::Text { text: text.clone() });
+                }
+                for img in images {
+                    content.push(ContentBlock::Image {
+                        media_type: img.media_type.clone(),
+                        data: img.data.clone(),
+                    });
+                }
+                ctx.history.push(Message::User { content });
             }
 
             Event::UserCancel { session } => {
@@ -152,7 +163,7 @@ mod tests {
     #[test]
     fn user_prompt_creates_root_session_and_appends_history() {
         let mut s = SystemState::default();
-        s.apply(&Event::UserPrompt { session: SessionId(1), text: "hi".into() });
+        s.apply(&Event::UserPrompt { session: SessionId(1), text: "hi".into(), images: vec![] });
         let ctx = s.sessions.get(&SessionId(1)).unwrap();
         assert!(ctx.is_root());
         assert_eq!(ctx.history.len(), 1);
@@ -175,7 +186,7 @@ mod tests {
     #[test]
     fn subtree_collects_transitive_children() {
         let mut s = SystemState::default();
-        s.apply(&Event::UserPrompt { session: SessionId(1), text: "root".into() });
+        s.apply(&Event::UserPrompt { session: SessionId(1), text: "root".into(), images: vec![] });
         s.register_child(SessionId(2), SessionId(1));
         s.register_child(SessionId(3), SessionId(1));
         s.register_child(SessionId(4), SessionId(2));
@@ -198,22 +209,61 @@ mod tests {
     #[test]
     fn second_user_prompt_appends_to_existing_session() {
         let mut s = SystemState::default();
-        s.apply(&Event::UserPrompt { session: SessionId(1), text: "first".into() });
-        s.apply(&Event::UserPrompt { session: SessionId(1), text: "second".into() });
+        s.apply(&Event::UserPrompt { session: SessionId(1), text: "first".into(), images: vec![] });
+        s.apply(&Event::UserPrompt { session: SessionId(1), text: "second".into(), images: vec![] });
         assert_eq!(s.sessions.get(&SessionId(1)).unwrap().history.len(), 2);
     }
 
     #[test]
     fn event_round_trips_through_json() {
-        let ev = Event::UserPrompt { session: SessionId(42), text: "hello".into() };
+        let ev = Event::UserPrompt { session: SessionId(42), text: "hello".into(), images: vec![] };
         let json = serde_json::to_string(&ev).unwrap();
         let ev2: Event = serde_json::from_str(&json).unwrap();
         match ev2 {
-            Event::UserPrompt { session, text } => {
+            Event::UserPrompt { session, text, .. } => {
                 assert_eq!(session, SessionId(42));
                 assert_eq!(text, "hello");
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn user_prompt_with_images_folds_text_then_image_blocks() {
+        let mut s = SystemState::default();
+        s.apply(&Event::UserPrompt {
+            session: SessionId(1),
+            text: "look".into(),
+            images: vec![ImageSource { media_type: "image/jpeg".into(), data: "QUJD".into() }],
+        });
+        let ctx = s.sessions.get(&SessionId(1)).unwrap();
+        assert_eq!(ctx.history.len(), 1);
+        match &ctx.history[0] {
+            Message::User { content } => {
+                assert_eq!(content.len(), 2, "text + image");
+                assert!(matches!(&content[0], ContentBlock::Text { text } if text == "look"));
+                assert!(matches!(&content[1],
+                    ContentBlock::Image { media_type, data }
+                    if media_type == "image/jpeg" && data == "QUJD"));
+            }
+            _ => panic!("expected a user message"),
+        }
+    }
+
+    #[test]
+    fn image_only_prompt_skips_the_empty_text_block() {
+        let mut s = SystemState::default();
+        s.apply(&Event::UserPrompt {
+            session: SessionId(1),
+            text: String::new(),
+            images: vec![ImageSource { media_type: "image/png".into(), data: "QQ".into() }],
+        });
+        match &s.sessions.get(&SessionId(1)).unwrap().history[0] {
+            Message::User { content } => {
+                assert_eq!(content.len(), 1, "image only — no empty text block");
+                assert!(matches!(&content[0], ContentBlock::Image { .. }));
+            }
+            _ => panic!("expected a user message"),
         }
     }
 

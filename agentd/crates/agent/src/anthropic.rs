@@ -132,6 +132,11 @@ fn block_to_json(b: &ContentBlock) -> Value {
             serde_json::json!({ "type": "tool_result", "tool_use_id": tool_use_id,
                                 "content": safe_content, "is_error": is_error })
         }
+        ContentBlock::Image { media_type, data } =>
+            serde_json::json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": media_type, "data": data },
+            }),
     }
 }
 
@@ -306,6 +311,16 @@ mod tests {
         assert_eq!(json["type"], "tool_result");
         assert!(json["content"].is_array(), "image array passes through, not stringified");
         assert_eq!(json["content"][0]["type"], "image");
+    }
+
+    #[test]
+    fn user_image_block_serializes_to_anthropic_image_source() {
+        let block = ContentBlock::Image { media_type: "image/jpeg".into(), data: "QUJD".into() };
+        let json = block_to_json(&block);
+        assert_eq!(json["type"], "image");
+        assert_eq!(json["source"]["type"], "base64");
+        assert_eq!(json["source"]["media_type"], "image/jpeg");
+        assert_eq!(json["source"]["data"], "QUJD");
     }
 
     #[test]

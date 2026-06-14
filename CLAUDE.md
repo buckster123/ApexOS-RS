@@ -249,6 +249,15 @@ Send user message:
 ```json
 {"type": "user_prompt", "text": "hello"}
 ```
+Attach image(s) — the gateway shims each through `vision::prepare` (decode →
+downscale ≤`VISION_MAX_EDGE` → re-encode) before the event, so `UserPrompt.images`
+is always prepared b64 (`ContentBlock::Image`). `path` is workspace-confined;
+arbitrary local images use `b64`. Also via HTTP: `POST /api/sessions/{id}/image`
+with the same `{text?, images:[…]}` body (PWA / phone camera / curl).
+```json
+{"type": "user_prompt", "text": "what is this?",
+ "images": [{"path": "screenshots/latest.png"}, {"b64": "<base64>", "media_type": "image/jpeg"}]}
+```
 Send approval (`action` = the numeric `ToolCall.id`; **not** `call_id`/`approved`):
 ```json
 {"type": "user_approval", "action": 5, "granted": true}
@@ -379,7 +388,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 - `apexos-core` vendor — optionally vendor agentd's core crate for shared `Event` types (avoids JSON string matching), blocked on agentd publishing it as a library crate
 - ~~Vision input — core eyes~~ — shipped: the downscale **shim** (`apexos_core::vision`, `VISION_MAX_EDGE` cap = the SensorHead token-bomb guard) + the **vision tool-result path** (a tool returns `{"vision":{"path"|"b64"},"text"}` → `turn.rs::vision_rewrite` shims it → multimodal content block; Anthropic native, OAI/Ollama follow-up user msg). `sketch_snapshot` now hands APEX the drawing inline. Remaining vision follow-ups still deferred:
   - ~~**Screenshot "mirror" tool**~~ — shipped: `screenshot_mirror` (apexos-tools) → ui-slint serves its own `Window::take_snapshot()` PNG over a loopback endpoint (renderer-agnostic — winit/femtovg, linuxkms/skia, femtovg-software all snapshot the rendered scene, so **no** DRM readback and **no** Wayland screencopy) → tool writes it under the workspace and returns the same `{vision:{path}}` sentinel, zero agentd changes. Graceful "no display" when headless.
-  - **User-attached images** — webcam / laptop camera / arbitrary image handed to APEX via UI/PWA (upload endpoint + WS `user_prompt` image; needs a first-class `ContentBlock::Image` for user messages).
+  - **User-attached images** — *plumbing shipped*: first-class `ContentBlock::Image` + `UserPrompt.images`, folded in `state`/router, serialized by both providers (Anthropic `image` / OpenAI `image_url`), gateway shims raw `path`|`b64` refs via `vision::prepare` on the WS `user_prompt` frame and at `POST /api/sessions/{id}/image`. Remaining surfaces: the **native Slint workspace image picker** (seeds a workspace file-explorer) and an **external-PWA upload/camera button** (`mobile.html` lives outside this repo). Webcam/laptop-camera capture is a later follow-up.
   - **cerebro `describe_image` / `search_vision`** — still stubbed; describe_image wants a VLM, search_vision wants CLIP-style image embeddings.
 
 ---

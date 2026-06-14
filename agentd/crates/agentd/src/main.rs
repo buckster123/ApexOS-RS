@@ -969,12 +969,23 @@ fn spawn_agent_router(
         loop {
             match rx.recv().await {
                 // ── new root turn ────────────────────────────────────────────
-                Ok(Event::UserPrompt { session, text }) => {
+                Ok(Event::UserPrompt { session, text, images }) => {
                     session_depths.lock().await.entry(session).or_insert(0);
 
-                    let user_msg = Message::User {
-                        content: vec![ContentBlock::Text { text }],
-                    };
+                    // Text first (skipped when empty — image-only prompts are
+                    // valid), then any attached images. The gateway has already
+                    // shimmed each image through vision::prepare (downscaled b64).
+                    let mut content: Vec<ContentBlock> = Vec::with_capacity(1 + images.len());
+                    if !text.is_empty() {
+                        content.push(ContentBlock::Text { text });
+                    }
+                    for img in images {
+                        content.push(ContentBlock::Image { media_type: img.media_type, data: img.data });
+                    }
+                    if content.is_empty() {
+                        content.push(ContentBlock::Text { text: String::new() });
+                    }
+                    let user_msg = Message::User { content };
                     let mut hist = histories.lock().await;
                     let history  = hist.entry(session).or_default();
                     history.push(user_msg.clone());
@@ -1051,7 +1062,7 @@ fn spawn_agent_router(
                 // ── agent-to-agent message routing ───────────────────────────
                 Ok(Event::AgentMessage { from, to, body, msg_id }) => {
                     let text = format!("[Agent {}]: {}", from.0, body);
-                    bus.emit(Event::UserPrompt { session: to, text }).await;
+                    bus.emit(Event::UserPrompt { session: to, text, images: vec![] }).await;
                     bus.emit(Event::AgentMessageAck { msg_id, from }).await;
                 }
 
@@ -1110,7 +1121,7 @@ fn spawn_agent_router(
                             last_alert.insert(alert_key, now);
                             let root = SessionId(0);
                             session_depths.lock().await.entry(root).or_insert(0);
-                            bus.emit(Event::UserPrompt { session: root, text: prompt }).await;
+                            bus.emit(Event::UserPrompt { session: root, text: prompt, images: vec![] }).await;
                         }
                     }
                 }
@@ -1764,7 +1775,7 @@ fn spawn_discovery_loop(
                         "New ApexOS node discovered on the mesh: **{peer_id}** at {ip}. \
                          Call `bootstrap_node` to provision it automatically."
                     );
-                    bus.emit(Event::UserPrompt { session: SessionId(0), text }).await;
+                    bus.emit(Event::UserPrompt { session: SessionId(0), text, images: vec![] }).await;
                 }
             }
 
