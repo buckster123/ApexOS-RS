@@ -10,7 +10,7 @@ export enum ShellMode { desktop, focus }
 // Every app is a window. Rust owns the set (which windows exist, z-order =
 // model order with the last element on top); Slint owns live-drag geometry
 // for smoothness and commits back to Rust on release.
-export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer }
 
 // ── Persona system (glowup G4) ───────────────────────────────────────────
 // A persona is a named bundle: theme + chrome + wallpaper + default shell mode
@@ -166,6 +166,19 @@ export struct NoteItem {
 export struct ImageItem {
     path: string,
     name: string,
+}
+
+// One entry in the Explorer (📁) — a dir or file under the workspace.
+// /api/workspace/list. `path` is workspace-relative (navigate dirs / preview
+// files); `abs` is the absolute path (co-located UI loads image previews from it).
+export struct ExplorerEntry {
+    name:       string,
+    kind:       string,   // "dir" | "file"
+    size-label: string,   // "1.2 KB" (files) / "" (dirs)
+    ext:        string,   // lowercased, no dot ("png", "md", …)
+    path:       string,
+    abs:        string,
+    glyph:      string,   // icon (Rust maps dir/ext → emoji)
 }
 
 // One drawn stroke in the Sketchpad (🎨). Rust owns the points; `commands` is
