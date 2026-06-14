@@ -332,12 +332,14 @@ pub fn list() -> Value {
         },
         {
             "name": "display_face",
-            "description": "Set the expression on the GC9A01A round TFT display face. States: idle, thinking, speaking, alert, listening, sleeping, happy. Requires apex-face service running.",
+            "description": "Set the expression on APEX's on-screen face — your face on this device's display. Emote with it while you talk: it carries tone the text can't. Expressions: neutral, happy, curious, amused, confused, sad, surprised, wink, skeptical, proud, love, focused (the activity states idle/thinking/speaking/listening/alert/sleeping are set for you automatically — you rarely need them). The expression lingers until your next reply, so set it to match your mood. Works on the Slint UI (kiosk/desktop) and the original GC9A01A round-TFT if present; a no-op (not an error) on a headless node.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "state": { "type": "string", "description": "Face state: idle|thinking|speaking|alert|listening|sleeping|happy" },
-                    "text":  { "type": "string", "description": "Optional text to show below the face (max ~20 chars)" }
+                    "state":     { "type": "string", "description": "Expression: neutral|happy|curious|amused|confused|sad|surprised|wink|skeptical|proud|love|focused (or an activity state idle|thinking|speaking|listening|alert|sleeping)" },
+                    "gaze":      { "type": "string", "description": "Optional eye direction: center|left|right|up|down (default center)" },
+                    "intensity": { "type": "number", "description": "Optional 0.0–1.0, how strong the expression reads (default 0.7)" },
+                    "text":      { "type": "string", "description": "Optional short caption shown under the face (≤20 chars)" }
                 },
                 "required": ["state"]
             }
@@ -2087,28 +2089,41 @@ fn gpio_servo(args: &Value) -> Value {
 }
 
 fn display_face(args: &Value) -> Value {
-    let state = args["state"].as_str().unwrap_or("idle");
-    let valid = ["idle","thinking","speaking","alert","listening","sleeping","happy"];
+    // Activity states are normally driven by the event stream; emotive states are
+    // what the agent reaches for. Both accepted. The Slint UI renders the face from
+    // the tool_requested event it already receives — this tool's job is to validate
+    // + echo (and, on the original Pi, poke the GC9A01A daemon best-effort).
+    let state = args["state"].as_str().unwrap_or("neutral");
+    let valid = [
+        "idle", "thinking", "speaking", "listening", "alert", "sleeping",     // activity
+        "neutral", "happy", "curious", "amused", "confused", "sad",           // emotive
+        "surprised", "wink", "skeptical", "proud", "love", "focused",
+    ];
     if !valid.contains(&state) {
-        return tool_error(format!("invalid state '{}' — use: {}", state, valid.join(", ")));
+        return tool_error(format!("invalid state '{}' — use one of: {}", state, valid.join(", ")));
     }
+    let gaze = match args["gaze"].as_str().unwrap_or("center") {
+        g @ ("center" | "left" | "right" | "up" | "down") => g,
+        _ => "center",
+    };
+    let intensity = (args["intensity"].as_f64().unwrap_or(0.7)).clamp(0.0, 1.0);
     let text = args["text"].as_str().unwrap_or("");
+
+    // Best-effort poke of the original ApexOS GC9A01A round-TFT daemon, if this
+    // node happens to have one. Its absence is normal on -RS (the Slint face is
+    // driven UI-side from the event) — so a missing/closed socket is NOT an error.
     let sock_path = "/run/apex-face/face.sock";
-    if !std::path::Path::new(sock_path).exists() {
-        return tool_ok(json!({ "ok": false, "reason": "display daemon not running (apex-face.service)" }));
-    }
-    use std::io::Write;
-    use std::os::unix::net::UnixStream;
-    match UnixStream::connect(sock_path) {
-        Ok(mut stream) => {
-            let msg = format!("{}\n", serde_json::json!({ "state": state, "text": text }));
-            match stream.write_all(msg.as_bytes()) {
-                Ok(_)  => tool_ok(json!({ "ok": true, "state": state })),
-                Err(e) => tool_error(format!("display write: {}", e)),
-            }
+    if std::path::Path::new(sock_path).exists() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        if let Ok(mut stream) = UnixStream::connect(sock_path) {
+            let msg = format!("{}\n", json!({ "state": state, "text": text }));
+            let _ = stream.write_all(msg.as_bytes());
         }
-        Err(e) => tool_error(format!("display connect: {}", e)),
     }
+
+    // Always ok: the expression request is the contract; rendering is the UI's job.
+    tool_ok(json!({ "ok": true, "state": state, "gaze": gaze, "intensity": intensity }))
 }
 
 #[cfg(test)]

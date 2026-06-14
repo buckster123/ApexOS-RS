@@ -2,13 +2,20 @@ import { Palette } from "../palette.slint";
 
 // ── FaceView (😊) ───────────────────────────────────────────────────────────
 //
-// APEX's face, back in -RS. The original ApexOS drove a round GC9A01A TFT via
-// the display_face tool; here we paint the same expressive states into a Slint
-// window so headless/desktop nodes get the face too. No new backend: `state` is
-// set by Rust from the agentd event stream (idle/thinking/speaking/listening/
-// alert/sleeping/happy), and `tick` is a slow timer that animates blink, talk
-// and the listening/speaking aura. Built from rounded rectangles + a radial
-// gradient (house style — no Path), so it renders on every backend incl. femtovg.
+// APEX's face. Two layers feed it:
+//   • ACTIVITY states (idle/thinking/speaking/listening/alert/sleeping) — set
+//     automatically by Rust from the agentd event stream.
+//   • EMOTIVE states (neutral/happy/curious/amused/confused/sad/surprised/wink/
+//     skeptical/proud/love/focused) — set deliberately by APEX via the
+//     `display_face` tool, which the UI consumes from the tool_requested event.
+//     `gaze` (center|left|right|up|down) and `intensity` (0..1) refine it; an
+//     emote lingers past turn-end (Rust holds it) so the expression feels alive.
+//
+// Built from rounded rectangles + eyebrows + a single Path mouth (the one curve
+// where a stroke beats a rect — proven on femtovg via the sketchpad) + a radial
+// gradient head, so it renders on every backend incl. femtovg software (Nano).
+// The shader/3D face is the Phase-2 upgrade for GL tiers; this is the universal
+// fallback and the control surface it will plug into.
 //
 // preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
 
@@ -18,40 +25,117 @@ export component FaceView {
 
     in property <string> state: "idle";
     in property <int>    tick: 0;
+    in property <string> gaze: "center";
+    in property <float>  intensity: 0.7;
 
     // Per-state accent — carries most of the emotional read.
     property <color> accent:
-        root.state == "thinking"  ? #eab308
+        root.state == "thinking"   ? #eab308
         : root.state == "speaking" ? Palette.primary
         : root.state == "listening" ? #00d4ff
         : root.state == "alert"    ? #ef4444
         : root.state == "sleeping" ? Palette.text-dim
         : root.state == "happy"    ? #39ff14
+        : root.state == "amused"   ? #39ff14
+        : root.state == "proud"    ? #39ff14
+        : root.state == "curious"  ? #00d4ff
+        : root.state == "focused"  ? #00d4ff
+        : root.state == "confused" ? #eab308
+        : root.state == "surprised" ? #eab308
+        : root.state == "skeptical" ? #eab308
+        : root.state == "wink"     ? #39ff14
+        : root.state == "sad"      ? #6b8cff
+        : root.state == "love"     ? #ff6ad5
         : Palette.primary;
 
-    // Eye openness (0 closed … 1 wide). Blink every 7 ticks unless asleep.
+    // Symmetric base eye openness (0 closed … 1 wide).
     property <float> eye-base:
-        root.state == "sleeping" ? 0.10
+        root.state == "sleeping"  ? 0.10
         : root.state == "thinking" ? 0.55
-        : root.state == "listening" ? 1.0
+        : root.state == "focused"  ? 0.58
+        : root.state == "sad"      ? 0.60
+        : root.state == "skeptical" ? 0.72
+        : root.state == "confused" ? 0.78
+        : (root.state == "listening" || root.state == "alert" || root.state == "surprised") ? 1.0
         : 0.85;
-    property <float> eye-open:
-        (root.state != "sleeping" && Math.mod(root.tick, 7) == 0) ? 0.10 : root.eye-base;
 
-    // Mouth openness — talking oscillates with the tick.
-    property <float> mouth-open:
-        root.state == "speaking" ? (Math.mod(root.tick, 2) == 0 ? 0.9 : 0.3)
-        : root.state == "alert"  ? 0.7
-        : root.state == "happy"  ? 0.45
+    // Blink every 7 ticks (never while asleep or mid-wink).
+    property <bool> blink: root.state != "sleeping" && root.state != "wink" && Math.mod(root.tick, 7) == 0;
+    property <float> l-eye:
+        root.state == "wink" ? 0.08
+        : root.blink ? 0.10
+        : root.eye-base;
+    property <float> r-eye:
+        root.state == "skeptical" ? root.eye-base * 0.5
+        : root.blink ? 0.10
+        : root.eye-base;
+
+    // Eyebrow vertical bias: + raised, − lowered (px applied in head space).
+    // skew tilts left vs right (confused / skeptical). Both scaled by intensity.
+    property <float> brow-raise:
+        root.state == "surprised" ? 1.0
+        : root.state == "curious"  ? 0.7
+        : root.state == "proud"    ? 0.5
+        : root.state == "amused"   ? 0.45
+        : root.state == "listening" ? 0.4
+        : root.state == "confused" ? 0.4
+        : root.state == "sad"      ? 0.35
+        : root.state == "love"     ? 0.3
+        : root.state == "happy"    ? 0.25
+        : root.state == "thinking" ? -0.3
+        : root.state == "skeptical" ? -0.4
+        : root.state == "alert"    ? -0.5
+        : root.state == "focused"  ? -0.6
+        : 0.0;
+    property <float> brow-skew:
+        root.state == "confused"  ? 0.6
+        : root.state == "skeptical" ? 0.5
         : 0.0;
 
+    // Mouth curve for the Path: +1 full smile … 0 flat … −1 full frown.
+    property <float> mouth-curve:
+        (root.state == "happy" || root.state == "amused" || root.state == "proud"
+            || root.state == "love" || root.state == "wink") ? 1.0
+        : root.state == "curious"  ? 0.4
+        : root.state == "sad"      ? -1.0
+        : root.state == "confused" ? -0.4
+        : root.state == "skeptical" ? -0.3
+        : 0.0;
+    // Open-mouth states draw a filled maw instead of a stroked curve.
+    property <bool> mouth-is-open:
+        root.state == "speaking" || root.state == "surprised" || root.state == "alert";
+    property <float> mouth-open:
+        root.state == "speaking" ? (Math.mod(root.tick, 2) == 0 ? 0.9 : 0.3)
+        : root.state == "surprised" ? 0.9
+        : root.state == "alert"  ? 0.6
+        : 0.0;
+    // Quadratic control-Y in the mouth viewbox (baseline 30 of 60). Larger Y dips
+    // DOWN → smile; smaller Y arcs up → frown. Scaled by intensity.
+    property <float> mouth-cy: 30 + root.mouth-curve * 22 * root.intensity;
+
+    // Gaze as a fraction of head size (applied inside the head).
+    property <float> gaze-fx:
+        root.gaze == "left" ? -0.06 : root.gaze == "right" ? 0.06 : 0.0;
+    property <float> gaze-fy:
+        root.gaze == "up" ? -0.05 : root.gaze == "down" ? 0.05 : 0.0;
+
     property <string> label:
-        root.state == "thinking"  ? "THINKING…"
+        root.state == "thinking"   ? "THINKING…"
         : root.state == "speaking" ? "SPEAKING"
         : root.state == "listening" ? "LISTENING"
         : root.state == "alert"    ? "NEEDS YOU"
         : root.state == "sleeping" ? "ASLEEP"
         : root.state == "happy"    ? "☺"
+        : root.state == "amused"   ? "HEH"
+        : root.state == "curious"  ? "HM?"
+        : root.state == "confused" ? "???"
+        : root.state == "sad"      ? "…"
+        : root.state == "surprised" ? "OH!"
+        : root.state == "wink"     ? ";)"
+        : root.state == "skeptical" ? "HMM"
+        : root.state == "proud"    ? "✓"
+        : root.state == "love"     ? "♥"
+        : root.state == "focused"  ? "FOCUS"
         : "READY";
 
     VerticalLayout {
@@ -92,14 +176,43 @@ export component FaceView {
                 animate border-color { duration: 300ms; }
 
                 property <length> eye-w: self.width * 0.15;
-                property <length> eye-y: self.height * 0.40;
+                property <length> eye-y: self.height * 0.42;
+                property <length> gx: self.width * root.gaze-fx;
+                property <length> gy: self.height * root.gaze-fy;
+                // Brow vertical travel; up is negative y.
+                property <length> brow-y0: self.height * 0.24;
+                property <length> brow-l-dy: -(root.brow-raise + root.brow-skew) * root.intensity * self.height * 0.07;
+                property <length> brow-r-dy: -(root.brow-raise - root.brow-skew) * root.intensity * self.height * 0.07;
+
+                // Left eyebrow.
+                Rectangle {
+                    width: head.eye-w * 1.25;
+                    height: 4px;
+                    x: head.width * 0.35 - self.width / 2 + head.gx;
+                    y: head.brow-y0 + head.brow-l-dy + head.gy;
+                    border-radius: 2px;
+                    background: root.accent;
+                    opacity: root.state == "sleeping" ? 0.25 : 0.9;
+                    animate y { duration: 160ms; }
+                }
+                // Right eyebrow.
+                Rectangle {
+                    width: head.eye-w * 1.25;
+                    height: 4px;
+                    x: head.width * 0.65 - self.width / 2 + head.gx;
+                    y: head.brow-y0 + head.brow-r-dy + head.gy;
+                    border-radius: 2px;
+                    background: root.accent;
+                    opacity: root.state == "sleeping" ? 0.25 : 0.9;
+                    animate y { duration: 160ms; }
+                }
 
                 // Left eye.
                 Rectangle {
                     width: head.eye-w;
-                    height: max(2px, head.eye-w * root.eye-open);
-                    x: head.width * 0.35 - self.width / 2;
-                    y: head.eye-y - self.height / 2;
+                    height: max(2px, head.eye-w * root.l-eye);
+                    x: head.width * 0.35 - self.width / 2 + head.gx;
+                    y: head.eye-y - self.height / 2 + head.gy;
                     border-radius: self.height / 2;
                     background: root.accent;
                     animate height { duration: 120ms; }
@@ -107,23 +220,38 @@ export component FaceView {
                 // Right eye.
                 Rectangle {
                     width: head.eye-w;
-                    height: max(2px, head.eye-w * root.eye-open);
-                    x: head.width * 0.65 - self.width / 2;
-                    y: head.eye-y - self.height / 2;
+                    height: max(2px, head.eye-w * root.r-eye);
+                    x: head.width * 0.65 - self.width / 2 + head.gx;
+                    y: head.eye-y - self.height / 2 + head.gy;
                     border-radius: self.height / 2;
                     background: root.accent;
                     animate height { duration: 120ms; }
                 }
 
-                // Mouth — a capsule whose height grows as the mouth opens.
-                Rectangle {
-                    width: head.width * (root.state == "happy" ? 0.42 : 0.30);
-                    height: max(4px, head.width * 0.20 * root.mouth-open);
-                    x: (head.width - self.width) / 2;
+                // Mouth — open states draw a filled maw; everything else a
+                // stroked quadratic curve (smile ↔ frown ↔ flat).
+                if root.mouth-is-open: Rectangle {
+                    width: head.width * 0.28;
+                    height: max(5px, head.width * 0.20 * root.mouth-open);
+                    x: (head.width - self.width) / 2 + head.gx * 0.5;
                     y: head.height * 0.66 - self.height / 2;
                     border-radius: min(self.width, self.height) / 2;
                     background: root.accent;
                     animate width, height { duration: 130ms; }
+                }
+                if !root.mouth-is-open: Path {
+                    width: head.width * 0.50;
+                    height: head.height * 0.24;
+                    x: (head.width - self.width) / 2 + head.gx * 0.5;
+                    y: head.height * 0.56;
+                    viewbox-x: 0;
+                    viewbox-y: 0;
+                    viewbox-width: 100;
+                    viewbox-height: 60;
+                    commands: "M 12 30 Q 50 \{root.mouth-cy} 88 30";
+                    stroke: root.accent;
+                    stroke-width: 5px;
+                    fill: transparent;
                 }
             }
         }

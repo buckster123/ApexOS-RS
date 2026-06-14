@@ -133,6 +133,8 @@ export component AppWindowFrame inherits Rectangle {
     in-out property <string>     notes-current-text;
     in property <string>         face-state;
     in property <int>            face-tick;
+    in property <string>         face-gaze;
+    in property <float>          face-intensity;
     in property <[SketchStroke]> sketch-strokes;
     in property <int>            sketch-color;
     in property <int>            sketch-width;
@@ -562,6 +564,8 @@ export component AppWindowFrame inherits Rectangle {
             vertical-stretch: 1;
             state: root.face-state;
             tick: root.face-tick;
+            gaze: root.face-gaze;
+            intensity: root.face-intensity;
         }
 
         if root.kind == AppKind.sketchpad: SketchpadView {

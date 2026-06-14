@@ -78,6 +78,8 @@ export component AppWindow inherits Window {
     in-out property <string>         notes-current-text: "";
     in-out property <string>         face-state: "idle";
     in-out property <int>            face-tick: 0;
+    in-out property <string>         face-gaze: "center";       // center|left|right|up|down (agent display_face)
+    in-out property <float>          face-intensity: 0.7;       // 0..1 expression strength
     in-out property <[SketchStroke]> sketch-strokes;
     in-out property <int>            sketch-color: 0;
     in-out property <int>            sketch-width: 0;
@@ -651,6 +653,8 @@ export component AppWindow inherits Window {
                         notes-current-text <=> root.notes-current-text;
                         face-state: root.face-state;
                         face-tick: root.face-tick;
+                        face-gaze: root.face-gaze;
+                        face-intensity: root.face-intensity;
                         sketch-strokes: root.sketch-strokes;
                         sketch-color: root.sketch-color;
                         sketch-width: root.sketch-width;
