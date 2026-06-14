@@ -1,7 +1,8 @@
 # SDK: Adding a tool to `apexos-tools`
 
 > `apexos-tools` is the built-in system-tool plugin agentd spawns over stdio: shell,
-> file I/O, HTTP, system telemetry, notify, audio, GPIO/PWM/servo, display_face. You
+> file I/O, notes, HTTP, system telemetry, notify, audio, GPIO/PWM/servo, the vision
+> tools (`sketch_snapshot`/`screenshot_mirror`/`camera_capture`), and `display_face`. You
 > extend it when the agent needs a **new local-system capability** that is plain Rust
 > (a command, a file/device op, a small HTTP call) — not memory (that's `cerebro-mcp`)
 > and not a daemon-internal verb like `propose_evolution` (that's a *virtual tool*
@@ -17,17 +18,17 @@
 
 `apexos-tools` is an MCP-over-stdio server. The loop is dead simple:
 
-- **`src/main.rs`** (`tools/crates/apexos-tools/src/main.rs:6`) reads newline-delimited
-  JSON-RPC from stdin, dispatches by `method`, writes the response to stdout:
-  - `initialize` → static handshake (`main.rs:26`)
-  - `tools/list` → `tools::list()` (`main.rs:36`) — the JSON-Schema registry
-  - `tools/call` → `tools::call(name, &args)` (`main.rs:41`) — the dispatch arm table
+- **`src/main.rs`** (`apexos-tools` `main`) reads newline-delimited JSON-RPC from stdin,
+  dispatches by `method`, writes the response to stdout:
+  - `initialize` → static handshake
+  - `tools/list` → `tools::list()` — the JSON-Schema registry
+  - `tools/call` → `tools::call(name, &args)` — the dispatch arm table
 - **`src/tools.rs`** holds everything else:
-  - `list()` (`tools.rs:10`) returns a `json!([...])` array of tool specs. **This is the
+  - `list()` returns a `json!([...])` array of tool specs. **This is the
     schema the LLM sees** — name, description, `inputSchema`.
-  - `call(name, args)` (`tools.rs:302`) is a `match` over the bare tool name routing to a
+  - `call(name, args)` is a `match` over the bare tool name routing to a
     per-tool `fn(args: &Value) -> Value`.
-  - `tool_ok(content)` (`tools.rs:333`) / `tool_error(msg)` (`tools.rs:337`) — the two
+  - `tool_ok(content)` / `tool_error(msg)` — the two
     MCP result envelopes every tool returns. **You always return one of these**, never a
     bare value.
 
@@ -52,8 +53,8 @@ distinguishes failure from success — the turn engine maps it to a `tool_result
 
 The supervisor (`agentd/crates/plugins/src/supervisor.rs`) does **not** hard-code tool
 names. On plugin start it calls `client.list_tools()` and registers every returned name
-into a flat `tool_registry: HashMap<String, PluginId>` (`supervisor.rs:1404-1406`).
-Dispatch is a single lookup by bare name (`supervisor.rs:1331-1332`). Two consequences:
+into a flat `tool_registry: HashMap<String, PluginId>`. Dispatch is a single lookup by
+bare name in `dispatch`. Two consequences:
 
 - **Tool names are global and flat across all plugins** — no `apexos-tools.` prefix. Your
   new name must not collide with a Cerebro tool name or another plugin's.
@@ -66,11 +67,11 @@ Before dispatch, every `ToolRequested` runs through the `PolicyEngine`
 (`supervisor.rs:162-163`):
 
 ```rust
-let path = call.args["path"].as_str();                 // supervisor.rs:162
+let path = call.args["path"].as_str();                 // supervisor.rs, dispatch hop
 let decision = self.policy.read().await.check(&call.tool, path);
 ```
 
-`PolicyEngine::check` (`agentd/crates/plugins/src/policy.rs:88`):
+`PolicyEngine::check` (`agentd/crates/plugins/src/policy.rs`):
 
 1. `mode == "yolo"` → `Allow` (short-circuit, ignores all rules).
 2. Look up `tool_name` in `[rules]`: **exact match wins**, then `prefix.*` wildcard
@@ -94,18 +95,47 @@ There are **two independent** workspace mechanisms, and they do not cover most t
 1. **Policy-layer `workspace` rule** (`policy.rs:118-138`): canonicalizes `AGENTD_WORKSPACE`
    and the `path` arg, allows iff `path` is inside the workspace, rejects `..` traversal,
    else `Ask`. Only `write_file`/`create_dir` use it today (`policy.toml:15-16`).
-2. **Tool-layer self-confinement**: only `delete_path` (`tools.rs:606-648`) actually roots
-   itself — it rejects `..`, canonicalizes, and hard-blocks deletions outside
-   `AGENTD_WORKSPACE` (or applies a system-dir denylist when no workspace is set).
+2. **Tool-layer self-confinement**: only `delete_path` (`fn delete_path` in `tools.rs`)
+   actually roots itself — it rejects `..`, canonicalizes, and hard-blocks deletions
+   outside `AGENTD_WORKSPACE` (or applies a system-dir denylist when no workspace is set).
 
 **Every other tool is unconfined.** `read_file`, `list_dir`, `run_command`, the audio
 tools (which write `output_path`), and all GPIO tools operate on whatever path/device the
 agent passes, limited only by the policy rule and the **systemd sandbox** in
 `deploy/agentd.service` (`ProtectSystem=strict`, `ReadWritePaths=/var/lib/agentd
 /etc/agentd`, `WorkingDirectory=/var/lib/agentd/workspace`). Treat the sandbox — not the
-tool code — as the real filesystem boundary. The `run_command` denylist (`tools.rs:343`)
-is a **soft substring heuristic** (blocks `mkfs`, `dd of=/dev/*`, `rm -rf /usr`, fork
+tool code — as the real filesystem boundary. The `run_command` denylist (`fn denylist_check`
+in `tools.rs`) is a **soft substring heuristic** (blocks `mkfs`, `dd of=/dev/*`, `rm -rf /usr`, fork
 bombs, …); it is trivially bypassable and is **not** a security boundary.
+
+### The vision-tool convention — give the agent eyes without touching agentd
+
+Three of the built-in tools — `sketch_snapshot`, `screenshot_mirror`, `camera_capture` —
+do **not** return an image directly. They write a PNG somewhere readable and return a
+plain `tool_ok` with a **vision sentinel**:
+
+```jsonc
+{ "vision": { "path": "screenshots/mirror-1718.png" }, "text": "the live UI" }
+```
+
+`path` is preferred (workspace-relative or absolute, read back from disk); a tool that
+already has the bytes in hand can return `{"vision": {"b64": "<base64>"}, "text": …}`
+instead. The optional `text` becomes the image caption.
+
+The agent turn loop does the rest — **no agentd or gateway change is needed for a new
+vision tool, only this return shape.** After a tool result comes back, `vision_rewrite`
+(`agentd/crates/agent/src/turn.rs`) calls `find_vision_sentinel`, and on a hit hands the
+ref to `apexos_core::vision` (`agentd/crates/core/src/vision.rs`):
+`vision::load_and_prepare(path)` or `vision::prepare_b64(b64)` decode → downscale (longest
+edge ≤ `VISION_MAX_EDGE`, the token-bomb cap) → re-encode, then
+`vision::anthropic_tool_result_content` turns the `PreparedImage` into a multimodal
+`ContentBlock::Image` (Anthropic native; OAI/Ollama get a follow-up user message). The
+tool's stringified JSON result is replaced by the actual image block, so the model *sees*
+the picture instead of reading a path string.
+
+To add your own eye-style tool: capture to a PNG, return the `{"vision":{"path"},"text"}`
+sentinel from `tool_ok`, give it an `allow` policy rule, done. Mirror `fn camera_capture`
+/ `fn screenshot_mirror` / `fn sketch_snapshot` in `tools.rs` for the exact shape.
 
 ---
 
@@ -116,7 +146,7 @@ Five steps. Steps 1–3 are in `tools/crates/apexos-tools/src/tools.rs`; step 4 
 
 ### 1. Declare the schema in `list()`
 
-Add an object to the `json!([...])` array in `list()` (`tools.rs:11`). The shape is fixed
+Add an object to the `json!([...])` array in `list()`. The shape is fixed
 MCP: `name`, `description`, `inputSchema` (JSON Schema, `type: "object"`).
 
 ```jsonc
@@ -135,22 +165,22 @@ MCP: `name`, `description`, `inputSchema` (JSON Schema, `type: "object"`).
 ```
 
 Guidance:
-- A no-arg tool uses `"inputSchema": { "type": "object", "properties": {} }` (see `cpu_temp`, `tools.rs:103`).
+- A no-arg tool uses `"inputSchema": { "type": "object", "properties": {} }` (see `cpu_temp`).
 - Name the primary filesystem argument **`path`** if you want `workspace`/policy path
   checks to engage (see Concepts).
 - The description is the *only* thing the LLM reads to choose the tool. Front-load the
-  verb and the side effects; note hardware/safety limits inline (the GPIO specs at
-  `tools.rs:238` are the model).
+  verb and the side effects; note hardware/safety limits inline (the GPIO specs in
+  `list()` are the model — see `gpio_servo`).
 
 ### 2. Add the dispatch arm in `call()`
 
-Add one line to the `match name` in `call()` (`tools.rs:303`):
+Add one line to the `match name` in `call()`:
 
 ```rust
 "my_tool" => my_tool(args),
 ```
 
-The fallthrough `_ => tool_error(format!("unknown tool: {}", name))` (`tools.rs:329`)
+The fallthrough `_ => tool_error(format!("unknown tool: {}", name))`
 already handles unknown names.
 
 ### 3. Implement the tool fn
@@ -175,8 +205,8 @@ fn my_tool(args: &Value) -> Value {
 ```
 
 If you want workspace self-confinement (like `delete_path`), copy the canonicalize +
-`AGENTD_WORKSPACE` `starts_with` guard from `tools.rs:613-648` — don't rely on policy
-alone for a destructive op.
+`AGENTD_WORKSPACE` `starts_with` guard from `fn delete_path` in `tools.rs` — don't rely on
+policy alone for a destructive op.
 
 ### 4. Add a policy rule in `config/policy.toml`
 
@@ -329,9 +359,9 @@ prompt. Verify by asking the agent: *"is port 8787 open on localhost?"*
   /etc/agentd` (`deploy/agentd.service`). A tool that "writes a file" can only write where
   the sandbox permits regardless of what `path` it's handed. Lean on this; do not invent a
   parallel allowlist in tool code unless the op is genuinely destructive (then copy
-  `delete_path`'s canonicalize guard, `tools.rs:613-648`).
-- **The `run_command` denylist is not a sandbox.** `denylist_check` (`tools.rs:343`) is a
-  substring heuristic and is bypassable (e.g. via env-indirection, base64, or paths it
+  `delete_path`'s canonicalize guard, `fn delete_path` in `tools.rs`).
+- **The `run_command` denylist is not a sandbox.** `denylist_check` (`fn denylist_check` in
+  `tools.rs`) is a substring heuristic and is bypassable (e.g. via env-indirection, base64, or paths it
   doesn't enumerate). If you add a tool that shells out, do not treat the denylist as
   protection — it catches honest mistakes, not adversarial input.
 - **Self-evolution / audit discipline (for agents).** A 24/7 self-extending APEX adds tools
@@ -355,8 +385,8 @@ prompt. Verify by asking the agent: *"is port 8787 open on localhost?"*
 
 | File | Edit |
 |------|------|
-| `tools/crates/apexos-tools/src/tools.rs` (`list()` @ :10) | add the schema object |
-| `tools/crates/apexos-tools/src/tools.rs` (`call()` @ :302) | add `"name" => fn(args),` arm |
+| `tools/crates/apexos-tools/src/tools.rs` (`list()`) | add the schema object |
+| `tools/crates/apexos-tools/src/tools.rs` (`call()`) | add `"name" => fn(args),` arm |
 | `tools/crates/apexos-tools/src/tools.rs` (near other fns) | add the `fn name(args:&Value)->Value` impl |
 | `config/policy.toml` (`[rules]`) | add `"name" = "allow"\|"ask"\|"workspace"` |
 | *(not edited)* `config/plugins.toml` | the supervisor auto-registers via `tools/list` |
@@ -365,8 +395,8 @@ prompt. Verify by asking the agent: *"is port 8787 open on localhost?"*
 
 | Helper | Shape | When |
 |--------|-------|------|
-| `tool_ok(v)` (`tools.rs:333`) | `{"content":[{"type":"text","text":"<v as JSON string>"}]}` | success (including "negative-but-valid" results) |
-| `tool_error(msg)` (`tools.rs:337`) | `{"content":[{"type":"text","text":"{\"error\":\"msg\"}"}],"isError":true}` | the tool could not run / bad args |
+| `tool_ok(v)` (`fn tool_ok`) | `{"content":[{"type":"text","text":"<v as JSON string>"}]}` | success (including "negative-but-valid" results) |
+| `tool_error(msg)` (`fn tool_error`) | `{"content":[{"type":"text","text":"{\"error\":\"msg\"}"}],"isError":true}` | the tool could not run / bad args |
 
 ### Policy `Rule` values (`policy.rs:12`, kebab-case in TOML)
 
@@ -389,28 +419,35 @@ Modes (`policy.toml:3`): `suggest` (default — confirm everything not `allow`),
 
 Policy reads **only** `call.args["path"]` (`supervisor.rs:162`). No other arg name is inspected.
 
-### Existing tools (the `call()` table, `tools.rs:302-330`)
+### Existing tools (the full `list()` / `call()` registry)
+
+The 31 tools `apexos-tools` exposes today (verify against `list()` / `call()` in
+`tools.rs`):
 
 `run_command`, `read_file`, `write_file`, `list_dir`, `create_dir`, `delete_path`,
-`http_fetch`, `cpu_temp`, `disk_usage`, `memory_info`, `uptime`, `notify`, `audio_analyze`,
-`audio_trim_silence`, `audio_normalize`, `audio_peak_limit`, `audio_trim`, `audio_clean`,
-`gpio_info`, `gpio_read`, `gpio_write`, `gpio_pulse`, `gpio_pwm`, `gpio_servo`,
-`display_face`. Names are global across all plugins — don't collide with these or with
-`cerebro-mcp`'s ~66 tools.
+`notes_list`, `notes_read`, `notes_append`, `sketch_snapshot`, `screenshot_mirror`,
+`camera_capture`, `http_fetch`, `cpu_temp`, `disk_usage`, `memory_info`, `uptime`,
+`notify`, `audio_analyze`, `audio_trim_silence`, `audio_normalize`, `audio_peak_limit`,
+`audio_trim`, `audio_clean`, `gpio_info`, `gpio_read`, `gpio_write`, `gpio_pulse`,
+`gpio_pwm`, `gpio_servo`, `display_face`. Names are global across all plugins — don't
+collide with these or with `cerebro-mcp`'s tools (`TOOL_NAMES`, 66 entries — 63 functional
++ 3 stubs: `ingest_file`, `describe_image`, `search_vision`).
 
 ### Workspace confinement coverage (honest)
 
 | Mechanism | Where | Covers |
 |-----------|-------|--------|
-| Policy `workspace` rule | `policy.rs:118` | `write_file`, `create_dir` (any tool whose `path` arg is set to `workspace`) |
-| Tool self-confinement | `tools.rs:613-648` | `delete_path` only (canonicalize + `AGENTD_WORKSPACE` `starts_with`) |
+| Policy `workspace` rule | `workspace_decision` in `policy.rs` | `write_file`, `create_dir` (any tool whose `path` arg is set to `workspace`) |
+| Tool self-confinement | `fn delete_path` in `tools.rs` | `delete_path` only (canonicalize + `AGENTD_WORKSPACE` `starts_with`) |
 | systemd sandbox | `deploy/agentd.service` | **everything** — the real filesystem boundary |
-| `run_command` denylist | `tools.rs:343` | nothing (soft heuristic, bypassable — not a boundary) |
+| `run_command` denylist | `fn denylist_check` in `tools.rs` | nothing (soft heuristic, bypassable — not a boundary) |
 
 ### Relevant env vars
 
 | Var | Read by | Effect |
 |-----|---------|--------|
-| `AGENTD_WORKSPACE` | `policy.rs:124`, `tools.rs:625` | workspace root for `workspace` rule + `delete_path` confinement |
-| `APEX_GPIO_RESERVED=none` | `tools.rs:1422` | bypass reserved-pin checks (unsafe with sensor head) |
-| `PIPER_MODEL`/`NTFY_TOPIC`/`TELEGRAM_*` | `notify` (`tools.rs:948-998`) | enable optional notify surfaces |
+| `AGENTD_WORKSPACE` | `workspace_decision` (`policy.rs`), `fn delete_path` (`tools.rs`) | workspace root for `workspace` rule + `delete_path` confinement |
+| `APEX_GPIO_RESERVED=none` | GPIO tool fns (`tools.rs`) | bypass reserved-pin checks (unsafe with sensor head) |
+| `PIPER_MODEL`/`NTFY_TOPIC`/`TELEGRAM_*` | `fn notify` (`tools.rs`) | enable optional notify surfaces |
+| `APEXOS_CAMERA_DEVICE`/`APEXOS_CAMERA_CMD` | `fn camera_capture` (`tools.rs`) | force a V4L2 node / fully override the capture command for `camera_capture` |
+| `APEXOS_UI_SNAPSHOT_URL` | `fn screenshot_mirror` (`tools.rs`) | loopback URL ui-slint serves its `take_snapshot` PNG on (default `http://127.0.0.1:8788/snapshot`) |

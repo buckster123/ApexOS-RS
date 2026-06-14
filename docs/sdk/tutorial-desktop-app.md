@@ -20,7 +20,8 @@ All paths below are relative to the repo root unless absolute. The binary is
 
 ## What we're building
 
-A new window of `AppKind` `clock`:
+A new window of `AppKind` `clock` — appended at the **next free ordinal, 18**
+(the enum already runs `chat=0 … explorer=17`; we never reorder, only append):
 
 - **Top half** — big live time + date, read from the `Clock` Slint global (a
   Rust `chrono::Local` timer already ticks it every second; we reuse it for
@@ -72,7 +73,9 @@ Five facts make everything below make sense.
    `if root.kind == AppKind.x` content switch in `AppWindowFrame`. Its ordinal
    is **mirrored by hand** in Rust (`kind_ordinal` / `kind_from_ordinal` /
    `kind_title` / `default_geom`). These must agree with the enum order, which
-   is positional. **Append, never reorder.**
+   is positional. **Append, never reorder.** The enum currently ends at
+   `explorer` (ordinal 17), so our new variant lands at the **next free
+   ordinal, 18** — that number is what every step below uses.
 
 The window manager itself (drag/resize/focus/minimise) is already built and
 generic over `kind` — you get all of it for free just by adding your `kind`.
@@ -211,20 +214,21 @@ Notes that match the existing components:
 
 ## Step 2 — Add the `AppKind` variant
 
-Edit `ui-slint/src/ui/types.slint`. Find the enum:
+Edit `ui-slint/src/ui/types.slint`. Find the enum (it's grown a lot — these are
+the live 18 variants, ending at `explorer`):
 
 ```slint
-export enum AppKind { chat, system, sensor, sessions, settings, terminal, council }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer }
 ```
 
-Append `clock` (do **not** reorder the existing variants — ordinals are
-positional and Rust hard-codes them):
+Append `clock` to the **end** (do **not** reorder the existing variants —
+ordinals are positional and Rust hard-codes them):
 
 ```slint
-export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, clock }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer, clock }
 ```
 
-`clock` is now ordinal **7** (chat=0 … council=6).
+`clock` is now ordinal **18** (chat=0 … explorer=17).
 
 > If your app needed a list of structured rows, you'd also add an
 > `export struct ClockRow { … }` here; it becomes a Rust struct via
@@ -237,19 +241,18 @@ export enum AppKind { chat, system, sensor, sessions, settings, terminal, counci
 Edit `ui-slint/src/main.rs`. Four `match`es over `AppKind` must each gain a
 `Clock` arm. They're all near the top of the file in the window-manager section.
 
-**`kind_ordinal`** (the enum-order mirror — must equal the Slint ordinal, 7):
+Each match already lists all 18 existing variants; only the new tail arm is
+shown here (`…` = the existing arms, left untouched).
+
+**`kind_ordinal`** (the enum-order mirror — must equal the Slint ordinal, 18):
 
 ```rust
 fn kind_ordinal(k: AppKind) -> i32 {
     match k {
         AppKind::Chat => 0,
-        AppKind::System => 1,
-        AppKind::Sensor => 2,
-        AppKind::Sessions => 3,
-        AppKind::Settings => 4,
-        AppKind::Terminal => 5,
-        AppKind::Council => 6,
-        AppKind::Clock => 7,          // ← add
+        // … System=1 … Calculator=16 …
+        AppKind::Explorer => 17,
+        AppKind::Clock => 18,         // ← add
     }
 }
 ```
@@ -260,12 +263,9 @@ fn kind_ordinal(k: AppKind) -> i32 {
 fn kind_from_ordinal(o: i32) -> AppKind {
     match o {
         1 => AppKind::System,
-        2 => AppKind::Sensor,
-        3 => AppKind::Sessions,
-        4 => AppKind::Settings,
-        5 => AppKind::Terminal,
-        6 => AppKind::Council,
-        7 => AppKind::Clock,          // ← add
+        // … 16 => AppKind::Calculator …
+        17 => AppKind::Explorer,
+        18 => AppKind::Clock,         // ← add
         _ => AppKind::Chat,
     }
 }
@@ -277,12 +277,8 @@ fn kind_from_ordinal(o: i32) -> AppKind {
 fn kind_title(k: AppKind) -> &'static str {
     match k {
         AppKind::Chat => "Chat",
-        AppKind::System => "System",
-        AppKind::Sensor => "Sensors",
-        AppKind::Sessions => "Sessions",
-        AppKind::Settings => "Settings",
-        AppKind::Terminal => "Terminal",
-        AppKind::Council => "Council",
+        // … AppKind::Calculator => "Calculator" …
+        AppKind::Explorer => "Files",
         AppKind::Clock => "Clock",            // ← add
     }
 }
@@ -295,12 +291,8 @@ function, so just give width/height):
 fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
     let (w, h) = match kind {
         AppKind::Chat => (760.0, 540.0),
-        AppKind::System => (440.0, 460.0),
-        AppKind::Sensor => (560.0, 480.0),
-        AppKind::Sessions => (500.0, 520.0),
-        AppKind::Settings => (660.0, 560.0),
-        AppKind::Terminal => (640.0, 420.0),
-        AppKind::Council => (560.0, 560.0),
+        // … AppKind::Calculator => (300.0, 440.0) …
+        AppKind::Explorer => (680.0, 520.0),
         AppKind::Clock => (360.0, 380.0),     // ← add
     };
     let step = (n % 6) as f32 * 30.0;
@@ -313,7 +305,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
 > unhandled). That's your safety net — a missed arm is a build failure, not a
 > runtime surprise. The only silent trap is getting the **ordinal number**
 > wrong in `kind_ordinal`/`kind_from_ordinal`: keep it equal to the Slint enum
-> position (7).
+> position (18).
 
 ---
 
@@ -409,6 +401,8 @@ match kind {
     AppKind::Settings => ui.invoke_refresh_settings(),
     AppKind::Sessions => ui.invoke_refresh_sessions(),
     AppKind::Terminal => start_terminal(&rt_h_term, &term_url, ui.as_weak()),
+    // … the other per-app refresh arms: EventLog, Mesh, Inference,
+    //   AudioEditor, Sonus, Notes, Explorer …
     AppKind::Clock    => ui.invoke_clock_refresh(),   // ← add (matches `clock-refresh`)
     _ => {}
 }
@@ -475,22 +469,29 @@ Also note the Slint↔Rust string conversion: `uptime.into()` turns the Rust
 
 **6c. The launcher entry.** Edit
 `ui-slint/src/ui/components/start_menu.slint`. The Clock is a "core" app
-(useful for everyone), so add it to the always-shown group (not behind
-`Personas.show-tech-apps`). Launch ordinal **7**:
+(useful for everyone), so add it to the always-shown group (the unconditional
+`MenuRow`s, not the ones behind `if Personas.show-tech-apps:`). Launch
+ordinal **18**:
 
 ```slint
-// in the StartMenu component, with the core MenuRows:
-MenuRow { glyph: "🕐"; label: "Clock"; clicked => { root.launch(7); } }
+// in the StartMenu component, with the core MenuRows (alongside Calculator/Files):
+MenuRow { glyph: "🕐"; label: "Clock"; clicked => { root.launch(18); } }
 ```
 
-If you want it in the Win-98 persona's start menu too, add the matching
-`WinMenuRow` in `Win98StartMenu` in the same file:
+The same file also has a Win-98 persona menu (`WinMenuRow`s in the `Win98...`
+start-menu component). If you want Clock there too, add the matching row in the
+core group:
 
 ```slint
-WinMenuRow { glyph: "🕐"; label: "Clock"; clicked => { root.launch(7); } }
+WinMenuRow { glyph: "🕐"; label: "Clock"; clicked => { root.launch(18); } }
 ```
 
-`launch(7)` already routes to `ui.on_launch_app` → `wm_launch` (creates or
+> The tech-only apps live behind `if Personas.show-tech-apps:` and the Win-98
+> menu sizes its height from the row count (`9 * 26px …`), so if you instead
+> put Clock in a *conditional* group, bump that arithmetic to match. A core,
+> always-shown row needs no height change.
+
+`launch(18)` already routes to `ui.on_launch_app` → `wm_launch` (creates or
 reveals the single Clock window) → the per-app refresh you added in 6a. No
 other launcher wiring is needed.
 

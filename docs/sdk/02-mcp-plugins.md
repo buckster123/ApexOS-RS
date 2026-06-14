@@ -44,11 +44,11 @@ Four facts to hold in your head:
    JSON-RPC. Anything you print to stdout that isn't a valid JSON-RPC line is
    silently dropped by the client reader (`mcp.rs:60-62`). **All logging must go to
    stderr** — `agentd` already pipes your stderr to its own log prefixed with
-   `[plugin:<id>]` (`supervisor.rs:1389-1398`).
+   `[plugin:<id>]` (the stderr-forwarder task spawned in `Supervisor::spawn_plugin`).
 2. **One tool name → one plugin.** At `tools/list` time the supervisor inserts every
    returned tool name into a flat `tool_registry: HashMap<String, PluginId>`
-   (`supervisor.rs:1404-1406`). Names are global; a name collision means last plugin
-   to start wins. Namespace yours (`weather_now`, not `now`).
+   (the insert in `Supervisor::spawn_plugin`). Names are global; a name collision means
+   last plugin to start wins. Namespace yours (`weather_now`, not `now`).
 3. **No request timeout on the call path.** `McpClient` has no per-request timeout
    (`mcp.rs` — a `tools/call` that never replies blocks that call's oneshot forever).
    The agent turn engine has its own bounded wait that synthesizes an error so a turn
@@ -65,12 +65,12 @@ Four facts to hold in your head:
 | `initialize` handshake | `mcp.rs:82-90` | sends `initialize` then the `notifications/initialized` notification. |
 | `list_tools` | `mcp.rs:93-108` | reads `result.tools[]`, maps each `{name, description, inputSchema}` → `ToolSpec`. |
 | `call_tool` | `mcp.rs:111-122` | sends `tools/call {name, arguments}`; maps reply → `ToolOutput { ok: !isError, content }`. |
-| `Supervisor::spawn_plugin` | `supervisor.rs:1364-1420` | spawns child with stdio piped + `kill_on_drop(true)`, attaches `McpClient`, runs the handshake, registers tools, emits `PluginUp`, and starts the death-watcher. |
-| `Supervisor::dispatch_tool` | `supervisor.rs:299-1362` | the dispatch chain: virtual tools first, then `tool_registry` lookup → `client.call_tool` → `Event::ToolResult`. Real plugins are the fall-through at `:1331-1348`. |
-| `Supervisor::handle_died` | `supervisor.rs:1422-1448` | restart logic keyed on `RestartPolicy`. |
-| `PluginConfig` / `RestartPolicy` | `agentd/crates/plugins/src/config.rs:5-24` | the `[[plugin]]` stanza shape. |
-| `ToolProxy::call` | `supervisor.rs:49-63` | direct call path (10 s timeout) used by daemon-internal code, bypasses policy. |
-| `ToolSpec` / `ToolOutput` / `ToolCall` | `agentd/crates/core/src/types.rs:288 / 282 / 273` | the in-daemon representations. |
+| `Supervisor::spawn_plugin` | `agentd/crates/plugins/src/supervisor.rs` | spawns child with stdio piped + `kill_on_drop(true)`, attaches `McpClient`, runs the handshake, registers tools, emits `PluginUp`, and starts the death-watcher. |
+| `Supervisor::dispatch_tool` | `agentd/crates/plugins/src/supervisor.rs` | the dispatch chain: virtual tools first, then `tool_registry` lookup → `client.call_tool` → `Event::ToolResult`. Real plugins are the fall-through (the `tool_registry.get` branch near the end of `dispatch_tool`). |
+| `Supervisor::handle_died` | `agentd/crates/plugins/src/supervisor.rs` | restart logic keyed on `RestartPolicy`. |
+| `PluginConfig` / `RestartPolicy` | `agentd/crates/plugins/src/config.rs` | the `[[plugin]]` stanza shape. |
+| `ToolProxy::call` | `agentd/crates/plugins/src/supervisor.rs` | direct call path (10 s timeout) used by daemon-internal code, bypasses policy. |
+| `ToolSpec` / `ToolOutput` / `ToolCall` | `agentd/crates/core/src/types.rs` | the in-daemon representations. |
 | Reference server (Rust, sync) | `tools/crates/apexos-tools/src/main.rs` | minimal stdio loop — the template to copy. |
 | Reference server (Rust, async + state) | `cerebro/crates/cerebro-mcp/src/{main.rs,transport.rs}` | tokio loop holding an `Arc<CerebroCortex>`. |
 
@@ -195,7 +195,7 @@ WEATHER_API_KEY = "…"
 ```
 Restart agentd: `sudo systemctl restart agentd`. On boot the supervisor spawns every
 `[[plugin]]`, runs the handshake, and logs `plugin '<id>' up — N tools`
-(`supervisor.rs:1408`). Confirm with `journalctl -u agentd | grep weather`.
+(`Supervisor::spawn_plugin`). Confirm with `journalctl -u agentd | grep weather`.
 
 > The default `config/plugins.toml` in the repo is the install-time template; the
 > *live* file is `/etc/agentd/plugins.toml` (chowned to `agentd` so self-evolution can
@@ -223,15 +223,15 @@ per request to stdout — same four methods.
 
 | `restart` value | On clean exit *or* crash | Used by |
 |---|---|---|
-| `always` *(stock plugins)* | restarted after a 1 s backoff (`supervisor.rs:1441-1447`) | cerebro, apexos-tools |
-| `on-failure` | **note:** `handle_died` only auto-restarts on `Always` (`:1441`). `on-failure` parses but is **not** distinguished from `never` in the restart path today — treat it as "no auto-restart" until that gap closes. | — |
+| `always` *(stock plugins)* | restarted after a 1 s backoff (`Supervisor::handle_died`) | cerebro, apexos-tools |
+| `on-failure` | **note:** `handle_died` only auto-restarts on `Always`. `on-failure` parses but is **not** distinguished from `never` in the restart path today — treat it as "no auto-restart" until that gap closes. | — |
 | `never` *(default)* | not restarted | one-shot helpers |
 
 Other supervision facts:
-- The child is spawned with `kill_on_drop(true)` (`supervisor.rs:1376`) — if the
+- The child is spawned with `kill_on_drop(true)` (in `Supervisor::spawn_plugin`) — if the
   supervisor task is dropped, the child is killed too. No orphans.
 - A death-watcher task `child.wait()`s and sends `SupervisorCmd::PluginDied`
-  (`supervisor.rs:1411-1415`), which triggers `PluginDown` on the bus + the restart
+  (spawned in `Supervisor::spawn_plugin`), which triggers `PluginDown` on the bus + the restart
   policy.
 - A live plugin can be hot-reloaded or killed at runtime via `SupervisorCmd::HotReload`
   / `KillPlugin` (`supervisor.rs:220-252`) — these are how the evolution applier
@@ -389,10 +389,10 @@ You should see three JSON lines back (init result, tools array, tool result).
 
 **The call path once live:** when the agent calls `weather_now`, `run_turn` emits
 `Event::ToolRequested` → Supervisor's `PolicyEngine.check("weather_now", None)`
-(`supervisor.rs:163`) decides Allow/Ask → on Allow, `dispatch_tool` falls past every
-virtual tool to the registry lookup (`:1331`), finds `weather` owns the name, calls
-`client.call_tool` (`mcp.rs:111`), wraps the reply as `ToolOutput`, and emits
-`Event::ToolResult` back onto the bus (`:1344`). The UI renders it in a tool card; the
+(in `dispatch_tool`) decides Allow/Ask → on Allow, `dispatch_tool` falls past every
+virtual tool to the `tool_registry` lookup, finds `weather` owns the name, calls
+`client.call_tool` (`McpClient::call_tool`), wraps the reply as `ToolOutput`, and emits
+`Event::ToolResult` back onto the bus. The UI renders it in a tool card; the
 turn engine feeds `content` back to the LLM.
 
 ---
@@ -469,7 +469,7 @@ the supervisor checks policy before it ever calls you (`supervisor.rs:161-178`).
 
 ### `RestartPolicy` (`config.rs:17-24`)
 
-| TOML value | Variant | Restart behaviour (`handle_died`, `:1441`) |
+| TOML value | Variant | Restart behaviour (`Supervisor::handle_died`) |
 |---|---|---|
 | `"always"` | `Always` | restart after 1 s on any exit |
 | `"on-failure"` | `OnFailure` | parses, but currently treated as no-restart (only `Always` restarts) |
@@ -511,6 +511,6 @@ the supervisor checks policy before it ever calls you (`supervisor.rs:161-178`).
 
 | Plugin | `id` | binary | language | restart | notes |
 |---|---|---|---|---|---|
-| Cerebro memory | `cerebro` | `/usr/local/bin/cerebro-mcp` | Rust (tokio) | `always` | ~63 tools, holds `Arc<CerebroCortex>`; async `StdioTransport` |
-| System tools | `apexos-tools` | `/usr/local/bin/apexos-tools` | Rust (sync) | `always` | ~26 tools; the minimal template |
+| Cerebro memory | `cerebro` | `/usr/local/bin/cerebro-mcp` | Rust (tokio) | `always` | 66 tool names (63 functional + 3 stubs), holds `Arc<CerebroCortex>`; async `StdioTransport` |
+| System tools | `apexos-tools` | `/usr/local/bin/apexos-tools` | Rust (sync) | `always` | 31 tools; the minimal template |
 | Sonus (example) | `sonus` | `/usr/local/bin/sonus-mcp` | (intended Python) | `always` | commented in `config/plugins.toml`; the example here repoints it at a `python3` interpreter for the non-Rust pattern |

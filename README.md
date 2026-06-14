@@ -4,7 +4,7 @@
 
 **Pure-Rust native UI distro of [ApexOS](https://github.com/buckster123/ApexOS)**
 
-*Slint frontend · KMS/DRM direct rendering · No Chromium · No Wayland · ~10 MB RAM*
+*A single self-contained ~32 MB native binary — no Chromium, no Electron, no Node, no browser runtime · Slint frontend · KMS/DRM direct rendering*
 
 [![Status](https://img.shields.io/badge/status-mk1_complete-green?style=flat-square)]()
 [![Rust](https://img.shields.io/badge/built_with-Rust-orange?style=flat-square)](https://www.rust-lang.org/)
@@ -48,7 +48,8 @@ The Slint UI connects to `ws://localhost:8787/ws` — the same protocol as the b
 | | ApexOS (original) | ApexOS-RS |
 |--|--|--|
 | UI runtime | Chromium | Slint native |
-| UI memory | ~300 MB | ~10 MB |
+| UI footprint | hundreds of MB of binaries + runtime | one self-contained ~32 MB binary |
+| UI memory | ~300 MB+ | ~160 MB RSS (Pi 5) |
 | Startup | ~5s (cage + Chromium) | ~200ms |
 | Display stack | cage → Wayland → Chromium | KMS/DRM direct |
 | Target hardware | Pi 5 primary | Pi 4, Pi 5, Zero 2W |
@@ -96,11 +97,11 @@ Hardware tier (RAM/GPU) and deployment mode are independent — pick both:
 ```mermaid
 graph LR
     subgraph Nano["Nano node\nPi Zero 2W"]
-        UI1["apexos-rs-ui\n7 MB"]
+        UI1["apexos-rs-ui\n~32 MB binary"]
         AG1["agentd\n~30 MB"]
     end
     subgraph Micro["Micro node\nPi 4 1GB"]
-        UI2["apexos-rs-ui\n10 MB"]
+        UI2["apexos-rs-ui\n~32 MB binary"]
         AG2["agentd\n~30 MB"]
         CB2["cerebro-mcp\nFTS5 only"]
     end
@@ -137,17 +138,17 @@ agentd's mesh (avahi discovery + `peers.toml`) already handles this. The GPU nod
 
 ## Status
 
-> **Alpha — workspace assembled, UI in progress.**
+> **mk1 complete — full stack deployed on the Pi 5.**
 
 | Component | Status |
 |-----------|--------|
 | agentd | ✓ production (Pi 5) |
 | cerebro-mcp (66 tools) | ✓ production (Pi 5) |
-| apexos-tools | ✓ production (Pi 5) |
+| apexos-tools (31 tools) | ✓ production (Pi 5) |
 | apex-sensor-bridge | ✓ production (Pi 5) |
 | cerebro-api (REST) | ✓ implemented |
-| `install.sh` | ✓ first draft |
-| ui-slint | step 1 / 9 — agent chat in progress |
+| `install.sh` | ✓ shipped |
+| ui-slint | ✓ all 9 mk1 steps complete (KMS/DRM deploy live) |
 
 ---
 
@@ -197,21 +198,21 @@ sudo bash install.sh --api-key=sk-...    # set Anthropic key non-interactively
 
 ## Build Roadmap (UI)
 
-The non-UI stack is production. The Slint UI ships in 9 steps:
+The non-UI stack is production. The Slint UI shipped in 9 steps — **all complete**:
 
 | # | Feature | Status |
 |---|---------|--------|
-| 1 | Agent chat — streaming message list, send input | ⬜ next |
-| 2 | Tool call blocks — collapsible cards, inline approval | ⬜ |
-| 3 | Home dashboard — CPU/RAM/disk bars, IAQ badge | ⬜ |
-| 4 | Sensor window — IAQ stats + thermal heatmap (custom painter) | ⬜ |
-| 5 | Session management — init, picker, history replay | ⬜ |
-| 6 | Voice controls — mic → `/api/record/start`, speaker → `/api/speak` | ⬜ |
-| 7 | Settings — soul.md editor, policy mode, plugin list | ⬜ |
-| 8 | Power modal + model/policy selectors | ⬜ |
-| 9 | KMS/DRM deploy — `linuxkms` backend, systemd, retire cage | ⬜ |
+| 1 | Agent chat — streaming message list, send input | ✓ |
+| 2 | Tool call blocks — collapsible cards, inline approval | ✓ |
+| 3 | Home dashboard — CPU/RAM/disk bars, IAQ badge | ✓ |
+| 4 | Sensor window — IAQ stats + thermal heatmap (custom painter) | ✓ |
+| 5 | Session management — init, picker, history replay | ✓ |
+| 6 | Voice controls — mic → `/api/record/start`, speaker → `/api/speak` | ✓ |
+| 7 | Settings — soul.md editor, policy mode, plugin list | ✓ |
+| 8 | Power modal + model/policy selectors | ✓ |
+| 9 | KMS/DRM deploy — `linuxkms` backend, systemd, retire cage | ✓ |
 
-Post-v1: PTY terminal, sub-agent windows, Cerebro dashboard, sketchpad.
+Beyond the mk1 9 steps: PTY terminal, sketchpad, mesh, council, an expressive GL face (`display_face`), workspace image picker, and more have all shipped. See [`CLAUDE.md`](CLAUDE.md) for live build status.
 
 Full per-step detail: [`docs/build-roadmap.md`](docs/build-roadmap.md)
 
