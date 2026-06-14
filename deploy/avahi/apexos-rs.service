@@ -1,0 +1,25 @@
+<?xml version="1.0" standalone='no'?><!--*-nxml-*-->
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+
+<!-- ApexOS-RS mesh advertisement (mDNS / Bonjour).
+     install.sh copies this to /etc/avahi/services/apexos-rs.service; avahi-daemon
+     watches that dir and advertises the service live (no daemon restart needed).
+
+     This is the PUBLISH half of mesh discovery. Every node both advertises
+     _apexos._tcp (here) and browses for it (agentd discovery loop +
+     GET /api/mesh/nodes, both `avahi-browse -rpt _apexos._tcp`). Without this
+     file a node browses an empty mesh forever — nothing to find.
+
+     %h expands to the node hostname. avahi resolves the publishing host's
+     <hostname>.local automatically; agentd's parse_avahi_output() reads that
+     back (field 6) as the node_id, and the address (field 7) as the IP.
+
+     Port is agentd's WebSocket/HTTP port (8787, the workspace-wide default;
+     mesh_nodes_handler and fetch_mesh both assume 8787). -->
+<service-group>
+  <name replace-wildcards="yes">ApexOS %h</name>
+  <service>
+    <type>_apexos._tcp</type>
+    <port>8787</port>
+  </service>
+</service-group>
