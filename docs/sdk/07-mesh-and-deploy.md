@@ -27,10 +27,19 @@ mesh. It is three loosely-coupled mechanisms layered on top of independent `agen
    Discovery surfaces candidates; the registry is the committed set. Cross-node messaging reads
    it; the gateway REST API and the `list_mesh_peers` virtual tool read/write it.
 
-3. **Cross-node A2A.** `send_to_agent` with a `node` arg looks up the peer's `ws_url` in
-   `peers.toml`, derives the HTTP base, and `POST`s to that peer's
-   `/api/sessions/{id}/message` — which simply emits a `UserPrompt` on the remote bus. That is the
-   entire wire: one fire-and-forget HTTP POST. No streaming back, no result.
+3. **Cross-node A2A.** `send_to_agent` with a `node` arg looks up the peer's `ws_url` **and
+   `token`** in `peers.toml`, derives the HTTP base, and `POST`s (reqwest, `Authorization: Bearer
+   <peer token>`) to that peer's `/api/sessions/{id}/message` — which simply emits a `UserPrompt`
+   on the remote bus. One fire-and-forget HTTP POST; no streaming back, no result. **Two
+   prerequisites on the *target*, or it silently no-ops:**
+   - **Per-peer token.** The route is token-gated, so `peers.toml` must carry the target's
+     `AGENTD_TOKEN` as `PeerRecord.token` (0600 file; redacted to `has_token` in the
+     `/api/mesh/peers` JSON). No token → `send_to_agent` returns `detail: "no token stored…"`;
+     wrong token → `401`.
+   - **LAN bind.** agentd defaults to `127.0.0.1:8787` (loopback). Discovery (mDNS/UDP) still works,
+     so a peer ADDs fine, but the delivery POST gets a connection error until the target sets
+     `AGENTD_BIND=0.0.0.0:8787` in `/etc/agentd/env`. The token is what makes that non-loopback bind
+     safe (F036) — the two features are meant to ship together.
 
 Orthogonal to the mesh are two *single-node* axes that `install.sh` decides at provision time:
 
@@ -49,7 +58,7 @@ nodes then reach that model by being routed at the renting node (`send_to_agent 
 | Peer registry type, `peers.toml` (de)serialize, avahi line parser | `agentd/crates/gateway/src/mesh.rs` — `PeerRegistry` :47, `PeerRecord` :29, `PeerRole` :7, `save()` :89, `parse_avahi_output` :105 |
 | Mesh REST routes | `agentd/crates/gateway/src/lib.rs` — routes :135-153; `mesh_nodes_handler` :1453, `mesh_peers_get/post/delete` :1489-1545, `session_message_handler` :712, `active_sessions_handler` :693 |
 | Discovery loop (mDNS poll, subnet guard, auto-bootstrap) | `agentd/crates/agentd/src/main.rs` — `spawn_discovery_loop` :1699, `local_subnet_prefix` :1686, started :409 |
-| Cross-node `send_to_agent`, `list_mesh_peers`, `bootstrap_node` virtual tools | `agentd/crates/plugins/src/supervisor.rs` — `send_to_agent` :557, `list_mesh_peers` :640, `bootstrap_node` :658, `find_peer_ws_url` :1548 |
+| Cross-node `send_to_agent`, `list_mesh_peers`, `bootstrap_node` virtual tools | `agentd/crates/plugins/src/supervisor.rs` — `send_to_agent` :557, `list_mesh_peers` :640, `bootstrap_node` :658, `find_peer` (ws_url + a2a token) :1548 |
 | Tool specs (schemas shown to the LLM) | `agentd/crates/agentd/src/main.rs` — `send_to_agent_spec` :1473, `list_mesh_peers_spec` :1502, `bootstrap_node_spec` :1515, `vast_*_spec` :1551-1599; registered in `gather_tools` :1194 |
 | vast.ai recipe types, state, CLI wrapper | `agentd/crates/plugins/src/vast.rs` — `RecipeFile`/`GpuTier`/`Recipe` :7-41, `load_recipes` :43, `VastState`/`VastInstance`/`VastPhase` :64-138, `vastai()` :143 |
 | vast lifecycle (`vast_launch` etc.) | `agentd/crates/plugins/src/supervisor.rs` — `vast_list_recipes` :804, `vast_status` :842, `vast_launch` :884, `vast_destroy` :1255 |

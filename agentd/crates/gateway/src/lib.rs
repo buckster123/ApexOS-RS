@@ -1758,14 +1758,23 @@ async fn mesh_nodes_handler(State(state): State<GatewayState>) -> impl IntoRespo
     Json(serde_json::json!({ "nodes": nodes }))
 }
 
-/// GET /api/mesh/peers — list peers.toml contents.
+/// GET /api/mesh/peers — list peers.toml contents (tokens REDACTED).
 async fn mesh_peers_get_handler(State(state): State<GatewayState>) -> impl IntoResponse {
     let registry = state.peer_registry.read().await;
-    Json(serde_json::json!({ "peers": registry.peers }))
+    // Never serialize the per-peer token: it's the peer's secret credential.
+    // Clients only need to know whether one is set (drives the a2a-ready dot).
+    let peers: Vec<serde_json::Value> = registry.peers.iter().map(|p| serde_json::json!({
+        "node_id":   p.node_id,
+        "ws_url":    p.ws_url,
+        "role":      p.role.to_string(),
+        "status":    p.status,
+        "has_token": p.token.is_some(),
+    })).collect();
+    Json(serde_json::json!({ "peers": peers }))
 }
 
 /// POST /api/mesh/peers — add or update a peer.
-/// Body: { node_id, ws_url, role? }
+/// Body: { node_id, ws_url, role?, token? }  (token = the peer's AGENTD_TOKEN, for a2a)
 async fn mesh_peers_post_handler(
     State(state): State<GatewayState>,
     Json(body):   Json<serde_json::Value>,
@@ -1783,10 +1792,15 @@ async fn mesh_peers_post_handler(
         "thin"   => PeerRole::Thin,
         _        => PeerRole::Full,
     };
-    let record = PeerRecord { node_id: node_id.clone(), ws_url: ws_url.clone(), role, status: "online".into() };
+    let token_in = body["token"].as_str().filter(|s| !s.is_empty()).map(str::to_string);
 
     let result = {
         let mut registry = state.peer_registry.write().await;
+        // Preserve an existing token when the caller didn't supply one (e.g. a
+        // ws_url/status-only re-add from REFRESH shouldn't wipe the a2a credential).
+        let token = token_in.or_else(|| registry.peers.iter()
+            .find(|p| p.node_id == node_id).and_then(|p| p.token.clone()));
+        let record = PeerRecord { node_id: node_id.clone(), ws_url: ws_url.clone(), role, status: "online".into(), token };
         registry.add(record)
     };
 
