@@ -259,6 +259,14 @@ async fn main() -> anyhow::Result<()> {
         Ok(c)  => { eprintln!("[agentd] loaded {} plugin(s)", c.len()); c }
         Err(e) => { eprintln!("[agentd] plugins config: {e}"); vec![] }
     };
+    // The cerebro embed model lives in the cerebro plugin's [plugin.env], NOT agentd's
+    // own env — extract it here for the embodiment block's memory line.
+    let cerebro_embed: Option<String> = plugin_configs.iter()
+        .find(|p| p.id == "cerebro")
+        .and_then(|p| p.env.as_ref())
+        .and_then(|e| e.get("CEREBRO_EMBED_MODEL"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     // Read subagents config from the policy (already loaded above).
     let max_depth = {
@@ -385,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&model_arc),
         Arc::clone(&peer_registry),
         Arc::clone(&node_id),
+        cerebro_embed,
     );
 
     // agent_rx was subscribed above, before the supervisor spawned, so the early
@@ -1261,12 +1270,13 @@ fn spawn_embodiment_refresher(
     model_arc:     Arc<RwLock<String>>,
     peer_registry: Arc<RwLock<PeerRegistry>>,
     node_id:       Arc<String>,
+    cerebro_embed: Option<String>,
 ) {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         loop {
             let block = build_embodiment(&tool_reg, &backend_arc, &model_arc,
-                                         &peer_registry, &node_id).await;
+                                         &peer_registry, &node_id, &cerebro_embed).await;
             *embodiment.write().await = block;
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }
@@ -1282,6 +1292,7 @@ async fn build_embodiment(
     model_arc:     &Arc<RwLock<String>>,
     peer_registry: &Arc<RwLock<PeerRegistry>>,
     node_id:       &str,
+    cerebro_embed: &Option<String>,
 ) -> String {
     let full = gather_tools(tool_reg).await;            // plugin tools + virtual tools
     let reg  = tool_reg.read().await;
@@ -1308,10 +1319,10 @@ async fn build_embodiment(
         "- Senses: camera {} · thermal/IAQ {} · GPIO {}\n",
         yn(has_camera()), yn(has_sensors), yn(is_raspberry_pi()),
     ));
-    let embed = std::env::var("CEREBRO_EMBED_MODEL").unwrap_or_default();
-    out.push_str(&format!("- Memory: cerebro {}\n",
-        if embed.trim().is_empty() { "FTS5 keyword search only".to_string() }
-        else { format!("semantic embeddings ({embed})") }));
+    out.push_str(&format!("- Memory: cerebro {}\n", match cerebro_embed {
+        Some(m) => format!("semantic embeddings ({m})"),
+        None    => "FTS5 keyword search only".to_string(),
+    }));
 
     {
         let peers = peer_registry.read().await;
