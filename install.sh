@@ -760,9 +760,12 @@ if [[ ! -f /etc/agentd/soul.md ]]; then
 fi
 
 # peers.toml — mesh registry (agentd writes it at runtime; seed empty if missing).
+# Holds per-peer a2a tokens (secrets), so keep it owner-only (0600); agentd re-clamps
+# the mode on every save() too.
 if [[ ! -f /etc/agentd/peers.toml ]]; then
   echo "# ApexOS mesh peers" > /etc/agentd/peers.toml
 fi
+chmod 600 /etc/agentd/peers.toml
 
 # Agent-mutable configs must be owned by the agentd user so the daemon can rewrite
 # them: Settings save (soul), and self-evolution (update_system_prompt / update_policy_rule

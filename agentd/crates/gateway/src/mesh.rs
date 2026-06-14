@@ -34,6 +34,12 @@ pub struct PeerRecord {
     pub role:    PeerRole,
     #[serde(default = "online")]
     pub status:  String,
+    /// This peer's AGENTD_TOKEN, used as the Bearer credential for cross-node
+    /// a2a (send_to_agent → peer's token-gated /api/sessions/{id}/message).
+    /// A secret — persisted to peers.toml (0600) but REDACTED out of the
+    /// /api/mesh/peers JSON the UI/PWA reads (see mesh_peers_get_handler).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token:   Option<String>,
 }
 
 fn online() -> String { "online".into() }
@@ -93,6 +99,10 @@ impl PeerRegistry {
                 "\n[[peer]]\nnode_id = {:?}\nws_url  = {:?}\nrole    = {:?}\nstatus  = {:?}\n",
                 p.node_id, p.ws_url, p.role.to_string(), p.status,
             ));
+            // Secret — only written here (and to 0600 below), never to the JSON API.
+            if let Some(ref tok) = p.token {
+                out.push_str(&format!("token   = {:?}\n", tok));
+            }
         }
         // Atomic write (temp + rename) when the dir is writable; fall back to an
         // in-place write when it isn't. /etc/agentd is root-owned (the auth-token
@@ -101,7 +111,7 @@ impl PeerRegistry {
         // the temp+rename then fails with EPERM (os error 13), which silently broke
         // "add peer" from the mesh UI. Mirrors write_atomic() in agentd/main.rs.
         let tmp = self.path.with_extension("toml.tmp");
-        match std::fs::write(&tmp, &out).and_then(|()| std::fs::rename(&tmp, &self.path)) {
+        let res = match std::fs::write(&tmp, &out).and_then(|()| std::fs::rename(&tmp, &self.path)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 let _ = std::fs::remove_file(&tmp); // best-effort; may never have been created
@@ -111,7 +121,14 @@ impl PeerRegistry {
                 let _ = std::fs::remove_file(&tmp);
                 Err(e)
             }
+        };
+        // peers.toml now holds per-peer tokens — keep it owner-only (0600). Either
+        // write path can land it at the umask default (0644), so clamp every time.
+        if res.is_ok() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
         }
+        res
     }
 }
 
@@ -182,6 +199,7 @@ mod tests {
             ws_url:  "ws://192.168.0.201:8787".into(),
             role:    PeerRole::Full,
             status:  "online".into(),
+            token:   None,
         });
 
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap(); // restore for cleanup
@@ -189,6 +207,35 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("apex-garage"), "peer should be persisted in place");
         assert!(!path.with_extension("toml.tmp").exists(), "temp file must not linger");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Per-peer a2a token must survive a save()→load() round-trip, and peers.toml
+    // must be owner-only (0600) since it now holds that secret credential.
+    #[test]
+    fn token_round_trips_and_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("apexrs-peers-tok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("peers.toml");
+
+        let mut reg = PeerRegistry { peers: vec![], path: path.clone() };
+        reg.add(PeerRecord {
+            node_id: "ApexOS-RS".into(),
+            ws_url:  "ws://192.168.0.158:8787".into(),
+            role:    PeerRole::Full,
+            status:  "online".into(),
+            token:   Some("deadbeef-secret".into()),
+        }).unwrap();
+
+        let loaded = PeerRegistry::load(&path);
+        assert_eq!(loaded.peers.len(), 1);
+        assert_eq!(loaded.peers[0].token.as_deref(), Some("deadbeef-secret"),
+                   "token must round-trip through peers.toml");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "peers.toml holds secrets — must be owner-only");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

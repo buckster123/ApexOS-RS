@@ -574,8 +574,7 @@ impl Supervisor {
             if let Some(node_id) = node_arg {
                 let sid = to_id.unwrap_or(SessionId(0)).0;
                 tokio::spawn(async move {
-                    let peer_ws_url = find_peer_ws_url(&node_id).await;
-                    match peer_ws_url {
+                    match find_peer(&node_id).await {
                         None => {
                             bus.emit(Event::ToolResult {
                                 session, call: call_id,
@@ -585,23 +584,36 @@ impl Supervisor {
                                 },
                             }).await;
                         }
-                        Some(ws_url) => {
+                        Some((ws_url, token)) => {
                             let http_base = ws_url.replacen("ws://", "http://", 1)
                                                   .replacen("wss://", "https://", 1);
-                            let url      = format!("{http_base}/api/sessions/{sid}/message");
-                            let payload  = serde_json::json!({ "text": body }).to_string();
-                            let result   = tokio::process::Command::new("curl")
-                                .args(["-s", "-f", "-X", "POST",
-                                       "-H", "Content-Type: application/json",
-                                       "-d", &payload, &url])
-                                .output().await;
-                            let ok = result.map(|o| o.status.success()).unwrap_or(false);
+                            let url = format!("{http_base}/api/sessions/{sid}/message");
+                            // reqwest (not curl) so the peer's token rides in an Authorization
+                            // header rather than argv — never visible in `ps`. The peer's
+                            // /api/sessions/{id}/message is token-gated; without the credential
+                            // this 401s (the whole reason cross-node a2a needs the per-peer token).
+                            let mut req = reqwest::Client::new()
+                                .post(&url)
+                                .json(&serde_json::json!({ "text": body }))
+                                .timeout(std::time::Duration::from_secs(15));
+                            if let Some(tok) = token.as_deref() {
+                                req = req.bearer_auth(tok);
+                            }
+                            let resp = req.send().await;
+                            let status = resp.as_ref().ok().map(|r| r.status());
+                            let ok = status.map(|s| s.is_success()).unwrap_or(false);
+                            let detail = match (&token, status) {
+                                (None, _)                       => "no token stored for peer — set one to reach a token-gated node",
+                                (Some(_), Some(s)) if s == 401  => "peer rejected the token (401) — stale credential?",
+                                _                               => if ok { "sent" } else { "delivery failed" },
+                            };
                             bus.emit(Event::ToolResult {
                                 session, call: call_id,
                                 output: ToolOutput {
                                     ok,
                                     content: serde_json::json!({
                                         "status": if ok { "sent" } else { "error" },
+                                        "detail": detail,
                                         "node": node_id,
                                         "target_session": sid,
                                     }),
@@ -1580,16 +1592,17 @@ fn shell_single_quote(s: &str) -> String {
 // ── mesh helpers ──────────────────────────────────────────────────────────────
 
 /// Look up a peer's ws_url by node_id in peers.toml. Async because it reads a file.
-async fn find_peer_ws_url(node_id: &str) -> Option<String> {
+/// Look up a peer in peers.toml, returning its ws_url and (optional) a2a token.
+async fn find_peer(node_id: &str) -> Option<(String, Option<String>)> {
     #[derive(serde::Deserialize)]
     struct PeersFile { #[serde(default)] peer: Vec<PeerEntry> }
     #[derive(serde::Deserialize)]
-    struct PeerEntry { node_id: String, ws_url: String }
+    struct PeerEntry { node_id: String, ws_url: String, #[serde(default)] token: Option<String> }
 
     let path = std::env::var("PEERS_TOML").unwrap_or_else(|_| "/etc/agentd/peers.toml".into());
     let raw  = tokio::fs::read_to_string(&path).await.ok()?;
     let file: PeersFile = toml::from_str(&raw).ok()?;
-    file.peer.into_iter().find(|p| p.node_id == node_id).map(|p| p.ws_url)
+    file.peer.into_iter().find(|p| p.node_id == node_id).map(|p| (p.ws_url, p.token))
 }
 
 #[cfg(test)]
