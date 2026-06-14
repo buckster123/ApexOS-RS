@@ -11,7 +11,7 @@
 
 slint::include_modules!();
 
-mod face_gl; // Phase-2 face spike (APEX_FACE_GL=1) — raw GL via the rendering notifier
+mod face_gl; // Phase-2 face — raw GL via the rendering notifier (default on GL tiers)
 
 use slint::Model; // row_count / row_data / set_row_data on VecModel
 use futures_util::{SinkExt, StreamExt};
@@ -479,6 +479,19 @@ fn wm_index_by_id(model: &Rc<slint::VecModel<WindowDesc>>, id: i32) -> Option<us
 
 fn wm_index_by_kind(model: &Rc<slint::VecModel<WindowDesc>>, kind: AppKind) -> Option<usize> {
     (0..model.row_count()).find(|&i| model.row_data(i).map(|d| d.kind) == Some(kind))
+}
+
+/// True when a face window exists and is not minimised. Slint-thread only
+/// (reads the WINDOWS thread-local). Gates both the GL face draw and its 30fps
+/// redraw loop, so a closed face window costs nothing on the kiosk.
+fn face_window_visible() -> bool {
+    WINDOWS.with(|w| {
+        w.borrow().as_ref().is_some_and(|m| {
+            wm_index_by_kind(m, AppKind::Face)
+                .and_then(|i| m.row_data(i))
+                .is_some_and(|d| !d.minimized)
+        })
+    })
 }
 
 /// Move a window to the top of the z-order (end of the model) and mark it
@@ -2036,9 +2049,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_windows(slint::ModelRc::from(windows.clone()));
     WINDOWS.with(|w| *w.borrow_mut() = Some(windows.clone()));
     wm_launch(&ui, &windows, AppKind::Chat);
-    // Dev: with the GL face enabled, open the Face window too so the shader pass
-    // has a target to scissor to on launch (single-command verification).
-    if std::env::var_os("APEX_FACE_GL").is_some() {
+    // Dev: APEX_FACE_AUTOOPEN=1 opens the Face window at launch (single-command
+    // verification of the face, GL or 2D). Independent of the render path.
+    if std::env::var_os("APEX_FACE_AUTOOPEN").is_some() {
         wm_launch(&ui, &windows, AppKind::Face);
     }
 
@@ -3314,15 +3327,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Screen mirror (#36): self-snapshot server for APEX's screenshot tool ──
     rt.spawn(run_snapshot_server(snapshot_addr(), ui.as_weak()));
 
-    // ── Phase-2 face — GL pass (APEX_FACE_GL=1) ───────────────────────────────
+    // ── Phase-2 face — GL render (default on GL tiers) ────────────────────────
     // A custom GLSL face rendered inside our window via the rendering notifier
-    // (femtovg NativeOpenGL), sharing femtovg's GL context. Slice 1 scissors it
-    // to the FaceView's live on-window rect (published via the FaceGl global) so
-    // it renders inside the face window and tracks it, instead of floating over
-    // the whole UI. Dormant unless the env var is set, so the shipped UI is
-    // untouched. A repeated timer drives redraws so the animation runs (Slint
-    // renders on-demand otherwise).
-    if std::env::var_os("APEX_FACE_GL").is_some() {
+    // (femtovg NativeOpenGL), sharing femtovg's GL context. Scissored to the
+    // FaceView's live on-window rect (published via the FaceGl global) so it
+    // renders inside the face window and tracks it. This is now the DEFAULT: it
+    // turns on automatically wherever a real GL context is available (desktop
+    // winit, Pi 4/5 V3D) and **silently falls back to the 2D FaceView** when one
+    // isn't (the notifier errors or never delivers NativeOpenGL → face_gl stays
+    // None → nothing is drawn, the 2D face shows). `APEX_FACE_GL=0` forces the
+    // 2D face everywhere (escape hatch). A repeated timer drives redraws so the
+    // animation runs (Slint renders on-demand), gated on a visible face window
+    // so a closed face costs nothing on the kiosk.
+    let face_gl_enabled = std::env::var("APEX_FACE_GL").ok().as_deref() != Some("0");
+    if face_gl_enabled {
         let start = std::time::Instant::now();
         let geom_weak = ui.as_weak();
         let mut face_gl: Option<face_gl::FaceGl> = None;
@@ -3339,17 +3357,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             slint::RenderingState::AfterRendering => {
+                // Only paint when a face window is open & visible — the FaceGl
+                // global keeps stale geometry after it closes.
                 if let (Some(f), Some(ui)) = (&face_gl, geom_weak.upgrade()) {
-                    // Only paint when a face window is actually open & visible —
-                    // the FaceGl global keeps stale geometry after it closes.
-                    let face_visible = WINDOWS.with(|w| {
-                        w.borrow().as_ref().is_some_and(|m| {
-                            wm_index_by_kind(m, AppKind::Face)
-                                .and_then(|i| m.row_data(i))
-                                .is_some_and(|d| !d.minimized)
-                        })
-                    });
-                    if !face_visible {
+                    if !face_window_visible() {
                         return;
                     }
                     let sf = ui.window().scale_factor();
@@ -3388,18 +3399,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         match res {
             Ok(()) => {
-                // Tell FaceView to start publishing its rect (gates its sample
-                // Timer); only on the real-GL path, never the software renderer.
+                // Tell FaceView to publish its rect (gates its sample Timer).
+                // The actual GL draw is separately gated on a real NativeOpenGL
+                // context (face_gl.is_some()), so on a notifier-but-no-GL backend
+                // this just runs a cheap idle Timer while the 2D face shows.
                 ui.global::<FaceGl>().set_active(true);
-                // Dev: APEX_FACE_STATE=<emote> previews a specific expression on
-                // the GL face without agentd (deterministic for snapshot verify).
-                if let Ok(s) = std::env::var("APEX_FACE_STATE") {
-                    if !s.is_empty() {
-                        ui.set_face_state(s.into());
-                        ui.set_face_intensity(1.0);
-                    }
-                }
-                // Drive ~30fps redraws so the GL animation runs (Slint is on-demand).
+                // Drive ~30fps redraws so the GL animation runs (Slint is
+                // on-demand) — but only while a face window is visible, so a
+                // closed face doesn't pin the CPU at 30fps on the kiosk.
                 let redraw_weak = ui.as_weak();
                 let timer = slint::Timer::default();
                 timer.start(
@@ -3407,16 +3414,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::time::Duration::from_millis(33),
                     move || {
                         if let Some(ui) = redraw_weak.upgrade() {
-                            ui.window().request_redraw();
+                            if face_window_visible() {
+                                ui.window().request_redraw();
+                            }
                         }
                     },
                 );
-                std::mem::forget(timer); // spike: keep the redraw loop alive for the process
-                eprintln!("[face-gl] spike active (APEX_FACE_GL set)");
+                std::mem::forget(timer); // keep the redraw loop alive for the process
+                eprintln!("[face-gl] GL face active (auto; APEX_FACE_GL=0 to disable)");
             }
             Err(e) => eprintln!(
-                "[face-gl] rendering notifier unavailable (software renderer / Nano?): {e:?}"
+                "[face-gl] rendering notifier unavailable → 2D face (software renderer / Nano?): {e:?}"
             ),
+        }
+    }
+
+    // Dev: APEX_FACE_STATE=<emote> previews a specific expression without agentd
+    // (deterministic for snapshot verification), on either the GL or 2D face.
+    if let Ok(s) = std::env::var("APEX_FACE_STATE") {
+        if !s.is_empty() {
+            ui.set_face_state(s.into());
+            ui.set_face_intensity(1.0);
         }
     }
 
