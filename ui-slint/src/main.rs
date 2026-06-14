@@ -763,6 +763,42 @@ fn clear_messages() {
 thread_local! {
     // Epoch (secs) of the last chat time-divider; 0 = none yet this transcript.
     static LAST_STAMP: std::cell::Cell<i64> = std::cell::Cell::new(0);
+    // Agent-chosen expression (state, gaze, intensity) from `display_face`, held
+    // so it lingers past turn-end instead of snapping back to idle. Cleared when
+    // the user sends the next prompt (a fresh exchange). None = no held emote.
+    static FACE_HELD: RefCell<Option<(String, String, f32)>> =
+        const { RefCell::new(None) };
+}
+
+/// Apply an agent emote to the face and remember it as the held expression.
+/// Runs on the Slint thread.
+fn set_face_emote(ui: &AppWindow, state: &str, gaze: &str, intensity: f32) {
+    ui.set_face_state(state.into());
+    ui.set_face_gaze(gaze.into());
+    ui.set_face_intensity(intensity);
+    FACE_HELD.with(|h| *h.borrow_mut() = Some((state.to_string(), gaze.to_string(), intensity)));
+}
+
+/// Revert the face after a turn: restore a held agent emote if there is one,
+/// else fall back to a calm idle (gaze re-centred, intensity reset).
+fn face_rest(ui: &AppWindow) {
+    match FACE_HELD.with(|h| h.borrow().clone()) {
+        Some((state, gaze, intensity)) => {
+            ui.set_face_state(state.into());
+            ui.set_face_gaze(gaze.into());
+            ui.set_face_intensity(intensity);
+        }
+        None => {
+            ui.set_face_state("idle".into());
+            ui.set_face_gaze("center".into());
+            ui.set_face_intensity(0.7);
+        }
+    }
+}
+
+/// Drop any held emote — called when the user starts a fresh exchange.
+fn clear_face_hold() {
+    FACE_HELD.with(|h| *h.borrow_mut() = None);
 }
 
 // Drop a centered date/time marker into the chat at the start of an exchange,
@@ -2351,6 +2387,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return;
         }
 
+        // Fresh exchange — drop any emote APEX was holding so this turn's
+        // activity/idle face shows, and APEX can re-emote in its reply.
+        clear_face_hold();
+
         maybe_push_time_divider();
         // The chat bubble shows the text, prefixed with a 🖼 chip line when an
         // image rode along (image-only prompts show just the chip).
@@ -3388,8 +3428,9 @@ fn dispatch_event(
                     }
                     finish_last_agent_message();
                     ui.set_agent_busy(false);
-                    // Turn done — back to a calm ready face (unless mic is live; see below).
-                    if !ui.get_recording() { ui.set_face_state("idle".into()); }
+                    // Turn done — restore APEX's held emote if it set one this turn,
+                    // else a calm idle (unless mic is live; see below).
+                    if !ui.get_recording() { face_rest(&ui); }
                     if tts {
                         // Grab last agent bubble text for TTS
                         let text = MESSAGES.with(|m| {
@@ -3450,33 +3491,50 @@ fn dispatch_event(
             // Event::ToolRequested { session, call: ToolCall } — fields nest under `call`.
             // ToolCall.id is ActionId(u64) → a bare number; stringify for the row key.
             let call      = &ev["call"];
-            let call_id   = call["id"].as_u64().map(|n| n.to_string()).unwrap_or_default();
             let tool_name = call["tool"].as_str().unwrap_or("").to_string();
-            let tool_args = if call["args"].is_null() {
-                String::new()
+
+            // `display_face` is APEX emoting, not a "tool action" — drive the face
+            // directly from the call args and show NO tool card (it'd be noise).
+            if tool_name == "display_face" {
+                let a = &call["args"];
+                let fstate = a["state"].as_str().unwrap_or("neutral").to_string();
+                let fgaze  = a["gaze"].as_str().unwrap_or("center").to_string();
+                let fint   = a["intensity"].as_f64().unwrap_or(0.7).clamp(0.0, 1.0) as f32;
+                let w = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = w.upgrade() {
+                        set_face_emote(&ui, &fstate, &fgaze, fint);
+                    }
+                })
+                .ok();
             } else {
-                serde_json::to_string_pretty(&call["args"]).unwrap_or_default()
-            };
-            let w = ui_weak.clone();
-            slint::invoke_from_event_loop(move || {
-                if let Some(ui) = w.upgrade() {
-                    push_message(MessageItem {
-                        role: "tool".into(),
-                        text: "".into(),
-                        streaming: false,
-                        call_id: call_id.into(),
-                        tool_name: tool_name.into(),
-                        tool_args: tool_args.into(),
-                        tool_output: "".into(),
-                        tool_status: "running".into(),
-                        awaiting_approval: false,
-                    });
-                    // Running a tool — APEX is working.
-                    ui.set_face_state("thinking".into());
-                    bump_scroll(&ui);
-                }
-            })
-            .ok();
+                let call_id   = call["id"].as_u64().map(|n| n.to_string()).unwrap_or_default();
+                let tool_args = if call["args"].is_null() {
+                    String::new()
+                } else {
+                    serde_json::to_string_pretty(&call["args"]).unwrap_or_default()
+                };
+                let w = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = w.upgrade() {
+                        push_message(MessageItem {
+                            role: "tool".into(),
+                            text: "".into(),
+                            streaming: false,
+                            call_id: call_id.into(),
+                            tool_name: tool_name.into(),
+                            tool_args: tool_args.into(),
+                            tool_output: "".into(),
+                            tool_status: "running".into(),
+                            awaiting_approval: false,
+                        });
+                        // Running a tool — APEX is working.
+                        ui.set_face_state("thinking".into());
+                        bump_scroll(&ui);
+                    }
+                })
+                .ok();
+            }
         }
 
         "tool_result" => {
