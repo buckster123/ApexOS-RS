@@ -1,0 +1,27 @@
+# world-vision — agentd plugin registration snippet.
+#
+# Paste this `[[plugin]]` block into agentd's plugins.toml (e.g. /etc/agentd/plugins.toml)
+# on a Pro/Standard node that runs apexos-world. agentd's Supervisor spawns the binary,
+# calls `initialize` + `tools/list`, advertises the tools, and routes `tools/call` to it —
+# no agentd code change (DESIGN.md §4, design doc 04 §5). NOT auto-installed.
+
+[[plugin]]
+id      = "world"
+cmd     = "/usr/local/bin/world-vision"
+args    = []
+restart = "always"
+
+[plugin.env]
+# Must match world-app's IPC bind. Defaults to $XDG_RUNTIME_DIR/apexos-world.sock if unset.
+WORLD_IPC_PATH = "/run/user/1000/apexos-world.sock"
+RUST_LOG       = "warn"
+
+# ── policy.toml ───────────────────────────────────────────────────────────────
+# Read-only vision tools default to `allow`; world-mutating verbs (added later —
+# world_move / world_activate / world_point, design doc 04 §2) should default to `ask`
+# until trusted, using the same exact-then-prefix rule mechanism every other tool uses:
+#
+#   [rules]
+#   "world_look"     = "allow"
+#   "world_snapshot" = "allow"
+#   "world.*"        = "ask"

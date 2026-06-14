@@ -1,0 +1,69 @@
+[package]
+name = "world-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "apexos-world renderer + agentd WS client. Slint (host) + Bevy (3D scene) + wgpu. HEAVY deps — the only crate that needs the GPU/UI toolchain."
+
+# The binary mirrors `apexos-rs-ui` in spirit: `apexos-world`.
+[[bin]]
+name = "apexos-world"
+path = "src/main.rs"
+
+# ── Dependency notes (wgpu VERSION — verified against the installed toolchain) ──
+# Slint resolves to 1.16.1 in this tree. `cargo` reports its available unstable-wgpu
+# features as 27/28 — there is NO `unstable-wgpu-29` and NO `renderer-wgpu` feature on
+# this build. So we use `unstable-wgpu-28` + `renderer-femtovg-wgpu`.
+#
+# This CONFIRMS DESIGN.md §5/D1 ("wgpu version is 28") and CONTRADICTS the brief +
+# the seed-skill template (Cargo.toml line 8) + doc 03, which all say "wgpu-29". The
+# brief's "same as ui-slint" is honored in spirit: ui-slint pins `slint = "1"` and so
+# resolves to the same 1.16.1 wgpu-28 build. The `GraphicsAPI::WGPU28` variant and
+# `BackendSelector::require_wgpu_28` are the matching API names (commented in main.rs
+# until the shared-device handoff is wired in Spike 1).
+#
+# Bevy is gated behind the `viz` feature and is OFF by default (DESIGN.md D2/D3,
+# doc 06 §4): no released Bevy shares Slint 1.16's wgpu-28, so the shared-device
+# handoff does not typecheck/link today (Spike 0 records the clash). Keeping `viz`
+# off by default means the crate's non-Bevy skeleton stays buildable and the
+# workspace stays CI-friendly. The Bevy scene scaffolding (src/world.rs) is written
+# behind `#[cfg(feature = "viz")]` so it is ready the day Spike 0 turns green.
+[dependencies]
+world-protocol = { path = "../world-protocol" }
+
+slint = { version = "1.16", features = ["backend-winit", "unstable-wgpu-28"] }
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+# `env-filter` so `RUST_LOG` is honored (root CLAUDE.md convention).
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+image = "0.25"
+
+# Bevy — optional, OFF by default until the wgpu-28 shared-device clash is resolved
+# (DESIGN.md D2, Spike 0). When enabled, `world.rs` builds a headless Bevy App driven
+# from the Slint frame timer (never `App::run`). The `0.16` pin is a PLACEHOLDER — the
+# real pin is the output of Spike 0 (the Bevy release whose wgpu == Slint's), and may
+# differ. // TODO(Mn): Spike 0 → set the verified pin.
+bevy = { version = "0.16", default-features = false, features = [
+    "bevy_render",
+    "bevy_pbr",
+    "bevy_core_pipeline",
+    "bevy_winit",
+    "x11",
+], optional = true }
+
+# VR — pure seam. Off by default; tracks a Bevy/OpenXR pairing chosen at M3 (DESIGN.md D8).
+bevy_mod_openxr = { version = "0.1", optional = true }
+
+[features]
+default = []
+# `viz` pulls in Bevy and compiles the 3D scene scaffolding. OFF until Spike 0 green.
+viz = ["dep:bevy"]
+# `vr` is a post-prototype seam (M3). Implies `viz`.
+vr = ["viz", "dep:bevy_mod_openxr"]
+
+[build-dependencies]
+slint-build = "1.16"

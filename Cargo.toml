@@ -25,6 +25,7 @@ members = [
     # ── Native UI ─────────────────────────────────────────────────────────────
     "ui-slint",
 ]
+exclude = ["world"]
 resolver = "2"
 
 [workspace.dependencies]

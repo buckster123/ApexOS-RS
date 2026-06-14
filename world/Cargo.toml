@@ -1,0 +1,41 @@
+# apexos-world — workspace root.
+#
+# Three crates with a hard dependency discipline (docs/DESIGN.md §2,
+# docs/design/06-roadmap-and-scaffold-plan.md §3):
+#   - world-protocol : the wire boundary. LIGHT deps only (tokio + tungstenite +
+#                      serde + futures-util). The CI-green crate — `cargo check`s
+#                      and `cargo test`s on a headless box with no GPU/X/fontconfig.
+#   - world-app      : the Slint + wgpu renderer binary. HEAVY deps (the only crate
+#                      that needs the GPU/UI toolchain).
+#   - world-vision   : the snapshot/act MCP stdio plugin. LIGHT deps, no GPU. A leaf,
+#                      buildable + handshake-testable from day one.
+#
+# world-protocol is the only crate everything depends on.
+[workspace]
+resolver = "2"
+members = [
+    "crates/world-protocol",
+    "crates/world-app",
+    "crates/world-vision",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# Shared dep versions, pinned once here. Stack: Slint 1.16 (unstable-wgpu, same as
+# ui-slint), Bevy (deferred — see DESIGN.md §5), tokio-tungstenite.
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
+
+[profile.release]
+lto = true
+opt-level = 3
+codegen-units = 1
