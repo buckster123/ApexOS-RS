@@ -130,6 +130,37 @@ this pattern (chat, settings, session, council, terminal, persona, notif).
 
 ---
 
+## Custom GL under the rendering notifier (Phase-2 face)
+
+`Window::set_rendering_notifier` lets you draw raw GL (via `glow`) inside the same
+context femtovg renders with — the basis of the GL face (`ui-slint/src/face_gl.rs`,
+gated by `APEX_FACE_GL=1`). Three things bit us:
+
+**1. Scissor the GL to the element's live rect, not the whole window.** The face is
+a movable desktop-shell window, so the GL pass must track it. The `FaceView` publishes
+its stage `absolute-position` + size to the `FaceGl` Slint global; Rust reads them in
+the `AfterRendering` notifier, converts logical→physical px (× `window().scale_factor()`),
+**flips Y** for GL's bottom-left origin (`sy = win_h - (fy + fh)`), and sets
+`glViewport` + `glScissor` to that rect. `gl_FragCoord` stays window-absolute even with
+a viewport set, so pass the rect's bottom-left as a `u_origin` uniform to localise it.
+Restore full-frame state afterward (`disable(SCISSOR_TEST)`, viewport back to the
+window) or the next femtovg frame is clipped.
+
+**2. Never read a layout-coupled property (e.g. `absolute-position`) inside a `changed`
+handler.** It re-enters the layout pass and panics with **"Recursion detected"**
+(`i-slint-core properties.rs`). Sample such values from a `Timer { triggered => … }`
+instead — the Timer fires in event-loop context (between frames), where the read is
+safe. The face geometry is sampled at 32 ms (gated by a `FaceGl.active` flag Rust sets
+only on the real-GL path, so the 2D Nano fallback pays nothing).
+
+**3. `Window::take_snapshot()` *does* capture the notifier's GL overlay** on
+winit/femtovg — taking a snapshot re-runs a render pass, which fires `AfterRendering`,
+so raw-GL draws land in the PNG. This makes the loopback snapshot server
+(`APEXOS_UI_SNAPSHOT_ADDR`, `/snapshot`) a way to verify GL work headlessly:
+`curl …:8788/snapshot -o shot.png` and inspect.
+
+---
+
 ## Pi KMS/DRM Setup
 
 ### Environment variable

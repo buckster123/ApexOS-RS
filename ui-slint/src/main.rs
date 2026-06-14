@@ -2036,6 +2036,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_windows(slint::ModelRc::from(windows.clone()));
     WINDOWS.with(|w| *w.borrow_mut() = Some(windows.clone()));
     wm_launch(&ui, &windows, AppKind::Chat);
+    // Dev: with the GL face enabled, open the Face window too so the shader pass
+    // has a target to scissor to on launch (single-command verification).
+    if std::env::var_os("APEX_FACE_GL").is_some() {
+        wm_launch(&ui, &windows, AppKind::Face);
+    }
 
     // ── Terminal (G3d): stdin channel + WS URL (parked until first launch) ────
     let term_url = {
@@ -3309,15 +3314,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Screen mirror (#36): self-snapshot server for APEX's screenshot tool ──
     rt.spawn(run_snapshot_server(snapshot_addr(), ui.as_weak()));
 
-    // ── Phase-2 face SPIKE (APEX_FACE_GL=1) ───────────────────────────────────
-    // Prove a custom GLSL face renders inside our window via the rendering
-    // notifier (femtovg NativeOpenGL), sharing femtovg's GL context. Throwaway:
-    // a blinking lit sphere overlaid (with alpha) on the whole window. Dormant
-    // unless the env var is set, so the shipped UI is untouched. A repeated timer
-    // drives redraws so the blink animates (Slint renders on-demand otherwise).
+    // ── Phase-2 face — GL pass (APEX_FACE_GL=1) ───────────────────────────────
+    // A custom GLSL face rendered inside our window via the rendering notifier
+    // (femtovg NativeOpenGL), sharing femtovg's GL context. Slice 1 scissors it
+    // to the FaceView's live on-window rect (published via the FaceGl global) so
+    // it renders inside the face window and tracks it, instead of floating over
+    // the whole UI. Dormant unless the env var is set, so the shipped UI is
+    // untouched. A repeated timer drives redraws so the animation runs (Slint
+    // renders on-demand otherwise).
     if std::env::var_os("APEX_FACE_GL").is_some() {
         let start = std::time::Instant::now();
-        let size_weak = ui.as_weak();
+        let geom_weak = ui.as_weak();
         let mut face_gl: Option<face_gl::FaceGl> = None;
         let res = ui.window().set_rendering_notifier(move |state, api| match state {
             slint::RenderingState::RenderingSetup => {
@@ -3332,15 +3339,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             slint::RenderingState::AfterRendering => {
-                if let Some(f) = &face_gl {
-                    let (w, h) = size_weak
-                        .upgrade()
-                        .map(|ui| {
-                            let s = ui.window().size();
-                            (s.width as f32, s.height as f32)
+                if let (Some(f), Some(ui)) = (&face_gl, geom_weak.upgrade()) {
+                    // Only paint when a face window is actually open & visible —
+                    // the FaceGl global keeps stale geometry after it closes.
+                    let face_visible = WINDOWS.with(|w| {
+                        w.borrow().as_ref().is_some_and(|m| {
+                            wm_index_by_kind(m, AppKind::Face)
+                                .and_then(|i| m.row_data(i))
+                                .is_some_and(|d| !d.minimized)
                         })
-                        .unwrap_or((0.0, 0.0));
-                    f.draw(start.elapsed().as_secs_f32(), w, h);
+                    });
+                    if !face_visible {
+                        return;
+                    }
+                    let sf = ui.window().scale_factor();
+                    let win = ui.window().size();
+                    let g = ui.global::<FaceGl>();
+                    f.draw(
+                        start.elapsed().as_secs_f32(),
+                        win.width as f32,
+                        win.height as f32,
+                        g.get_x() * sf,
+                        g.get_y() * sf,
+                        g.get_w() * sf,
+                        g.get_h() * sf,
+                    );
                 }
             }
             slint::RenderingState::RenderingTeardown => face_gl = None,
@@ -3348,6 +3371,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         match res {
             Ok(()) => {
+                // Tell FaceView to start publishing its rect (gates its sample
+                // Timer); only on the real-GL path, never the software renderer.
+                ui.global::<FaceGl>().set_active(true);
                 // Drive ~30fps redraws so the GL animation runs (Slint is on-demand).
                 let redraw_weak = ui.as_weak();
                 let timer = slint::Timer::default();
