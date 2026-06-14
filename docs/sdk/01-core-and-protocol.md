@@ -21,8 +21,9 @@ CLAUDE.md protocol table, this file is correct and the table is stale** — see
 
 ### One enum is the protocol
 
-There is no separate `Intent` type. **`Event`** (`core/src/types.rs:162`) is a
-single tagged enum that carries *both* directions:
+There is no separate `Intent` type. **`Event`** (the `Event` enum in
+`agentd/crates/core/src/types.rs`) is a single tagged enum that carries *both*
+directions:
 
 - **Inbound (frontend → daemon)** — `UserPrompt`, `UserApproval`, `UserCancel`.
   The doc-level term "Intent" maps to these three variants; the code has no
@@ -32,7 +33,7 @@ single tagged enum that carries *both* directions:
   vast/evolution variants, etc.
 
 Serde config: `#[serde(tag = "type", rename_all = "snake_case")]`
-(`types.rs:163`). So every frame on the wire is a JSON object with a `"type"`
+(the container attribute on `enum Event`). So every frame on the wire is a JSON object with a `"type"`
 discriminant in **snake_case** and the variant's fields flattened alongside it:
 
 ```json
@@ -42,7 +43,7 @@ discriminant in **snake_case** and the variant's fields flattened alongside it:
 ### ID newtypes serialize as bare numbers
 
 `SessionId(pub u64)`, `ActionId(pub u64)`, `EvolutionId(pub u64)`
-(`types.rs:8–23`) are `#[derive(Serialize, Deserialize)]` tuple structs. Serde
+(the ID newtypes in `types.rs`) are `#[derive(Serialize, Deserialize)]` tuple structs. Serde
 serializes a single-field tuple struct **transparently** — as the inner number,
 **not** as `{"0": 42}` and **not** as a string. So on the wire:
 
@@ -55,7 +56,7 @@ serializes as a bare string.
 
 ### The bus: emit → run → broadcast
 
-`core/src/bus.rs` is the in-process hub. `Bus::new(state)` (`bus.rs:24`) returns a
+`core/src/bus.rs` is the in-process hub. `Bus::new(state)` returns a
 triple:
 
 | Returned | Type | Use |
@@ -64,8 +65,8 @@ triple:
 | `BusHandle` | `Clone`, `bus.emit(event).await` | every producer holds one |
 | `broadcast::Sender<Event>` | `.subscribe()` for a `Receiver` | every consumer holds one |
 
-Both channels are **capacity 1024** (`bus.rs:25–26`). `Bus::run` (`bus.rs:32`) is
-the only mutator of canonical state:
+Both channels are **capacity 1024** (the channel constructors in `Bus::new`).
+`Bus::run` is the only mutator of canonical state:
 
 ```rust
 while let Some(event) = self.inbox.recv().await {
@@ -82,42 +83,42 @@ store log writer, and the scheduler/council handlers.
 
 ### SystemState::apply is pure and lossy-by-design
 
-`SystemState` (`core/src/state.rs:5`) holds `sessions`, `tools`, `plugins`,
-`pending_approvals`. `apply(&mut self, event)` (`state.rs:18`) is **pure — no I/O,
+`SystemState` (`core/src/state.rs`) holds `sessions`, `tools`, `plugins`,
+`pending_approvals`. `SystemState::apply(&mut self, event)` is **pure — no I/O,
 no async** — and folds each event into that canonical state. Crucially, **most
-event variants are deliberate no-ops in `apply`** (`state.rs:37–115`): streaming
+event variants are deliberate no-ops in `apply`**: streaming
 deltas (`AgentText`/`AgentThinking`), council, sensor, mesh, vast, and evolution
 events change no canonical state — they exist purely to fan out to subscribers.
 Only a handful mutate state:
 
-| Event | `apply` effect (`state.rs`) |
+| Event | `apply` effect (the matching arm in `SystemState::apply`) |
 |-------|------------------------------|
-| `UserPrompt` | create/get root session, push a `User` text message to its history (`:21`) |
-| `ApprovalPending` | insert `call.id → session` into `pending_approvals` (`:42`) |
-| `UserApproval` | remove `action` from `pending_approvals` (`:46`) |
-| `PluginUp` | register each tool name → plugin, store plugin's tool list (`:65`) |
-| `PluginDown` | drop that plugin's tools + entry (`:72`) |
+| `UserPrompt` | create/get root session, push a `User` text message to its history |
+| `ApprovalPending` | insert `call.id → session` into `pending_approvals` |
+| `UserApproval` | remove `action` from `pending_approvals` |
+| `PluginUp` | register each tool name → plugin, store plugin's tool list |
+| `PluginDown` | drop that plugin's tools + entry |
 
 **The event log (`apexos-store`) — not `SystemState` — is the authoritative audit
-trail** for transient/evolution events (`state.rs:96`).
+trail** for transient/evolution events (the no-op arms in `SystemState::apply`).
 
 ### ToolCall / ToolOutput / ToolSpec / ContentBlock
 
-- **`ToolCall`** (`types.rs:272`): `{ id: ActionId, tool: String, args: Value, needs_approval: bool }`.
+- **`ToolCall`** (`struct ToolCall`): `{ id: ActionId, tool: String, args: Value, needs_approval: bool }`.
   Nested under the `call` field of `ToolRequested` / `ApprovalPending`.
-- **`ToolOutput`** (`types.rs:281`): `{ ok: bool, content: Value }`. Nested under
+- **`ToolOutput`** (`struct ToolOutput`): `{ ok: bool, content: Value }`. Nested under
   `output` of `ToolResult`.
-- **`ToolSpec`** (`types.rs:287`): `{ name, description, input_schema }` — a tool's
+- **`ToolSpec`** (`struct ToolSpec`): `{ name, description, input_schema }` — a tool's
   advertised schema, carried in `PluginUp`.
-- **`ContentBlock`** (`types.rs:329`) `#[serde(tag="type", rename_all="snake_case")]`:
+- **`ContentBlock`** (`enum ContentBlock`) `#[serde(tag="type", rename_all="snake_case")]`:
   `text` / `thinking` (carries `signature` — must be replayed across tool
-  round-trips or the Anthropic API rejects the continuation, `types.rs:318`) /
-  `tool_use` / `tool_result`. These make up `Message` history (`types.rs:322`),
+  round-trips or the Anthropic API rejects the continuation) /
+  `tool_use` / `tool_result`. These make up `Message` history (`struct Message`),
   **not** the WS chat stream — chat streams as `agent_text` deltas.
 
 ### PolicyMode vs. PolicyRule — do not conflate
 
-Two distinct kebab-case enums (`types.rs:27–73`):
+Two distinct kebab-case enums (`enum PolicyMode` / `enum PolicyRule` in `types.rs`):
 
 - **`PolicyMode`** — the *global* mode: `suggest` (default) / `auto-edit` / `yolo`.
   Set via `POST /api/policy`.
@@ -126,7 +127,7 @@ Two distinct kebab-case enums (`types.rs:27–73`):
   `EvolutionProposal::UpdatePolicyRule`.
 
 Writing a mode name into a rule slot (or vice versa) corrupts `policy.toml` on
-reload (`types.rs:40`).
+reload.
 
 ---
 
@@ -138,7 +139,7 @@ discarded with no error — see [Reference](#reference)).
 
 ### 1. Declare the variant — `core/src/types.rs`
 
-Add to the `Event` enum (`types.rs:164`). Snake_case is automatic via the
+Add to the `Event` enum (in `core/src/types.rs`). Snake_case is automatic via the
 container attribute; just name the variant in PascalCase and the fields:
 
 ```rust
@@ -157,7 +158,7 @@ Rules:
 
 ### 2. Handle it in `SystemState::apply` — `core/src/state.rs`
 
-The `match` in `apply` (`state.rs:19`) is **exhaustive** — the crate will not
+The `match` in `SystemState::apply` is **exhaustive** — the crate will not
 compile until your variant has an arm. If it carries no canonical state, make it
 an explicit no-op (this is the common case and is intentional):
 
@@ -174,13 +175,13 @@ writer of `SystemState`, and it must stay pure (no I/O, no async).
 Producers call `bus.emit(Event::BatteryStatus { .. }).await`. Consumers
 `match` on the broadcast `Receiver`. The relevant consumers:
 
-| Consumer | File | Add an arm if… |
+| Consumer | Symbol | Add an arm if… |
 |----------|------|----------------|
-| Agent router | `agentd/src/main.rs:930` (`spawn_agent_router`) | the event should drive/cancel a turn (it has a catch-all `Ok(_) => {}`, so it ignores unknown variants safely) |
-| Plugin supervisor | `plugins/src/supervisor.rs:158` | the event affects tool dispatch/approval |
-| Evolution applier | `agentd/src/main.rs` (`spawn_evolution_applier`) | it's an `Evolution*` variant |
+| Agent router | `spawn_agent_router` (`agentd/src/main.rs`) | the event should drive/cancel a turn (it has a catch-all `Ok(_) => {}`, so it ignores unknown variants safely) |
+| Plugin supervisor | `Supervisor::run` (`plugins/src/supervisor.rs`) | the event affects tool dispatch/approval |
+| Evolution applier | `spawn_evolution_applier` (`agentd/src/main.rs`) | it's an `Evolution*` variant |
 | Store writer | `store/src/lib.rs` | **automatic** — it logs *every* `Event` as JSONL; no change needed |
-| Gateway WS write task | `gateway/src/lib.rs:202` | **automatic** — it relays *every* broadcast `Event` to every socket; no change needed |
+| Gateway WS write task | the broadcast-relay loop in `gateway/src/lib.rs` | **automatic** — it relays *every* broadcast `Event` to every socket; no change needed |
 
 Most new outbound events need **no consumer edits** — the store and gateway relay
 everything. You only edit a consumer to make the daemon *act* on the event.
@@ -191,12 +192,12 @@ everything. You only edit a consumer to make the daemon *act* on the event.
 the gateway already relays it. On the client, add a case to your inbound
 dispatch keyed on `"type": "battery_status"`.
 
-**Inbound** (client → daemon): the gateway read task (`gateway/src/lib.rs:243`)
-takes the raw frame, **injects `frame["session"] = session_id`** (`lib.rs:245`),
+**Inbound** (client → daemon): the gateway read task
+takes the raw frame, **injects `frame["session"] = session_id`**,
 then `serde_json::from_value::<Event>(frame)`. So:
 - the client **omits** `session` (the gateway sets it to the socket's session);
 - the frame must otherwise deserialize cleanly into your variant or it is
-  **silently dropped** (`lib.rs:246` — the `if let Ok(event)` has no `else`).
+  **silently dropped** (the `if let Ok(event)` has no `else`).
 
 For the Slint UI specifically, the inbound dispatch + any new `VecModel` row type
 live in `ui-slint/src/main.rs` and `ui-slint/src/ui/types.slint` (the Slint struct
@@ -205,10 +206,10 @@ must mirror the Rust model). See SDK 05 (UI) for that surface.
 ### 5. (If it's a frontend intent) confirm the router consumes it
 
 A new *inbound* variant that should *do* something must be matched in
-`spawn_agent_router` (`main.rs:969` `loop { match rx.recv().await { ... } }`) or
+`spawn_agent_router` (its `loop { match rx.recv().await { ... } }`) or
 the supervisor. The router's existing arms are the template: `UserPrompt`
-(`main.rs:972`) spawns a turn; `UserCancel` (`main.rs:1059`) cascades an abort;
-`UserApproval` is consumed by the **supervisor** (`supervisor.rs:180`), not the
+spawns a turn; `UserCancel` cascades an abort;
+`UserApproval` is consumed by the **supervisor** (`Supervisor::run`), not the
 router. Without an arm, the event applies to state and broadcasts but nothing
 acts on it.
 
@@ -220,8 +221,7 @@ Goal: a mesh node periodically reports liveness; the daemon logs it (free, via
 the store) and broadcasts it; clients show a green dot. This is a pure
 *outbound* event — no new intent, no state mutation — the minimal end-to-end case.
 
-**1. `core/src/types.rs`** — add to `enum Event` (after the mesh variants,
-`types.rs:245`):
+**1. `core/src/types.rs`** — add to `enum Event` (after the mesh variants):
 
 ```rust
 /// Emitted by the mesh heartbeat task ~every 30s per known peer.
@@ -229,8 +229,8 @@ the store) and broadcasts it; clients show a green dot. This is a pure
 NodeStatus { node_id: String, rss_mb: u32, load1: f32, healthy: bool },
 ```
 
-**2. `core/src/state.rs`** — add the no-op arm (next to the other mesh no-ops,
-`state.rs:106`):
+**2. `core/src/state.rs`** — add the no-op arm (next to the other mesh no-ops in
+`SystemState::apply`):
 
 ```rust
 Event::NodeStatus { .. } => {}
@@ -251,7 +251,7 @@ bus.emit(Event::NodeStatus {
 ```
 
 No consumer edits: the store writer already persists it (`store/src/lib.rs`), and
-every gateway WS write task already relays it (`gateway/src/lib.rs:204`).
+every gateway WS write task already relays it (the broadcast-relay loop in `gateway/src/lib.rs`).
 
 **4. Client** — it arrives on the socket as:
 
@@ -266,7 +266,7 @@ without touching the agent loop, the supervisor, or the policy engine.
 > **If this were an inbound intent instead** (say `set_node_label`), you would
 > also (a) include `session: SessionId` in the variant, (b) have the client send
 > `{"type":"set_node_label", "label":"kitchen"}` *without* `session`, and (c) add
-> a match arm in `spawn_agent_router` (`main.rs:969`) to act on it.
+> a match arm in `spawn_agent_router` to act on it.
 
 ---
 
@@ -281,7 +281,7 @@ This is the exact handshake — and it **differs from CLAUDE.md** (see Gotchas).
 
 2. **The server speaks first.** On connect, the gateway assigns a session id and
    **immediately pushes** a `session_init` frame *before* you send anything
-   (`lib.rs:189–192`):
+   (the connect handler in `gateway/src/lib.rs`):
    ```json
    {"type": "session_init", "session_id": 42, "history": []}
    ```
@@ -290,7 +290,7 @@ This is the exact handshake — and it **differs from CLAUDE.md** (see Gotchas).
    connect" instruction is wrong for the Rust daemon.
 
 3. **To resume a prior session**, send a `hello` frame with `resume_session`
-   (`lib.rs:228–241`):
+   (the `hello` handling in `gateway/src/lib.rs`):
    ```json
    {"type": "hello", "resume_session": 42}
    ```
@@ -314,7 +314,7 @@ This is the exact handshake — and it **differs from CLAUDE.md** (see Gotchas).
    ```json
    {"type": "user_cancel"}
    ```
-   The router runs `cascade_cancel` (`main.rs:1060`) which aborts the turn (and
+   The router runs `cascade_cancel` (in `spawn_agent_router`) which aborts the turn (and
    children) but emits **no** `TurnComplete`. Your client must clear its own busy
    state and any pending tool cards.
 
@@ -358,16 +358,16 @@ ws.send(JSON.stringify({type: "user_prompt", text: "hello"}));   // no `session`
 a message shape. Capability is gated downstream:
 
 - **Tool calls** go through the `PolicyEngine`. The agent turn engine sets
-  `ToolCall.needs_approval = false` unconditionally (`turn.rs:118`); the
+  `ToolCall.needs_approval = false` unconditionally (in `run_turn`, `agent/src/turn.rs`); the
   **supervisor** is what decides, calling `policy.check(&call.tool, path)`
-  (`supervisor.rs:163`) and emitting `ApprovalPending` on `Decision::Ask`
-  (`supervisor.rs:175`). So **`needs_approval` on the wire is currently always
+  (in `Supervisor::dispatch_tool`) and emitting `ApprovalPending` on `Decision::Ask`.
+  So **`needs_approval` on the wire is currently always
   `false`** — clients must rely on receiving an `approval_pending` event, not on
   that flag. (If you make `needs_approval` meaningful, you must set it in the
   supervisor's `ToolRequested` handling, not the agent.)
 
 - **Evolution events are the audited self-modification path.** A new
-  `EvolutionProposal` variant (`types.rs:88`) is the *correct* way to let the
+  `EvolutionProposal` variant (`enum EvolutionProposal`) is the *correct* way to let the
   agent change config — it routes through the policy engine under the
   `evolution.*` namespace (default `suggest` → asks the user), the applier
   snapshots an undo state and journals it into a Cerebro episode, and
@@ -382,7 +382,7 @@ a message shape. Capability is gated downstream:
   pattern, not widen `/ws`.
 
 - **Silent-drop is a safety feature *and* a footgun.** A malformed inbound frame
-  is dropped, not errored (`lib.rs:246`) — a malicious client can't crash the
+  is dropped, not errored (the no-`else` `if let Ok(event)` in the gateway read task) — a malicious client can't crash the
   daemon with garbage, but you also get no feedback when a field name is wrong.
   Test new inbound variants with a real round-trip, not by eyeballing.
 
@@ -458,11 +458,11 @@ protocol tables in the same commit.
 |------|-------|--------|
 | Inbox (mpsc) capacity | 1024 | `bus.rs:25` |
 | Broadcast capacity | 1024 | `bus.rs:26` |
-| Emit | `BusHandle::emit(Event).await` | `bus.rs:17` |
-| Subscribe | `broadcast::Sender::subscribe()` | `bus.rs:24` |
-| State mutation | only in `SystemState::apply` (pure, sync) | `state.rs:18` |
-| Lagged subscriber | `RecvError::Lagged(n)` → consumer skips (`continue`) | e.g. `lib.rs:208`, `turn.rs:170` |
-| Tool-result wait timeout | `AGENTD_TOOL_RESULT_TIMEOUT_SECS`, default **1800s** | `turn.rs:68` |
+| Emit | `BusHandle::emit(Event).await` | `bus.rs` |
+| Subscribe | `broadcast::Sender::subscribe()` | `Bus::new`, `bus.rs` |
+| State mutation | only in `SystemState::apply` (pure, sync) | `state.rs` |
+| Lagged subscriber | `RecvError::Lagged(n)` → consumer skips (`continue`) | e.g. the WS write loop (`gateway/src/lib.rs`), the turn's bus reader (`agent/src/turn.rs`) |
+| Tool-result wait timeout | `AGENTD_TOOL_RESULT_TIMEOUT_SECS`, default **1800s** | `run_turn`, `agent/src/turn.rs` |
 
 ### Gotchas vs. CLAUDE.md
 
@@ -470,8 +470,8 @@ The CLAUDE.md and (older) protocol tables contain stale claims. Trust the source
 
 | CLAUDE.md says | Reality (source) |
 |----------------|------------------|
-| client sends `{type:"session_init"}` on connect | server **pushes** `session_init` first; client sends nothing to start (`lib.rs:189`) |
-| resume via `{type:"session_init", session_id}` | resume via `{type:"hello", resume_session:<id>}` (`lib.rs:228`) |
+| client sends `{type:"session_init"}` on connect | server **pushes** `session_init` first; client sends nothing to start (the connect handler in `gateway/src/lib.rs`) |
+| resume via `{type:"session_init", session_id}` | resume via `{type:"hello", resume_session:<id>}` (the `hello` handling in `gateway/src/lib.rs`) |
 | `turn_started` clears buffer / sets busy | Rust daemon **never emits** `turn_started`; busy is driven by `agent_text` |
 | `tool_result` has `call: <id>` | correct — `call` is a **bare number** here, *unlike* `tool_requested` where `call` is a full `ToolCall` object (`types.rs:177` vs `:173`) |
 

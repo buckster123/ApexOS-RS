@@ -7,7 +7,8 @@
 > surface when** an agent needs to persist or retrieve something across turns, sessions, or
 > reboots — or when you want to add a *new* memory tool to the ~66-verb registry.
 >
-> Two audiences: humans adding a Cerebro tool (`dispatch.rs` route + `tools.rs` schema), and
+> Two audiences: humans adding a Cerebro tool (a `route` arm in `dispatch.rs` + a `tool_schema`
+> arm in `tools.rs`), and
 > agents (APEX/FORGE) *using* the verbs to keep the Wake→Sleep continuity loop closed. Both
 > are covered. Read alongside [symbiosis.md](../symbiosis.md) (the cognitive loop) and
 > [architecture.md](../architecture.md) (where Cerebro sits in the daemon).
@@ -16,7 +17,7 @@
 
 ## Concepts
 
-**The engine.** `CerebroCortex` (`cerebro/crates/cerebro/src/cortex.rs:22`) is the facade
+**The engine.** `CerebroCortex` (struct in `cerebro/crates/cerebro/src/cortex.rs`) is the facade
 the MCP server holds as `Arc<CerebroCortex>`. It owns the storage coordinator
 (`storage: Arc<RwLock<StorageCoordinator>>`) and nine brain-region engines (thalamus,
 amygdala, temporal, hippocampus, association, cerebellum, prefrontal, neocortex, dream).
@@ -26,21 +27,23 @@ vec0 with an FTS5 keyword fallback), `graph` (in-memory petgraph rebuilt at star
 Only three methods are "first-class" on the cortex; everything else is reached through
 `brain.storage.read().await.sqlite.*`:
 
-| Cortex method | File:line | Pipeline |
-|---------------|-----------|----------|
-| `remember(content, type?, tags?, salience?, scope)` | `cortex.rs:63` | thalamus gate → amygdala emotion → temporal concepts → SQLite insert → vector embed → graph node |
-| `recall(query, k, scope)` | `cortex.rs:102` | vector/FTS5 candidates → spreading activation → bulk SQLite load → prefrontal rank → top-k |
-| `associate(src, tgt, link)` | `cortex.rs:161` | SQLite insert_link → mirror into graph |
+| Cortex method | Symbol | Pipeline |
+|---------------|--------|----------|
+| `remember(content, type?, tags?, salience?, scope)` | `CerebroCortex::remember` | thalamus gate → amygdala emotion → temporal concepts → SQLite insert → vector embed → graph node |
+| `recall(query, k, scope)` | `CerebroCortex::recall` | vector/FTS5 candidates → spreading activation → bulk SQLite load → prefrontal rank → top-k |
+| `associate(src, tgt, link)` | `CerebroCortex::associate` | SQLite insert_link → mirror into graph |
 
-**The MCP wiring.** A tool call lands in `dispatch_tool` (`dispatch.rs:37`) →
-`route(name, args, brain)` (`dispatch.rs:70`), a big `match name { … }`. The result is
-wrapped as MCP `content[0].text` = a **JSON string** (`dispatch.rs:46-49`); the agent reads
-that text and re-parses it. Schemas live separately in `tools.rs` `tool_schema()`
-(`tools.rs:11`); the authoritative name list is `TOOL_NAMES` (`tools.rs:840`, 66 entries).
-`tools/list` returns `all_tool_schemas()` (`tools.rs:7`).
+**The MCP wiring.** A tool call lands in `dispatch_tool` (in `dispatch.rs`) →
+`route(name, args, brain)`, a big `match name { … }`. The result is
+wrapped as MCP `content[0].text` = a **JSON string**; the agent reads
+that text and re-parses it. Schemas live separately in `tool_schema()` (in `tools.rs`);
+the authoritative name list is `TOOL_NAMES` (`tools.rs`) — **66 entries** (63 functional + 3
+stubs). Note the `tools.rs` header comment still reads "63 tools" — it predates the three
+deferred vision/ingest verbs; the live array is 66. `tools/list` returns `all_tool_schemas()`,
+which maps `tool_schema` over every `TOOL_NAMES` entry.
 
-**Scoping — the single primitive.** `agent_scope(args)` (`dispatch.rs:929`) reads one field,
-`agent_id`, and produces a `VisibilityScope` (`cerebro/src/types.rs:127`):
+**Scoping — the single primitive.** `agent_scope(args)` (fn in `dispatch.rs`) reads one field,
+`agent_id`, and produces a `VisibilityScope` (`cerebro/src/types.rs`):
 
 - `agent_id` present and non-empty → `VisibilityScope::for_agent(AgentId(id))` — sees its own
   `private` memories **plus** all `shared` ones.
@@ -49,16 +52,17 @@ that text and re-parses it. Schemas live separately in `tools.rs` `tool_schema()
   isolation). The "shared-only" notion applies only to what a global *write* produces (it
   writes `Visibility::Shared`); it is not enforced on global reads.
 
-`sql_filter()` (`types.rs:144`) renders the scoped (for_agent) case to SQL:
+`VisibilityScope::sql_filter` (in `types.rs`) renders the scoped (`for_agent`) case to SQL:
 `(visibility='shared' OR (visibility='private' AND agent_id=?))`, and the global case to
 `1=1`. The `visibility` field that
-appears in the `remember` schema (`tools.rs:31`) is **not read by dispatch** — visibility is
-*derived from scope* inside `remember` (`cortex.rs:74`): a scoped write is `Private`, an
+appears in the `remember` schema (in `tools.rs`) is **not read by dispatch** — visibility is
+*derived from scope* inside `CerebroCortex::remember`: a scoped write is `Private`, an
 unscoped write is `Shared`. To make a memory shared, omit `agent_id` on the write or call
 `share_memory` afterward. **In ApexOS-RS, FORGE passes `agent_id="FORGE"` and APEX passes
-`agent_id="CLAUDE-APEX"`** — keep this consistent or recall silently misses prior memories.
+`agent_id="CLAUDE-APEX"`** (FORGE is the external tool-caller's agent id per CLAUDE.md; APEX is
+the running on-device agent) — keep these consistent or recall silently misses prior memories.
 
-**Memory types** (`types.rs:31`, snake_case on the wire): `episodic`, `semantic`,
+**Memory types** (`MemoryType` enum in `types.rs`, snake_case on the wire): `episodic`, `semantic`,
 `procedural`, `affective`, `prospective`, `schematic`. Most verbs that "feel" like a distinct
 kind of memory are actually `remember` with a fixed type + convention tags — see Reference.
 
@@ -84,12 +88,12 @@ the Sleep loop runs. `session_save` is **mandatory at session end**; `dream_run`
 Two files, always both, or the verb is invisible or unroutable. The schema in `tools.rs`
 makes the agent *see* the tool; the route in `dispatch.rs` makes it *do* something.
 
-1. **Add the name to `TOOL_NAMES`** (`cerebro/crates/cerebro-mcp/src/tools.rs:840`). This is
+1. **Add the name to `TOOL_NAMES`** (`const` in `cerebro/crates/cerebro-mcp/src/tools.rs`). This is
    what `tools/list` advertises and what the test in `dispatch.rs` (`tools_list_…contains…`)
    counts. Without it, the agent never learns the tool exists.
 
-2. **Add a schema arm** in `tool_schema()` (`tools.rs:11`). Match your name and return the
-   MCP `inputSchema`. The `_` fallback (`tools.rs:831`) emits a `(stub)` schema — fine
+2. **Add a schema arm** in `tool_schema()` (in `tools.rs`). Match your name and return the
+   MCP `inputSchema`. The `_` fallback emits a `(stub)` schema — fine
    transiently, but a real tool needs a real schema so the agent knows the arguments:
 
    ```rust
@@ -107,11 +111,11 @@ makes the agent *see* the tool; the route in `dispatch.rs` makes it *do* somethi
    }),
    ```
 
-3. **Add a route arm** in `route()` (`cerebro/crates/cerebro-mcp/src/dispatch.rs:70`). Pull
+3. **Add a route arm** in `route()` (the `match name` in `cerebro/crates/cerebro-mcp/src/dispatch.rs`). Pull
    args with `args["x"].as_str()/.as_u64()/.as_f64()/.as_array()`, build the scope with
    `agent_scope(args)`, call the cortex or `brain.storage.read().await.sqlite.*`, and return
-   `Ok(Value)`. The dispatcher stringifies it into `content[0].text` and turns any `Err` into
-   a JSON-RPC error (`dispatch.rs:50`):
+   `Ok(Value)`. The dispatcher (`dispatch_tool`) stringifies it into `content[0].text` and turns any `Err` into
+   a JSON-RPC error:
 
    ```rust
    "summarize_recent" => {
@@ -141,10 +145,10 @@ makes the agent *see* the tool; the route in `dispatch.rs` makes it *do* somethi
    the Wake loop, add it to the allow-list in `config/policy.toml` (see Policy). Writes and
    consolidation stay gated.
 
-6. **Add a dispatch test.** The `#[cfg(test)] mod tests` block (`dispatch.rs:940`) builds a
+6. **Add a dispatch test.** The `#[cfg(test)] mod tests` block in `dispatch.rs` builds a
    `CerebroCortex` over a temp SQLite DB with embedding disabled
    (`embed_model: ""`) and drives `dispatch_tool` end-to-end with no stdio. Copy
-   `dispatch_remember_stores_and_returns_node` (`dispatch.rs:992`) as a template.
+   `dispatch_remember_stores_and_returns_node` as a template.
 
 > **Do not edit existing files for an SDK doc task** — the steps above are the change-points
 > for real feature work. `cerebro-mcp` is hot-swapped via systemd (`systemctl stop agentd` →
@@ -179,7 +183,7 @@ memory_store {
   "content": "VRM hits 78°C under sustained 70B inference; throttle to recover",
   "agent_id": "CLAUDE-APEX"
 }
-// memory_store is the `remember` alias (dispatch.rs:158) — type auto-classified, scoped private.
+// memory_store is the `remember` alias (the "memory_store" | "memory_search" arm in route) — type auto-classified, scoped private.
 
 // 3. Promote the reusable fix to a procedure (skill acquisition)
 store_procedure {
@@ -220,7 +224,7 @@ find_relevant_procedures { "tags": ["thermal"], "agent_id": "CLAUDE-APEX" }  // 
 Why each verb and not a flat dump: `session_save` is tag-convention episodic so it's
 *recallable*; `store_procedure` is `procedural` so `find_relevant_procedures` finds it by
 tag/concept; `store_intention` is `prospective` so `list_intentions` surfaces it until
-`resolve_intention` drops its salience to 0.1 (`dispatch.rs:683`). One fact per memory; link
+`resolve_intention` drops its salience to 0.1 (the `"resolve_intention"` arm in `route`). One fact per memory; link
 with `associate` rather than concatenating.
 
 ---
@@ -267,7 +271,9 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 **Known stubs & inert paths (do NOT rely on these).** Grounded in `dispatch.rs` + symbiosis.md:
 
 - `ingest_file`, `describe_image`, `search_vision` are advertised in `TOOL_NAMES` but
-  unimplemented — they now return an honest `-32601` not-implemented **error** (C-RS-007).
+  unimplemented — they fall through the `route` match to the `_` arm and return an honest
+  `-32601` not-implemented **error** (C-RS-007). These three are the **only** Cerebro stubs;
+  the other 63 `TOOL_NAMES` verbs are functional.
 - **`cognitive_bootstrap` is implemented** (CB-001 closed): one call assembles a
   token-budgeted priming block from live memory state — open intentions + query-relevant
   session summaries, procedures, and memories. It is the one-call replacement for the manual
@@ -320,11 +326,11 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 > The `visibility` arg in the `remember` schema is **not read** — use `share_memory` to flip
 > an existing memory to shared.
 
-### MemoryType enum (`cerebro/src/types.rs:31`, snake_case on wire)
+### MemoryType enum (`MemoryType` in `cerebro/src/types.rs`, snake_case on wire)
 
 `episodic` · `semantic` · `procedural` · `affective` · `prospective` · `schematic`
 
-### LinkType enum (`types.rs:42`) + spreading conductance (`types.rs:57`)
+### LinkType enum + spreading conductance (`LinkType` in `types.rs`)
 
 | `link_type` | weight | `link_type` | weight |
 |-------------|--------|-------------|--------|
@@ -334,7 +340,7 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 | `part_of` | 0.8 | `contradicts` | 0.3 |
 | `contextual` | 0.7 | | |
 
-### Visibility scoping (`types.rs:127`)
+### Visibility scoping (`VisibilityScope` in `types.rs`)
 
 | `agent_id` arg | Scope | SQL filter | Sees |
 |----------------|-------|-----------|------|

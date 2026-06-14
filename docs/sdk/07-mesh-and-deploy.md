@@ -51,19 +51,21 @@ And **vast.ai** is a fourth, runtime mechanism: a *single* node rents a cloud GP
 tunnel to its `llama-server`, and hot-swaps its own inference backend to point at it. Other mesh
 nodes then reach that model by being routed at the renting node (`send_to_agent --node`).
 
-### Named types & files (file:line truth)
+### Named types & files (symbol truth)
+
+> Cited by **symbol**, not `file:line` (line numbers drift). `grep` the symbol in the named file.
 
 | Thing | Where |
 |-------|-------|
-| Peer registry type, `peers.toml` (de)serialize, avahi line parser, pairing-code state | `agentd/crates/gateway/src/mesh.rs` — `PeerRegistry` :47, `PeerRecord` (incl. `token`) :29, `PeerRole` :7, `save()` (0600 + EPERM fallback) :89, `parse_avahi_output` (IPv4-only) :105, `Pairing`/`gen_pair_code` |
-| Mesh REST routes | `agentd/crates/gateway/src/lib.rs` — `mesh_nodes_handler`, `mesh_peers_get` (redacts token → `has_token`)`/post` (accepts `token`)`/delete`, **pairing**: `pair_start`/`pair_status`/`pair_redeem` (gated) + `pair_claim` (ungated, code-gated), `session_message_handler`, `active_sessions_handler` |
-| Discovery loop (mDNS poll, subnet guard, auto-bootstrap) | `agentd/crates/agentd/src/main.rs` — `spawn_discovery_loop` :1699, `local_subnet_prefix` :1686, started :409 |
-| Cross-node `send_to_agent`, `list_mesh_peers`, `bootstrap_node` virtual tools | `agentd/crates/plugins/src/supervisor.rs` — `send_to_agent` :557, `list_mesh_peers` :640, `bootstrap_node` :658, `find_peer` (ws_url + a2a token) :1548 |
-| Tool specs (schemas shown to the LLM) | `agentd/crates/agentd/src/main.rs` — `send_to_agent_spec` :1473, `list_mesh_peers_spec` :1502, `bootstrap_node_spec` :1515, `vast_*_spec` :1551-1599; registered in `gather_tools` :1194 |
-| vast.ai recipe types, state, CLI wrapper | `agentd/crates/plugins/src/vast.rs` — `RecipeFile`/`GpuTier`/`Recipe` :7-41, `load_recipes` :43, `VastState`/`VastInstance`/`VastPhase` :64-138, `vastai()` :143 |
-| vast lifecycle (`vast_launch` etc.) | `agentd/crates/plugins/src/supervisor.rs` — `vast_list_recipes` :804, `vast_status` :842, `vast_launch` :884, `vast_destroy` :1255 |
-| Backend hot-swap on `VastInstanceReady`/`Destroyed` | `agentd/crates/agentd/src/main.rs` :373-406; live backend route `/api/backend` in `gateway/src/lib.rs` :128, `set_backend_handler` :529 |
-| Install-time tier/mode detection & embed-model gating | `install.sh` — tier detect :359-377, mode detect :367-368, `NO_UI` gating :430, embed model :692-700, peers.toml seed :713-715, env/token :727-746, service install/enable :760-781 |
+| Peer registry type, `peers.toml` (de)serialize, avahi line parser, pairing-code state | `agentd/crates/gateway/src/mesh.rs` — `PeerRegistry`, `PeerRecord` (incl. `token`), `PeerRole`, `PeerRegistry::save` (0600 + EPERM fallback), `parse_avahi_output` (IPv4-only), `Pairing`/`gen_pair_code` |
+| Mesh REST routes | `agentd/crates/gateway/src/lib.rs` — `mesh_nodes_handler`, `mesh_peers_get_handler` (redacts token → `has_token`) / `mesh_peers_post_handler` (accepts `token`) / `mesh_peers_delete_handler`, **pairing**: `pair_start_handler`/`pair_status_handler`/`pair_redeem_handler` (gated) + `pair_claim_handler` (ungated, code-gated), `session_message_handler`, `active_sessions_handler` |
+| Discovery loop (mDNS poll, subnet guard, auto-bootstrap) | `agentd/crates/agentd/src/main.rs` — `spawn_discovery_loop`, `local_subnet_prefix` |
+| Cross-node `send_to_agent`, `list_mesh_peers`, `bootstrap_node` virtual tools | `agentd/crates/plugins/src/supervisor.rs` — dispatched in `Supervisor::dispatch_tool` (`if call.tool == "send_to_agent"` / `"list_mesh_peers"` / `"bootstrap_node"` arms); `find_peer` (ws_url + a2a token) |
+| Tool specs (schemas shown to the LLM) | `agentd/crates/agentd/src/main.rs` — `send_to_agent_spec`, `list_mesh_peers_spec`, `bootstrap_node_spec`, `vast_list_recipes_spec`/`vast_launch_spec`/`vast_destroy_spec`/`vast_status_spec`; registered in `gather_tools` |
+| vast.ai recipe types, state, CLI wrapper | `agentd/crates/plugins/src/vast.rs` — `RecipeFile`/`GpuTier`/`Recipe`, `load_recipes`, `VastState`/`VastInstance`/`VastPhase`, `vastai` |
+| vast lifecycle (`vast_launch` etc.) | `agentd/crates/plugins/src/supervisor.rs` — `Supervisor::dispatch_tool` (`"vast_list_recipes"` / `"vast_status"` / `"vast_launch"` / `"vast_destroy"` arms) |
+| Backend hot-swap on `VastInstanceReady`/`Destroyed` | `agentd/crates/agentd/src/main.rs` — the `tokio::spawn`ed event listener in `main` that matches `Event::VastInstanceReady` / `Event::VastInstanceDestroyed`; live backend route `/api/backend` in `gateway/src/lib.rs` (`get_backend_handler` / `set_backend_handler`) |
+| Install-time tier/mode detection & embed-model gating | `install.sh` — tier detect (the `RAM_MB` → `TIER` `if/elif` ladder), mode detect (`MODE="kiosk"`/`"headless"`), `NO_UI` gating, embed model (the `case "$TIER"` setting `EMBED_MODEL`), peers.toml seed, env/token (`write_env_key`), service install/enable (`install_svc`) |
 | systemd hardening template | `deploy/agentd.service` (jailed daemon), `deploy/apexos-rs-ui.service` (root + device allowlist), `deploy/cerebro-api.service`, `deploy/apex-sensor-bridge.service` |
 
 > **Reality check — install gaps.** Mesh discovery is now handled: `install.sh` installs
@@ -81,7 +83,7 @@ nodes then reach that model by being routed at the renting node (`send_to_agent 
 Tiers gate the Cerebro embedding model (and, by convention, the local-LLM story). The selection
 logic is a single `case` in `install.sh`.
 
-1. **Add the detection branch.** `install.sh` :359 maps RAM to a tier:
+1. **Add the detection branch.** `install.sh` maps RAM to a tier (the `RAM_MB` `if/elif` ladder):
    ```bash
    if   (( RAM_MB <  768 )); then TIER="nano"
    elif (( RAM_MB < 2048 )); then TIER="micro"
@@ -92,23 +94,28 @@ logic is a single `case` in `install.sh`.
    Insert your branch (e.g. detect a CUDA/arm64 DGX for `titan`). Tiers can also be forced with
    `--tier=NAME`, `APEXOS_TIER=NAME` in a boot file, or the manual whiptail picker.
 
-2. **Add a description** in the `case "$TIER"` block at :372 (`TIER_DESC=...`). This is shown in
-   the install summary; keep it one line.
+2. **Add a description** in the `case "$TIER"` block (`TIER_DESC=...`). This is shown in the
+   install summary; keep it one line.
 
-3. **Map it to an embedding model** at :692:
+3. **Map it to an embedding model** in the `case "$TIER"` that sets `EMBED_MODEL`. The live
+   mapping points **every** embed-enabled tier at bge-small:
    ```bash
+   EMBED_MODEL=""
    case "$TIER" in
-     micro|standard) EMBED_MODEL="BAAI/bge-small-en-v1.5" ;;
-     pro)            EMBED_MODEL="BAAI/bge-large-en-v1.5" ;;
+     micro|standard|pro) EMBED_MODEL="BAAI/bge-small-en-v1.5" ;;
    esac
    ```
-   `nano` is intentionally absent → empty `EMBED_MODEL` → `CEREBRO_EMBED_MODEL=""` → ~23 MB RSS,
-   FTS5-only search. A non-empty value is written into `/etc/agentd/plugins.toml` at :700.
+   **Do not map a tier to `bge-large`.** It was tried for `pro` and **cerebro rejected it →
+   embeddings silently disabled** (see the `bge-large was set for pro …` comment in `install.sh`,
+   and `vector.rs` in cerebro). bge-small (384-dim) is the only model cerebro wires through today;
+   until a larger model is actually plumbed in, all of `micro|standard|pro` use it. `nano` is
+   intentionally absent → empty `EMBED_MODEL` → `CEREBRO_EMBED_MODEL=""` → FTS5-only search, lowest
+   memory. A non-empty value is written into `/etc/agentd/plugins.toml`.
 
 4. **(Optional) gate the LLM default.** Tiers don't currently change `AGENTD_BACKEND`; if you want
    a tier to default to a local Ollama backend, set `AGENTD_BACKEND`/`AGENTD_MODEL`/
-   `AGENTD_OAI_BASE_URL` in the env file (`write_env_key` at :731). The daemon reads these at
-   `main.rs` :96-104.
+   `AGENTD_OAI_BASE_URL` in the env file (`write_env_key`). The daemon reads these in `main` at
+   startup.
 
 There is **no Rust code** behind a tier — it is purely an install-time knob over the embed model
 and env defaults. Build UI/agent features for the Nano floor (no fast inference, embedding may be
@@ -116,16 +123,18 @@ off); faster tiers get the same behaviour, just quicker.
 
 ## Add a new deployment mode
 
-Modes gate which binaries install. The logic is `install.sh` :367 + :430.
+Modes gate which binaries install. The logic is in `install.sh` (the `MODE` auto-detect + the
+`NO_UI` gating line).
 
-1. **Add the auto-detect branch** at :367 (`$IS_PI && MODE="kiosk" || MODE="headless"`), and a
-   picker entry in the manual menu at :423.
-2. **Decide component gating.** The one rule today is :430:
+1. **Add the auto-detect branch** (`$IS_PI && MODE="kiosk" || MODE="headless"`), and a picker entry
+   in the manual menu.
+2. **Decide component gating.** The one rule today is:
    ```bash
    [[ "$MODE" == "headless" || "$MODE" == "desktop" ]] && NO_UI=true
    ```
-   `NO_UI=true` skips installing/enabling `apexos-rs-ui` (:582, :773, :779). Add your mode's
-   gating here. Other gates: `NO_SENSOR` (sensor bridge), `NO_CEREBRO_API` (REST dashboard).
+   `NO_UI=true` skips installing/enabling `apexos-rs-ui` (guarded at the UI build, `install_svc`,
+   and `systemctl enable` sites). Add your mode's gating here. Other gates: `NO_SENSOR` (sensor
+   bridge), `NO_CEREBRO_API` (REST dashboard).
 3. A mode is just a label that flips `NO_*` booleans. agentd itself is mode-agnostic — it is a
    pure daemon; headless = "don't install the local display."
 
@@ -137,7 +146,7 @@ Two ways: **manual** (you provision the box yourself) or **agent-driven** (`boot
 
 1. **Provision the new box** by running `install.sh` on it (or `curl … | sudo bash`). It will
    come up as an independent `agentd`. Give it a stable identity with `APEX_NODE_ID` (defaults to
-   `hostname`, `main.rs` :200).
+   `hostname`; read in `main`).
 2. **Avahi advertise/browse — now handled by `install.sh`.** It installs `avahi-daemon` +
    `avahi-utils` and drops `/etc/avahi/services/apexos-rs.service` (from `deploy/avahi/`), so the
    node both advertises `_apexos._tcp` and can `avahi-browse`. To wire an *already-deployed* node
@@ -186,15 +195,16 @@ Two ways: **manual** (you provision the box yourself) or **agent-driven** (`boot
    ```
    It connectivity-checks, skips if `agentd` is already active, installs git, clones
    `repo_url` (default `https://github.com/buckster123/ApexOS.git`), and `nohup`s `install.sh`
-   (supervisor :658-797). Returns immediately; install takes ~15-20 min. The node appears in the
-   mesh once *its* avahi is up — so the same avahi prereq applies to the new box.
+   (the `"bootstrap_node"` arm of `Supervisor::dispatch_tool`). Returns immediately; install takes
+   ~15-20 min. The node appears in the mesh once *its* avahi is up — so the same avahi prereq
+   applies to the new box.
 
 ### Discovery loop knobs (env on the routing node)
 
-| Var | Default | Effect (`main.rs` :1704) |
+| Var | Default | Effect (`spawn_discovery_loop`, `agentd/src/main.rs`) |
 |-----|---------|--------------------------|
 | `MESH_DISCOVERY_INTERVAL` | `60` | seconds between `avahi-browse` scans |
-| `MESH_SUBNET_GUARD` | on | only consider peers on the same `/24` (`local_subnet_prefix` :1686) |
+| `MESH_SUBNET_GUARD` | on | only consider peers on the same `/24` (`local_subnet_prefix`) |
 | `MESH_AUTO_BOOTSTRAP` | off | when set, a newly-seen peer injects a `UserPrompt` into root session suggesting the agent call `bootstrap_node` |
 | `APEX_NODE_ID` | `hostname` | this node's mesh identity |
 | `PEERS_TOML` | `/etc/agentd/peers.toml` | registry path (also read by supervisor + `list_mesh_peers`) |
@@ -202,10 +212,10 @@ Two ways: **manual** (you provision the box yourself) or **agent-driven** (`boot
 ## Add a vast.ai GPU recipe
 
 A recipe is a row in `/etc/agentd/recipes.toml` mapping a name → GPU tier + model + llama-server
-params. No Rust change needed — `load_recipes()` (`vast.rs` :43) reads the file at call time.
+params. No Rust change needed — `load_recipes` (`vast.rs`) reads the file at call time.
 
 1. **Create `recipes.toml`** (install.sh does *not*). Minimal shape (mirrors `RecipeFile`,
-   `vast.rs` :7-41):
+   `vast.rs`):
    ```toml
    [docker]
    prebuilt = "your/llama-server-image:tag"   # must expose /health and /v1 on :8000, run /app/launch.sh
@@ -228,17 +238,18 @@ params. No Rust change needed — `load_recipes()` (`vast.rs` :43) reads the fil
    kv_type     = "q8_0"
    description = "Balanced reasoning model for the colony"
    ```
-2. **Set `VAST_API_KEY`** in `/etc/agentd/env` (the `vastai()` wrapper requires it, :143) and
+2. **Set `VAST_API_KEY`** in `/etc/agentd/env` (the `vastai` wrapper in `vast.rs` requires it) and
    install the `vastai` CLI on the node.
 3. **Use it.** `vast_list_recipes` → pick a name → `vast_launch {"recipe":"qwen36-27b-q6-5090"}`.
-   The launch flow (supervisor :884) searches offers in the geo (`VAST_DEFAULT_GEO`, default
-   `EU_NORDIC`), creates the instance, opens an SSH `-L {VAST_LOCAL_PORT|8000}:127.0.0.1:8000`
-   tunnel, polls `/health` (≤20 min), then emits `VastInstanceReady` → `main.rs` :386 hot-swaps
-   `backend → "ollama"` and `oai_base_url → http://127.0.0.1:<port>/v1`. `vast_destroy` tears it
-   all down and reverts the backend (:392).
+   The launch flow (the `"vast_launch"` arm of `Supervisor::dispatch_tool`) searches offers in the
+   geo (`VAST_DEFAULT_GEO`, default `EU_NORDIC`), creates the instance, opens an SSH
+   `-L {VAST_LOCAL_PORT|8000}:127.0.0.1:8000` tunnel, polls `/health` (≤20 min), then emits
+   `VastInstanceReady` → the `main` event listener hot-swaps `backend → "ollama"` and
+   `oai_base_url → http://127.0.0.1:<port>/v1`. `vast_destroy` tears it all down and reverts the
+   backend (on `VastInstanceDestroyed`).
 
-Geo filters are hard-coded in the launch flow (supervisor :996): `EU_NORDIC`, `EU`, `US`, or
-anything else = no filter. To add a geo, extend that `match`.
+Geo filters are hard-coded in the launch flow (the offer-search step in the `"vast_launch"` arm):
+`EU_NORDIC`, `EU`, `US`, or anything else = no filter. To add a geo, extend that `match`.
 
 ## Ship a new systemd service (the hardening contract)
 
@@ -263,8 +274,8 @@ anything else = no filter. To add a geo, extend that `match`.
 5. **Order after agentd if you depend on it:** `After=agentd.service` + `Requires=agentd.service`
    (see `cerebro-api.service`).
 6. **Wire it into `install.sh`:** drop the unit in `deploy/`, then add `install_svc <name>` and
-   `systemctl enable <name>` (and a `svc_start` health check) — `install.sh` :760-838. Gate it
-   behind a `NO_*` boolean if it's mode-dependent.
+   `systemctl enable <name>` (and a `svc_start` health check) in the service install/enable block.
+   Gate it behind a `NO_*` boolean if it's mode-dependent.
 
 If your service needs hardware (DRM, input, GPIO), do **not** drop the sandbox — use a device
 allowlist like `apexos-rs-ui.service` (`DevicePolicy=closed` + explicit `DeviceAllow=` lines).
@@ -286,8 +297,9 @@ delegates via `send_to_agent`.
    curl -fsSL https://raw.githubusercontent.com/buckster123/ApexOS/main/install.sh \
      | sudo APEXOS_MODE=headless APEXOS_TIER=pro bash
    ```
-   `headless` ⇒ `NO_UI=true` (no display installed); `pro` ⇒ bge-large embeddings. Then point its
-   backend at a local Ollama model:
+   `headless` ⇒ `NO_UI=true` (no display installed); `pro` ⇒ bge-small embeddings (every
+   embed-enabled tier uses bge-small — see "Add a new hardware tier"). Then point its backend at a
+   local Ollama model:
    ```bash
    curl -fsS -X POST "http://localhost:8787/api/backend?token=$AGENTD_TOKEN" \
      -H 'Content-Type: application/json' \
@@ -334,9 +346,9 @@ No second physical box; one node hot-swaps its own backend to a rented cloud GPU
    ```
 3. `vast_launch` finds the cheapest reliable EU-Nordic offer, creates the instance, tunnels
    `127.0.0.1:8000`, waits for the model, then emits `VastInstanceReady` — the Pi's backend
-   hot-swaps to `http://127.0.0.1:8000/v1` (`main.rs` :386). Every subsequent turn on the Pi (and
-   any peer routed to it) now runs on the rented GPU. `vast_status` shows cost/hr; `vast_destroy`
-   stops billing and reverts the backend.
+   hot-swaps to `http://127.0.0.1:8000/v1` (the `main` event listener). Every subsequent turn on
+   the Pi (and any peer routed to it) now runs on the rented GPU. `vast_status` shows cost/hr;
+   `vast_destroy` stops billing and reverts the backend.
 
 **Verification.** `GET /api/mesh/peers` lists the peer (Topology A); `GET /api/backend` shows the
 swapped `oai_base_url` (Topology B); `vast_status` reports `ready` with the instance. Watch
@@ -377,7 +389,7 @@ untrusted networks.
 `plugins.toml`, `peers.toml`) are individually `chown agentd` so self-evolution can write them
 (`install.sh` :724); `/etc/agentd` itself stays root-owned to protect the `600 root:root` env
 token. Because the dir is root-owned, `peers.toml` writes are *in-place*, not atomic temp+rename —
-the gateway's `PeerRegistry::save` uses temp+rename (`mesh.rs` :97), which **fails inside the
+the gateway's `PeerRegistry::save` (`mesh.rs`) uses temp+rename, which **fails inside the
 root-owned dir**; a concurrent reader could momentarily see a missing file. Single-writer in
 practice, but don't assume atomicity.
 
@@ -397,17 +409,23 @@ silently keep a GPU billing — always reconcile `vast_status` after a restart.
 
 ## Reference
 
-### Hardware tiers (`install.sh` :359, :692; CLAUDE.md)
+### Hardware tiers (`install.sh` — `RAM_MB` ladder + `EMBED_MODEL` case; CLAUDE.md)
 
-| Tier | RAM gate | `CEREBRO_EMBED_MODEL` | Cerebro RSS | LLM story |
+Cerebro RSS figures below are **approximate / qualitative** (order-of-magnitude, not measured
+in-code): `nano` is smallest (FTS5 index only, no embedder loaded); `micro`/`standard`/`pro` all
+load the same bge-small embedder, so their footprint is roughly equal. Every embed-enabled tier
+uses **bge-small** — `bge-large` is *not* used (cerebro rejected it → embeddings silently disabled;
+see "Add a new hardware tier").
+
+| Tier | RAM gate | `CEREBRO_EMBED_MODEL` | Cerebro RSS (approx.) | LLM story |
 |------|----------|-----------------------|-------------|-----------|
-| `nano` | `< 768 MB` | `""` (none) | ~23 MB, FTS5-only | API only |
-| `micro` | `< 2048 MB` | `BAAI/bge-small-en-v1.5` | ~275 MB | API or small local |
-| `standard` | `< 8192 MB` | `BAAI/bge-small-en-v1.5` | ~275 MB | Ollama 7-13B |
-| `pro` | `≥ 8192 MB` | `BAAI/bge-large-en-v1.5` | 500 MB+ | Ollama 30-70B (GPU) |
-| `titan` | (aspirational, arm64 DGX) | bge-large | 500 MB+ | 70B+ served to mesh |
+| `nano` | `< 768 MB` | `""` (none) | smallest — FTS5-only, no embedder | API only |
+| `micro` | `< 2048 MB` | `BAAI/bge-small-en-v1.5` | bge-small loaded (~hundreds of MB) | API or small local |
+| `standard` | `< 8192 MB` | `BAAI/bge-small-en-v1.5` | bge-small loaded (~hundreds of MB) | Ollama 7-13B |
+| `pro` | `≥ 8192 MB` | `BAAI/bge-small-en-v1.5` | bge-small loaded (~hundreds of MB) | Ollama 30-70B (GPU) |
+| `titan` | (aspirational, arm64 DGX) | bge-small | bge-small loaded (~hundreds of MB) | 70B+ served to mesh |
 
-### Deployment modes (`install.sh` :367, :430)
+### Deployment modes (`install.sh` — `MODE` detect + `NO_UI` gate)
 
 | Mode | Auto-detect | Installs `apexos-rs-ui`? | Interface | `SLINT_BACKEND` |
 |------|-------------|--------------------------|-----------|-----------------|
@@ -415,7 +433,7 @@ silently keep a GPU billing — always reconcile `vast_status` after a restart.
 | `headless` | non-Pi | no (`NO_UI=true`) | browser / PWA | — |
 | `desktop` | manual | no (`NO_UI=true`) | native window | `winit` |
 
-### Mesh REST API (`gateway/src/lib.rs` :135-153)
+### Mesh REST API (`gateway/src/lib.rs` — the `/api/mesh/*` + `/api/backend` + `/api/sessions/*` routes)
 
 | Method + path | Body / params | Effect |
 |---------------|---------------|--------|
@@ -436,7 +454,7 @@ silently keep a GPU billing — always reconcile `vast_status` after a restart.
 > `POST /api/sessions/{id}/message` with `{"message": …}` for cross-node injection. Local
 > `send_to_agent` (no `node`) is unaffected — it emits `AgentMessage` on the bus directly.
 
-### Mesh / deploy virtual tools (specs in `main.rs` :1473-1599; impl in `supervisor.rs`)
+### Mesh / deploy virtual tools (specs: the `*_spec` fns in `agentd/src/main.rs`; impl: `Supervisor::dispatch_tool` in `supervisor.rs`)
 
 | Tool | Required args | Optional args | Returns | Default policy |
 |------|---------------|---------------|---------|----------------|
@@ -448,7 +466,7 @@ silently keep a GPU billing — always reconcile `vast_status` after a restart.
 | `vast_destroy` | — | — | `{status:"destroyed", instance_id}` | Ask |
 | `vast_status` | — | — | `{status, phase?, instance?}` | Ask |
 
-### `peers.toml` schema (`mesh.rs` :29; `/etc/agentd/peers.toml`)
+### `peers.toml` schema (`PeerRecord` in `mesh.rs`; `/etc/agentd/peers.toml`)
 
 ```toml
 # ApexOS mesh peers — managed by agentd
@@ -459,7 +477,7 @@ role    = "full"      # full | sensor | thin   (default: full)
 status  = "online"    # free-form, default "online"
 ```
 
-### `recipes.toml` schema (`vast.rs` :7-41; `/etc/agentd/recipes.toml`, NOT auto-created)
+### `recipes.toml` schema (`RecipeFile`/`GpuTier`/`Recipe` in `vast.rs`; `/etc/agentd/recipes.toml`, NOT auto-created)
 
 | Section | Fields |
 |---------|--------|
@@ -467,7 +485,7 @@ status  = "online"    # free-form, default "online"
 | `[gpu_tiers.<key>]` | `vast_names` (`[String]`, → `gpu_name=` offer filter), `label`, `max_price` (string, dph ceiling), `min_disk_gb`, `vram_gb` |
 | `[[recipes]]` | `name` (launch handle), `label`, `gpu` (→ a `gpu_tiers` key), `model_repo`, `model_quant`, `ctx`, `parallel`, `kv_type`, `description` |
 
-### Vast events & phases (`vast.rs` :83; `main.rs` :386)
+### Vast events & phases (`VastPhase` in `vast.rs`; the `main` event listener in `agentd/src/main.rs`)
 
 | Event | When | Backend effect |
 |-------|------|----------------|
@@ -482,16 +500,16 @@ Phases (`VastPhase`): `idle` → `launching{phase}` → `ready` → `destroying`
 
 | Var | Default | Read at |
 |-----|---------|---------|
-| `APEX_NODE_ID` | `hostname` | `main.rs` :200 |
-| `MESH_DISCOVERY_INTERVAL` | `60` (s) | `main.rs` :1704 |
-| `MESH_SUBNET_GUARD` | on | `main.rs` :1707 |
-| `MESH_AUTO_BOOTSTRAP` | off | `main.rs` :1706 |
-| `PEERS_TOML` | `/etc/agentd/peers.toml` | `main.rs` :189, supervisor :644/:1554 |
-| `RECIPES_TOML` | `/etc/agentd/recipes.toml` | `vast.rs` :44 |
-| `VAST_API_KEY` | — (required for vast) | `vast.rs` :144 |
-| `VAST_DEFAULT_GEO` | `EU_NORDIC` | supervisor :888 |
-| `VAST_LOCAL_PORT` | `8000` | supervisor :964 |
-| `AGENTD_BIND` | `127.0.0.1:8787` | `main.rs` bind gate (non-loopback ⇒ token required) |
+| `APEX_NODE_ID` | `hostname` | `agentd/src/main.rs` (`main`) |
+| `MESH_DISCOVERY_INTERVAL` | `60` (s) | `spawn_discovery_loop` |
+| `MESH_SUBNET_GUARD` | on | `spawn_discovery_loop` |
+| `MESH_AUTO_BOOTSTRAP` | off | `spawn_discovery_loop` |
+| `PEERS_TOML` | `/etc/agentd/peers.toml` | `main`, `Supervisor::dispatch_tool` (`list_mesh_peers` arm), `find_peer` |
+| `RECIPES_TOML` | `/etc/agentd/recipes.toml` | `load_recipes` (`vast.rs`) |
+| `VAST_API_KEY` | — (required for vast) | `vastai` (`vast.rs`) |
+| `VAST_DEFAULT_GEO` | `EU_NORDIC` | `Supervisor::dispatch_tool` (`vast_launch` arm) |
+| `VAST_LOCAL_PORT` | `8000` | `Supervisor::dispatch_tool` (`vast_launch` arm) |
+| `AGENTD_BIND` | `127.0.0.1:8787` | `main` bind gate (non-loopback ⇒ token required) |
 
 ### Manual prerequisites (NOT installed by `install.sh`)
 

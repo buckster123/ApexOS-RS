@@ -41,8 +41,8 @@
 - [plugins/src/supervisor.rs](../../agentd/crates/plugins/src/supervisor.rs): Spawns plugins, registers tools into the flat global registry, gates each call through PolicyEngine, intercepts the virtual tools (propose_evolution/rollback_evolution/read_soul_md/send_to_agent/vast_*).
 - [plugins/src/policy.rs](../../agentd/crates/plugins/src/policy.rs): `check()` (:88) — yolo → exact key → `prefix.*` wildcard → unknown defaults to Ask; `workspace` rule canonicalizes the `path` arg inside `AGENTD_WORKSPACE`.
 - [agentd/src/main.rs](../../agentd/crates/agentd/src/main.rs): Agent router, evolution applier (apply_evolution / compute_undo), virtual-tool specs, backend hot-swap, mesh discovery loop.
-- [tools/crates/apexos-tools/src/tools.rs](../../tools/crates/apexos-tools/src/tools.rs): `list()` (:10) / `call()` (:302) / `tool_ok` / `tool_error` — the edit points for a new system tool.
-- [cerebro-mcp/src/dispatch.rs](../../cerebro/crates/cerebro-mcp/src/dispatch.rs): `route()` (:70) + `agent_scope()` (:929) — where a memory verb's behaviour lives.
+- [tools/crates/apexos-tools/src/tools.rs](../../tools/crates/apexos-tools/src/tools.rs): `list()` / `call()` / `tool_ok` / `tool_error` — the edit points for a new system tool (31 tools today).
+- [cerebro-mcp/src/dispatch.rs](../../cerebro/crates/cerebro-mcp/src/dispatch.rs): `route()` + `agent_scope()` — where a memory verb's behaviour lives.
 - [config/policy.toml](../../config/policy.toml): The default approval policy (`mode` + `[rules]`) written to `/etc/agentd/policy.toml` at install.
 - [config/plugins.toml](../../config/plugins.toml): The default `[[plugin]]` stanzas (cmd/args/restart/env).
 - [CLAUDE.md](../../CLAUDE.md): Project blueprint — locked decisions, build order, Pi gotchas, deploy workflow. (Protocol table is stale; guide 01 supersedes it.)

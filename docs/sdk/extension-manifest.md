@@ -46,13 +46,13 @@ ground-truthed; where this disagrees with `CLAUDE.md`, this is correct.
 
 | To add… | Edit | Schema / signature | Gate / notes |
 |---|---|---|---|
-| **A new memory tool** | `cerebro/crates/cerebro-mcp/src/tools.rs` + `cerebro/crates/cerebro-mcp/src/dispatch.rs` | `tools.rs`: add name to `TOOL_NAMES` (:840) + `"name" => json!({name,description,inputSchema})` arm in `tool_schema()` (:11). `dispatch.rs`: add `"name" => { let scope = agent_scope(args); /* call brain.* */ Ok(json!(...)) }` in `route()` (:70). Sig: `async fn route(name:&str, args:&Value, brain:Arc<CerebroCortex>) -> anyhow::Result<Value>`. | Both halves required (schema-only = visible no-op; route-only = invisible). New verb defaults to Ask under `suggest` unless added to `policy.toml`; allow-list **read-only** verbs only. Confined by the systemd sandbox (DB under `/var/lib/agentd/cerebro`). |
+| **A new memory tool** | `cerebro/crates/cerebro-mcp/src/tools.rs` + `cerebro/crates/cerebro-mcp/src/dispatch.rs` | `tools.rs`: add name to the `TOOL_NAMES` const + `"name" => json!({name,description,inputSchema})` arm in `tool_schema()`. `dispatch.rs`: add `"name" => { let scope = agent_scope(args); /* call brain.* */ Ok(json!(...)) }` in `route()`. Sig: `async fn route(name:&str, args:&Value, brain:Arc<CerebroCortex>) -> anyhow::Result<Value>`. | Both halves required (schema-only = visible no-op; route-only = invisible). New verb defaults to Ask under `suggest` unless added to `policy.toml`; allow-list **read-only** verbs only. Confined by the systemd sandbox (DB under `/var/lib/agentd/cerebro`). |
 
 ### UI — new desktop app/view (guide 05)
 
 | To add… | Edit | Schema / signature | Gate / notes |
 |---|---|---|---|
-| **A new app/view** | `ui-slint/src/ui/components/<name>_view.slint` (new) + `types.slint` (`AppKind` variant) + `components/app_window_frame.slint` (content arm) + `components/start_menu.slint` (launcher row) + `src/main.rs` (4 helper arms + data wiring) | New `export component MyAppView { in property <T> ...; callback do-thing(); }`; append `AppKind` variant; mirror ordinal in `kind_ordinal`/`kind_from_ordinal`/`kind_title`/`default_geom` (`main.rs:111-133`); `if root.kind == AppKind.x: MyAppView {...}` arm. **`AppKind` ordinal MUST agree with enum order.** | Almost always **zero agentd code**. Slint owns main thread (never `#[tokio::main]`); all UI mutation via `slint::invoke_from_event_loop`; lists are `Rc<VecModel<T>>` mutated on Slint thread only. `touch ui-slint/build.rs` to force `.slint` recompile. Rebuild + hot-swap (code commit, not a self-grant). |
+| **A new app/view** | `ui-slint/src/ui/components/<name>_view.slint` (new) + `types.slint` (`AppKind` variant) + `components/app_window_frame.slint` (content arm) + `components/start_menu.slint` (launcher row) + `src/main.rs` (4 helper arms + data wiring) | New `export component MyAppView { in property <T> ...; callback do-thing(); }`; append `AppKind` variant; mirror ordinal in `kind_ordinal`/`kind_from_ordinal`/`kind_title`/`default_geom` (all in `ui-slint/src/main.rs`); `if root.kind == AppKind.x: MyAppView {...}` arm. **`AppKind` ordinal MUST agree with enum order.** | Almost always **zero agentd code**. Slint owns main thread (never `#[tokio::main]`); all UI mutation via `slint::invoke_from_event_loop`; lists are `Rc<VecModel<T>>` mutated on Slint thread only. `touch ui-slint/build.rs` to force `.slint` recompile. Rebuild + hot-swap (code commit, not a self-grant). |
 | **Feed it from `/api` poll** | `ui-slint/src/main.rs` | `ui.on_<app>_refresh(move || rt_h.spawn(async move { /* http_client GET/POST */ invoke_from_event_loop(set_prop) }))`; add `AppKind::<X> => ui.invoke_<app>_refresh()` to `on_launch_app` (:1124). | Fetch is subject to agentd auth + policy. `/api/run`, `/api/soul` write, `/api/policy`, `/api/model`, `/api/power` are gated; read-only endpoints allowed. Shared `http_client` carries the bearer token (`main.rs:1227`). |
 | **Drive it from a WS event** | `ui-slint/src/main.rs` | Add a `match ev_type` arm in `dispatch_event` (:1686) keyed on the event's `type` string; mutate a `VecModel`/property inside `invoke_from_event_loop`. | UI only renders. Emitting the Event is an agentd concern (guide 01). Filter on the bare-number `session` field for multi-client. |
 | **Launcher / persona gating** | `ui-slint/src/ui/components/start_menu.slint` | Core: `MenuRow { glyph; label; clicked => { root.launch(<ord>); } }`. Deep-tech: wrap in `if Personas.show-tech-apps:` (`personas.slint:32`). | Pure presentation; no policy gate. |
@@ -168,16 +168,27 @@ error, aborts the call.
 
 ### apexos-tools — existing tool names (global; don't collide)
 
-`run_command read_file write_file list_dir create_dir delete_path http_fetch
-cpu_temp disk_usage memory_info uptime notify audio_analyze audio_trim_silence
-audio_normalize audio_peak_limit audio_trim audio_clean gpio_info gpio_read
-gpio_write gpio_pulse gpio_pwm gpio_servo display_face`
+31 tools, advertised by `list()` and dispatched by `call()` (both in
+`tools/crates/apexos-tools/src/tools.rs`):
+
+`run_command read_file write_file list_dir create_dir delete_path notes_list
+notes_read notes_append sketch_snapshot screenshot_mirror camera_capture
+http_fetch cpu_temp disk_usage memory_info uptime notify audio_analyze
+audio_trim_silence audio_normalize audio_peak_limit audio_trim audio_clean
+gpio_info gpio_read gpio_write gpio_pulse gpio_pwm gpio_servo display_face`
+
+`sketch_snapshot`/`screenshot_mirror`/`camera_capture` are the **vision** tools:
+each returns a `{"vision":{"path"|"b64"},"text"}` sentinel that the agent turn
+loop (`vision_rewrite` in `agentd/crates/agent/src/turn.rs`) converts to a
+`ContentBlock::Image` via `prepare_image`/`prepare_b64`
+(`agentd/crates/core/src/vision.rs`) — zero agentd schema changes.
 
 Confinement is honest: only `write_file`/`create_dir` use the `workspace` rule,
 only `delete_path` self-roots to `AGENTD_WORKSPACE`; every other tool is
 unconfined and the real boundary is the systemd sandbox. The `run_command`
 denylist is a bypassable heuristic, not security. `SupervisorCmd::CallTool`
-(`supervisor.rs:30`) dispatches **without** a policy check.
+(`dispatch_tool` in `agentd/crates/agentd/src/supervisor.rs`) dispatches
+**without** a policy check.
 
 ### Cerebro — core memory verbs (`name | required args | key optional | backing`)
 
@@ -202,10 +213,15 @@ guide 04 catalog). **Scoping:** `agent_id` set → `VisibilityScope::for_agent`
 from scope (scoped→Private, unscoped→Shared); the schema `visibility` arg is
 unread. Conventions: FORGE→`"FORGE"`, APEX→`"CLAUDE-APEX"`.
 
-**Stubs (advertised, NOT routed — return `not_yet_implemented`):**
-`cognitive_bootstrap`, `ingest_file`, `describe_image`, `search_vision`. Caveat:
-reinforcement is inert (recall doesn't bump activation) and spreading activation
-ignores scope — treat scope as a best-effort read filter, not hard isolation.
+**Stubs (advertised in `TOOL_NAMES` for surface parity, NOT routed —
+`route()` in `cerebro/crates/cerebro-mcp/src/dispatch.rs` returns
+"tool not implemented"):** `ingest_file`, `describe_image`, `search_vision`.
+`TOOL_NAMES` (`cerebro/crates/cerebro-mcp/src/tools.rs`) has 66 entries: 63
+functional + these 3 stubs. **`cognitive_bootstrap` is SHIPPED, not a stub** —
+it routes to the live-state priming assembler (`assemble_bootstrap` in
+`dispatch.rs`). Caveat: reinforcement is inert (recall doesn't bump activation)
+and spreading activation ignores scope — treat scope as a best-effort read
+filter, not hard isolation.
 
 ### Virtual tools (agentd-built-in, intercepted in `supervisor.rs` `dispatch_tool`)
 
@@ -230,9 +246,12 @@ ignores scope — treat scope as a best-effort read filter, not hard isolation.
 
 ### UI surface (`ui-slint`)
 
-- `AppKind` ordinals (`types.slint:13`, mirrored `main.rs:111-133`): `chat=0,
-  system=1, sensor=2, sessions=3, settings=4, terminal=5, council=6` (append
-  new variants).
+- `AppKind` ordinals (enum in `ui-slint/src/ui/types.slint`, mirrored by
+  `kind_ordinal`/`kind_from_ordinal` in `ui-slint/src/main.rs`): `chat=0,
+  system=1, sensor=2, sessions=3, settings=4, terminal=5, council=6,
+  event-log=7, mesh=8, inference=9, audio-editor=10, sonus=11, notes=12,
+  face=13, sketchpad=14, web=15, calculator=16, explorer=17` (append new
+  variants; the ordinal in the two `main.rs` arms MUST agree with enum order).
 - `WindowDesc{ id, kind:AppKind, title, x/y/w/h, minimized, maximized }`
   (`types.slint:52-62`); `WINDOWS` VecModel order == z-order.
 - Thread-local models (`main.rs:25-54`): `MESSAGES, SESSIONS, MODELS, TOASTS,
