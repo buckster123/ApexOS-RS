@@ -33,10 +33,20 @@ the model**, so the model can change without the agent forgetting who it is.
 
 | Substrate | Holds | Authoritative for | Survives reboot? |
 |-----------|-------|-------------------|------------------|
-| `soul.md` | identity, principles, embodiment | *who APEX is* | yes (file) |
+| `soul.md` | identity, principles | *who APEX is* | yes (file) |
+| **embodiment block** | live tier/senses/tools/mesh/uptime | *what body APEX inhabits now* | no — regenerated each boot |
 | **Cerebro** | episodes, facts, procedures, intentions, affect | *what APEX has lived & learned* | yes (db) |
 | **git** | code + commit log | *implementation truth* | yes (forever) |
 | **live system state** | sysstat, sensors, event log, running config | *what is true right now* | **no — ephemeral** |
+
+**Identity vs. embodiment.** `soul.md` is now pure *identity* — hardware-agnostic,
+portable across the mesh, evolvable at runtime. APEX's *body* (current tier, senses,
+the live tool registry, mesh peers, uptime) is a `## Current embodiment` block that
+agentd generates from actual node state (`build_embodiment` in `agentd/main.rs`,
+refreshed every 30s) and appends after `soul.md` when composing the system prompt.
+The split matters: a hardware/tool list baked into `soul.md` goes stale and once made
+APEX believe it couldn't call tools it actually had. The live block can't go stale.
+This is agentd-owned and **separate from CCBS** (cerebro-side cognitive priming).
 
 **The continuity contract.** Only `soul.md`, Cerebro, and git survive a reboot or a
 context reset. The working conversation does **not**. Therefore anything that must outlive
@@ -152,8 +162,8 @@ verbs (`cognitive_bootstrap`, `session_recall`, `check_inbox`, `list_intentions`
 
 | Piece | Status |
 |-------|--------|
-| Static `soul.md` injected as system prompt | ✓ (`agentd/main.rs` `load_soul` → engine system Arc) |
-| Embodiment self-model in `soul.md` | ✓ (already strong) |
+| Static `soul.md` (identity) injected as system prompt | ✓ (`agentd/main.rs` → engine system Arc) |
+| **Live embodiment block** appended after `soul.md` | ✓ `build_embodiment` in `agentd/main.rs` — node tier/senses/memory/mesh/uptime + the **live tool registry**, refreshed 30s; `TurnEngine` holds soul + embodiment separately (#36/#38) |
 | Boot orient instruction (now incl. `cognitive_bootstrap`) | ✓ soul.md Session-startup patched (`fa2eba8`) |
 | Cerebro memory types, episodes, `dream_run` | ✓ (in the cortex) |
 | **Sleep loop — `session_save` + `dream_run` mandate** | ✓ soul.md Session-shutdown section (`fa2eba8`, deployed) |
