@@ -1821,7 +1821,60 @@ async fn capture_png(ui_weak: slint::Weak<AppWindow>) -> Result<Vec<u8>, String>
     Ok(out.into_inner())
 }
 
+/// Point THIS process's fontconfig at a config that loads the system one and
+/// then rejects the color-bitmap emoji font, so font fallback lands on the
+/// monochrome `Noto Emoji` instead.
+///
+/// Why: femtovg is the only renderer we compile (Nano-first — Skia is too heavy
+/// for the tier ladder), and femtovg can't rasterize colour-bitmap/COLR glyphs.
+/// A char from "Noto Color Emoji" therefore renders as tofu. The bundled mono
+/// `Noto Emoji` (installed by install.sh / shipped in `deploy/fonts/`) is plain
+/// outlines femtovg *can* draw — but fontconfig prefers the colour font by
+/// default, so we drop it for our process only. Scoped via `FONTCONFIG_FILE`:
+/// the rest of the machine keeps colour emoji. Must run before the first font
+/// query (i.e. before `AppWindow::new()`). Best-effort — any failure leaves the
+/// default config in place (emoji stay tofu, nothing breaks). Respects an
+/// existing `FONTCONFIG_FILE` so a user override always wins.
+fn ensure_mono_emoji_fontconfig() {
+    if std::env::var_os("FONTCONFIG_FILE").is_some() {
+        return; // user/operator override — leave it alone
+    }
+    const CONF: &str = r#"<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <!-- Load the system config (all font dirs + rules)… -->
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <!-- …then drop the colour-bitmap emoji font: femtovg can't rasterize it, so
+       fallback lands on the monochrome Noto Emoji (outline) instead of tofu. -->
+  <selectfont>
+    <rejectfont>
+      <pattern>
+        <patelt name="family"><string>Noto Color Emoji</string></patelt>
+      </pattern>
+    </rejectfont>
+  </selectfont>
+</fontconfig>
+"#;
+    let dir = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
+        .map(|p| p.join("apexos-rs"));
+    let Some(dir) = dir else { return };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("fonts.conf");
+    if std::fs::write(&path, CONF).is_ok() {
+        std::env::set_var("FONTCONFIG_FILE", &path);
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Steer this process's emoji fallback to a monochrome font before any font
+    // is loaded (femtovg can't draw colour emoji). See the fn doc.
+    ensure_mono_emoji_fontconfig();
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
