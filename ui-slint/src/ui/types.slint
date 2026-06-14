@@ -88,6 +88,21 @@ export global FaceGl {
     in-out property <length> y;       // face-stage top,   window coords (logical px)
     in-out property <length> w;       // face-stage width
     in-out property <length> h;       // face-stage height
+
+    // ── Expression (slice 2) ────────────────────────────────────────────
+    // Mirrors FaceView's 2D state→feature derivations so the GL shader and the
+    // 2D fallback render from one source and can't drift. FaceView publishes
+    // these from the same sample Timer; Rust forwards them to shader uniforms.
+    in-out property <color>  accent;       // per-state head tint (carries the read)
+    in-out property <float>  eye-l;        // left-eye  openness 0..1 (incl. blink/wink)
+    in-out property <float>  eye-r;        // right-eye openness 0..1 (incl. blink/skeptical)
+    in-out property <float>  brow;         // symmetric brow raise (+up / −down)
+    in-out property <float>  brow-skew;    // L/R brow asymmetry (confused/skeptical)
+    in-out property <float>  mouth;        // mouth curve −1..1 (smile ↔ frown)
+    in-out property <float>  mouth-open;   // open-mouth amount 0..1 (0 = stroked curve)
+    in-out property <float>  gaze-x;       // gaze offset fraction (−left / +right)
+    in-out property <float>  gaze-y;       // gaze offset fraction (−up / +down)
+    in-out property <float>  intensity;    // expression strength 0..1
 }
 
 // ── Clock global (glowup G6.1) ──────────────────────────────────────────

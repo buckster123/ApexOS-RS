@@ -20,6 +20,22 @@
 use glow::HasContext;
 use std::ffi::CStr;
 
+/// One emote frame's worth of expression, mirrored from the `FaceGl` Slint
+/// global (which mirrors the 2D FaceView's state→feature derivations). Built by
+/// the notifier each frame and pushed to the shader as uniforms.
+#[derive(Clone, Copy, Default)]
+pub struct FaceExpr {
+    pub accent: [f32; 3], // head tint (linear 0..1)
+    pub eye_l: f32,       // left-eye  openness 0..1
+    pub eye_r: f32,       // right-eye openness 0..1
+    pub brow: f32,        // symmetric brow raise (+up / −down)
+    pub brow_skew: f32,   // L/R brow asymmetry
+    pub mouth: f32,       // mouth curve −1..1 (smile ↔ frown)
+    pub open: f32,        // open-mouth amount 0..1 (0 = stroked curve)
+    pub gaze: [f32; 2],   // gaze offset fraction (x: −left/+right, y: −up/+down)
+    pub intensity: f32,   // expression strength 0..1
+}
+
 pub struct FaceGl {
     gl: glow::Context,
     program: glow::Program,
@@ -28,6 +44,12 @@ pub struct FaceGl {
     u_time: Option<glow::UniformLocation>,
     u_res: Option<glow::UniformLocation>,
     u_origin: Option<glow::UniformLocation>,
+    u_accent: Option<glow::UniformLocation>,
+    u_eyes: Option<glow::UniformLocation>,
+    u_brow: Option<glow::UniformLocation>,
+    u_mouth: Option<glow::UniformLocation>,
+    u_gaze: Option<glow::UniformLocation>,
+    u_intensity: Option<glow::UniformLocation>,
 }
 
 const VERT: &str = r#"#version 100
@@ -35,47 +57,87 @@ attribute vec2 pos;
 void main() { gl_Position = vec4(pos, 0.0, 1.0); }
 "#;
 
-// Lit sphere + blinking eyes + a small smile. Cyan APEX accent. Alpha 0 outside
-// the head so it floats over the UI. y is bottom-up (gl_FragCoord).
+// Lit hemisphere tinted by the emote accent, with ink eyes / brows / mouth
+// driven entirely by the expression uniforms (mirrored from the 2D FaceView).
+// y is bottom-up (gl_FragCoord, localised to the face rect via u_origin).
 const FRAG: &str = r#"#version 100
 precision mediump float;
 uniform float u_time;
-uniform vec2  u_res;     // face-rect size in physical px
-uniform vec2  u_origin;  // face-rect bottom-left in physical px (gl_FragCoord frame)
+uniform vec2  u_res;       // face-rect size in physical px
+uniform vec2  u_origin;    // face-rect bottom-left in physical px (gl_FragCoord frame)
+uniform vec3  u_accent;    // head tint
+uniform vec2  u_eyes;      // (left, right) eye openness 0..1
+uniform vec2  u_brow;      // (raise, skew)
+uniform vec2  u_mouth;     // (curve −1..1, open 0..1)
+uniform vec2  u_gaze;      // gaze offset fraction
+uniform float u_intensity; // expression strength 0..1
+
+// Distance from p to segment a—b.
+float segd(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a, ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
 void main() {
-    // gl_FragCoord is window-absolute even with a viewport set, so localise it to
-    // the face rect before normalising — keeps the face centred in its window.
     vec2 local = gl_FragCoord.xy - u_origin;
     vec2 uv = (local - 0.5 * u_res) / min(u_res.x, u_res.y);
-    float r = 0.32;
+
+    float r = 0.34;
     float d = length(uv);
-    if (d > r) { gl_FragColor = vec4(0.0); return; }
+    if (d > r + 0.03) { gl_FragColor = vec4(0.0); return; }
 
-    // Fake hemisphere normal for simple diffuse + rim lighting.
+    // Hemisphere normal → diffuse + rim, tinted by the accent.
     float z = sqrt(max(0.0, r * r - d * d));
-    vec3 n = normalize(vec3(uv, z));
-    vec3 lightDir = normalize(vec3(0.4, 0.55, 0.8));
-    float diff = clamp(dot(n, lightDir), 0.0, 1.0);
-    vec3 base = vec3(0.0, 0.83, 1.0);
-    vec3 col = base * (0.22 + 0.78 * diff);
-    col += pow(1.0 - z / r, 3.0) * 0.35;          // rim glow
+    vec3  n = normalize(vec3(uv, max(z, 0.001)));
+    float diff = clamp(dot(n, normalize(vec3(0.35, 0.5, 0.8))), 0.0, 1.0);
+    vec3  col = u_accent * (0.25 + 0.75 * diff);
+    col += pow(1.0 - clamp(z / r, 0.0, 1.0), 3.0) * 0.30;   // rim glow
 
-    vec3 ink = vec3(0.02, 0.05, 0.08);
+    vec3  ink = vec3(0.04, 0.05, 0.07);
+    vec2  g   = u_gaze;
 
-    // Eyes — squash vertically on a blink every ~3s.
-    float blink = step(2.75, mod(u_time, 3.0));
-    float eyeH = mix(1.0, 0.12, blink);
-    float le = length(vec2((uv.x + 0.11),        (uv.y - 0.06) / eyeH));
-    float re = length(vec2((uv.x - 0.11),        (uv.y - 0.06) / eyeH));
-    float eye = min(le, re);
-    col = mix(ink, col, smoothstep(0.040, 0.052, eye));
+    // Eyes — ellipses whose vertical openness comes from u_eyes; gaze shifts them.
+    vec2  leC = vec2(-0.12 + g.x, 0.07 + g.y);
+    vec2  reC = vec2( 0.12 + g.x, 0.07 + g.y);
+    float ew  = 0.052;
+    float lh  = max(0.05, u_eyes.x) * 0.085;
+    float rh  = max(0.05, u_eyes.y) * 0.085;
+    float eye = min(length((uv - leC) / vec2(ew, lh)),
+                    length((uv - reC) / vec2(ew, rh)));
+    col = mix(ink, col, smoothstep(0.92, 1.08, eye));
 
-    // Smile — a shallow upward parabola.
-    float curve = uv.y + 0.12 - 0.45 * uv.x * uv.x;
-    float mouth = smoothstep(0.016, 0.0, abs(curve)) * step(abs(uv.x), 0.14);
-    col = mix(col, ink, mouth);
+    // Brows — short ink bars above each eye; raise + skew scaled by intensity.
+    float lDy = (u_brow.x + u_brow.y) * u_intensity * 0.085;
+    float rDy = (u_brow.x - u_brow.y) * u_intensity * 0.085;
+    vec2  lb  = vec2(-0.12 + g.x, 0.205 + lDy + g.y);
+    vec2  rb  = vec2( 0.12 + g.x, 0.205 + rDy + g.y);
+    float bw  = 0.072;
+    float bd  = min(segd(uv, lb - vec2(bw, 0.0), lb + vec2(bw, 0.0)),
+                    segd(uv, rb - vec2(bw, 0.0), rb + vec2(bw, 0.0)));
+    col = mix(ink, col, smoothstep(0.016, 0.026, bd));
 
-    gl_FragColor = vec4(col, 1.0);
+    // Mouth — filled maw when open, else a stroked quadratic (smile ↔ frown).
+    vec2  mc = vec2(g.x * 0.5, -0.15 + g.y);
+    if (u_mouth.y > 0.02) {
+        float mw = 0.13;
+        float mh = max(0.04, u_mouth.y) * 0.15;
+        float mo = length((uv - mc) / vec2(mw, mh));
+        col = mix(ink, col, smoothstep(0.92, 1.08, mo));
+    } else {
+        float halfW = 0.16;
+        // y(x): centre dips for a smile (curve>0), arcs up for a frown (<0).
+        float yc = mc.y - u_mouth.x * 0.14 * (1.0 - pow(uv.x / halfW, 2.0));
+        float md = abs(uv.y - yc);
+        float line = smoothstep(0.024, 0.012, md) * step(abs(uv.x - mc.x), halfW);
+        col = mix(col, ink, line);
+    }
+
+    // Soft accent rim-light pulse keeps the face feeling alive between emotes.
+    col += u_accent * 0.04 * (0.5 + 0.5 * sin(u_time * 1.4)) * (1.0 - diff);
+
+    float headMask = smoothstep(r + 0.012, r - 0.012, d);
+    gl_FragColor = vec4(col, headMask);
 }
 "#;
 
@@ -125,8 +187,17 @@ impl FaceGl {
             let u_time = gl.get_uniform_location(program, "u_time");
             let u_res = gl.get_uniform_location(program, "u_res");
             let u_origin = gl.get_uniform_location(program, "u_origin");
+            let u_accent = gl.get_uniform_location(program, "u_accent");
+            let u_eyes = gl.get_uniform_location(program, "u_eyes");
+            let u_brow = gl.get_uniform_location(program, "u_brow");
+            let u_mouth = gl.get_uniform_location(program, "u_mouth");
+            let u_gaze = gl.get_uniform_location(program, "u_gaze");
+            let u_intensity = gl.get_uniform_location(program, "u_intensity");
 
-            Ok(Self { gl, program, vao, vbo, u_time, u_res, u_origin })
+            Ok(Self {
+                gl, program, vao, vbo, u_time, u_res, u_origin,
+                u_accent, u_eyes, u_brow, u_mouth, u_gaze, u_intensity,
+            })
         }
     }
 
@@ -139,7 +210,17 @@ impl FaceGl {
     /// = face-rect top-left in window coords (Y-down, as Slint reports); `fw/fh`
     /// = face-rect size. We flip Y here for GL's bottom-left origin.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&self, time: f32, win_w: f32, win_h: f32, fx: f32, fy: f32, fw: f32, fh: f32) {
+    pub fn draw(
+        &self,
+        time: f32,
+        win_w: f32,
+        win_h: f32,
+        fx: f32,
+        fy: f32,
+        fw: f32,
+        fh: f32,
+        expr: &FaceExpr,
+    ) {
         if fw <= 0.0 || fh <= 0.0 {
             return;
         }
@@ -169,6 +250,25 @@ impl FaceGl {
             }
             if let Some(u) = self.u_origin.as_ref() {
                 self.gl.uniform_2_f32(Some(u), fx, sy);
+            }
+            // Expression uniforms (mirrored from the 2D FaceView via FaceGl).
+            if let Some(u) = self.u_accent.as_ref() {
+                self.gl.uniform_3_f32(Some(u), expr.accent[0], expr.accent[1], expr.accent[2]);
+            }
+            if let Some(u) = self.u_eyes.as_ref() {
+                self.gl.uniform_2_f32(Some(u), expr.eye_l, expr.eye_r);
+            }
+            if let Some(u) = self.u_brow.as_ref() {
+                self.gl.uniform_2_f32(Some(u), expr.brow, expr.brow_skew);
+            }
+            if let Some(u) = self.u_mouth.as_ref() {
+                self.gl.uniform_2_f32(Some(u), expr.mouth, expr.open);
+            }
+            if let Some(u) = self.u_gaze.as_ref() {
+                self.gl.uniform_2_f32(Some(u), expr.gaze[0], expr.gaze[1]);
+            }
+            if let Some(u) = self.u_intensity.as_ref() {
+                self.gl.uniform_1_f32(Some(u), expr.intensity);
             }
             self.gl.bind_vertex_array(Some(self.vao));
             self.gl.draw_arrays(glow::TRIANGLES, 0, 3);
