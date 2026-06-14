@@ -55,8 +55,8 @@ nodes then reach that model by being routed at the renting node (`send_to_agent 
 
 | Thing | Where |
 |-------|-------|
-| Peer registry type, `peers.toml` (de)serialize, avahi line parser | `agentd/crates/gateway/src/mesh.rs` — `PeerRegistry` :47, `PeerRecord` :29, `PeerRole` :7, `save()` :89, `parse_avahi_output` :105 |
-| Mesh REST routes | `agentd/crates/gateway/src/lib.rs` — routes :135-153; `mesh_nodes_handler` :1453, `mesh_peers_get/post/delete` :1489-1545, `session_message_handler` :712, `active_sessions_handler` :693 |
+| Peer registry type, `peers.toml` (de)serialize, avahi line parser, pairing-code state | `agentd/crates/gateway/src/mesh.rs` — `PeerRegistry` :47, `PeerRecord` (incl. `token`) :29, `PeerRole` :7, `save()` (0600 + EPERM fallback) :89, `parse_avahi_output` (IPv4-only) :105, `Pairing`/`gen_pair_code` |
+| Mesh REST routes | `agentd/crates/gateway/src/lib.rs` — `mesh_nodes_handler`, `mesh_peers_get` (redacts token → `has_token`)`/post` (accepts `token`)`/delete`, **pairing**: `pair_start`/`pair_status`/`pair_redeem` (gated) + `pair_claim` (ungated, code-gated), `session_message_handler`, `active_sessions_handler` |
 | Discovery loop (mDNS poll, subnet guard, auto-bootstrap) | `agentd/crates/agentd/src/main.rs` — `spawn_discovery_loop` :1699, `local_subnet_prefix` :1686, started :409 |
 | Cross-node `send_to_agent`, `list_mesh_peers`, `bootstrap_node` virtual tools | `agentd/crates/plugins/src/supervisor.rs` — `send_to_agent` :557, `list_mesh_peers` :640, `bootstrap_node` :658, `find_peer` (ws_url + a2a token) :1548 |
 | Tool specs (schemas shown to the LLM) | `agentd/crates/agentd/src/main.rs` — `send_to_agent_spec` :1473, `list_mesh_peers_spec` :1502, `bootstrap_node_spec` :1515, `vast_*_spec` :1551-1599; registered in `gather_tools` :1194 |
@@ -143,24 +143,35 @@ Two ways: **manual** (you provision the box yourself) or **agent-driven** (`boot
    node both advertises `_apexos._tcp` and can `avahi-browse`. To wire an *already-deployed* node
    that predates this, just `apexos-update` it (re-runs `install.sh`), or drop the file by hand:
    `sudo install -D -m 644 deploy/avahi/apexos-rs.service /etc/avahi/services/apexos-rs.service && sudo systemctl reload avahi-daemon`.
-3. **Register the peer** on the node that will route to it. Either let discovery surface it (watch
-   for `[mesh] new peer discovered` and a `PeerSeen` event) and then commit it, or POST directly:
-   ```bash
-   curl -fsS -X POST "http://NODE_A:8787/api/mesh/peers?token=$AGENTD_TOKEN" \
-     -H 'Content-Type: application/json' \
-     -d '{"node_id":"apex-garage","ws_url":"ws://192.168.0.201:8787","role":"full"}'
-   ```
-   This writes a `[[peer]]` block into `/etc/agentd/peers.toml` (`PeerRegistry::add` → `save`,
-   `mesh.rs` :67/:89) and emits `PeerRegistered`.
-4. **Route to it.** From an agent on NODE_A:
+3. **Open the LAN bind on every node you'll route to.** agentd defaults to `127.0.0.1:8787`
+   (loopback) — discovery (mDNS/UDP) still works, which *masks* the gap, but cross-node delivery
+   POSTs get a connection error. Set `AGENTD_BIND=0.0.0.0:8787` in `/etc/agentd/env` + restart.
+   The per-peer token (next) is exactly what makes that non-loopback bind safe (F036).
+4. **Register the peer — pick one:**
+   - **Pairing code (recommended; kiosk-friendly, no external device).** On the *peer's* Mesh app
+     tap **PAIR** (`POST /api/mesh/pair/start`) → it shows a single-use **6-digit code** (5-min
+     expiry, 5-guess lockout, in-memory only). On *this* node tap **+ ADD** on the discovered peer
+     → enter the code → **PAIR** (`POST /api/mesh/pair/redeem`). agentd claims it
+     (`POST peer/api/mesh/pair/claim`, the one ungated route — gated by the code itself) and **both
+     nodes store each other with tokens in one shot**. No token typing.
+   - **Manual token paste / POST.** If you already hold the peer's `AGENTD_TOKEN`, paste it in the
+     ADD dialog or POST directly (cross-node a2a is token-gated, so the token is required):
+     ```bash
+     curl -fsS -X POST "http://NODE_A:8787/api/mesh/peers?token=$AGENTD_TOKEN" \
+       -H 'Content-Type: application/json' \
+       -d '{"node_id":"apex-garage","ws_url":"ws://192.168.0.201:8787","role":"full","token":"<peer AGENTD_TOKEN>"}'
+     ```
+     Writes a `[[peer]]` block into `/etc/agentd/peers.toml` (now **0600** — it holds the token;
+     the token is **redacted** to a `has_token` bool in the `GET /api/mesh/peers` JSON) and emits
+     `PeerRegistered`.
+5. **Route to it.** From an agent on NODE_A:
    ```json
    {"tool":"send_to_agent","args":{"node":"apex-garage","session_id":0,"message":"recall today's IAQ trend"}}
    ```
-   `find_peer_ws_url("apex-garage")` (supervisor :1548) reads `peers.toml`, converts
-   `ws://…` → `http://…`, and POSTs to `http://192.168.0.201:8787/api/sessions/0/message`. Session
-   `0` is the remote node's root session. Fire-and-forget — no result comes back.
-   **Caveat:** the field-name mismatch above means this POST currently lands a `missing message`
-   error (reported as a false `sent`); until fixed, do the POST yourself with `{"message": …}`.
+   `find_peer("apex-garage")` (supervisor) reads `peers.toml` (ws_url **+ token**), converts
+   `ws://…` → `http://…`, and POSTs (reqwest, `Authorization: Bearer <peer token>`) to
+   `http://192.168.0.201:8787/api/sessions/0/message`. Session `0` is the remote node's root
+   session. Fire-and-forget — no result comes back.
 
 ### Agent-driven (`bootstrap_node`)
 
