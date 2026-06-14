@@ -1,0 +1,85 @@
+import { Palette } from "../palette.slint";
+import { ImageItem } from "../types.slint";
+
+// Workspace image picker (🖼) — compact panel listing images under the workspace
+// (newest first). Picking one emits pick(path, name); the composer stages it and
+// sends it with the next message. Seed of a fuller workspace file-explorer.
+export component ImagePicker inherits Rectangle {
+    in property <[ImageItem]> images;
+    callback pick(string, string);   // path, name
+    callback refresh();
+
+    width: 300px;
+    height: 360px;
+    border-radius: Palette.radius-lg;
+    background: Palette.surface;
+    border-width: 1px;
+    border-color: Palette.border-hi;
+    drop-shadow-blur: 40px;
+    drop-shadow-color: #000000aa;
+    drop-shadow-offset-y: 8px;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            Text {
+                text: "ATTACH IMAGE";
+                color: Palette.text-dim;
+                font-size: 9px;
+                letter-spacing: 2px;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            refresh-btn := Rectangle {
+                width: 22px;
+                height: 18px;
+                border-radius: Palette.radius;
+                background: rb-area.has-hover ? Palette.surface-hi : transparent;
+                Text {
+                    text: "⟳";
+                    color: Palette.text-dim;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                rb-area := TouchArea { clicked => { root.refresh(); } }
+            }
+        }
+
+        if root.images.length == 0: Text {
+            text: "No images in the workspace yet — take a screenshot or draw a sketch.";
+            color: Palette.text-dim;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+
+        Flickable {
+            vertical-stretch: 1;
+            viewport-height: list.preferred-height;
+            list := VerticalLayout {
+                spacing: 4px;
+                for img in root.images: Rectangle {
+                    height: 32px;
+                    border-radius: Palette.radius;
+                    background: row-area.has-hover ? Palette.surface-hi : Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        Text {
+                            text: "🖼  " + img.name;
+                            color: Palette.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    row-area := TouchArea { clicked => { root.pick(img.path, img.name); } }
+                }
+            }
+        }
+    }
+}

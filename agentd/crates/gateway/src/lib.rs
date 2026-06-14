@@ -152,6 +152,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/events/recent",      get(events_recent_handler))
         .route("/api/sessions/{id}/message", post(session_message_handler))
         .route("/api/sessions/{id}/image",   post(session_image_handler))
+        .route("/api/workspace/images",      get(workspace_images_handler))
         .route("/api/run",                post(run_command_handler))
         .route("/api/snapshot",           get(snapshot_handler))
         .route("/api/sonus/files",        get(sonus_files_handler))
@@ -2227,6 +2228,55 @@ async fn audio_files_handler() -> impl IntoResponse {
     });
 
     Json(serde_json::json!({ "files": files }))
+}
+
+/// GET /api/workspace/images — list image files under the workspace for the
+/// native UI's attach picker (the seed of a workspace file-explorer). Scans the
+/// workspace root and the image-bearing subdirs (screenshots/, sketches/,
+/// uploads/, images/), newest first. Paths are workspace-relative so they round-
+/// trip cleanly through the `user_prompt` `images:[{path}]` (workspace-confined).
+async fn workspace_images_handler() -> impl IntoResponse {
+    let ws = std::env::var("AGENTD_WORKSPACE")
+        .ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    let ws_path = std::path::Path::new(&ws);
+    let exts = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+    let subdirs = ["", "screenshots", "sketches", "uploads", "images"];
+    let mut images: Vec<serde_json::Value> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for sub in subdirs {
+        let dir = if sub.is_empty() { ws_path.to_path_buf() } else { ws_path.join(sub) };
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let p = entry.path();
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            if !exts.contains(&ext.as_str()) { continue; }
+            let abs = p.to_string_lossy().to_string();
+            if !seen.insert(abs.clone()) { continue; }
+            // Workspace-relative path (falls back to absolute if not under ws).
+            let rel = p.strip_prefix(ws_path).map(|r| r.to_string_lossy().to_string())
+                .unwrap_or_else(|_| abs.clone());
+            let meta = entry.metadata().await.ok();
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let modified = meta.as_ref().and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()).unwrap_or(0);
+            images.push(serde_json::json!({
+                "path": rel,
+                "name": p.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                "size": size,
+                "modified": modified,
+            }));
+        }
+    }
+
+    // Newest first — most useful for "the screenshot I just took".
+    images.sort_by(|a, b| b["modified"].as_u64().unwrap_or(0).cmp(&a["modified"].as_u64().unwrap_or(0)));
+    Json(serde_json::json!({ "images": images }))
 }
 
 #[derive(Deserialize)]
