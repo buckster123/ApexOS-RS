@@ -73,6 +73,23 @@ export global AgentBridge {
     in property <int> chat-scroll-tick: 0;
 }
 
+// ── FaceGl global (Phase-2 GL face) ─────────────────────────────────────
+// Bridges the FaceView's live on-window rect to Rust's rendering-notifier GL
+// pass, so the shader face can be scissored to the (movable, resizable) face
+// window instead of painting the whole surface. FaceView writes its face-stage
+// absolute-position + size here (logical px, window coords) from a sampling
+// Timer; Rust reads them in the AfterRendering notifier, converts to
+// physical px (× scale-factor, Y-flipped for GL's bottom-left origin) and sets
+// glViewport + glScissor. "Is the face window open?" gating stays in Rust (it
+// owns the windows model) — Slint has no element-destroyed hook to clear this.
+export global FaceGl {
+    in-out property <bool>   active;  // Rust sets true only on the GL face path
+    in-out property <length> x;       // face-stage left,  window coords (logical px)
+    in-out property <length> y;       // face-stage top,   window coords (logical px)
+    in-out property <length> w;       // face-stage width
+    in-out property <length> h;       // face-stage height
+}
+
 // ── Clock global (glowup G6.1) ──────────────────────────────────────────
 // A Rust timer (chrono Local) ticks `time`/`date` every second on the Slint
 // thread. Drives the taskbar tray clock and gives the desktop a temporal

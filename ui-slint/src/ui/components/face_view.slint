@@ -1,4 +1,5 @@
 import { Palette } from "../palette.slint";
+import { FaceGl } from "../types.slint";
 
 // ── FaceView (😊) ───────────────────────────────────────────────────────────
 //
@@ -144,6 +145,26 @@ export component FaceView {
             vertical-stretch: 1;
             background: Palette.bg;
             clip: true;
+
+            // Phase-2 GL face: publish our live on-window rect so Rust's
+            // rendering-notifier GL pass can scissor the shader to exactly this
+            // stage (the window moves/resizes; the GL face tracks it). Sampled
+            // from a Timer rather than `changed` handlers: reading the
+            // layout-coupled absolute-position inside a property-change callback
+            // re-enters the layout pass ("Recursion detected"); a Timer fires in
+            // event-loop context, between frames, where the read is safe. Gated
+            // on FaceGl.active (Rust sets it only on the GL path) so the 2D
+            // fallback face on Nano pays nothing.
+            Timer {
+                interval: 32ms;          // ~30fps, in step with the GL redraw
+                running: FaceGl.active;
+                triggered => {
+                    FaceGl.x = stage.absolute-position.x;
+                    FaceGl.y = stage.absolute-position.y;
+                    FaceGl.w = stage.width;
+                    FaceGl.h = stage.height;
+                }
+            }
 
             // Head diameter from the smaller stage axis.
             property <length> hd: min(self.width, self.height) - 56px;

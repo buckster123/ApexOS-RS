@@ -1,11 +1,15 @@
-// ── Phase-2 face SPIKE — raw GL under Slint's rendering notifier ─────────────
+// ── Phase-2 face — raw GL under Slint's rendering notifier ───────────────────
 //
-// Proves a custom GLSL face can render inside the existing ui-slint window via
+// Renders a custom GLSL face inside the existing ui-slint window via
 // `Window::set_rendering_notifier` + femtovg's `GraphicsAPI::NativeOpenGL`,
-// sharing the same GL context femtovg draws with. This is the integration test
-// for Path A (in-Slint GL underlay) before we sculpt the real raymarched,
-// emote-driven face. THROWAWAY: a blinking lit cyan sphere, drawn as an overlay
-// (after Slint) with alpha so the rest of the UI shows around it.
+// sharing the same GL context femtovg draws with. This is Path A (in-Slint GL
+// underlay) toward the real raymarched, emote-driven face.
+//
+// Slice 1 (scissor-to-window): the GL pass is confined to the FaceView's live
+// on-window rect (glViewport + glScissor), so the face renders *inside the face
+// window* and tracks it as it moves/resizes — not floating over the whole UI.
+// It clears its rect to the face bg first, hiding the 2D fallback face beneath.
+// Still a blinking lit cyan sphere; emote uniforms + SDF sculpting come next.
 //
 // Gated by APEX_FACE_GL=1 in main.rs — dormant (zero cost) otherwise.
 //
@@ -23,6 +27,7 @@ pub struct FaceGl {
     vbo: glow::Buffer,
     u_time: Option<glow::UniformLocation>,
     u_res: Option<glow::UniformLocation>,
+    u_origin: Option<glow::UniformLocation>,
 }
 
 const VERT: &str = r#"#version 100
@@ -35,9 +40,13 @@ void main() { gl_Position = vec4(pos, 0.0, 1.0); }
 const FRAG: &str = r#"#version 100
 precision mediump float;
 uniform float u_time;
-uniform vec2  u_res;
+uniform vec2  u_res;     // face-rect size in physical px
+uniform vec2  u_origin;  // face-rect bottom-left in physical px (gl_FragCoord frame)
 void main() {
-    vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / min(u_res.x, u_res.y);
+    // gl_FragCoord is window-absolute even with a viewport set, so localise it to
+    // the face rect before normalising — keeps the face centred in its window.
+    vec2 local = gl_FragCoord.xy - u_origin;
+    vec2 uv = (local - 0.5 * u_res) / min(u_res.x, u_res.y);
     float r = 0.32;
     float d = length(uv);
     if (d > r) { gl_FragColor = vec4(0.0); return; }
@@ -115,18 +124,39 @@ impl FaceGl {
 
             let u_time = gl.get_uniform_location(program, "u_time");
             let u_res = gl.get_uniform_location(program, "u_res");
+            let u_origin = gl.get_uniform_location(program, "u_origin");
 
-            Ok(Self { gl, program, vao, vbo, u_time, u_res })
+            Ok(Self { gl, program, vao, vbo, u_time, u_res, u_origin })
         }
     }
 
-    /// Draw the face as an overlay. Called from the AfterRendering notifier, so
-    /// femtovg has already drawn this frame; we blend on top, then it's swapped.
-    pub fn draw(&self, time: f32, width: f32, height: f32) {
-        if width <= 0.0 || height <= 0.0 {
+    /// Draw the face confined to the face window's rect. Called from the
+    /// AfterRendering notifier (femtovg has already drawn this frame), so we
+    /// scissor to the face rect, clear it, and blend the face on top — then
+    /// restore GL state so femtovg's next frame is unaffected.
+    ///
+    /// All args are **physical** px. `win_w/win_h` = full framebuffer; `fx/fy`
+    /// = face-rect top-left in window coords (Y-down, as Slint reports); `fw/fh`
+    /// = face-rect size. We flip Y here for GL's bottom-left origin.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(&self, time: f32, win_w: f32, win_h: f32, fx: f32, fy: f32, fw: f32, fh: f32) {
+        if fw <= 0.0 || fh <= 0.0 {
             return;
         }
+        // GL's origin is bottom-left; Slint's fy is top-down.
+        let sy = win_h - (fy + fh);
+        let (ix, iy, iw, ih) = (fx as i32, sy as i32, fw as i32, fh as i32);
         unsafe {
+            // Confine everything below to the face rect.
+            self.gl.viewport(ix, iy, iw, ih);
+            self.gl.enable(glow::SCISSOR_TEST);
+            self.gl.scissor(ix, iy, iw, ih);
+
+            // Opaque face background — hides the 2D fallback face femtovg drew
+            // underneath, so we see one face, not two overlaid. (~Palette.bg.)
+            self.gl.clear_color(0.051, 0.059, 0.094, 1.0);
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+
             self.gl.disable(glow::DEPTH_TEST);
             self.gl.enable(glow::BLEND);
             self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
@@ -135,12 +165,19 @@ impl FaceGl {
                 self.gl.uniform_1_f32(Some(u), time);
             }
             if let Some(u) = self.u_res.as_ref() {
-                self.gl.uniform_2_f32(Some(u), width, height);
+                self.gl.uniform_2_f32(Some(u), fw, fh);
+            }
+            if let Some(u) = self.u_origin.as_ref() {
+                self.gl.uniform_2_f32(Some(u), fx, sy);
             }
             self.gl.bind_vertex_array(Some(self.vao));
             self.gl.draw_arrays(glow::TRIANGLES, 0, 3);
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
+
+            // Restore full-frame state so the next femtovg frame isn't clipped.
+            self.gl.disable(glow::SCISSOR_TEST);
+            self.gl.viewport(0, 0, win_w as i32, win_h as i32);
         }
     }
 }
