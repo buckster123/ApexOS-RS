@@ -622,6 +622,20 @@ else
   warn "avahi-daemon unavailable — this node won't appear on the mesh"
 fi
 
+# Monochrome emoji font for the native UI (📊 ☺ ツ render; the smiley/pictograph
+# set too). ui-slint renders with femtovg, which can't rasterize colour-bitmap
+# emoji fonts (outline glyphs only) — so we ship the OFL monochrome "Noto Emoji"
+# and ui-slint rejects the colour font for its own process (see
+# ensure_mono_emoji_fontconfig). Installed wherever fontconfig is present (kiosk +
+# desktop); a bare headless node has nothing to render, so the skip is harmless.
+if command -v fc-cache >/dev/null 2>&1; then
+  install -d /usr/local/share/fonts/apexos-rs
+  install -m 644 "$REPO_DIR/deploy/fonts/NotoEmoji-mono.ttf" \
+    /usr/local/share/fonts/apexos-rs/NotoEmoji-mono.ttf
+  fc-cache -f /usr/local/share/fonts/apexos-rs >/dev/null 2>&1 || true
+  ok "Monochrome emoji font installed (native UI)"
+fi
+
 # ── Rust toolchain ─────────────────────────────────────────────────────────────
 hdr "Rust toolchain"
 
