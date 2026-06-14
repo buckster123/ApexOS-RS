@@ -1,0 +1,156 @@
+// ── Phase-2 face SPIKE — raw GL under Slint's rendering notifier ─────────────
+//
+// Proves a custom GLSL face can render inside the existing ui-slint window via
+// `Window::set_rendering_notifier` + femtovg's `GraphicsAPI::NativeOpenGL`,
+// sharing the same GL context femtovg draws with. This is the integration test
+// for Path A (in-Slint GL underlay) before we sculpt the real raymarched,
+// emote-driven face. THROWAWAY: a blinking lit cyan sphere, drawn as an overlay
+// (after Slint) with alpha so the rest of the UI shows around it.
+//
+// Gated by APEX_FACE_GL=1 in main.rs — dormant (zero cost) otherwise.
+//
+// GLSL ES 1.00 (`#version 100`) for portability: native on the Pi's V3D GLES and
+// accepted by desktop GL drivers. No depth, alpha blend, one VAO + fullscreen
+// triangle. Follows Slint's official `opengl_underlay` example shape.
+
+use glow::HasContext;
+use std::ffi::CStr;
+
+pub struct FaceGl {
+    gl: glow::Context,
+    program: glow::Program,
+    vao: glow::VertexArray,
+    vbo: glow::Buffer,
+    u_time: Option<glow::UniformLocation>,
+    u_res: Option<glow::UniformLocation>,
+}
+
+const VERT: &str = r#"#version 100
+attribute vec2 pos;
+void main() { gl_Position = vec4(pos, 0.0, 1.0); }
+"#;
+
+// Lit sphere + blinking eyes + a small smile. Cyan APEX accent. Alpha 0 outside
+// the head so it floats over the UI. y is bottom-up (gl_FragCoord).
+const FRAG: &str = r#"#version 100
+precision mediump float;
+uniform float u_time;
+uniform vec2  u_res;
+void main() {
+    vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / min(u_res.x, u_res.y);
+    float r = 0.32;
+    float d = length(uv);
+    if (d > r) { gl_FragColor = vec4(0.0); return; }
+
+    // Fake hemisphere normal for simple diffuse + rim lighting.
+    float z = sqrt(max(0.0, r * r - d * d));
+    vec3 n = normalize(vec3(uv, z));
+    vec3 lightDir = normalize(vec3(0.4, 0.55, 0.8));
+    float diff = clamp(dot(n, lightDir), 0.0, 1.0);
+    vec3 base = vec3(0.0, 0.83, 1.0);
+    vec3 col = base * (0.22 + 0.78 * diff);
+    col += pow(1.0 - z / r, 3.0) * 0.35;          // rim glow
+
+    vec3 ink = vec3(0.02, 0.05, 0.08);
+
+    // Eyes — squash vertically on a blink every ~3s.
+    float blink = step(2.75, mod(u_time, 3.0));
+    float eyeH = mix(1.0, 0.12, blink);
+    float le = length(vec2((uv.x + 0.11),        (uv.y - 0.06) / eyeH));
+    float re = length(vec2((uv.x - 0.11),        (uv.y - 0.06) / eyeH));
+    float eye = min(le, re);
+    col = mix(ink, col, smoothstep(0.040, 0.052, eye));
+
+    // Smile — a shallow upward parabola.
+    float curve = uv.y + 0.12 - 0.45 * uv.x * uv.x;
+    float mouth = smoothstep(0.016, 0.0, abs(curve)) * step(abs(uv.x), 0.14);
+    col = mix(col, ink, mouth);
+
+    gl_FragColor = vec4(col, 1.0);
+}
+"#;
+
+impl FaceGl {
+    /// Build the program + geometry from the live GL context. `get_proc_address`
+    /// is only valid for the duration of this call (the rendering-setup callback);
+    /// glow eagerly resolves every entry point, so we don't retain it.
+    pub fn new(
+        get_proc_address: &dyn Fn(&CStr) -> *const std::ffi::c_void,
+    ) -> Result<Self, String> {
+        unsafe {
+            let gl = glow::Context::from_loader_function_cstr(|s| get_proc_address(s));
+
+            let program = gl.create_program().map_err(|e| format!("create_program: {e}"))?;
+            for (kind, src) in [(glow::VERTEX_SHADER, VERT), (glow::FRAGMENT_SHADER, FRAG)] {
+                let sh = gl.create_shader(kind).map_err(|e| format!("create_shader: {e}"))?;
+                gl.shader_source(sh, src);
+                gl.compile_shader(sh);
+                if !gl.get_shader_compile_status(sh) {
+                    return Err(format!("shader compile: {}", gl.get_shader_info_log(sh)));
+                }
+                gl.attach_shader(program, sh);
+                gl.delete_shader(sh);
+            }
+            gl.link_program(program);
+            if !gl.get_program_link_status(program) {
+                return Err(format!("program link: {}", gl.get_program_info_log(program)));
+            }
+
+            // Fullscreen triangle.
+            let verts: [f32; 6] = [-1.0, -1.0, 3.0, -1.0, -1.0, 3.0];
+            let bytes = core::slice::from_raw_parts(
+                verts.as_ptr() as *const u8,
+                verts.len() * core::mem::size_of::<f32>(),
+            );
+            let vao = gl.create_vertex_array().map_err(|e| format!("create_vao: {e}"))?;
+            let vbo = gl.create_buffer().map_err(|e| format!("create_vbo: {e}"))?;
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW);
+            let loc = gl.get_attrib_location(program, "pos").ok_or("attrib 'pos' missing")?;
+            gl.enable_vertex_attrib_array(loc);
+            gl.vertex_attrib_pointer_f32(loc, 2, glow::FLOAT, false, 0, 0);
+            gl.bind_vertex_array(None);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+
+            let u_time = gl.get_uniform_location(program, "u_time");
+            let u_res = gl.get_uniform_location(program, "u_res");
+
+            Ok(Self { gl, program, vao, vbo, u_time, u_res })
+        }
+    }
+
+    /// Draw the face as an overlay. Called from the AfterRendering notifier, so
+    /// femtovg has already drawn this frame; we blend on top, then it's swapped.
+    pub fn draw(&self, time: f32, width: f32, height: f32) {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        unsafe {
+            self.gl.disable(glow::DEPTH_TEST);
+            self.gl.enable(glow::BLEND);
+            self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            self.gl.use_program(Some(self.program));
+            if let Some(u) = self.u_time.as_ref() {
+                self.gl.uniform_1_f32(Some(u), time);
+            }
+            if let Some(u) = self.u_res.as_ref() {
+                self.gl.uniform_2_f32(Some(u), width, height);
+            }
+            self.gl.bind_vertex_array(Some(self.vao));
+            self.gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+}
+
+impl Drop for FaceGl {
+    fn drop(&mut self) {
+        unsafe {
+            self.gl.delete_program(self.program);
+            self.gl.delete_buffer(self.vbo);
+            self.gl.delete_vertex_array(self.vao);
+        }
+    }
+}

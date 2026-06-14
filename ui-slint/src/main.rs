@@ -11,6 +11,8 @@
 
 slint::include_modules!();
 
+mod face_gl; // Phase-2 face spike (APEX_FACE_GL=1) — raw GL via the rendering notifier
+
 use slint::Model; // row_count / row_data / set_row_data on VecModel
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -3266,6 +3268,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Screen mirror (#36): self-snapshot server for APEX's screenshot tool ──
     rt.spawn(run_snapshot_server(snapshot_addr(), ui.as_weak()));
+
+    // ── Phase-2 face SPIKE (APEX_FACE_GL=1) ───────────────────────────────────
+    // Prove a custom GLSL face renders inside our window via the rendering
+    // notifier (femtovg NativeOpenGL), sharing femtovg's GL context. Throwaway:
+    // a blinking lit sphere overlaid (with alpha) on the whole window. Dormant
+    // unless the env var is set, so the shipped UI is untouched. A repeated timer
+    // drives redraws so the blink animates (Slint renders on-demand otherwise).
+    if std::env::var_os("APEX_FACE_GL").is_some() {
+        let start = std::time::Instant::now();
+        let size_weak = ui.as_weak();
+        let mut face_gl: Option<face_gl::FaceGl> = None;
+        let res = ui.window().set_rendering_notifier(move |state, api| match state {
+            slint::RenderingState::RenderingSetup => {
+                if let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api {
+                    match face_gl::FaceGl::new(get_proc_address) {
+                        Ok(f) => {
+                            eprintln!("[face-gl] GL face initialised");
+                            face_gl = Some(f);
+                        }
+                        Err(e) => eprintln!("[face-gl] setup failed: {e}"),
+                    }
+                }
+            }
+            slint::RenderingState::AfterRendering => {
+                if let Some(f) = &face_gl {
+                    let (w, h) = size_weak
+                        .upgrade()
+                        .map(|ui| {
+                            let s = ui.window().size();
+                            (s.width as f32, s.height as f32)
+                        })
+                        .unwrap_or((0.0, 0.0));
+                    f.draw(start.elapsed().as_secs_f32(), w, h);
+                }
+            }
+            slint::RenderingState::RenderingTeardown => face_gl = None,
+            _ => {}
+        });
+        match res {
+            Ok(()) => {
+                // Drive ~30fps redraws so the GL animation runs (Slint is on-demand).
+                let redraw_weak = ui.as_weak();
+                let timer = slint::Timer::default();
+                timer.start(
+                    slint::TimerMode::Repeated,
+                    std::time::Duration::from_millis(33),
+                    move || {
+                        if let Some(ui) = redraw_weak.upgrade() {
+                            ui.window().request_redraw();
+                        }
+                    },
+                );
+                std::mem::forget(timer); // spike: keep the redraw loop alive for the process
+                eprintln!("[face-gl] spike active (APEX_FACE_GL set)");
+            }
+            Err(e) => eprintln!(
+                "[face-gl] rendering notifier unavailable (software renderer / Nano?): {e:?}"
+            ),
+        }
+    }
 
     ui.run()?;
     Ok(())
