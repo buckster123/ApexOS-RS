@@ -2506,12 +2506,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let id     = node_id.to_string();
         let url    = ws_url.to_string();
         rt_h_addp.spawn(async move {
-            let ok = client.post(format!("{base}/api/mesh/peers"))
+            // The handler returns {ok:false} as HTTP 200, so check the body, not the
+            // status — otherwise a failed save() (e.g. EPERM on peers.toml) would
+            // flash "Peer added" while the row never moves to saved.
+            let ok = match client.post(format!("{base}/api/mesh/peers"))
                 .json(&serde_json::json!({"node_id": id, "ws_url": url}))
                 .timeout(std::time::Duration::from_secs(8))
                 .send().await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
+            {
+                Ok(r)  => r.json::<serde_json::Value>().await
+                            .map(|v| v["ok"].as_bool().unwrap_or(false))
+                            .unwrap_or(false),
+                Err(_) => false,
+            };
             if ok { notify(ToastKind::Success, "Peer added"); }
             else  { notify(ToastKind::Error, "Failed to add peer"); }
             // Re-scan so the row moves from discovered → saved.
@@ -2528,11 +2535,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let base   = base_rmp.clone();
         let id     = node_id.to_string();
         rt_h_rmp.spawn(async move {
-            let ok = client.delete(format!("{base}/api/mesh/peers/{id}"))
+            let ok = match client.delete(format!("{base}/api/mesh/peers/{id}"))
                 .timeout(std::time::Duration::from_secs(8))
                 .send().await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
+            {
+                Ok(r)  => r.json::<serde_json::Value>().await
+                            .map(|v| v["ok"].as_bool().unwrap_or(false))
+                            .unwrap_or(false),
+                Err(_) => false,
+            };
             if ok { notify(ToastKind::Info, "Peer removed"); }
             else  { notify(ToastKind::Error, "Failed to remove peer"); }
             let items = fetch_mesh(&client, &base).await;
