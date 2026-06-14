@@ -114,6 +114,8 @@ export component AppWindowFrame inherits Rectangle {
     // Tier-A parity apps (Event Log / Mesh / Inference).
     in property <[EventLogItem]> event-log;
     in property <[MeshNode]>     mesh-nodes;
+    in-out property <string>     mesh-pair-code;
+    in-out property <int>        mesh-pair-remaining;
     in property <string>         inference-backend;
     in property <string>         inference-base-url;
     in property <[ModelItem]>    inference-models;
@@ -175,6 +177,8 @@ export component AppWindowFrame inherits Rectangle {
     callback refresh-mesh();
     callback add-peer(string, string, string);   // node_id, ws_url, token
     callback remove-peer(string);        // node_id
+    callback start-pairing();
+    callback redeem-pairing(string, string);     // peer ws_url, code
     callback refresh-inference();
     callback refresh-audio();
     callback select-audio(string, string);   // path, name
@@ -483,9 +487,13 @@ export component AppWindowFrame inherits Rectangle {
         if root.kind == AppKind.mesh: MeshView {
             vertical-stretch: 1;
             nodes: root.mesh-nodes;
+            pair-code <=> root.mesh-pair-code;
+            pair-remaining <=> root.mesh-pair-remaining;
             refresh => { root.refresh-mesh(); }
             add-peer(id, url, token) => { root.add-peer(id, url, token); }
             remove-peer(id) => { root.remove-peer(id); }
+            start-pairing => { root.start-pairing(); }
+            redeem-pairing(url, code) => { root.redeem-pairing(url, code); }
         }
 
         if root.kind == AppKind.inference: InferenceView {

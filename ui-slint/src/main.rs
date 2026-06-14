@@ -2558,6 +2558,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     });
 
+    // PAIR (host): generate a code on THIS node, show it for another node to enter.
+    let rt_h_spair    = rt.handle().clone();
+    let client_spair  = Arc::clone(&http_client);
+    let base_spair    = http_base.clone();
+    let ui_weak_spair = ui.as_weak();
+    ui.on_start_pairing(move || {
+        let client = Arc::clone(&client_spair);
+        let base   = base_spair.clone();
+        let ui_w   = ui_weak_spair.clone();
+        rt_h_spair.spawn(async move {
+            let (code, ttl) = match client.post(format!("{base}/api/mesh/pair/start"))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+            {
+                Ok(r) => {
+                    let v = r.json::<serde_json::Value>().await.unwrap_or_default();
+                    (v["code"].as_str().unwrap_or("").to_string(),
+                     v["ttl_secs"].as_i64().unwrap_or(300) as i32)
+                }
+                Err(_) => (String::new(), 0),
+            };
+            if code.is_empty() { notify(ToastKind::Error, "Couldn't start pairing"); return; }
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    ui.set_mesh_pair_code(code.into());
+                    ui.set_mesh_pair_remaining(ttl);
+                }
+            }).ok();
+        });
+    });
+
+    // Redeem a pairing code shown on a discovered peer (exchanges tokens both ways).
+    let rt_h_rdm    = rt.handle().clone();
+    let client_rdm  = Arc::clone(&http_client);
+    let base_rdm    = http_base.clone();
+    ui.on_redeem_pairing(move |ws_url, code| {
+        let client = Arc::clone(&client_rdm);
+        let base   = base_rdm.clone();
+        let url    = ws_url.to_string();
+        let code   = code.trim().to_string();
+        rt_h_rdm.spawn(async move {
+            let ok = match client.post(format!("{base}/api/mesh/pair/redeem"))
+                .json(&serde_json::json!({"ws_url": url, "code": code}))
+                .timeout(std::time::Duration::from_secs(12))
+                .send().await
+            {
+                Ok(r)  => r.json::<serde_json::Value>().await
+                            .map(|v| v["ok"].as_bool().unwrap_or(false))
+                            .unwrap_or(false),
+                Err(_) => false,
+            };
+            if ok { notify(ToastKind::Success, "Paired — peer added"); }
+            else  { notify(ToastKind::Error, "Pairing failed (bad or expired code?)"); }
+            let items = fetch_mesh(&client, &base).await;
+            slint::invoke_from_event_loop(move || replace_mesh(items)).ok();
+        });
+    });
+
     let rt_h_inf    = rt.handle().clone();
     let client_inf  = Arc::clone(&http_client);
     let base_inf    = http_base.clone();

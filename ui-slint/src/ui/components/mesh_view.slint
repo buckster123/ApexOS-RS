@@ -7,10 +7,11 @@ import { MeshNode } from "../types.slint";
 // nodes not yet added (/api/mesh/nodes). A discovered node offers "+ ADD"
 // (POST /api/mesh/peers); a saved peer offers "✕" (DELETE /api/mesh/peers/:id).
 //
-// "+ ADD" opens a token-capture dialog: cross-node a2a needs the peer's
-// AGENTD_TOKEN (the peer's /api/sessions/{id}/message is token-gated). The token
-// is optional — leave blank for an auth-disabled node. The status dot shows a2a
-// readiness: green = peer with token, amber = peer without, dim = discovered.
+// Cross-node a2a needs the peer's AGENTD_TOKEN. Two ways to supply it from the
+// ADD dialog: paste the token, OR enter a 6-digit PAIRING CODE shown on the
+// other node (PAIR button → /api/mesh/pair/start). Pairing exchanges tokens both
+// ways with no hand-typing. The status dot shows a2a readiness: green = peer with
+// token, amber = peer without, dim = discovered.
 //
 // preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
 
@@ -20,13 +21,18 @@ export component MeshView {
 
     in property <[MeshNode]> nodes;
 
-    // Token-capture dialog state. pending-node != "" ⇒ dialog open.
+    // Token-capture / pairing dialog state. pending-node != "" ⇒ ADD dialog open.
     in-out property <string> pending-node;
     in-out property <string> pending-url;
+    // Host-side pairing offer. pair-code != "" ⇒ "show this code" overlay open.
+    in-out property <string> pair-code;
+    in-out property <int>    pair-remaining;
 
     callback refresh();
     callback add-peer(string, string, string);   // node_id, ws_url, token
     callback remove-peer(string);                 // node_id
+    callback start-pairing();                     // this node: generate + show a code
+    callback redeem-pairing(string, string);      // peer ws_url, code
 
     VerticalLayout {
         width: 100%;
@@ -40,6 +46,7 @@ export component MeshView {
             HorizontalLayout {
                 padding-left: 20px;
                 padding-right: 14px;
+                spacing: 8px;
 
                 Text {
                     text: "MESH";
@@ -48,6 +55,29 @@ export component MeshView {
                     letter-spacing: 2px;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
+                }
+
+                // PAIR — show this node's code for another node to enter.
+                Rectangle {
+                    width: 56px;
+                    height: 28px;
+                    border-radius: Palette.radius;
+                    background: pair_ta.pressed ? Palette.primary-dim
+                              : pair_ta.has-hover ? Palette.surface
+                              : Palette.surface-hi;
+                    border-width: 1px;
+                    border-color: pair_ta.has-hover ? Palette.primary : Palette.border;
+                    y: (parent.height - self.height) / 2;
+                    animate background, border-color { duration: 150ms; }
+                    pair_ta := TouchArea { clicked => { root.start-pairing(); } }
+                    Text {
+                        text: "PAIR";
+                        color: pair_ta.has-hover ? Palette.primary : Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 1px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
 
                 Rectangle {
@@ -156,7 +186,7 @@ export component MeshView {
                             }
                         }
 
-                        // Action: ADD (discovered → opens token dialog) / ✕ (saved peer)
+                        // Action: ADD (discovered → opens token/pair dialog) / ✕ (saved peer)
                         Rectangle {
                             width: 56px;
                             height: 28px;
@@ -194,32 +224,28 @@ export component MeshView {
         }
     }
 
-    // ── Token-capture dialog (overlays the whole view when adding a peer) ───────
+    // ── ADD dialog: paste a token OR enter a pairing code ───────────────────────
     if root.pending-node != "": Rectangle {
         width: 100%;
         height: 100%;
         background: #000000.with-alpha(0.55);
-
-        // Backdrop click dismisses.
         TouchArea { clicked => { root.pending-node = ""; } }
 
         Rectangle {
-            width: min(parent.width - 32px, 360px);
-            height: 200px;
+            width: min(parent.width - 32px, 380px);
+            height: 288px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: Palette.surface;
             border-radius: Palette.radius;
             border-width: 1px;
             border-color: Palette.border;
-
-            // Swallow clicks inside the card so they don't hit the backdrop.
             TouchArea { }
             init => { tok-field.focus(); }
 
             VerticalLayout {
                 padding: 16px;
-                spacing: 10px;
+                spacing: 9px;
 
                 Text {
                     text: "Add peer  " + root.pending-node;
@@ -227,80 +253,174 @@ export component MeshView {
                     font-size: 13px;
                     font-weight: 600;
                 }
+
+                // Method 1 — paste the token.
                 Text {
-                    text: "Paste this node's AGENTD_TOKEN for cross-node a2a. Leave blank if it has no token.";
+                    text: "Paste its AGENTD_TOKEN (blank if the node has no token):";
                     color: Palette.text-dim;
                     font-size: 10px;
                     wrap: word-wrap;
                 }
-
-                // Token field
-                Rectangle {
-                    height: 34px;
-                    border-radius: Palette.radius;
-                    background: Palette.bg;
-                    border-width: 1px;
-                    border-color: tok-field.has-focus ? Palette.primary : Palette.border;
-                    clip: true;
-                    tok-field := TextInput {
-                        x: 10px;
-                        width: parent.width - 20px;
-                        height: parent.height;
-                        vertical-alignment: center;
-                        single-line: true;
-                        font-size: 12px;
-                        color: Palette.text;
-                        selection-background-color: Palette.primary-dim;
-                        accepted => {
-                            root.add-peer(root.pending-node, root.pending-url, self.text);
-                            root.pending-node = "";
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 32px;
+                        border-radius: Palette.radius;
+                        background: Palette.bg;
+                        border-width: 1px;
+                        border-color: tok-field.has-focus ? Palette.primary : Palette.border;
+                        clip: true;
+                        tok-field := TextInput {
+                            x: 10px; width: parent.width - 20px; height: parent.height;
+                            vertical-alignment: center; single-line: true;
+                            font-size: 12px; color: Palette.text;
+                            selection-background-color: Palette.primary-dim;
+                            accepted => { root.add-peer(root.pending-node, root.pending-url, self.text); root.pending-node = ""; }
+                        }
+                        if tok-field.text == "": Text {
+                            x: 10px; text: "AGENTD_TOKEN (optional)";
+                            color: Palette.text-dim; font-size: 12px; vertical-alignment: center;
                         }
                     }
-                    if tok-field.text == "": Text {
-                        x: 10px;
-                        text: "AGENTD_TOKEN (optional)";
-                        color: Palette.text-dim;
-                        font-size: 12px;
-                        vertical-alignment: center;
+                    Rectangle {
+                        width: 64px; height: 32px;
+                        border-radius: Palette.radius;
+                        background: add-ta.has-hover ? Palette.primary : Palette.primary-dim;
+                        border-width: 1px; border-color: Palette.primary;
+                        add-ta := TouchArea {
+                            clicked => { root.add-peer(root.pending-node, root.pending-url, tok-field.text); root.pending-node = ""; }
+                        }
+                        Text { text: "ADD"; color: Palette.text-bright; font-size: 9px; letter-spacing: 1px; font-weight: 700;
+                               horizontal-alignment: center; vertical-alignment: center; }
                     }
                 }
 
-                // Actions
+                // Divider
                 HorizontalLayout {
                     spacing: 8px;
-                    alignment: end;
+                    Rectangle { vertical-stretch: 1; height: 1px; background: Palette.border; y: 8px; }
+                    Text { text: "or pair with a code"; color: Palette.text-dim; font-size: 9px; letter-spacing: 1px; }
+                    Rectangle { vertical-stretch: 1; height: 1px; background: Palette.border; y: 8px; }
+                }
 
+                // Method 2 — enter the 6-digit code shown on the other node (PAIR there).
+                HorizontalLayout {
+                    spacing: 8px;
                     Rectangle {
-                        width: 84px; height: 30px;
+                        horizontal-stretch: 1;
+                        height: 32px;
                         border-radius: Palette.radius;
-                        background: cancel-ta.has-hover ? Palette.surface : Palette.surface-hi;
+                        background: Palette.bg;
                         border-width: 1px;
-                        border-color: Palette.border;
-                        cancel-ta := TouchArea { clicked => { root.pending-node = ""; } }
-                        Text {
-                            text: "CANCEL"; color: Palette.text-dim;
-                            font-size: 9px; letter-spacing: 1px;
-                            horizontal-alignment: center; vertical-alignment: center;
+                        border-color: code-field.has-focus ? Palette.primary : Palette.border;
+                        clip: true;
+                        code-field := TextInput {
+                            x: 10px; width: parent.width - 20px; height: parent.height;
+                            vertical-alignment: center; single-line: true;
+                            font-size: 14px; letter-spacing: 2px; color: Palette.text;
+                            selection-background-color: Palette.primary-dim;
+                            accepted => { if (self.text != "") { root.redeem-pairing(root.pending-url, self.text); root.pending-node = ""; } }
+                        }
+                        if code-field.text == "": Text {
+                            x: 10px; text: "6-digit pairing code";
+                            color: Palette.text-dim; font-size: 12px; vertical-alignment: center;
                         }
                     }
                     Rectangle {
-                        width: 84px; height: 30px;
+                        width: 64px; height: 32px;
                         border-radius: Palette.radius;
-                        background: add-ta.has-hover ? Palette.primary : Palette.primary-dim;
-                        border-width: 1px;
-                        border-color: Palette.primary;
-                        add-ta := TouchArea {
-                            clicked => {
-                                root.add-peer(root.pending-node, root.pending-url, tok-field.text);
-                                root.pending-node = "";
-                            }
+                        background: pairgo-ta.has-hover ? Palette.primary : Palette.primary-dim;
+                        border-width: 1px; border-color: Palette.primary;
+                        pairgo-ta := TouchArea {
+                            clicked => { if (code-field.text != "") { root.redeem-pairing(root.pending-url, code-field.text); root.pending-node = ""; } }
                         }
-                        Text {
-                            text: "ADD"; color: Palette.text-bright;
-                            font-size: 9px; letter-spacing: 1px; font-weight: 700;
-                            horizontal-alignment: center; vertical-alignment: center;
-                        }
+                        Text { text: "PAIR"; color: Palette.text-bright; font-size: 9px; letter-spacing: 1px; font-weight: 700;
+                               horizontal-alignment: center; vertical-alignment: center; }
                     }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                // Cancel
+                Rectangle {
+                    width: 96px; height: 30px;
+                    x: (parent.width - 32px - self.width) / 2;
+                    border-radius: Palette.radius;
+                    background: cancel-ta.has-hover ? Palette.surface : Palette.surface-hi;
+                    border-width: 1px; border-color: Palette.border;
+                    cancel-ta := TouchArea { clicked => { root.pending-node = ""; } }
+                    Text { text: "CANCEL"; color: Palette.text-dim; font-size: 9px; letter-spacing: 1px;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+
+    // ── PAIR (host): show this node's code for another node to enter ────────────
+    if root.pair-code != "": Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #000000.with-alpha(0.6);
+        TouchArea { clicked => { root.pair-code = ""; } }
+
+        // 1-second countdown; clears the offer when it expires.
+        Timer {
+            interval: 1s;
+            running: root.pair-code != "";
+            triggered => {
+                if (root.pair-remaining > 1) { root.pair-remaining -= 1; }
+                else { root.pair-remaining = 0; root.pair-code = ""; }
+            }
+        }
+
+        Rectangle {
+            width: min(parent.width - 32px, 320px);
+            height: 196px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.surface;
+            border-radius: Palette.radius;
+            border-width: 1px;
+            border-color: Palette.primary;
+            TouchArea { }
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 8px;
+                alignment: center;
+
+                Text {
+                    text: "MESH PAIRING CODE";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 2px;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: root.pair-code;
+                    color: Palette.primary;
+                    font-size: 40px;
+                    font-weight: 800;
+                    letter-spacing: 6px;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Enter this on the other node — expires in \{root.pair-remaining}s";
+                    color: Palette.text-dim;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                Rectangle {
+                    width: 96px; height: 30px;
+                    x: (parent.width - 36px - self.width) / 2;
+                    border-radius: Palette.radius;
+                    background: done-ta.has-hover ? Palette.surface : Palette.surface-hi;
+                    border-width: 1px; border-color: Palette.border;
+                    done-ta := TouchArea { clicked => { root.pair-code = ""; } }
+                    Text { text: "DONE"; color: Palette.text-dim; font-size: 9px; letter-spacing: 1px;
+                           horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
         }
