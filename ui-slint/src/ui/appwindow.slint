@@ -1,8 +1,9 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
+import { ImagePicker } from "components/image_picker.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
 import { Dashboard } from "components/dashboard.slint";
@@ -104,8 +105,15 @@ export component AppWindow inherits Window {
     in-out property <bool>           persona-picker-open: false;
     in-out property <bool>           first-boot: false;
 
+    // ── Image attach (🖼) — workspace picker → staged image → user_prompt ──
+    in property <[ImageItem]>        workspace-images;
+    in-out property <bool>           image-picker-open: false;
+    in-out property <string>         staged-image-path: "";   // workspace-relative; read by Rust on send
+    in-out property <string>         staged-image-name: "";   // shown as the composer chip
+
     // ── Callbacks sent to Rust ──────────────────────────────────────────
     callback send-message(string);
+    callback refresh-workspace-images();
     callback stop-turn();
     callback refresh-sessions();
     callback restore-session(int);
@@ -501,9 +509,12 @@ export component AppWindow inherits Window {
                                 busy: root.agent-busy;
                                 glow-alpha: root.jarvis-pulse;
                                 recording: root.recording;
+                                staged-name: root.staged-image-name;
                                 toggle-recording => { root.toggle-recording(); }
                                 send(text) => { root.send-message(text); }
                                 stop => { root.stop-turn(); }
+                                attach => { root.refresh-workspace-images(); root.image-picker-open = true; }
+                                clear-attachment => { root.staged-image-path = ""; root.staged-image-name = ""; }
                             }
                         }
                     }
@@ -625,8 +636,11 @@ export component AppWindow inherits Window {
                         web-sensorhead-url: root.web-sensorhead-url;
                         web-custom-url <=> root.web-custom-url;
                         calc-display: root.calc-display;
+                        staged-image-name: root.staged-image-name;
 
                         send-message(t) => { root.send-message(t); }
+                        attach-image => { root.refresh-workspace-images(); root.image-picker-open = true; }
+                        clear-attachment => { root.staged-image-path = ""; root.staged-image-name = ""; }
                         stop-turn => { root.stop-turn(); }
                         terminal-send(line) => { root.terminal-send(line); }
                         toggle-recording => { root.toggle-recording(); }
@@ -866,6 +880,23 @@ export component AppWindow inherits Window {
         pick(id) => {
             Personas.pick(id);
             root.persona-picker-open = false;
+        }
+    }
+
+    // ── Image attach picker (🖼) — workspace images; sets the staged image ──
+    if root.image-picker-open: TouchArea {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        clicked => { root.image-picker-open = false; }
+    }
+    if root.image-picker-open: ImagePicker {
+        images: root.workspace-images;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        refresh => { root.refresh-workspace-images(); }
+        pick(path, name) => {
+            root.staged-image-path = path;
+            root.staged-image-name = name;
+            root.image-picker-open = false;
         }
     }
 
