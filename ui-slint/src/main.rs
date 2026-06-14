@@ -3355,6 +3355,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let sf = ui.window().scale_factor();
                     let win = ui.window().size();
                     let g = ui.global::<FaceGl>();
+                    let a = g.get_accent();
+                    let expr = face_gl::FaceExpr {
+                        accent: [
+                            a.red() as f32 / 255.0,
+                            a.green() as f32 / 255.0,
+                            a.blue() as f32 / 255.0,
+                        ],
+                        eye_l: g.get_eye_l(),
+                        eye_r: g.get_eye_r(),
+                        brow: g.get_brow(),
+                        brow_skew: g.get_brow_skew(),
+                        mouth: g.get_mouth(),
+                        open: g.get_mouth_open(),
+                        gaze: [g.get_gaze_x(), g.get_gaze_y()],
+                        intensity: g.get_intensity(),
+                    };
                     f.draw(
                         start.elapsed().as_secs_f32(),
                         win.width as f32,
@@ -3363,6 +3379,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         g.get_y() * sf,
                         g.get_w() * sf,
                         g.get_h() * sf,
+                        &expr,
                     );
                 }
             }
@@ -3374,6 +3391,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Tell FaceView to start publishing its rect (gates its sample
                 // Timer); only on the real-GL path, never the software renderer.
                 ui.global::<FaceGl>().set_active(true);
+                // Dev: APEX_FACE_STATE=<emote> previews a specific expression on
+                // the GL face without agentd (deterministic for snapshot verify).
+                if let Ok(s) = std::env::var("APEX_FACE_STATE") {
+                    if !s.is_empty() {
+                        ui.set_face_state(s.into());
+                        ui.set_face_intensity(1.0);
+                    }
+                }
                 // Drive ~30fps redraws so the GL animation runs (Slint is on-demand).
                 let redraw_weak = ui.as_weak();
                 let timer = slint::Timer::default();
