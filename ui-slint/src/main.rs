@@ -66,6 +66,9 @@ thread_local! {
         const { RefCell::new(None) };
     static NOTES_FILES: RefCell<Option<Rc<slint::VecModel<NoteItem>>>> =
         const { RefCell::new(None) };
+    // Chat-composer image attach: workspace images offered in the 🖼 picker.
+    static WORKSPACE_IMAGES: RefCell<Option<Rc<slint::VecModel<ImageItem>>>> =
+        const { RefCell::new(None) };
     // Sketchpad: the rendered stroke model (Slint Paths) + the raw point data we
     // post to /api/sketch. Index into SKETCH_PALETTE drives colour; width index 0/1.
     static SKETCH_STROKES: RefCell<Option<Rc<slint::VecModel<SketchStroke>>>> =
@@ -909,6 +912,19 @@ fn replace_notes_files(items: Vec<NoteItem>) {
     });
 }
 
+fn replace_workspace_images(items: Vec<ImageItem>) {
+    WORKSPACE_IMAGES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+            for item in items {
+                model.push(item);
+            }
+        }
+    });
+}
+
 // ── Sketchpad helpers (run on the Slint thread) ────────────────────────────────
 
 /// Start a new stroke at (x, y) with the current colour/width.
@@ -1611,6 +1627,15 @@ async fn fetch_notes(client: &reqwest::Client, base_url: &str) -> Vec<NoteItem> 
     }).collect()
 }
 
+async fn fetch_workspace_images(client: &reqwest::Client, base_url: &str) -> Vec<ImageItem> {
+    // GET /api/workspace/images → { images: [{ path, name, size, modified }] } (newest first)
+    let body = json_get(client, format!("{base_url}/api/workspace/images")).await;
+    body["images"].as_array().unwrap_or(&vec![]).iter().map(|f| ImageItem {
+        path: f["path"].as_str().unwrap_or("").into(),
+        name: f["name"].as_str().unwrap_or("").into(),
+    }).collect()
+}
+
 /// POST /api/notes/read → the note's content (empty string on any error).
 async fn fetch_note_content(client: &reqwest::Client, base_url: &str, name: &str) -> String {
     match client.post(format!("{base_url}/api/notes/read"))
@@ -1788,6 +1813,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let notes_files_vec: Rc<slint::VecModel<NoteItem>> = Rc::new(slint::VecModel::default());
     ui.set_notes(slint::ModelRc::from(notes_files_vec.clone()));
     NOTES_FILES.with(|m| *m.borrow_mut() = Some(notes_files_vec.clone()));
+
+    let workspace_images_vec: Rc<slint::VecModel<ImageItem>> = Rc::new(slint::VecModel::default());
+    ui.set_workspace_images(slint::ModelRc::from(workspace_images_vec.clone()));
+    WORKSPACE_IMAGES.with(|m| *m.borrow_mut() = Some(workspace_images_vec.clone()));
 
     let sketch_strokes_vec: Rc<slint::VecModel<SketchStroke>> = Rc::new(slint::VecModel::default());
     ui.set_sketch_strokes(slint::ModelRc::from(sketch_strokes_vec.clone()));
@@ -2161,14 +2190,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── send-message callback ─────────────────────────────────────────────────
     let tx_send = tx.clone();
     let messages_send = messages.clone();
+    let send_weak = ui.as_weak();
     ui.on_send_message(move |text| {
-        if text.is_empty() {
+        // Pull (and clear) any staged workspace image — image-only prompts are ok.
+        let (img_path, img_name) = send_weak.upgrade().map(|ui| {
+            let p = ui.get_staged_image_path().to_string();
+            let n = ui.get_staged_image_name().to_string();
+            if !p.is_empty() {
+                ui.set_staged_image_path("".into());
+                ui.set_staged_image_name("".into());
+            }
+            (p, n)
+        }).unwrap_or_default();
+
+        if text.is_empty() && img_path.is_empty() {
             return;
         }
+
         maybe_push_time_divider();
+        // The chat bubble shows the text, prefixed with a 🖼 chip line when an
+        // image rode along (image-only prompts show just the chip).
+        let bubble = if img_path.is_empty() {
+            text.to_string()
+        } else if text.is_empty() {
+            format!("🖼 {img_name}")
+        } else {
+            format!("🖼 {img_name}\n{text}")
+        };
         messages_send.push(MessageItem {
             role: "user".into(),
-            text: text.clone(),
+            text: bubble.into(),
             streaming: false,
             call_id: "".into(),
             tool_name: "".into(),
@@ -2177,8 +2228,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tool_status: "".into(),
             awaiting_approval: false,
         });
-        let payload = serde_json::json!({"type": "user_prompt", "text": text.as_str()}).to_string();
-        tx_send.send(payload).ok();
+
+        let mut frame = serde_json::json!({ "type": "user_prompt", "text": text.as_str() });
+        if !img_path.is_empty() {
+            frame["images"] = serde_json::json!([{ "path": img_path }]);
+        }
+        tx_send.send(frame.to_string()).ok();
     });
 
     // ── stop / cancel callback ────────────────────────────────────────────────
@@ -2560,6 +2615,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rt_h_nref.spawn(async move {
             let items = fetch_notes(&client, &base).await;
             slint::invoke_from_event_loop(move || replace_notes_files(items)).ok();
+        });
+    });
+
+    // Image attach (🖼): refresh the workspace-image picker on demand.
+    let rt_h_wsimg   = rt.handle().clone();
+    let client_wsimg = Arc::clone(&http_client);
+    let base_wsimg   = http_base.clone();
+    ui.on_refresh_workspace_images(move || {
+        let client = Arc::clone(&client_wsimg);
+        let base   = base_wsimg.clone();
+        rt_h_wsimg.spawn(async move {
+            let items = fetch_workspace_images(&client, &base).await;
+            slint::invoke_from_event_loop(move || replace_workspace_images(items)).ok();
         });
     });
 

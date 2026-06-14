@@ -161,6 +161,13 @@ export struct NoteItem {
     size-label: string,   // "1.2 KB"
 }
 
+// One workspace image in the chat-composer attach picker (🖼). /api/workspace/images.
+// `path` is workspace-relative (sent as user_prompt images:[{path}]); `name` shows.
+export struct ImageItem {
+    path: string,
+    name: string,
+}
+
 // One drawn stroke in the Sketchpad (🎨). Rust owns the points; `commands` is
 // an SVG path string in canvas-pixel coords (rendered by a Path with a viewbox
 // matching the canvas). The same strokes are posted to /api/sketch for APEX.
