@@ -300,6 +300,7 @@ async fn main() -> anyhow::Result<()> {
         Some(soul_content),
     ));
     let soul_arc = engine.system_arc();
+    let embodiment_arc = engine.embodiment_arc();
 
     // Share soul_arc with the supervisor so read_soul_md returns live content.
     if sv_cmd_tx.send(SupervisorCmd::SetSoulArc { arc: soul_arc.clone() }).await.is_err() {
@@ -372,6 +373,18 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&council_sessions),
         log_dir.join("council"),
         council_proxy,
+    );
+
+    // Live embodiment refresher — regenerates the "## Current embodiment" block the
+    // engine appends after soul.md (node/senses/mesh/uptime + the LIVE tool list, so
+    // it can never go stale). Cloned arcs since tool_reg/engine move into the router.
+    spawn_embodiment_refresher(
+        embodiment_arc,
+        Arc::clone(&tool_reg),
+        Arc::clone(&backend_arc),
+        Arc::clone(&model_arc),
+        Arc::clone(&peer_registry),
+        Arc::clone(&node_id),
     );
 
     // agent_rx was subscribed above, before the supervisor spawned, so the early
@@ -1236,6 +1249,141 @@ async fn gather_tools(
     tools.push(vast_destroy_spec());
     tools.push(vast_status_spec());
     tools
+}
+
+/// Regenerate the live embodiment block every 30s (after a short delay so plugins
+/// finish enumerating). soul.md = identity; this block = the body APEX currently
+/// inhabits. Agentd-owned and separate from CCBS (cerebro-side priming).
+fn spawn_embodiment_refresher(
+    embodiment:    Arc<RwLock<String>>,
+    tool_reg:      Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
+    backend_arc:   Arc<RwLock<String>>,
+    model_arc:     Arc<RwLock<String>>,
+    peer_registry: Arc<RwLock<PeerRegistry>>,
+    node_id:       Arc<String>,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        loop {
+            let block = build_embodiment(&tool_reg, &backend_arc, &model_arc,
+                                         &peer_registry, &node_id).await;
+            *embodiment.write().await = block;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
+}
+
+/// Build the "## Current embodiment" block from this node's ACTUAL state: the live
+/// tool registry (never stale — its absence caused a multi-hour debugging hunt),
+/// cheap hardware probes, mesh peers, and uptime.
+async fn build_embodiment(
+    tool_reg:      &Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
+    backend_arc:   &Arc<RwLock<String>>,
+    model_arc:     &Arc<RwLock<String>>,
+    peer_registry: &Arc<RwLock<PeerRegistry>>,
+    node_id:       &str,
+) -> String {
+    let full = gather_tools(tool_reg).await;            // plugin tools + virtual tools
+    let reg  = tool_reg.read().await;
+    let plugin_names: std::collections::HashSet<&str> =
+        reg.values().flatten().map(|t| t.name.as_str()).collect();
+
+    let backend = backend_arc.read().await.clone();
+    let mut model = model_arc.read().await.clone();
+    if model.trim().is_empty() { model = "(provider default)".into(); }
+
+    let has_sensors = plugin_names.contains("get_iaq")
+        || plugin_names.contains("thermal_frame")
+        || plugin_names.iter().any(|n| n.starts_with("get_temp"));
+    let ram = read_ram_mb();
+
+    let mut out = String::new();
+    out.push_str("## Current embodiment — auto-generated from this node's live state. Trust this\n");
+    out.push_str("## over any hardware or tool list in your identity above; it reflects THIS body.\n\n");
+    out.push_str(&format!(
+        "- Node: {node_id} · {} · {ram} MB · tier {} · uptime {} · backend {backend}/{model}\n",
+        std::env::consts::ARCH, tier_from_ram(ram), fmt_uptime(read_uptime_secs()),
+    ));
+    out.push_str(&format!(
+        "- Senses: camera {} · thermal/IAQ {} · GPIO {}\n",
+        yn(has_camera()), yn(has_sensors), yn(is_raspberry_pi()),
+    ));
+    let embed = std::env::var("CEREBRO_EMBED_MODEL").unwrap_or_default();
+    out.push_str(&format!("- Memory: cerebro {}\n",
+        if embed.trim().is_empty() { "FTS5 keyword search only".to_string() }
+        else { format!("semantic embeddings ({embed})") }));
+
+    {
+        let peers = peer_registry.read().await;
+        if peers.peers.is_empty() {
+            out.push_str("- Mesh: standalone (no peers yet)\n");
+        } else {
+            let list: Vec<String> = peers.peers.iter()
+                .map(|p| format!("{} [{}]", p.node_id, p.status)).collect();
+            out.push_str(&format!("- Mesh: {} peer(s) — {}\n", peers.peers.len(), list.join(", ")));
+        }
+    }
+
+    out.push_str(&format!("- Tools you can call right now ({}):\n", full.len()));
+    let mut by_plugin: Vec<(&PluginId, &Vec<ToolSpec>)> = reg.iter().collect();
+    by_plugin.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+    for (pid, specs) in by_plugin {
+        let names: Vec<&str> = specs.iter().map(|t| t.name.as_str()).collect();
+        out.push_str(&format!("    {} ({}): {}\n", pid.0, names.len(), names.join(", ")));
+    }
+    let virtuals: Vec<&str> = full.iter().map(|t| t.name.as_str())
+        .filter(|n| !plugin_names.contains(n)).collect();
+    out.push_str(&format!("    agentd virtual ({}): {}\n", virtuals.len(), virtuals.join(", ")));
+    out
+}
+
+fn yn(b: bool) -> &'static str { if b { "✓" } else { "✗" } }
+
+fn read_ram_mb() -> u64 {
+    std::fs::read_to_string("/proc/meminfo").ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("MemTotal"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|kb| kb.parse::<u64>().ok()))
+        .map(|kb| kb / 1024).unwrap_or(0)
+}
+
+fn tier_from_ram(mb: u64) -> &'static str {
+    match mb {
+        0                 => "unknown",
+        m if m < 768      => "nano",
+        m if m < 2048     => "micro",
+        m if m < 8192     => "standard",
+        _                 => "pro",
+    }
+}
+
+fn read_uptime_secs() -> u64 {
+    std::fs::read_to_string("/proc/uptime").ok()
+        .and_then(|s| s.split_whitespace().next().and_then(|f| f.parse::<f64>().ok()))
+        .map(|f| f as u64).unwrap_or(0)
+}
+
+fn fmt_uptime(s: u64) -> String {
+    let (d, h, m) = (s / 86400, (s % 86400) / 3600, (s % 3600) / 60);
+    if d > 0 { format!("{d}d {h}h {m}m") } else if h > 0 { format!("{h}h {m}m") } else { format!("{m}m") }
+}
+
+/// A camera is reachable if there's a V4L2 node (USB/laptop) or a Pi CSI capture
+/// utility on PATH — mirrors camera_capture's own backend detection.
+fn has_camera() -> bool {
+    let v4l2 = std::fs::read_dir("/dev").map(|rd| rd.flatten()
+        .any(|e| e.file_name().to_string_lossy().starts_with("video"))).unwrap_or(false);
+    v4l2 || which_on_path("rpicam-jpeg") || which_on_path("libcamera-jpeg")
+}
+
+fn is_raspberry_pi() -> bool {
+    std::fs::read_to_string("/proc/device-tree/model")
+        .map(|s| s.to_lowercase().contains("raspberry")).unwrap_or(false)
+}
+
+fn which_on_path(bin: &str) -> bool {
+    std::env::var("PATH").ok().map(|p| p.split(':')
+        .any(|d| std::path::Path::new(d).join(bin).exists())).unwrap_or(false)
 }
 
 fn agent_spawn_spec() -> ToolSpec {

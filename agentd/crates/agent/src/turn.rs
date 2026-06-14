@@ -13,6 +13,10 @@ pub struct TurnEngine {
     pub sem:      Arc<Semaphore>,
     // Arc<RwLock<>> so soul.md hot-reloads (Phase 2) without restarting the daemon.
     system:       Arc<RwLock<String>>,
+    // Live "## Current embodiment" block (node tier, senses, live tool list, mesh,
+    // uptime) — agentd-generated, appended to `system` at request time. Kept SEPARATE
+    // from `system` so read_soul_md / update_system_prompt manage only the identity.
+    embodiment:   Arc<RwLock<String>>,
 }
 
 impl TurnEngine {
@@ -22,14 +26,18 @@ impl TurnEngine {
         system: Option<String>,
     ) -> Self {
         Self {
-            provider: Arc::new(provider),
-            sem:      Arc::new(Semaphore::new(max_concurrent)),
-            system:   Arc::new(RwLock::new(system.unwrap_or_default())),
+            provider:   Arc::new(provider),
+            sem:        Arc::new(Semaphore::new(max_concurrent)),
+            system:     Arc::new(RwLock::new(system.unwrap_or_default())),
+            embodiment: Arc::new(RwLock::new(String::new())),
         }
     }
 
     /// Returns the Arc so callers can hot-swap the system prompt (Phase 2).
     pub fn system_arc(&self) -> Arc<RwLock<String>> { Arc::clone(&self.system) }
+
+    /// Returns the embodiment Arc so agentd can refresh the live node block.
+    pub fn embodiment_arc(&self) -> Arc<RwLock<String>> { Arc::clone(&self.embodiment) }
 
     /// Derive an engine variant with a different system prompt.
     /// - None  → child inherits the parent's Arc (shares soul hot-reloads)
@@ -40,7 +48,13 @@ impl TurnEngine {
             Some(s) => Arc::new(RwLock::new(s)),
             None    => Arc::clone(&self.system),
         };
-        Self { provider: self.provider.clone(), sem: self.sem.clone(), system }
+        // Children share the parent's embodiment Arc — they inhabit the same node body.
+        Self {
+            provider:   self.provider.clone(),
+            sem:        self.sem.clone(),
+            system,
+            embodiment: Arc::clone(&self.embodiment),
+        }
     }
 }
 
@@ -80,7 +94,16 @@ pub async fn run_turn(
         {
             let _permit = engine.sem.acquire().await?;
 
-            let system_str = engine.system.read().await.clone();
+            // System prompt = identity (soul) + live embodiment block, composed fresh
+            // each turn so the model always sees this node's current tools/senses/mesh.
+            let soul = engine.system.read().await.clone();
+            let emb  = engine.embodiment.read().await.clone();
+            let system_str = match (soul.trim().is_empty(), emb.trim().is_empty()) {
+                (true,  true)  => String::new(),
+                (false, true)  => soul,
+                (true,  false) => emb,
+                (false, false) => format!("{soul}\n\n{emb}"),
+            };
             let system_opt = if system_str.is_empty() { None } else { Some(system_str.as_str()) };
             let mut stream = engine.provider
                 .messages_stream(&history, &tools, system_opt)
