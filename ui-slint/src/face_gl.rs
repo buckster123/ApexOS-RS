@@ -33,10 +33,12 @@ pub struct FaceExpr {
     pub eye_r: f32,       // right-eye openness 0..1
     pub brow: f32,        // symmetric brow raise (+up / −down)
     pub brow_skew: f32,   // L/R brow asymmetry
+    pub brow_angle: f32,  // inner-end tilt (+up = worried, −down = angry)
     pub mouth: f32,       // mouth curve −1..1 (smile ↔ frown)
     pub open: f32,        // open-mouth amount 0..1 (0 = stroked curve)
     pub gaze: [f32; 2],   // gaze offset fraction (x: −left/+right, y: −up/+down)
     pub intensity: f32,   // expression strength 0..1
+    pub blush: f32,       // warm-cheek amount 0..1
 }
 
 pub struct FaceGl {
@@ -53,6 +55,7 @@ pub struct FaceGl {
     u_mouth: Option<glow::UniformLocation>,
     u_gaze: Option<glow::UniformLocation>,
     u_intensity: Option<glow::UniformLocation>,
+    u_blush: Option<glow::UniformLocation>,
 }
 
 const VERT: &str = r#"#version 100
@@ -82,10 +85,11 @@ uniform vec2  u_res;       // face-rect size in physical px
 uniform vec2  u_origin;    // face-rect bottom-left in physical px (gl_FragCoord frame)
 uniform vec3  u_accent;    // head tint
 uniform vec2  u_eyes;      // (left, right) eye openness 0..1
-uniform vec2  u_brow;      // (raise, skew)
+uniform vec3  u_brow;      // (raise, skew, inner-tilt)
 uniform vec2  u_mouth;     // (curve −1..1, open 0..1)
 uniform vec2  u_gaze;      // gaze offset fraction
 uniform float u_intensity; // expression strength 0..1
+uniform float u_blush;     // warm-cheek amount 0..1
 
 // Inexact-but-bounded ellipsoid SDF (Quílez); fine for sphere tracing a blob.
 float sdEllipsoid(vec3 p, vec3 r) {
@@ -121,6 +125,39 @@ float segd(vec2 p, vec2 a, vec2 b) {
     vec2 pa = p - a, ba = b - a;
     float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
     return length(pa - ba * h);
+}
+
+// A glossy eye: a dark sheened eyeball with two catchlights that shift with
+// `look` (gaze + idle drift), and an upper eyelid that descends as `open` drops
+// (blink / sleepy / squint) carrying a dark lash line. `head` is the lit head
+// colour, used for the eyelid + soft socket so it blends into the face. Returns
+// vec4(rgb, mask); mask is the soft eye-opening coverage.
+vec4 eyePix(vec2 fc, vec2 c, float open, vec2 look, vec3 head) {
+    vec2 p = fc - c;
+    float ow = 0.115, oh = 0.155;
+    float shape = length(p / vec2(ow, oh));
+    if (shape > 1.25) return vec4(0.0);
+
+    // Dark glossy eyeball with a faint downward sheen.
+    vec3 col = vec3(0.05, 0.06, 0.09);
+    col += vec3(0.05, 0.07, 0.11) * smoothstep(0.0, -oh, p.y);
+
+    // Catchlights — primary up-left, tiny secondary down-right; both ride `look`.
+    vec2 pc = look * vec2(0.05, 0.045);
+    float cl  = length((p - pc - vec2(-0.030, 0.045)) / vec2(0.020, 0.025));
+    col = mix(vec3(1.0), col, smoothstep(0.55, 1.05, cl));
+    float cl2 = length((p - pc - vec2(0.022, -0.030)) / vec2(0.011, 0.013));
+    col = mix(vec3(0.80, 0.86, 0.96), col, smoothstep(0.55, 1.10, cl2));
+
+    // Upper eyelid: open=1 → lid above the eye; open=0 → covers it entirely.
+    float lidY = mix(-oh - 0.03, oh + 0.03, clamp(open, 0.0, 1.0));
+    float lid  = smoothstep(lidY - 0.012, lidY + 0.012, p.y);
+    col = mix(col, head, lid);
+    // Dark lash line riding the lid edge — makes blinks read.
+    float lash = smoothstep(0.013, 0.003, abs(p.y - lidY)) * smoothstep(1.25, 1.0, shape);
+    col = mix(col, vec3(0.04, 0.05, 0.07), lash);
+
+    return vec4(col, smoothstep(1.25, 1.04, shape));
 }
 
 void main() {
@@ -162,21 +199,26 @@ void main() {
     float front = smoothstep(0.05, 0.45, n.z);  // paint features on the face front only
     vec2  fc    = p.xy;
 
-    // Eyes — ellipses; vertical openness from u_eyes.
-    float lh  = max(0.05, u_eyes.x) * 0.17;
-    float rh  = max(0.05, u_eyes.y) * 0.17;
-    float eye = min(length((fc - vec2(-0.28, 0.14)) / vec2(0.115, lh)),
-                    length((fc - vec2( 0.28, 0.14)) / vec2(0.115, rh)));
-    col = mix(col, ink, (1.0 - smoothstep(0.92, 1.08, eye)) * front);
+    vec3 headCol = col;   // lit head colour, for eyelids + socket blending
 
-    // Brows — ink bars; raise + skew scaled by intensity.
+    // Eyes — glossy, gaze-tracking, with descending lids. Pupils follow gaze
+    // plus a gentle idle drift so the face never feels frozen.
+    vec2 eyeAim = u_gaze * 8.0 + vec2(sin(u_time * 0.7), sin(u_time * 0.9 + 1.3)) * 0.22;
+    vec4 le = eyePix(fc, vec2(-0.28, 0.15), u_eyes.x, eyeAim, headCol);
+    vec4 re = eyePix(fc, vec2( 0.28, 0.15), u_eyes.y, eyeAim, headCol);
+    col = mix(col, le.rgb, le.a * front);
+    col = mix(col, re.rgb, re.a * front);
+
+    // Brows — bars with raise + skew (vertical) AND inner-end tilt: angle>0 lifts
+    // the inner ends (worried/sad), angle<0 drops them (angry V).
     float lDy = (u_brow.x + u_brow.y) * u_intensity * 0.18;
     float rDy = (u_brow.x - u_brow.y) * u_intensity * 0.18;
-    vec2  lb  = vec2(-0.28, 0.40 + lDy);
-    vec2  rb  = vec2( 0.28, 0.40 + rDy);
+    float ta  = u_brow.z * u_intensity * 0.085;
+    vec2  lb  = vec2(-0.28, 0.42 + lDy);
+    vec2  rb  = vec2( 0.28, 0.42 + rDy);
     float bw  = 0.17;
-    float bd  = min(segd(fc, lb - vec2(bw, 0.0), lb + vec2(bw, 0.0)),
-                    segd(fc, rb - vec2(bw, 0.0), rb + vec2(bw, 0.0)));
+    float bd  = min(segd(fc, lb + vec2(-bw, -ta), lb + vec2(bw,  ta)),
+                    segd(fc, rb + vec2(-bw,  ta), rb + vec2(bw, -ta)));
     col = mix(col, ink, (1.0 - smoothstep(0.045, 0.065, bd)) * front);
 
     // Mouth — filled maw when open, else a stroked quadratic (smile ↔ frown).
@@ -192,6 +234,14 @@ void main() {
         float line = smoothstep(0.055, 0.028, abs(fc.y - yc))
                    * step(abs(fc.x - mc.x), halfW) * front;
         col = mix(col, ink, line);
+    }
+
+    // Blush — warm cheeks for affection / pride / delight.
+    if (u_blush > 0.01) {
+        float bl = min(length((fc - vec2(-0.40, -0.07)) / vec2(0.16, 0.115)),
+                       length((fc - vec2( 0.40, -0.07)) / vec2(0.16, 0.115)));
+        float bm = (1.0 - smoothstep(0.45, 1.0, bl)) * u_blush * 0.45 * front;
+        col = mix(col, vec3(1.0, 0.45, 0.55), bm);
     }
 
     gl_FragColor = vec4(col, 1.0);
@@ -250,10 +300,11 @@ impl FaceGl {
             let u_mouth = gl.get_uniform_location(program, "u_mouth");
             let u_gaze = gl.get_uniform_location(program, "u_gaze");
             let u_intensity = gl.get_uniform_location(program, "u_intensity");
+            let u_blush = gl.get_uniform_location(program, "u_blush");
 
             Ok(Self {
                 gl, program, vao, vbo, u_time, u_res, u_origin,
-                u_accent, u_eyes, u_brow, u_mouth, u_gaze, u_intensity,
+                u_accent, u_eyes, u_brow, u_mouth, u_gaze, u_intensity, u_blush,
             })
         }
     }
@@ -316,7 +367,7 @@ impl FaceGl {
                 self.gl.uniform_2_f32(Some(u), expr.eye_l, expr.eye_r);
             }
             if let Some(u) = self.u_brow.as_ref() {
-                self.gl.uniform_2_f32(Some(u), expr.brow, expr.brow_skew);
+                self.gl.uniform_3_f32(Some(u), expr.brow, expr.brow_skew, expr.brow_angle);
             }
             if let Some(u) = self.u_mouth.as_ref() {
                 self.gl.uniform_2_f32(Some(u), expr.mouth, expr.open);
@@ -326,6 +377,9 @@ impl FaceGl {
             }
             if let Some(u) = self.u_intensity.as_ref() {
                 self.gl.uniform_1_f32(Some(u), expr.intensity);
+            }
+            if let Some(u) = self.u_blush.as_ref() {
+                self.gl.uniform_1_f32(Some(u), expr.blush);
             }
             self.gl.bind_vertex_array(Some(self.vao));
             self.gl.draw_arrays(glow::TRIANGLES, 0, 3);

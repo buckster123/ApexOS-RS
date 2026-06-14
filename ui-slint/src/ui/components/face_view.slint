@@ -93,6 +93,28 @@ export component FaceView {
         : root.state == "skeptical" ? 0.5
         : 0.0;
 
+    // Inner-end brow tilt (consumed by the GL face): +up = worried/sad,
+    // −down = angry/focused. The 2D face doesn't render this; it's the extra
+    // shape dimension the shader can express. Scaled by intensity in the shader.
+    property <float> brow-angle:
+        root.state == "alert"     ? -1.0
+        : root.state == "focused"  ? -0.8
+        : root.state == "thinking" ? -0.4
+        : root.state == "skeptical" ? -0.3
+        : root.state == "sad"      ? 1.0
+        : root.state == "confused" ? 0.6
+        : root.state == "curious"  ? 0.4
+        : root.state == "surprised" ? 0.2
+        : 0.0;
+
+    // Warm-cheek blush (GL face): affection / pride / delight.
+    property <float> blush:
+        root.state == "love"   ? 1.0
+        : root.state == "proud" ? 0.6
+        : root.state == "happy" ? 0.5
+        : root.state == "amused" ? 0.5
+        : 0.0;
+
     // Mouth curve for the Path: +1 full smile … 0 flat … −1 full frown.
     property <float> mouth-curve:
         (root.state == "happy" || root.state == "amused" || root.state == "proud"
@@ -170,6 +192,8 @@ export component FaceView {
                     FaceGl.eye-r = root.r-eye;
                     FaceGl.brow = root.brow-raise;
                     FaceGl.brow-skew = root.brow-skew;
+                    FaceGl.brow-angle = root.brow-angle;
+                    FaceGl.blush = root.blush;
                     FaceGl.mouth = root.mouth-curve;
                     FaceGl.mouth-open = root.mouth-is-open ? root.mouth-open : 0;
                     FaceGl.gaze-x = root.gaze-fx;
