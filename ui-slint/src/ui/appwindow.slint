@@ -59,6 +59,8 @@ export component AppWindow inherits Window {
     // ── Tier-A parity apps (Event Log / Mesh / Inference) ───────────────
     in-out property <[EventLogItem]> event-log;
     in-out property <[MeshNode]>     mesh-nodes;
+    in-out property <string>         mesh-pair-code;
+    in-out property <int>            mesh-pair-remaining;
     in-out property <string>         inference-backend: "—";
     in-out property <string>         inference-base-url: "";
     in-out property <[ModelItem]>    inference-models;
@@ -141,6 +143,8 @@ export component AppWindow inherits Window {
     callback refresh-mesh();
     callback add-peer(string, string, string);   // node_id, ws_url, token
     callback remove-peer(string);            // node_id
+    callback start-pairing();
+    callback redeem-pairing(string, string);     // peer ws_url, code
     callback refresh-inference();
     callback refresh-audio();
     callback select-audio(string, string);   // path, name
@@ -628,6 +632,8 @@ export component AppWindow inherits Window {
                         council-scroll-tick: root.council-scroll-tick;
                         event-log: root.event-log;
                         mesh-nodes: root.mesh-nodes;
+                        mesh-pair-code <=> root.mesh-pair-code;
+                        mesh-pair-remaining <=> root.mesh-pair-remaining;
                         inference-backend: root.inference-backend;
                         inference-base-url: root.inference-base-url;
                         inference-models: root.inference-models;
@@ -685,6 +691,8 @@ export component AppWindow inherits Window {
                         refresh-mesh => { root.refresh-mesh(); }
                         add-peer(id, url, token) => { root.add-peer(id, url, token); }
                         remove-peer(id) => { root.remove-peer(id); }
+                        start-pairing => { root.start-pairing(); }
+                        redeem-pairing(url, code) => { root.redeem-pairing(url, code); }
                         refresh-inference => { root.refresh-inference(); }
                         refresh-audio => { root.refresh-audio(); }
                         select-audio(p, n) => { root.select-audio(p, n); }
