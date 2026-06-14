@@ -43,6 +43,7 @@ pub struct FaceExpr {
     pub head_roll: f32,   // head tilt/cock
     pub head_pitch: f32,  // chin lift (+) / drop (−)
     pub tear: f32,        // 1 = sliding teardrop (sad)
+    pub cheek: f32,       // cheek-raise / lower-lid squint 0..1
 }
 
 pub struct FaceGl {
@@ -62,6 +63,7 @@ pub struct FaceGl {
     u_blush: Option<glow::UniformLocation>,
     u_head: Option<glow::UniformLocation>,
     u_anim: Option<glow::UniformLocation>,
+    u_cheek: Option<glow::UniformLocation>,
 }
 
 const VERT: &str = r#"#version 100
@@ -98,6 +100,7 @@ uniform float u_intensity; // expression strength 0..1
 uniform float u_blush;     // warm-cheek amount 0..1
 uniform vec2  u_head;      // (roll, pitch) head tilt
 uniform vec2  u_anim;      // (talk, tear)
+uniform float u_cheek;     // cheek-raise / lower-lid squint 0..1
 
 // Inexact-but-bounded ellipsoid SDF (Quílez); fine for sphere tracing a blob.
 float sdEllipsoid(vec3 p, vec3 r) {
@@ -138,11 +141,12 @@ float segd(vec2 p, vec2 a, vec2 b) {
 }
 
 // A glossy eye: a dark sheened eyeball with two catchlights that shift with
-// `look` (gaze + idle drift), and an upper eyelid that descends as `open` drops
-// (blink / sleepy / squint) carrying a dark lash line. `head` is the lit head
-// colour, used for the eyelid + soft socket so it blends into the face. Returns
+// `look` (gaze + idle drift), an upper eyelid that descends as `open` drops
+// (blink / sleepy / squint) and a lower eyelid that rises with `lower` (the
+// Duchenne smiling-eye crinkle / concentration squint), both carrying lash
+// lines. `head` is the lit head colour so the lids blend into the face. Returns
 // vec4(rgb, mask); mask is the soft eye-opening coverage.
-vec4 eyePix(vec2 fc, vec2 c, float open, vec2 look, vec3 head) {
+vec4 eyePix(vec2 fc, vec2 c, float open, float lower, vec2 look, vec3 head) {
     vec2 p = fc - c;
     float ow = 0.115, oh = 0.155;
     float shape = length(p / vec2(ow, oh));
@@ -161,11 +165,15 @@ vec4 eyePix(vec2 fc, vec2 c, float open, vec2 look, vec3 head) {
 
     // Upper eyelid: open=1 → lid above the eye; open=0 → covers it entirely.
     float lidY = mix(-oh - 0.03, oh + 0.03, clamp(open, 0.0, 1.0));
-    float lid  = smoothstep(lidY - 0.012, lidY + 0.012, p.y);
-    col = mix(col, head, lid);
-    // Dark lash line riding the lid edge — makes blinks read.
+    col = mix(col, head, smoothstep(lidY - 0.012, lidY + 0.012, p.y));
     float lash = smoothstep(0.013, 0.003, abs(p.y - lidY)) * smoothstep(1.25, 1.0, shape);
     col = mix(col, vec3(0.04, 0.05, 0.07), lash);
+
+    // Lower eyelid rises with `lower` — the smiling-eye crinkle / squint.
+    float lowY = mix(-oh - 0.03, oh * 0.18, clamp(lower, 0.0, 1.0));
+    col = mix(col, head, smoothstep(lowY + 0.012, lowY - 0.012, p.y));
+    float llash = smoothstep(0.012, 0.003, abs(p.y - lowY)) * smoothstep(1.25, 1.0, shape) * step(0.05, lower);
+    col = mix(col, vec3(0.04, 0.05, 0.07), llash);
 
     return vec4(col, smoothstep(1.25, 1.04, shape));
 }
@@ -204,7 +212,11 @@ void main() {
     float rim  = pow(1.0 - clamp(dot(n, viewDir), 0.0, 1.0), 2.5);
     float spec = pow(clamp(dot(reflect(-lightDir, n), viewDir), 0.0, 1.0), 24.0);
 
-    vec3 col = u_accent * (0.30 + 0.60 * diff + 0.16 * fill);
+    // Lift the ambient floor for dark accents (e.g. the deep-blue idle/speaking
+    // Palette.primary) so the face never sinks into muddy darkness.
+    float lum    = dot(u_accent, vec3(0.30, 0.59, 0.11));
+    float ambient = 0.30 + (1.0 - smoothstep(0.12, 0.45, lum)) * 0.22;
+    vec3 col = u_accent * (ambient + 0.58 * diff + 0.16 * fill);
     col += u_accent * rim * 0.38;          // accent rim wrap
     col += vec3(1.0) * spec * 0.20;        // crisp highlight
 
@@ -229,10 +241,17 @@ void main() {
     // Crisp auto-blink — a quick lid dip (~0.45s) every ~5s.
     float bph   = fract(u_time * 0.2);
     float blink = 1.0 - 0.92 * (1.0 - smoothstep(0.0, 0.045, abs(bph - 0.03)));
-    vec4 le = eyePix(fc, vec2(-0.28, 0.15), u_eyes.x * blink, eyeAim, headCol);
-    vec4 re = eyePix(fc, vec2( 0.28, 0.15), u_eyes.y * blink, eyeAim, headCol);
+    vec4 le = eyePix(fc, vec2(-0.28, 0.15), u_eyes.x * blink, u_cheek, eyeAim, headCol);
+    vec4 re = eyePix(fc, vec2( 0.28, 0.15), u_eyes.y * blink, u_cheek, eyeAim, headCol);
     col = mix(col, le.rgb, le.a * front);
     col = mix(col, re.rgb, re.a * front);
+
+    // Cheek-raise bulge — a soft lit highlight under the eyes on a genuine smile.
+    if (u_cheek > 0.01 && u_mouth.x > 0.25) {
+        float cd = min(length((fc - vec2(-0.27, -0.02)) / vec2(0.17, 0.11)),
+                       length((fc - vec2( 0.27, -0.02)) / vec2(0.17, 0.11)));
+        col += headCol * (1.0 - smoothstep(0.5, 1.0, cd)) * u_cheek * 0.12 * front;
+    }
 
     // Brows — bars with raise + skew (vertical) AND inner-end tilt: angle>0 lifts
     // the inner ends (worried/sad), angle<0 drops them (angry V).
@@ -253,8 +272,18 @@ void main() {
     vec2 mc = vec2(0.0, -0.40);
     if (openAmt > 0.02) {
         float mh = max(0.04, openAmt) * 0.34;
-        float mo = length((fc - mc) / vec2(0.30, mh));
-        col = mix(col, ink, (1.0 - smoothstep(0.92, 1.08, mo)) * front);
+        vec2  mp = (fc - mc) / vec2(0.30, mh);
+        float mo = length(mp);
+        float mmask = (1.0 - smoothstep(0.92, 1.08, mo)) * front;
+        // Dark interior (throat).
+        col = mix(col, vec3(0.10, 0.03, 0.05), mmask);
+        // Upper teeth — a bright band across the top of the maw.
+        float teeth = smoothstep(0.30, 0.62, mp.y) * (1.0 - smoothstep(0.80, 1.0, mo));
+        col = mix(col, vec3(0.95, 0.95, 0.90), teeth * 0.9 * front);
+        // Tongue — a warm rounded shape low in the maw, only when wide open.
+        float tongue = (1.0 - smoothstep(0.7, 1.0, length((mp - vec2(0.0, -0.45)) / vec2(0.7, 0.5))))
+                     * smoothstep(0.45, 0.85, openAmt);
+        col = mix(col, vec3(0.85, 0.35, 0.42), tongue * 0.55 * front);
     } else {
         float halfW = 0.40;
         float nx = fc.x / halfW;   // pow(x,2) is undefined for x<0 in GLSL ES — square it
@@ -343,11 +372,12 @@ impl FaceGl {
             let u_blush = gl.get_uniform_location(program, "u_blush");
             let u_head = gl.get_uniform_location(program, "u_head");
             let u_anim = gl.get_uniform_location(program, "u_anim");
+            let u_cheek = gl.get_uniform_location(program, "u_cheek");
 
             Ok(Self {
                 gl, program, vao, vbo, u_time, u_res, u_origin,
                 u_accent, u_eyes, u_brow, u_mouth, u_gaze, u_intensity, u_blush,
-                u_head, u_anim,
+                u_head, u_anim, u_cheek,
             })
         }
     }
@@ -429,6 +459,9 @@ impl FaceGl {
             }
             if let Some(u) = self.u_anim.as_ref() {
                 self.gl.uniform_2_f32(Some(u), expr.talk, expr.tear);
+            }
+            if let Some(u) = self.u_cheek.as_ref() {
+                self.gl.uniform_1_f32(Some(u), expr.cheek);
             }
             self.gl.bind_vertex_array(Some(self.vao));
             self.gl.draw_arrays(glow::TRIANGLES, 0, 3);

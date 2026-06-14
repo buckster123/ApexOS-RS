@@ -3387,6 +3387,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         head_roll: g.get_head_roll(),
                         head_pitch: g.get_head_pitch(),
                         tear: g.get_tear(),
+                        cheek: g.get_cheek(),
                     };
                     f.draw(
                         start.elapsed().as_secs_f32(),

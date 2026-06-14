@@ -130,6 +130,15 @@ export component FaceView {
         : root.state == "sleeping" ? -0.28
         : 0.0;
     property <float> tear: root.state == "sad" ? 1.0 : 0.0;
+    // Cheek-raise / lower-lid: warm Duchenne crinkle on genuine smiles, plus a
+    // concentration/intensity squint for focused/alert/skeptical.
+    property <float> cheek:
+        (root.state == "happy" || root.state == "love" || root.state == "amused") ? 0.7
+        : root.state == "proud"    ? 0.55
+        : root.state == "focused"  ? 0.5
+        : root.state == "alert"    ? 0.4
+        : root.state == "skeptical" ? 0.35
+        : 0.0;
 
     // Mouth curve for the Path: +1 full smile … 0 flat … −1 full frown.
     property <float> mouth-curve:
@@ -214,6 +223,7 @@ export component FaceView {
                     FaceGl.head-roll = root.head-roll;
                     FaceGl.head-pitch = root.head-pitch;
                     FaceGl.tear = root.tear;
+                    FaceGl.cheek = root.cheek;
                     FaceGl.mouth = root.mouth-curve;
                     FaceGl.mouth-open = root.mouth-is-open ? root.mouth-open : 0;
                     FaceGl.gaze-x = root.gaze-fx;
