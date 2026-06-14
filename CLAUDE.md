@@ -19,7 +19,7 @@ ApexOS-RS targets any spare device — not just Pi 5. Pi 5 16GB boards now cost 
 | Nano | Pi Zero 2W, any 512MB Linux board | `linuxkms-femtovg` | 23 MB (FTS5 only) | API only |
 | Micro | Pi 4 1-2GB, older ARM64 | `linuxkms` | 275 MB (bge-small) | API or small local |
 | Standard | Pi 5, x86 mini-PC | `linuxkms` | 275 MB | Ollama 7-13B |
-| Pro | x86 + GPU (CUDA/ROCm/Metal) | `winit` | 500 MB+ (bge-large) | Ollama 30-70B local |
+| Pro | x86 + GPU (CUDA/ROCm/Metal) | `winit` | 275 MB (bge-small) | Ollama 30-70B local |
 
 **Design rule:** build UI features for Nano constraints first — no assumption of fast inference, graceful when embedding is disabled, no hard-coded timeouts shorter than 30s for LLM calls. Faster tiers get the same UI, they just respond faster.
 
