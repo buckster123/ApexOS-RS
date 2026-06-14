@@ -138,9 +138,12 @@ export component AppWindowFrame inherits Rectangle {
     in property <string>         web-sensorhead-url;
     in-out property <string>     web-custom-url;
     in property <string>         calc-display;
+    in property <string>         staged-image-name;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
+    callback attach-image();
+    callback clear-attachment();
     callback toggle-recording();
     callback stop-turn();
     callback restore-session(int);
@@ -392,9 +395,12 @@ export component AppWindowFrame inherits Rectangle {
                         busy: root.agent-busy;
                         glow-alpha: root.glow-alpha;
                         recording: root.recording;
+                        staged-name: root.staged-image-name;
                         toggle-recording => { root.toggle-recording(); }
                         send(text) => { root.send-message(text); }
                         stop => { root.stop-turn(); }
+                        attach => { root.attach-image(); }
+                        clear-attachment => { root.clear-attachment(); }
                     }
                 }
             }

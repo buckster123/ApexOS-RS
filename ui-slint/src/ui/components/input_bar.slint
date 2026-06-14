@@ -2,21 +2,25 @@ import { Palette } from "../palette.slint";
 
 // Text input + send button.
 // Calls send(text) when user presses Enter or the send button.
-// Clears after send.
+// Clears after send. attach()/clear-attachment() drive the workspace image
+// picker; staged-name shows the currently-attached image as a chip.
 
 export component InputBar {
     callback send(string);
     callback toggle-recording();
     callback stop();
+    callback attach();
+    callback clear-attachment();
 
     in property <bool>   busy: false;
     in property <float>  glow-alpha: 0.0;
     in property <bool>   recording: false;
+    in property <string> staged-name: "";   // attached image filename, "" = none
 
     // Grows with wrapped input (Enter sends, Shift+Enter = newline) up to a cap,
-    // after which the field scrolls internally.
-    min-height: 52px;
-    max-height: 132px;
+    // after which the field scrolls internally. Grows when a chip is shown.
+    min-height: root.staged-name != "" ? 82px : 52px;
+    max-height: 152px;
 
     Rectangle {
         background: Palette.surface;
@@ -29,118 +33,185 @@ export component InputBar {
         drop-shadow-color: rgba(0, 212, 255, root.glow-alpha * 0.3);
         drop-shadow-offset-y: 0px;
 
-        HorizontalLayout {
+        VerticalLayout {
             padding: 8px;
-            spacing: 8px;
+            spacing: 6px;
 
-            // Input field with manual placeholder overlay. clip keeps overflow text
-            // from spilling past the right edge / behind the buttons.
-            field-wrap := Rectangle {
-                horizontal-stretch: 1;
-                clip: true;
-
-                field := TextInput {
-                    width: parent.width;
-                    font-size: 13px;
-                    color: Palette.text;
-                    selection-background-color: Palette.primary-dim;
-                    selection-foreground-color: Palette.text-bright;
-                    // Multi-line + wrap so long messages flow to the next line
-                    // instead of scrolling off the right edge.
-                    single-line: false;
-                    wrap: word-wrap;
-                    enabled: !root.busy;
-
-                    // Enter sends; Shift+Enter inserts a newline (multi-line edit).
-                    key-pressed(e) => {
-                        if (e.text == "\n" && !e.modifiers.shift) {
-                            if (self.text != "") {
-                                root.send(self.text);
-                                self.text = "";
-                            }
-                            return EventResult.accept;
+            // Staged attachment chip — shown only when an image is attached.
+            if root.staged-name != "": HorizontalLayout {
+                spacing: 6px;
+                Rectangle {
+                    height: 24px;
+                    horizontal-stretch: 0;
+                    border-radius: Palette.radius;
+                    background: Palette.primary-dim;
+                    border-width: 1px;
+                    border-color: Palette.primary;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 6px;
+                        spacing: 6px;
+                        Text {
+                            text: "🖼 " + root.staged-name;
+                            color: Palette.text-bright;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
                         }
-                        return EventResult.reject;
+                        clear-chip := Rectangle {
+                            width: 18px;
+                            border-radius: 9px;
+                            background: clear-area.has-hover ? Palette.error : transparent;
+                            Text {
+                                text: "✕";
+                                color: clear-area.has-hover ? #ffffff : Palette.text-dim;
+                                font-size: 10px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            clear-area := TouchArea { clicked => { root.clear-attachment(); } }
+                        }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+
+            // Input row.
+            HorizontalLayout {
+                spacing: 8px;
+
+                // Input field with manual placeholder overlay. clip keeps overflow text
+                // from spilling past the right edge / behind the buttons.
+                field-wrap := Rectangle {
+                    horizontal-stretch: 1;
+                    clip: true;
+
+                    field := TextInput {
+                        width: parent.width;
+                        font-size: 13px;
+                        color: Palette.text;
+                        selection-background-color: Palette.primary-dim;
+                        selection-foreground-color: Palette.text-bright;
+                        // Multi-line + wrap so long messages flow to the next line
+                        // instead of scrolling off the right edge.
+                        single-line: false;
+                        wrap: word-wrap;
+                        enabled: !root.busy;
+
+                        // Enter sends; Shift+Enter inserts a newline (multi-line edit).
+                        key-pressed(e) => {
+                            if (e.text == "\n" && !e.modifiers.shift) {
+                                if (self.text != "") {
+                                    root.send(self.text);
+                                    self.text = "";
+                                }
+                                return EventResult.accept;
+                            }
+                            return EventResult.reject;
+                        }
+                    }
+
+                    // Placeholder — shown when field is empty
+                    if field.text == "": Text {
+                        x: 2px;
+                        y: 0;
+                        width: parent.width - 4px;
+                        height: parent.height;
+                        text: root.busy ? "apex is responding…"
+                            : root.recording ? "listening…"
+                            : "Message apex…";
+                        color: Palette.text-dim;
+                        font-size: 13px;
+                        vertical-alignment: center;
                     }
                 }
 
-                // Placeholder — shown when field is empty
-                if field.text == "": Text {
-                    x: 2px;
-                    y: 0;
-                    width: parent.width - 4px;
-                    height: parent.height;
-                    text: root.busy ? "apex is responding…"
-                        : root.recording ? "listening…"
-                        : "Message apex…";
-                    color: Palette.text-dim;
-                    font-size: 13px;
-                    vertical-alignment: center;
-                }
-            }
+                // Attach button — pick a workspace image to send to APEX.
+                attach-btn := Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    border-radius: Palette.radius;
+                    background: root.staged-name != "" ? Palette.primary-dim : Palette.surface-hi;
+                    border-width: 1px;
+                    border-color: root.staged-name != "" ? Palette.primary : Palette.border;
+                    animate background, border-color { duration: 150ms; }
 
-            // Mic button — tap to start/stop server-side recording
-            mic-btn := Rectangle {
-                width: 36px;
-                height: 36px;
-                border-radius: Palette.radius;
-                background: root.recording
-                    ? rgba(239, 68, 68, 0.15)
-                    : Palette.surface-hi;
-                border-width: 1px;
-                border-color: root.recording
-                    ? rgba(239, 68, 68, 0.7)
-                    : Palette.border;
-                animate background    { duration: 150ms; }
-                animate border-color  { duration: 150ms; }
+                    Text {
+                        text: "🖼";
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
 
-                Text {
-                    text: root.recording ? "■" : "●";
-                    color: root.recording ? #ef4444 : Palette.text-dim;
-                    font-size: 12px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    animate color { duration: 150ms; }
+                    attach-area := TouchArea {
+                        enabled: !root.busy;
+                        clicked => { root.attach(); }
+                    }
                 }
 
-                TouchArea {
-                    enabled: !root.busy;
-                    clicked => { root.toggle-recording(); }
+                // Mic button — tap to start/stop server-side recording
+                mic-btn := Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    border-radius: Palette.radius;
+                    background: root.recording
+                        ? rgba(239, 68, 68, 0.15)
+                        : Palette.surface-hi;
+                    border-width: 1px;
+                    border-color: root.recording
+                        ? rgba(239, 68, 68, 0.7)
+                        : Palette.border;
+                    animate background    { duration: 150ms; }
+                    animate border-color  { duration: 150ms; }
+
+                    Text {
+                        text: root.recording ? "■" : "●";
+                        color: root.recording ? #ef4444 : Palette.text-dim;
+                        font-size: 12px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        animate color { duration: 150ms; }
+                    }
+
+                    TouchArea {
+                        enabled: !root.busy;
+                        clicked => { root.toggle-recording(); }
+                    }
                 }
-            }
 
-            // Send button — while busy it becomes a Stop button (abort the turn).
-            send-btn := Rectangle {
-                width: 36px;
-                height: 36px;
-                border-radius: Palette.radius;
-                background: root.busy
-                    ? (send-area.has-hover ? Palette.error : rgba(239, 68, 68, 0.15))
-                    : (send-area.has-hover ? Palette.primary : Palette.primary-dim);
+                // Send button — while busy it becomes a Stop button (abort the turn).
+                send-btn := Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    border-radius: Palette.radius;
+                    background: root.busy
+                        ? (send-area.has-hover ? Palette.error : rgba(239, 68, 68, 0.15))
+                        : (send-area.has-hover ? Palette.primary : Palette.primary-dim);
 
-                animate background { duration: 150ms; easing: ease; }
+                    animate background { duration: 150ms; easing: ease; }
 
-                Text {
-                    text: root.busy ? "■" : "↑";
-                    color: root.busy
-                        ? (send-area.has-hover ? #ffffff : #ef4444)
-                        : Palette.bg;
-                    font-size: root.busy ? 12px : 16px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
+                    Text {
+                        text: root.busy ? "■" : "↑";
+                        color: root.busy
+                            ? (send-area.has-hover ? #ffffff : #ef4444)
+                            : Palette.bg;
+                        font-size: root.busy ? 12px : 16px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
 
-                send-area := TouchArea {
-                    // Clickable both while busy (stop) and when there's text to send.
-                    enabled: root.busy || field.text != "";
-                    clicked => {
-                        if root.busy {
-                            root.stop();
-                        } else if field.text != "" {
-                            root.send(field.text);
-                            field.text = "";
+                    send-area := TouchArea {
+                        // Clickable both while busy (stop) and when there's text to send.
+                        enabled: root.busy || field.text != "";
+                        clicked => {
+                            if root.busy {
+                                root.stop();
+                            } else if field.text != "" {
+                                root.send(field.text);
+                                field.text = "";
+                            }
                         }
                     }
                 }
