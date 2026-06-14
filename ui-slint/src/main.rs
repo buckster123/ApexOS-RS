@@ -3383,6 +3383,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         gaze: [g.get_gaze_x(), g.get_gaze_y()],
                         intensity: g.get_intensity(),
                         blush: g.get_blush(),
+                        talk: g.get_talk(),
+                        head_roll: g.get_head_roll(),
+                        head_pitch: g.get_head_pitch(),
+                        tear: g.get_tear(),
                     };
                     f.draw(
                         start.elapsed().as_secs_f32(),

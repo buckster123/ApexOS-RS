@@ -115,6 +115,22 @@ export component FaceView {
         : root.state == "amused" ? 0.5
         : 0.0;
 
+    // Motion / life (GL face only). The 2D fallback ignores these.
+    property <float> talk: root.state == "speaking" ? 1.0 : 0.0;
+    property <float> head-roll:                 // tilt/cock the head
+        root.state == "curious"   ? 0.55
+        : root.state == "confused" ? 0.40
+        : root.state == "amused"   ? 0.28
+        : root.state == "skeptical" ? -0.18
+        : 0.0;
+    property <float> head-pitch:                // chin up (+) / down (−)
+        root.state == "proud"     ? 0.35
+        : root.state == "surprised" ? 0.15
+        : root.state == "sad"      ? -0.18
+        : root.state == "sleeping" ? -0.28
+        : 0.0;
+    property <float> tear: root.state == "sad" ? 1.0 : 0.0;
+
     // Mouth curve for the Path: +1 full smile … 0 flat … −1 full frown.
     property <float> mouth-curve:
         (root.state == "happy" || root.state == "amused" || root.state == "proud"
@@ -194,6 +210,10 @@ export component FaceView {
                     FaceGl.brow-skew = root.brow-skew;
                     FaceGl.brow-angle = root.brow-angle;
                     FaceGl.blush = root.blush;
+                    FaceGl.talk = root.talk;
+                    FaceGl.head-roll = root.head-roll;
+                    FaceGl.head-pitch = root.head-pitch;
+                    FaceGl.tear = root.tear;
                     FaceGl.mouth = root.mouth-curve;
                     FaceGl.mouth-open = root.mouth-is-open ? root.mouth-open : 0;
                     FaceGl.gaze-x = root.gaze-fx;

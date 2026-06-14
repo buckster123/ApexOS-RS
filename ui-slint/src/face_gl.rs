@@ -39,6 +39,10 @@ pub struct FaceExpr {
     pub gaze: [f32; 2],   // gaze offset fraction (x: −left/+right, y: −up/+down)
     pub intensity: f32,   // expression strength 0..1
     pub blush: f32,       // warm-cheek amount 0..1
+    pub talk: f32,        // 1 = speaking → animated mouth-flap
+    pub head_roll: f32,   // head tilt/cock
+    pub head_pitch: f32,  // chin lift (+) / drop (−)
+    pub tear: f32,        // 1 = sliding teardrop (sad)
 }
 
 pub struct FaceGl {
@@ -56,6 +60,8 @@ pub struct FaceGl {
     u_gaze: Option<glow::UniformLocation>,
     u_intensity: Option<glow::UniformLocation>,
     u_blush: Option<glow::UniformLocation>,
+    u_head: Option<glow::UniformLocation>,
+    u_anim: Option<glow::UniformLocation>,
 }
 
 const VERT: &str = r#"#version 100
@@ -90,6 +96,8 @@ uniform vec2  u_mouth;     // (curve −1..1, open 0..1)
 uniform vec2  u_gaze;      // gaze offset fraction
 uniform float u_intensity; // expression strength 0..1
 uniform float u_blush;     // warm-cheek amount 0..1
+uniform vec2  u_head;      // (roll, pitch) head tilt
+uniform vec2  u_anim;      // (talk, tear)
 
 // Inexact-but-bounded ellipsoid SDF (Quílez); fine for sphere tracing a blob.
 float sdEllipsoid(vec3 p, vec3 r) {
@@ -119,6 +127,8 @@ vec3 calcNormal(vec3 p) {
 }
 mat3 rotY(float a) { float c = cos(a), s = sin(a); return mat3(c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c); }
 mat3 rotX(float a) { float c = cos(a), s = sin(a); return mat3(1.0, 0.0, 0.0, 0.0, c, s, 0.0, -s, c); }
+mat3 rotZ(float a) { float c = cos(a), s = sin(a); return mat3(c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0); }
+float hash1(float x) { return fract(sin(x * 12.9898) * 43758.5453); }
 
 // Distance from p to segment a—b (2D, for brow bars).
 float segd(vec2 p, vec2 a, vec2 b) {
@@ -168,7 +178,10 @@ void main() {
     float bob = sin(u_time * 1.1) * 0.012;
     vec3 ro = vec3(0.0, bob, 3.05);
     vec3 rd = normalize(vec3(uv * 0.95, -1.75));
-    mat3 look = rotY(-u_gaze.x * 4.0) * rotX(u_gaze.y * 4.0);
+    // Head orientation: gaze turn + a per-emote tilt (roll) and chin lift (pitch).
+    mat3 look = rotZ(u_head.x * 0.45)
+              * rotY(-u_gaze.x * 4.0)
+              * rotX(u_gaze.y * 4.0 - u_head.y * 0.4);
     vec3 roH = look * ro;
     vec3 rdH = look * rd;   // march in head space → fixed light + feature frame
 
@@ -203,9 +216,21 @@ void main() {
 
     // Eyes — glossy, gaze-tracking, with descending lids. Pupils follow gaze
     // plus a gentle idle drift so the face never feels frozen.
-    vec2 eyeAim = u_gaze * 8.0 + vec2(sin(u_time * 0.7), sin(u_time * 0.9 + 1.3)) * 0.22;
-    vec4 le = eyePix(fc, vec2(-0.28, 0.15), u_eyes.x, eyeAim, headCol);
-    vec4 re = eyePix(fc, vec2( 0.28, 0.15), u_eyes.y, eyeAim, headCol);
+    // Idle saccades — hold a random target, dart to a new one every ~2.4s;
+    // faded out when a real gaze is set so the agent's look wins.
+    float st  = u_time * 0.42;
+    float seg = floor(st);
+    vec2  sA  = vec2(hash1(seg) - 0.5, hash1(seg + 7.3) - 0.5);
+    vec2  sB  = vec2(hash1(seg + 1.0) - 0.5, hash1(seg + 8.3) - 0.5);
+    vec2  sacc = mix(sA, sB, smoothstep(0.0, 0.10, fract(st))) * 0.5;
+    sacc *= 1.0 - clamp(length(u_gaze) * 6.0, 0.0, 1.0);
+    vec2  eyeAim = u_gaze * 8.0 + sacc;
+
+    // Crisp auto-blink — a quick lid dip (~0.45s) every ~5s.
+    float bph   = fract(u_time * 0.2);
+    float blink = 1.0 - 0.92 * (1.0 - smoothstep(0.0, 0.045, abs(bph - 0.03)));
+    vec4 le = eyePix(fc, vec2(-0.28, 0.15), u_eyes.x * blink, eyeAim, headCol);
+    vec4 re = eyePix(fc, vec2( 0.28, 0.15), u_eyes.y * blink, eyeAim, headCol);
     col = mix(col, le.rgb, le.a * front);
     col = mix(col, re.rgb, re.a * front);
 
@@ -222,10 +247,13 @@ void main() {
     col = mix(col, ink, (1.0 - smoothstep(0.045, 0.065, bd)) * front);
 
     // Mouth — filled maw when open, else a stroked quadratic (smile ↔ frown).
+    // When speaking, a fast oscillation drives a lively lip-flap.
+    float talkOpen = (0.18 + 0.30 * (0.5 + 0.5 * sin(u_time * 15.0))) * u_anim.x;
+    float openAmt  = max(u_mouth.y, talkOpen);
     vec2 mc = vec2(0.0, -0.40);
-    if (u_mouth.y > 0.02) {
-        float mh = max(0.04, u_mouth.y) * 0.34;
-        float mo = length((fc - mc) / vec2(0.32, mh));
+    if (openAmt > 0.02) {
+        float mh = max(0.04, openAmt) * 0.34;
+        float mo = length((fc - mc) / vec2(0.30, mh));
         col = mix(col, ink, (1.0 - smoothstep(0.92, 1.08, mo)) * front);
     } else {
         float halfW = 0.40;
@@ -242,6 +270,18 @@ void main() {
                        length((fc - vec2( 0.40, -0.07)) / vec2(0.16, 0.115)));
         float bm = (1.0 - smoothstep(0.45, 1.0, bl)) * u_blush * 0.45 * front;
         col = mix(col, vec3(1.0, 0.45, 0.55), bm);
+    }
+
+    // Tear — wells under the right eye and slides down the cheek, on a loop (sad).
+    if (u_anim.y > 0.5) {
+        float tph = fract(u_time * 0.33);
+        vec2  tc  = vec2(0.255, -0.02 - tph * 0.40);
+        float td  = length((fc - tc) / vec2(0.034, 0.052));
+        float tm  = (1.0 - smoothstep(0.82, 1.08, td)) * front
+                  * smoothstep(0.0, 0.08, tph) * smoothstep(1.0, 0.9, tph);
+        col = mix(col, vec3(0.62, 0.82, 1.0), tm * 0.9);
+        float tcl = length((fc - tc - vec2(-0.010, 0.014)) / vec2(0.008, 0.010));
+        col = mix(col, vec3(1.0), (1.0 - smoothstep(0.6, 1.1, tcl)) * tm);
     }
 
     gl_FragColor = vec4(col, 1.0);
@@ -301,10 +341,13 @@ impl FaceGl {
             let u_gaze = gl.get_uniform_location(program, "u_gaze");
             let u_intensity = gl.get_uniform_location(program, "u_intensity");
             let u_blush = gl.get_uniform_location(program, "u_blush");
+            let u_head = gl.get_uniform_location(program, "u_head");
+            let u_anim = gl.get_uniform_location(program, "u_anim");
 
             Ok(Self {
                 gl, program, vao, vbo, u_time, u_res, u_origin,
                 u_accent, u_eyes, u_brow, u_mouth, u_gaze, u_intensity, u_blush,
+                u_head, u_anim,
             })
         }
     }
@@ -380,6 +423,12 @@ impl FaceGl {
             }
             if let Some(u) = self.u_blush.as_ref() {
                 self.gl.uniform_1_f32(Some(u), expr.blush);
+            }
+            if let Some(u) = self.u_head.as_ref() {
+                self.gl.uniform_2_f32(Some(u), expr.head_roll, expr.head_pitch);
+            }
+            if let Some(u) = self.u_anim.as_ref() {
+                self.gl.uniform_2_f32(Some(u), expr.talk, expr.tear);
             }
             self.gl.bind_vertex_array(Some(self.vao));
             self.gl.draw_arrays(glow::TRIANGLES, 0, 3);
