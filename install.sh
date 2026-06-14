@@ -373,7 +373,7 @@ case "$TIER" in
   nano)     TIER_DESC="Nano — FTS5 search only, ~23 MB RSS (no embeddings)" ;;
   micro)    TIER_DESC="Micro — bge-small embeddings, ~275 MB RSS" ;;
   standard) TIER_DESC="Standard — bge-small + local 7–13B models via Ollama" ;;
-  pro)      TIER_DESC="Pro — bge-large + 30–70B local models (GPU)" ;;
+  pro)      TIER_DESC="Pro — bge-small + 30–70B local models (GPU)" ;;
 esac
 
 # ── TUI: Install style — the first thing anyone sees ──────────────────────────
@@ -717,10 +717,13 @@ fi
 hdr "Configuration"
 
 # plugins.toml
+# bge-small (384-dim) for every embed-enabled tier — it's the only model cerebro
+# wires through and is plenty accurate for memory recall. (nano stays FTS5-only.)
+# bge-large was set for pro but cerebro rejected it → embeddings silently disabled;
+# see cerebro vector.rs. Revisit if/when a larger model is actually wired in.
 EMBED_MODEL=""
 case "$TIER" in
-  micro|standard) EMBED_MODEL="BAAI/bge-small-en-v1.5" ;;
-  pro)            EMBED_MODEL="BAAI/bge-large-en-v1.5" ;;
+  micro|standard|pro) EMBED_MODEL="BAAI/bge-small-en-v1.5" ;;
 esac
 
 install -m 644 "$REPO_DIR/config/plugins.toml" /etc/agentd/plugins.toml

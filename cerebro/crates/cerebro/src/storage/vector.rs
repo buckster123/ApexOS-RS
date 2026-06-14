@@ -254,9 +254,19 @@ pub fn blob_to_vec(blob: &[u8]) -> Vec<f32> {
 
 fn init_fastembed(model_name: &str) -> Result<fastembed::TextEmbedding> {
     use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+    // Only bge-small is wired through (384-dim — what the vector store assumes). An
+    // unrecognized model name must NOT disable embeddings: that degraded cerebro to
+    // FTS5-only *silently* and cost a long debugging hunt. Fall back to bge-small and
+    // warn loudly instead — memory search keeps working.
     let model = match model_name {
         "BAAI/bge-small-en-v1.5" => EmbeddingModel::BGESmallENV15,
-        other => anyhow::bail!("unsupported embed model: {other}"),
+        other => {
+            tracing::warn!(
+                "unsupported embed model '{other}' — falling back to BAAI/bge-small-en-v1.5 \
+                 (embeddings stay enabled; set CEREBRO_EMBED_MODEL=BAAI/bge-small-en-v1.5 to silence)"
+            );
+            EmbeddingModel::BGESmallENV15
+        }
     };
     TextEmbedding::try_new(InitOptions::new(model))
 }
