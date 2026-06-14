@@ -5,6 +5,7 @@
 // sensor thresholds, plugin crashes) have a durable home. In-canvas overlay
 // panel, dismissed by the backdrop; "Clear" empties the log.
 
+import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { ToastItem, ToastKind } from "../types.slint";
 import { Notifications } from "toast.slint";
@@ -114,8 +115,12 @@ export component NotifCenter inherits Rectangle {
         }
 
         // History — newest first (Rust inserts at index 0).
-        if Notifications.log.length > 0: Flickable {
+        // ScrollView (not Flickable): drag-able scrollbar — linuxkms has no
+        // scroll-wheel events on the kiosk.
+        if Notifications.log.length > 0: ScrollView {
             vertical-stretch: 1;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            viewport-width: self.visible-width;
             viewport-height: list.preferred-height;
             list := VerticalLayout {
                 spacing: 6px;

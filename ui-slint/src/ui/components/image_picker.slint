@@ -1,3 +1,4 @@
+import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { ImageItem } from "../types.slint";
 
@@ -55,8 +56,12 @@ export component ImagePicker inherits Rectangle {
             wrap: word-wrap;
         }
 
-        Flickable {
+        // ScrollView (not Flickable): drag-able scrollbar — linuxkms has no
+        // scroll-wheel events on the kiosk.
+        ScrollView {
             vertical-stretch: 1;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            viewport-width: self.visible-width;
             viewport-height: list.preferred-height;
             list := VerticalLayout {
                 spacing: 4px;

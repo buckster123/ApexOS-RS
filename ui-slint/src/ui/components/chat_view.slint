@@ -1,3 +1,4 @@
+import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { MessageItem, AgentBridge } from "../types.slint";
@@ -17,21 +18,25 @@ export component ChatView {
     in property <float>         glow-alpha: 0.0;
     in property <int>           scroll-tick: 0;   // bump to request scroll-to-bottom
 
-    // Expose the flickable for scroll control
-    property <length> flick-height: flick.viewport-height;
+    // Expose the viewport height for scroll control
+    property <length> flick-height: sv.viewport-height;
 
     changed scroll-tick => {
-        flick.viewport-y = min(0px, -(flick.viewport-height - flick.height));
+        sv.viewport-y = min(0px, -(sv.viewport-height - sv.visible-height));
     }
 
-    flick := Flickable {
-        interactive: true;
+    // ScrollView (not Flickable): draws a drag-able scrollbar, the only way to
+    // scroll back through history on the kiosk — the linuxkms backend drops
+    // scroll-wheel events. See the "No mouse-wheel scroll on linuxkms" gotcha.
+    sv := ScrollView {
+        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+        viewport-width: sv.visible-width;
         // Explicit viewport-height so overflow (and the scroll-tick auto-scroll
-        // math above) work — an unset Flickable sizes its child to the visible area.
-        // max(content, visible) keeps a sparse thread bottom-anchored: the column
-        // is stretched to the full visible height and `alignment: end` drops the
-        // messages to the bottom (chat-style), instead of stacking at the top.
-        viewport-height: max(msg-col.preferred-height, flick.height);
+        // math above) work. max(content, visible) keeps a sparse thread
+        // bottom-anchored: the column is stretched to the full visible height and
+        // `alignment: end` drops the messages to the bottom (chat-style), instead
+        // of stacking at the top.
+        viewport-height: max(msg-col.preferred-height, sv.visible-height);
 
         msg-col := VerticalLayout {
             padding:  12px;

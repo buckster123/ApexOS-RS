@@ -6,6 +6,7 @@
 //
 // Auto-scroll: Rust bumps `scroll-tick` on each delta (same pattern as chat).
 
+import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { CouncilAgent } from "../types.slint";
 
@@ -74,7 +75,7 @@ export component CouncilView {
     in property <int>    scroll-tick: 0;
 
     changed scroll-tick => {
-        flick.viewport-y = min(0px, -(flick.viewport-height - flick.height));
+        sv.viewport-y = min(0px, -(sv.viewport-height - sv.visible-height));
     }
 
     VerticalLayout {
@@ -143,9 +144,12 @@ export component CouncilView {
         }
 
         // ── Body ────────────────────────────────────────────────────────
-        flick := Flickable {
+        // ScrollView (not Flickable): drag-able scrollbar — linuxkms has no
+        // scroll-wheel events on the kiosk.
+        sv := ScrollView {
             vertical-stretch: 1;
-            interactive: true;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            viewport-width: sv.visible-width;
             viewport-height: council-col.preferred-height;
 
             council-col := VerticalLayout {

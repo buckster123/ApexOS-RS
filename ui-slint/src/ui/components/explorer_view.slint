@@ -1,3 +1,4 @@
+import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { ExplorerEntry } from "../types.slint";
 
@@ -96,9 +97,12 @@ export component ExplorerView {
 
                 Rectangle { height: 1px; background: Palette.border; }
 
-                Flickable {
+                // ScrollView (not Flickable): drag-able scrollbar — linuxkms has
+                // no scroll-wheel events on the kiosk.
+                ScrollView {
                     vertical-stretch: 1;
-                    interactive: true;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    viewport-width: self.visible-width;
                     viewport-height: list-col.preferred-height;
 
                     list-col := VerticalLayout {
@@ -250,12 +254,15 @@ export component ExplorerView {
                         vertical-alignment: center;
                     }
 
-                    if root.preview-kind == "text": Flickable {
+                    // ScrollView (not Flickable): drag-able scrollbar for long
+                    // text previews — linuxkms has no scroll-wheel on the kiosk.
+                    if root.preview-kind == "text": ScrollView {
                         x: 12px;
                         y: 12px;
                         width: parent.width - 24px;
                         height: parent.height - 24px;
-                        interactive: true;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                        viewport-width: self.visible-width;
                         viewport-height: txt.preferred-height;
                         txt := Text {
                             width: parent.width;

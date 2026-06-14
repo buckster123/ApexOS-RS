@@ -1,3 +1,4 @@
+import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { NoteItem } from "../types.slint";
 
@@ -131,9 +132,12 @@ export component NotesView {
                 Rectangle { height: 1px; background: Palette.border; }
 
                 // List
-                Flickable {
+                // ScrollView (not Flickable): drag-able scrollbar — linuxkms has
+                // no scroll-wheel events on the kiosk.
+                ScrollView {
                     vertical-stretch: 1;
-                    interactive: true;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    viewport-width: self.visible-width;
                     viewport-height: list-col.preferred-height;
 
                     list-col := VerticalLayout {
@@ -261,16 +265,19 @@ export component NotesView {
                         animate border-color { duration: 150ms; }
                         clip: true;
 
-                        Flickable {
+                        // ScrollView (not Flickable): drag-able scrollbar for long
+                        // notes — linuxkms has no scroll-wheel events on the kiosk.
+                        ScrollView {
                             x: 10px; y: 10px;
                             width: parent.width - 20px;
                             height: parent.height - 20px;
-                            interactive: true;
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                            viewport-width: self.visible-width;
                             viewport-height: body-field.preferred-height + 20px;
 
                             body-field := TextInput {
                                 width: parent.width;
-                                // Content height only — the Flickable scrolls it.
+                                // Content height only — the ScrollView scrolls it.
                                 // (max(.., parent.height) broke the viewport's
                                 // content-height contract and hid the text.)
                                 height: self.preferred-height;

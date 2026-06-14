@@ -10,6 +10,7 @@
 // Selecting a tile emits `pick(id)` with the Persona ordinal; Rust's
 // apply_persona switches theme + chrome + wallpaper + shell-mode live.
 
+import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { PersonaDef } from "../types.slint";
 
@@ -171,8 +172,12 @@ export component FirstBootWizard inherits Rectangle {
 
             Rectangle { height: 10px; }
 
-            Flickable {
+            // ScrollView (not Flickable): drag-able scrollbar — linuxkms has no
+            // scroll-wheel events on the kiosk.
+            ScrollView {
                 vertical-stretch: 1;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                viewport-width: self.visible-width;
                 viewport-height: pp-col.preferred-height;
                 pp-col := VerticalLayout {
                     spacing: 10px;

@@ -1,3 +1,4 @@
+import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { ModelItem } from "../types.slint";
 
@@ -114,9 +115,12 @@ export component InferenceView {
         Rectangle { height: 1px; background: Palette.border; }
 
         // ── Model switcher ───────────────────────────────────────────────────
-        Flickable {
+        // ScrollView (not Flickable): drag-able scrollbar — linuxkms has no
+        // scroll-wheel events on the kiosk.
+        ScrollView {
             vertical-stretch: 1;
-            interactive: true;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            viewport-width: self.visible-width;
             viewport-height: model-col.preferred-height;
 
             model-col := VerticalLayout {
