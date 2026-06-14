@@ -94,9 +94,24 @@ impl PeerRegistry {
                 p.node_id, p.ws_url, p.role.to_string(), p.status,
             ));
         }
+        // Atomic write (temp + rename) when the dir is writable; fall back to an
+        // in-place write when it isn't. /etc/agentd is root-owned (the auth-token
+        // env file must stay 600 root:root), so the agentd user can write peers.toml
+        // itself (install.sh chowns the file) but CANNOT create a sibling tempfile —
+        // the temp+rename then fails with EPERM (os error 13), which silently broke
+        // "add peer" from the mesh UI. Mirrors write_atomic() in agentd/main.rs.
         let tmp = self.path.with_extension("toml.tmp");
-        std::fs::write(&tmp, &out)?;
-        std::fs::rename(&tmp, &self.path)
+        match std::fs::write(&tmp, &out).and_then(|()| std::fs::rename(&tmp, &self.path)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                let _ = std::fs::remove_file(&tmp); // best-effort; may never have been created
+                std::fs::write(&self.path, &out)
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
     }
 }
 
@@ -130,5 +145,33 @@ mod tests {
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].0, "apex-kitchen");
         assert_eq!(nodes[0].1, "192.168.0.201");
+    }
+
+    // The real "add peer fails" bug: /etc/agentd is root-owned, so the temp+rename
+    // can't create a sibling tempfile and must fall back to an in-place write of the
+    // (agentd-owned) peers.toml. Under non-root the read-only dir forces that path.
+    #[test]
+    fn save_falls_back_in_place_when_dir_readonly() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("apexrs-peers-ro-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("peers.toml");
+        std::fs::write(&path, "# seed\n").unwrap();         // pre-existing writable file
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap(); // read-only dir
+
+        let mut reg = PeerRegistry { peers: vec![], path: path.clone() };
+        let res = reg.add(PeerRecord {
+            node_id: "apex-garage".into(),
+            ws_url:  "ws://192.168.0.201:8787".into(),
+            role:    PeerRole::Full,
+            status:  "online".into(),
+        });
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap(); // restore for cleanup
+        res.expect("add() must fall back to an in-place write when the dir is read-only");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("apex-garage"), "peer should be persisted in place");
+        assert!(!path.with_extension("toml.tmp").exists(), "temp file must not linger");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
