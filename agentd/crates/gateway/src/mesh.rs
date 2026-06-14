@@ -126,6 +126,12 @@ pub fn parse_avahi_output(raw: &str) -> Vec<(String, String)> {
         if parts.len() < 9 { continue; }
         let hostname = parts[6].trim_end_matches(".local");
         let ip = parts[7];
+        // The mesh is IPv4:8787 throughout (ws://{ip}:8787, no bracket handling), and
+        // avahi lists each node on BOTH an IPv4 and an IPv6 line. Skip IPv6: a
+        // link-local fe80:: address makes a malformed, unusable ws_url and shows up as
+        // a duplicate "already known" row in /api/mesh/nodes — which silently hid the
+        // real IPv4 row from the UI's "+ ADD".
+        if ip.contains(':') { continue; }
         if !ip.is_empty() && !hostname.is_empty() {
             results.push((hostname.to_string(), ip.to_string()));
         }
@@ -145,6 +151,17 @@ mod tests {
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].0, "apex-kitchen");
         assert_eq!(nodes[0].1, "192.168.0.201");
+    }
+
+    #[test]
+    fn parse_skips_ipv6_keeps_ipv4() {
+        // avahi lists the same node on both an IPv6 (link-local) and an IPv4 line.
+        // Only the IPv4 line should survive — the IPv6 one yields an unusable ws_url.
+        let raw = "=;eth0;IPv6;ApexOS apex-kitchen;_apexos._tcp;local;apex-kitchen.local;fe80::2ecf:67ff:fe93:e90e;8787;\n\
+                   =;eth0;IPv4;ApexOS apex-kitchen;_apexos._tcp;local;apex-kitchen.local;192.168.0.201;8787;\n";
+        let nodes = parse_avahi_output(raw);
+        assert_eq!(nodes.len(), 1, "IPv6 line must be skipped");
+        assert_eq!(nodes[0], ("apex-kitchen".to_string(), "192.168.0.201".to_string()));
     }
 
     // The real "add peer fails" bug: /etc/agentd is root-owned, so the temp+rename
