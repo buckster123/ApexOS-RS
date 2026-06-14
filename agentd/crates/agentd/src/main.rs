@@ -1920,21 +1920,30 @@ fn spawn_discovery_loop(
             }
 
             let local_prefix = if subnet_guard { local_subnet_prefix() } else { None };
-            let registry = peer_registry.read().await;
 
-            for (peer_id, ip) in nodes {
-                if peer_id == *node_id { continue; } // skip self
+            // Decide which peers are new under a SHORT-LIVED read guard, then drop it
+            // before the emits and the tick. Holding peer_registry.read() across
+            // ticker.tick().await (a ~60s sleep) starved every writer: add/remove peer
+            // (POST/DELETE /api/mesh/peers take a write lock) hung for the whole
+            // interval unless they happened to race the brief avahi-browse window —
+            // which is exactly why an add worked from one node but not the other.
+            // Rule: never hold a lock guard across an .await that doesn't need it.
+            let new_peers: Vec<(String, String)> = {
+                let registry = peer_registry.read().await;
+                nodes.into_iter()
+                    .filter(|(peer_id, _)| peer_id.as_str() != node_id.as_str()) // skip self
+                    .filter(|(peer_id, ip)| match local_prefix {                 // subnet guard
+                        Some(ref prefix) if !ip.starts_with(prefix.as_str()) => {
+                            eprintln!("[mesh] skipping {peer_id} @ {ip} (outside {prefix}x subnet)");
+                            false
+                        }
+                        _ => true,
+                    })
+                    .filter(|(peer_id, _)| !registry.contains(peer_id))          // not already known
+                    .collect()
+            }; // read guard released here — writers can now proceed
 
-                // Subnet guard: only consider IPs on the same /24
-                if let Some(ref prefix) = local_prefix {
-                    if !ip.starts_with(prefix.as_str()) {
-                        eprintln!("[mesh] skipping {peer_id} @ {ip} (outside {prefix}x subnet)");
-                        continue;
-                    }
-                }
-
-                if registry.contains(&peer_id) { continue; } // already known
-
+            for (peer_id, ip) in new_peers {
                 eprintln!("[mesh] new peer discovered: {peer_id} @ {ip}");
                 bus.emit(Event::PeerSeen { node_id: peer_id.clone(), ip: ip.clone() }).await;
 
