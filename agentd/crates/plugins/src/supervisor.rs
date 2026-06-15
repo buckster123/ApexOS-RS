@@ -103,14 +103,19 @@ pub struct Supervisor {
     events_dir:        Option<PathBuf>,
     /// Vast.ai instance/tunnel state — shared with gateway for API routes.
     vast_state:        Option<VastState>,
-    /// The node's bound agent identity, stamped onto Cerebro tool calls so
-    /// routing/isolation can't depend on what the model typed. Resolved once at
-    /// construction (`$AGENTD_AGENT_ID` else `APEX`). See docs/agent-identity.md.
-    agent_id:          String,
+    /// Per-session agent bindings (multi-agent runtime). The Cerebro stamp
+    /// resolves the calling session's identity here (bound agent → else the node
+    /// default), so routing/isolation can't depend on what the model typed.
+    /// See docs/agent-identity.md (slices 1 & 3b).
+    session_bindings:  apexos_core::SessionBindings,
 }
 
 impl Supervisor {
-    pub fn new(bus: BusHandle, policy: Arc<RwLock<PolicyEngine>>) -> Self {
+    pub fn new(
+        bus: BusHandle,
+        policy: Arc<RwLock<PolicyEngine>>,
+        session_bindings: apexos_core::SessionBindings,
+    ) -> Self {
         let (sv_tx, sv_rx) = mpsc::channel::<SupervisorCmd>(64);
         Self {
             bus,
@@ -127,7 +132,7 @@ impl Supervisor {
             council_tx:        None,
             events_dir:        None,
             vast_state:        None,
-            agent_id:          apexos_core::node_agent_id(),
+            session_bindings,
         }
     }
 
@@ -1416,9 +1421,11 @@ impl Supervisor {
                 // System-stamp the agent identity onto Cerebro calls: routing and
                 // private/shared isolation must not depend on the agent_id the
                 // model typed (it can forget, typo, or — multi-agent — spoof).
-                // See docs/agent-identity.md (slice 1).
+                // Resolved from the calling session's binding (else the node
+                // default). See docs/agent-identity.md (slices 1 & 3b).
                 if pid.0 == "cerebro" {
-                    stamp_agent_id(&mut call.args, &self.agent_id);
+                    let agent_id = apexos_core::resolve_agent_id(&self.session_bindings, session);
+                    stamp_agent_id(&mut call.args, &agent_id);
                 }
                 tokio::spawn(async move {
                     let output = match client.call_tool(&call.tool, &call.args).await {

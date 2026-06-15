@@ -83,6 +83,10 @@ pub struct GatewayState {
     pub node_id:           Arc<String>,
     /// Vast.ai instance + tunnel state — shared with supervisor for virtual tools
     pub vast_state:        VastState,
+    /// Per-session agent bindings (multi-agent runtime). A `hello` frame may bind
+    /// its session to an agent; the supervisor stamp + CCBS boot resolve identity
+    /// here. See docs/agent-identity.md (slice 3b).
+    pub session_bindings:  apexos_core::SessionBindings,
 }
 
 /// Check Bearer token on all gated routes.
@@ -249,6 +253,7 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
     // Read task: handle hello frames (session resume) and relay everything else as Events.
     let bus      = state.bus.clone();
     let histories = state.histories.clone();
+    let session_bindings = state.session_bindings.clone();
     let read = tokio::spawn(async move {
         let mut stream   = stream;
         let mut session_id = session_id;   // mutable — updated by hello
@@ -272,6 +277,14 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                             _ => vec![],  // keep current session_id
                         }
                     };
+                    // Bind this session to the chosen agent identity, if provided
+                    // (multi-agent runtime, slice 3b). The stamp + CCBS resolve it;
+                    // unbound sessions fall back to the node default (APEX).
+                    if let Some(agent_id) = val["agent_id"].as_str().filter(|s| !s.is_empty()) {
+                        if let Ok(mut m) = session_bindings.lock() {
+                            m.insert(SessionId(session_id), agent_id.to_string());
+                        }
+                    }
                     let _ = prio_tx.send(make_session_init(session_id, &hist)).await;
                 } else {
                     // Regular frame — inject WS-bound session_id and emit as Event.
