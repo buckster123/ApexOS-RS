@@ -1307,6 +1307,7 @@ async fn build_embodiment(
     let has_sensors = plugin_names.contains("get_iaq")
         || plugin_names.contains("thermal_frame")
         || plugin_names.iter().any(|n| n.starts_with("get_temp"));
+    let has_cam = has_camera();
     let ram = read_ram_mb();
 
     let mut out = String::new();
@@ -1318,12 +1319,42 @@ async fn build_embodiment(
     ));
     out.push_str(&format!(
         "- Senses: camera {} · thermal/IAQ {} · GPIO {}\n",
-        yn(has_camera()), yn(has_sensors), yn(is_raspberry_pi()),
+        yn(has_cam), yn(has_sensors), yn(is_raspberry_pi()),
     ));
     out.push_str(&format!("- Memory: cerebro {}\n", match cerebro_embed {
         Some(m) => format!("semantic embeddings ({m})"),
         None    => "FTS5 keyword search only".to_string(),
     }));
+
+    // Extensions on hand — the EDK embodiment gradient (docs/edk.md). High-signal ONLY:
+    // we surface an on-hand inventory part iff it grants a capability THIS node currently
+    // LACKS (cheap built-in probe) AND its `compat` includes this board. The buyable
+    // universe is deliberately absent (APEX web-searches it on demand) so this stays a
+    // short pointer, never a wall of noise. We never run a part's `detect` shell here.
+    {
+        let model = node_model();
+        let mut lines: Vec<String> = Vec::new();
+        for p in read_inventory() {
+            if !(p.compat.is_empty() || p.compat.iter().any(|c| c == &model)) { continue; }
+            // Only hint on capabilities we can adjudicate as absent.
+            let absent = match capability_present(&p.unlocks, has_cam, has_sensors) {
+                Some(present) => !present,
+                None          => false,
+            };
+            if !absent { continue; }
+            let proof = if p.detect_tool.is_empty() { String::new() }
+                        else { format!(" — proves via {}", p.detect_tool) };
+            let unverified = if p.status == "verified" { "" } else { " [unverified]" };
+            lines.push(format!("    {} → {}{}{}\n", p.id, p.provides, proof, unverified));
+        }
+        if !lines.is_empty() {
+            out.push_str("- Extensions on hand (seat → reboot → the capability goes live; \
+                          you can't seat it yourself — ask a human):\n");
+            for l in &lines { out.push_str(l); }
+            out.push_str("    (To grow beyond these, web-search the part; see docs/edk.md \
+                          for the request-to-incarnate loop.)\n");
+        }
+    }
 
     {
         let peers = peer_registry.read().await;
@@ -1396,6 +1427,67 @@ fn is_raspberry_pi() -> bool {
 fn which_on_path(bin: &str) -> bool {
     std::env::var("PATH").ok().map(|p| p.split(':')
         .any(|d| std::path::Path::new(d).join(bin).exists())).unwrap_or(false)
+}
+
+/// This board as a `compat` slug (matches the inventory's `compat` field).
+/// pi5/pi4/pi3/zero2w from the device-tree model, else the arch (x86, aarch64…).
+fn node_model() -> String {
+    let m = std::fs::read_to_string("/proc/device-tree/model").unwrap_or_default().to_lowercase();
+    if      m.contains("zero 2") || m.contains("zero2") { "zero2w".into() }
+    else if m.contains("pi 5")   || m.contains("pi5")   { "pi5".into() }
+    else if m.contains("pi 4")   || m.contains("pi4")   { "pi4".into() }
+    else if m.contains("pi 3")   || m.contains("pi3")   { "pi3".into() }
+    else if std::env::consts::ARCH == "x86_64"          { "x86".into() }
+    else { std::env::consts::ARCH.to_string() }
+}
+
+/// One on-hand part, the subset of the inventory schema the embodiment hint needs.
+struct InvPart {
+    id:          String,
+    provides:    String,
+    compat:      Vec<String>,
+    unlocks:     Vec<String>,
+    detect_tool: String,
+    status:      String,
+}
+
+/// Read the on-hand parts inventory (EDK). Best-effort: a missing/garbled file yields an
+/// empty list (the hint simply doesn't render). Path: AGENTD_PARTS_INVENTORY, default the
+/// repo-relative file for dev — mirrors how policy/plugins paths resolve.
+fn read_inventory() -> Vec<InvPart> {
+    let path = std::env::var("AGENTD_PARTS_INVENTORY")
+        .unwrap_or_else(|_| "config/parts/inventory.toml".into());
+    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let Ok(doc)  = text.parse::<toml_edit::DocumentMut>() else { return Vec::new() };
+    let Some(arr) = doc.get("part").and_then(|i| i.as_array_of_tables()) else { return Vec::new() };
+    let str_vec = |t: &toml_edit::Table, k: &str| -> Vec<String> {
+        t.get(k).and_then(|i| i.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    let str_of = |t: &toml_edit::Table, k: &str| -> String {
+        t.get(k).and_then(|i| i.as_str()).unwrap_or("").to_string()
+    };
+    arr.iter().filter_map(|t| {
+        let id = t.get("id").and_then(|i| i.as_str())?.to_string();
+        Some(InvPart {
+            id,
+            provides:    str_of(t, "provides"),
+            compat:      str_vec(t, "compat"),
+            unlocks:     str_vec(t, "unlocks_tools"),
+            detect_tool: str_of(t, "detect_tool"),
+            status:      str_of(t, "status"),
+        })
+    }).collect()
+}
+
+/// Does this node already HAVE the capability a part would grant? `Some(false)` = a
+/// capability we can cheaply probe and that is currently absent (the only case we hint on);
+/// `None` = a capability we can't adjudicate with built-in probes (skip it — staying honest).
+fn capability_present(unlocks: &[String], has_cam: bool, has_sensors: bool) -> Option<bool> {
+    if unlocks.iter().any(|t| t == "camera_capture") { return Some(has_cam); }
+    if unlocks.iter().any(|t| t == "get_iaq" || t == "thermal_frame") { return Some(has_sensors); }
+    None
 }
 
 fn agent_spawn_spec() -> ToolSpec {
@@ -1980,6 +2072,71 @@ mod tests {
                 if p.len() == 4 { Some(format!("{}.{}.{}.", p[0], p[1], p[2])) } else { None }
             });
         assert_eq!(prefix, Some("192.168.0.".to_string()));
+    }
+
+    #[test]
+    fn edk_capability_present_only_adjudicates_known_probes() {
+        // camera_capture → tied to the camera probe; absent when no camera.
+        assert_eq!(capability_present(&["camera_capture".into()], false, false), Some(false));
+        assert_eq!(capability_present(&["camera_capture".into()], true,  false), Some(true));
+        // env sensors → tied to the sensor probe.
+        assert_eq!(capability_present(&["get_iaq".into()],       false, false), Some(false));
+        assert_eq!(capability_present(&["thermal_frame".into()], false, true),  Some(true));
+        // a capability we can't cheaply probe → None (we never hint on it).
+        assert_eq!(capability_present(&["gpio_write".into()], false, false), None);
+        assert_eq!(capability_present(&[], true, true), None);
+    }
+
+    #[test]
+    fn edk_read_inventory_parses_and_filters() {
+        // Write a temp inventory and point the env var at it.
+        let path = std::env::temp_dir().join("apexos_edk_test_inventory.toml");
+        std::fs::write(&path, r#"
+[[part]]
+id = "camera-module-3"
+provides = "eyes"
+bus = "csi"
+compat = ["pi5", "pi4"]
+unlocks_tools = ["camera_capture"]
+detect_tool = "camera_capture"
+status = "verified"
+
+[[part]]
+id = "ai-hat-hailo"
+provides = "local inference"
+bus = "m2-hat+"
+compat = ["pi5"]
+unlocks_tools = ["new:local_vision"]
+detect_tool = ""
+status = "inferred"
+"#).unwrap();
+        std::env::set_var("AGENTD_PARTS_INVENTORY", &path);
+
+        let inv = read_inventory();
+        assert_eq!(inv.len(), 2);
+        let cam = inv.iter().find(|p| p.id == "camera-module-3").unwrap();
+        assert_eq!(cam.compat, vec!["pi5".to_string(), "pi4".to_string()]);
+        assert_eq!(cam.unlocks, vec!["camera_capture".to_string()]);
+        assert_eq!(cam.status, "verified");
+
+        // The hint's filter: camera absent on a pi5 → surfaced; the Hailo part is a
+        // capability we can't probe (None) → never surfaced regardless.
+        let model = "pi5";
+        let surfaced: Vec<&str> = inv.iter().filter(|p| {
+            (p.compat.is_empty() || p.compat.iter().any(|c| c == model))
+            && matches!(capability_present(&p.unlocks, false, false), Some(false))
+        }).map(|p| p.id.as_str()).collect();
+        assert_eq!(surfaced, vec!["camera-module-3"]);
+
+        // Same inventory on x86 → nothing (compat excludes it): zero desktop noise.
+        let surfaced_x86: Vec<&str> = inv.iter().filter(|p| {
+            p.compat.iter().any(|c| c == "x86")
+            && matches!(capability_present(&p.unlocks, false, false), Some(false))
+        }).map(|p| p.id.as_str()).collect();
+        assert!(surfaced_x86.is_empty());
+
+        std::env::remove_var("AGENTD_PARTS_INVENTORY");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

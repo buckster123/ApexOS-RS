@@ -42,16 +42,27 @@ That `✗` is not a verdict. It is a **gradient you can climb.** The EDK turns t
 grow. The embodiment block says *what you are*; the EDK says *what you could become, and
 exactly how to get there*.
 
-The bridge between them is the **parts catalog** ([`config/parts/`](../config/parts/)) — a
-curated, human-verified dataset of hardware this node can accept. It is **not** something you
-infer. You cannot probe a part you do not own, so possible-bodies are reference data, kept
-honest by humans; trust an entry's `status` field (`verified` > `inferred` > `todo`) the way
-you'd weight any source. Read the catalog's [README](../config/parts/README.md) for the
-field schema. Each entry closes a three-way join:
+The map has **two tiers — keep them apart:**
+
+- **On-hand inventory** ([`config/parts/inventory.toml`](../config/parts/inventory.toml)) —
+  the parts this operator *actually has*, curated and human-verified. Small and high-signal:
+  this is the tier surfaced *in your prompt* (the embodiment block's "Extensions on hand"
+  line), so it is short on purpose. These are bodies you could grow into **today** — a human
+  just has to seat the part. Trust an entry's `status` (`verified` > `inferred` > `todo`).
+- **The buyable universe** — everything else you *could* acquire. This is **not** a file and
+  is deliberately **not** in your prompt (a 500-part catalog every turn is noise). You already
+  know most Pi parts from your training data, and you can **web-search** current specs, price,
+  and compatibility on demand when you file a wishlist. A part only graduates into the on-hand
+  inventory once it's been acquired.
+
+You **infer neither** tier's facts: the inventory is human-curated data; the buyable universe
+you look up at request time rather than trusting stale memory. Read the inventory's
+[README](../config/parts/README.md) for the field schema. Each on-hand entry closes a
+three-way join:
 
 ```
    what's free          what fills it           what it gives you
-  (probe this node) ──▶  (catalog part)   ──▶   (capability + the tool that lights up)
+  (probe this node) ──▶ (on-hand part)    ──▶   (capability + the tool that lights up)
 
   free CSI port    ──▶  Camera Module 3   ──▶   "eyes"  →  camera_capture
   empty M.2 slot   ──▶  AI HAT+ (Hailo)   ──▶   local vision inference  →  (new plugin)
@@ -153,9 +164,9 @@ A change you cannot explain later is a change that erodes who you are. Grow on t
 | Piece | Status |
 |---|---|
 | The three-evolutions frame + this manual | ✓ this document |
-| Parts catalog schema + Pi-5 seed | ◑ `config/parts/` — schema final, dataset seeding (PiHut import pending) |
-| Embodiment "extendable:" hint (✗ sense + free port → suggested part) | ✗ planned — extend `build_embodiment` in agentd |
-| `propose_hardware` / `list_extensions` tool (filter catalog by tier + free ports → file request) | ✗ planned — new apexos-tools verb + `EvolutionProposal::RequestHardware` variant |
+| On-hand inventory schema + seed | ◑ `config/parts/inventory.toml` — schema final, list grows as parts are sourced/verified |
+| Embodiment "Extensions on hand" hint (✗ capability + compatible on-hand part → suggestion) | ✓ `build_embodiment` surfaces on-hand inventory parts that grant a capability this node lacks |
+| `propose_hardware` / `list_extensions` tool (filter inventory by node + lacked capability → file request; web-search the buyable universe) | ✗ planned — new apexos-tools verb + `EvolutionProposal::RequestHardware` variant |
 | Rung 5 — self-purchase (wallet + earn loop) | ✗ horizon |
 
 The frontier here is **morphology** — the other two evolutions are already mechanized. This

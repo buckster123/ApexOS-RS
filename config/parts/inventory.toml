@@ -1,9 +1,14 @@
-# ApexOS parts catalog — curated, human-verified hardware this node can accept.
+# ApexOS parts INVENTORY — the hardware THIS operator has on hand for THIS node.
+# Not a store catalog: it's "what APEX could grow into today, two screwdriver-turns away."
+# The buyable universe (everything not here) is NOT listed — APEX web-searches that on demand
+# (most Pi parts are in its training data anyway). Keeping this to on-hand parts is what keeps
+# the in-prompt "Extensions on hand" hint high-signal instead of a 500-part wall of noise.
+#
 # Schema + curation rules: see README.md in this directory.
 # status: verified (confirmed on real HW) | inferred (best-effort, needs check) | todo (stub)
 # The agent READS this and weights entries by `status`. Never invent a spec it will trust.
 #
-# Seed set: Pi-5 basics + parts on hand. Vendor SKUs/URLs to be filled from the PiHut import.
+# Seed set: Pi-5 basics + parts on hand. Vendor SKUs/URLs filled as parts are sourced/verified.
 
 # ─────────────────────────────── SENSE ───────────────────────────────
 

@@ -773,6 +773,14 @@ if [[ ! -f /etc/agentd/soul.md ]]; then
   install -m 644 "$REPO_DIR/config/soul.md" /etc/agentd/soul.md
 fi
 
+# parts/inventory.toml — EDK on-hand parts inventory (docs/edk.md). agentd READS it for
+# the embodiment "Extensions on hand" hint; operator-curated, so don't overwrite edits.
+# Root-owned + world-readable is fine — the daemon only reads it (no self-write path yet).
+mkdir -p /etc/agentd/parts
+if [[ ! -f /etc/agentd/parts/inventory.toml ]]; then
+  install -m 644 "$REPO_DIR/config/parts/inventory.toml" /etc/agentd/parts/inventory.toml
+fi
+
 # peers.toml — mesh registry (agentd writes it at runtime; seed empty if missing).
 # Holds per-peer a2a tokens (secrets), so keep it owner-only (0600); agentd re-clamps
 # the mode on every save() too.
