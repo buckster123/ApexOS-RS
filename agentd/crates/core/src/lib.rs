@@ -11,4 +11,4 @@ pub use apexos_protocol as types;
 pub use apexos_protocol::*;
 pub use state::SystemState;
 pub use bus::{Bus, BusHandle};
-pub use identity::{node_agent_id, DEFAULT_AGENT_ID};
+pub use identity::*;

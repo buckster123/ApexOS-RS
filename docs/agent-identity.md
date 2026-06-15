@@ -112,17 +112,17 @@ boot ─▶ select / register USER ─▶ select AGENT ─▶ select SKIN ─▶
 
 This is where the design has one genuinely open product decision:
 
-### Open decision — how heavy is "light auth"?
+### Auth weight — DECIDED: profile-select + optional per-profile PIN
 
 | Option | What it is | Trade-off |
 |--------|-----------|-----------|
-| **Profile-select** | Pick a user from a list, no secret (kiosk-style) | Lightest; zero friction; no real protection on a shared box |
-| **Profile + optional PIN** | Per-profile PIN/passphrase, opt-in | Light but real; protects a profile's agents/memory on a shared device |
-| **OS-user-backed** | Map to system users / PAM | Strongest; heaviest; likely overkill for the spare-device tier |
+| ✅ **Profile + optional PIN** | Pick a profile; a profile *may* set a 4–6 digit PIN | Light but real — keeps a kid's agent out of a parent's private memory space without turning a Pi kiosk into a login server. No PIN = one tap |
+| ~~Profile-select only~~ | Pick a user, no secret ever | Rejected: no isolation between humans on a shared box |
+| ~~OS-user-backed~~ | Map to system users / PAM | Rejected: overkill/heavy for the spare-device tier |
 
-*Leaning: profile-select by default, **optional** per-profile PIN — enough to keep a kid's
-agent out of a parent's private memory space without turning a Pi kiosk into a login server.*
-Settled when we plan Slice 3; Slices 1–2 don't depend on it.
+The PIN is salted-hashed at rest (`sha256(salt‖pin)`); its real protection is an
+API-side guess **lockout** (a 3b sub-slice), since a 4-digit PIN is low-entropy
+regardless of hash strength.
 
 ---
 
@@ -132,7 +132,12 @@ Settled when we plan Slice 3; Slices 1–2 don't depend on it.
 |---|-------|-----------|--------|
 | 1 | **System-stamped Cerebro identity** 🔑 | agentd binds session→`agent_id` and stamps it onto every Cerebro call in `dispatch_tool` (overriding the model). Unify the `APEX`/`CLAUDE-APEX` drift to one source of truth. Default identity `APEX` → **zero behavior change for today's single agent**; pure hardening + the substrate multi-agent needs. | ✅ shipped — `apexos_core::node_agent_id()` (env `AGENTD_AGENT_ID`, default `APEX`); `Supervisor` caches it and `stamp_agent_id()` overrides `agent_id` on `cerebro`-plugin calls; council + rollback-store writes unified to it |
 | 2 | **Per-identity cognitive boot** | CCBS injection at session start keyed to the session's identity (select agent X → boot X's skills/intentions/memories) + nightly `dream_run` schedule. Absorbs the open symbiosis steps 3–4 (now unblocked: `cognitive_bootstrap` is implemented, not the stub the old BACKLOG claims). | ✅ shipped — `root_turn` calls `cognitive_bootstrap` via `ToolProxy` on a session's first turn (cached, 15s-bounded, graceful), composed into the prompt as `soul+embodiment+priming` by `TurnEngine::with_priming`; both scoped to `node_agent_id()`. Nightly `dream_run` runs as a dedicated direct-call task (`spawn_nightly_dream`, cron `AGENTD_DREAM_CRON`). Opt-out `AGENTD_CCBS=0` |
-| 3 | **OS boot / auth flow (UX)** | `user → agent → skin → desktop`, light auth per the decision above. Sets the Slice-1 identity, triggers the Slice-2 boot. The human face of the arc. | ▢ |
+| 3a | **Identity store** (data layer) | `User`/`AgentRecord`/`Identities` in `apexos_core::identity`: toml persistence (`identities.toml`), `seed_defaults` (owner + APEX), optional salted PIN (hash/verify, constant-time). Pure + unit-tested, **inert** (no wiring → zero hot-path risk). | ✅ shipped |
+| 3b | **Identity runtime + API** | HTTP CRUD (list/create users+agents, verify PIN + guess-lockout) and the per-session binding: a bound session resolves its agent's `agent_id` (→ slice-1 stamp + slice-2 boot) and soul (`with_system`), falling back to `node_agent_id()` when unbound. | ▢ |
+| 3c | **Boot UI** (ui-slint) | Extend the existing first-boot wizard into `user → (PIN) → agent → skin → desktop`, wired to 3b; "set default + skip" persistence. | ▢ |
+
+> Slice 3 split into 3a/3b/3c during build: the data layer (3a) is worth landing
+> on its own — tested + inert — before the runtime binding (3b) touches the hot path.
 
 The cognitive boot loop is the **missing middle**: Slice 1 *enforces* an identity, Slice 3
 *lets a human pick* one, and Slice 2 is *what loads when an identity wakes up*.
