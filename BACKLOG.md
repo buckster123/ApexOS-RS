@@ -125,8 +125,8 @@
 ### Symbiosis (runtime cognitive loop) — still open
 
 - ✅ **DONE — Sleep loop wired (step 1)** — soul.md Session-shutdown deposit section (`fa2eba8`, deployed live). APEX is now instructed to session_save/store_intention/dream_run on shutdown.
-- **Nightly `dream_run` schedule (step 3)** — `docs/symbiosis.md`. Register a nightly dream_run via `schedule_task` so consolidation is autonomous. **[medium]** *(still open)*
-- **agentd CCBS injection (step 4)** — `docs/symbiosis.md`. At session start, agentd calls `cognitive_bootstrap` and prepends the returned priming block to the static soul kernel before the first turn (daemon-driven). Add as a build-roadmap step. Depends on cognitive_bootstrap being implemented (see Bugs). **[medium]** *(still open)*
+- ✅ **DONE — Nightly `dream_run` schedule (step 3)** — `spawn_nightly_dream` calls `dream_run` **directly** via the ToolProxy on a cron (`AGENTD_DREAM_CRON`, default 03:00 UTC), scoped to `node_agent_id()`. Deliberately a dedicated background task, not a scheduled `UserPrompt` — autonomous, no LLM turn, can't be skipped. (Agent Identity slice 2.)
+- ✅ **DONE — agentd CCBS injection (step 4)** — `root_turn` calls `cognitive_bootstrap` via the ToolProxy on a session's first turn (cached, 15s-bounded, graceful) and `TurnEngine::with_priming` appends the block to the system prompt (`soul+embodiment+priming`). The "depends on cognitive_bootstrap" note was stale — it's implemented (the Top-10 #5 / Bugs `cognitive_bootstrap`-stub entries are themselves stale). Opt-out `AGENTD_CCBS=0`. (Agent Identity slice 2.)
 
 > **File-tool / sandbox permission issue (open):** the file tools (`read_file`/`list_dir`/`write_file`/audio output) interact poorly with the systemd sandbox and the split policy/tool confinement model — arbitrary host read on the read side, opaque EROFS on the write side, and two divergent workspace-confinement implementations. Tracked under Security and Tech-debt above; treat as one coherent confinement-model cleanup.
 
