@@ -21,6 +21,7 @@ Environment=AGENTD_PARTS_INVENTORY=/etc/agentd/parts/inventory.toml
 Environment=AGENTD_WORKSPACE=/var/lib/agentd/workspace
 Environment=AGENTD_LOG=/var/lib/agentd/events
 Environment=AGENTD_UI=/var/lib/agentd/ui
+Environment=AGENTD_HARDWARE_WISHLIST=/var/lib/agentd/hardware-wishlist.md
 EnvironmentFile=-/etc/agentd/env
 
 NoNewPrivileges=true

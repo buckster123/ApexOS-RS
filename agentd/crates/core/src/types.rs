@@ -111,6 +111,24 @@ pub enum EvolutionProposal {
     HotReloadSubsystem {
         subsystem: Subsystem,
     },
+    /// File a hardware request — the "request-to-incarnate" (EDK, docs/edk.md). The ONE
+    /// evolution that cannot auto-apply: agentd records the request to the hardware
+    /// wishlist, but a human must physically seat the part. The "apply confirmation" is
+    /// the next-boot embodiment probe seeing the new device flip a sense ✗→✓.
+    RequestHardware {
+        /// Part id from config/parts/inventory.toml, or a product name for a buyable part.
+        part:       String,
+        /// What capability it grants, in agent terms ("eyes", "hearing").
+        capability: String,
+        /// Why it's needed now (the rationale).
+        reason:     String,
+        /// How/where it attaches ("csi port", "m.2-hat+"); "" if unknown.
+        #[serde(default)]
+        bus:        String,
+        /// Provenance: "inventory:<id>" (on hand) or a URL / where it was found (buyable).
+        #[serde(default)]
+        source:     String,
+    },
 }
 
 // ── Sensor types ─────────────────────────────────────────────────────────────

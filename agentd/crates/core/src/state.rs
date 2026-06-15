@@ -302,6 +302,35 @@ mod tests {
     }
 
     #[test]
+    fn request_hardware_proposal_round_trips_and_defaults_optionals() {
+        // bus/source are #[serde(default)] — APEX may omit them.
+        let wire = serde_json::json!({
+            "kind":       "request_hardware",
+            "part":       "camera-module-3",
+            "capability": "eyes",
+            "reason":     "I keep being asked what's in the room and I'm blind",
+        });
+        let p: EvolutionProposal = serde_json::from_value(wire).unwrap();
+        match p {
+            EvolutionProposal::RequestHardware { part, capability, reason, bus, source } => {
+                assert_eq!(part, "camera-module-3");
+                assert_eq!(capability, "eyes");
+                assert!(reason.contains("blind"));
+                assert_eq!(bus, "");      // defaulted
+                assert_eq!(source, "");   // defaulted
+            }
+            _ => panic!("wrong variant"),
+        }
+        // and the tag is what the spec advertises
+        let back = serde_json::to_value(EvolutionProposal::RequestHardware {
+            part: "p".into(), capability: "c".into(), reason: "r".into(),
+            bus: "csi".into(), source: "inventory:camera-module-3".into(),
+        }).unwrap();
+        assert_eq!(back["kind"], "request_hardware");
+        assert_eq!(back["source"], "inventory:camera-module-3");
+    }
+
+    #[test]
     fn policy_mode_serializes_kebab_case() {
         assert_eq!(
             serde_json::to_value(PolicyMode::AutoEdit).unwrap(),

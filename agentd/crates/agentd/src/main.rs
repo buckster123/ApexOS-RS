@@ -792,6 +792,9 @@ async fn compute_undo(
             })
         }
         EvolutionProposal::HotReloadSubsystem { .. } => None,
+
+        // A hardware request is a record, not a mutation — nothing to roll back.
+        EvolutionProposal::RequestHardware { .. } => None,
     }
 }
 
@@ -838,7 +841,7 @@ async fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()
 }
 
 async fn apply_evolution(
-    _id:          EvolutionId,
+    id:           EvolutionId,
     proposal:     EvolutionProposal,
     soul_arc:     &Arc<RwLock<String>>,
     soul_path:    &PathBuf,
@@ -953,6 +956,32 @@ async fn apply_evolution(
                     Ok("gateway hot-reload not supported without daemon restart".into())
                 }
             }
+        }
+
+        // The request-to-incarnate (EDK). agentd CANNOT seat a physical part, so "apply"
+        // means: append the request to the human-facing hardware wishlist. The real
+        // confirmation is the next-boot embodiment probe flipping a sense ✗→✓.
+        EvolutionProposal::RequestHardware { part, capability, reason, bus, source } => {
+            let path = std::env::var("AGENTD_HARDWARE_WISHLIST")
+                .unwrap_or_else(|_| "hardware-wishlist.md".into());
+            let path_buf = PathBuf::from(&path);
+            let header = "# ApexOS hardware wishlist\n\n\
+                APEX's request-to-incarnate queue (EDK, docs/edk.md). Each entry is a part\n\
+                APEX asked for; a human seats it, reboots, and the embodiment probe confirms\n\
+                the new sense live. Remove an entry once it's installed.\n";
+            let mut doc = tokio::fs::read_to_string(&path_buf).await
+                .unwrap_or_else(|_| header.to_string());
+            let bus_line    = if bus.is_empty()    { String::new() } else { format!("- attaches: {bus}\n") };
+            let source_line = if source.is_empty() { String::new() } else { format!("- source: {source}\n") };
+            doc.push_str(&format!(
+                "\n## [#{}] {part} → {capability}\n{bus_line}{source_line}- why: {reason}\n\
+                 - status: REQUESTED — seat it, reboot; the embodiment probe confirms it live\n",
+                id.0,
+            ));
+            write_atomic(&path_buf, doc.as_bytes()).await?;
+            eprintln!("[evolution] hardware request filed: {part} -> {capability}");
+            Ok(format!("hardware request filed: {part} → {capability}. A human must seat it; \
+                        the next-boot embodiment probe will confirm it. (logged to {path})"))
         }
     }
 }
@@ -1530,9 +1559,11 @@ fn propose_evolution_spec() -> ToolSpec {
     ToolSpec {
         name:        "propose_evolution".into(),
         description: "Propose a structural change to agentd: register or remove an MCP plugin, \
-                      update a policy rule, update your own system prompt (soul.md), or \
-                      hot-reload a subsystem. Every proposal is recorded as an event and \
-                      applied immediately (gated by the evolution.* policy rule).".into(),
+                      update a policy rule, update your own system prompt (soul.md), \
+                      hot-reload a subsystem, or file a hardware request (request_hardware — \
+                      the EDK request-to-incarnate, docs/edk.md: it CANNOT auto-apply, a human \
+                      seats the part and the next-boot probe confirms it). Every proposal is \
+                      recorded as an event (gated by the evolution.* policy rule).".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -1543,9 +1574,28 @@ fn propose_evolution_spec() -> ToolSpec {
                         "unregister_mcp_server",
                         "update_policy_rule",
                         "update_system_prompt",
-                        "hot_reload_subsystem"
+                        "hot_reload_subsystem",
+                        "request_hardware"
                     ],
                     "description": "The type of evolution to propose."
+                },
+                "part": {
+                    "type":        "string",
+                    "description": "Part id from config/parts/inventory.toml (on hand) or a product \
+                                    name for a buyable part (request_hardware)."
+                },
+                "capability": {
+                    "type":        "string",
+                    "description": "What the part grants, in agent terms — 'eyes', 'hearing' (request_hardware)."
+                },
+                "bus": {
+                    "type":        "string",
+                    "description": "How/where it attaches — 'csi port', 'm.2-hat+' (request_hardware, optional)."
+                },
+                "source": {
+                    "type":        "string",
+                    "description": "'inventory:<id>' for an on-hand part, or a URL where you found a \
+                                    buyable one (request_hardware, optional)."
                 },
                 "name": {
                     "type":        "string",
@@ -2181,6 +2231,9 @@ status = "inferred"
         let required = spec.input_schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v.as_str() == Some("kind")));
         assert!(required.iter().any(|v| v.as_str() == Some("reason")));
+        // request_hardware (EDK) is advertised as a proposable kind.
+        let kinds = spec.input_schema["properties"]["kind"]["enum"].as_array().unwrap();
+        assert!(kinds.iter().any(|v| v.as_str() == Some("request_hardware")));
     }
 
     #[tokio::test]

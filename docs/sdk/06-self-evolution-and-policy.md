@@ -46,6 +46,11 @@ It serializes `{"kind": "...", ...}` (serde `tag = "kind"`, `snake_case`):
 - `unregister_mcp_server { name, reason }` — remove one (`UnregisterMcpServer`).
 - `hot_reload_subsystem { subsystem }` — re-read a subsystem in place (`HotReloadSubsystem`),
   `subsystem ∈ {plugins, policy, agent, gateway}` (the `Subsystem` enum).
+- `request_hardware { part, capability, reason, bus?, source? }` — file a hardware
+  request (`RequestHardware`; the EDK "request-to-incarnate", see [edk.md](../edk.md)). The
+  one variant that **records rather than mutates**: it appends to the hardware wishlist and
+  changes no config, because agentd cannot seat a physical part. Its "apply confirmation" is
+  the next-boot embodiment probe flipping a sense ✗→✓. `undo` is `None` (nothing to revert).
 
 **The three virtual tools** the agent actually calls (declared in `gather_tools` in
 `agentd/crates/agentd/src/main.rs`, intercepted in `dispatch_tool` in
@@ -358,6 +363,7 @@ Apply arm = the matching `EvolutionProposal::*` arm of `apply_evolution` (in `ma
 | `register_mcp_server` | `name`, `command`, `env`, `reason` | `RegisterMcpServer` arm: add to plugins.toml + `SpawnPlugin` | `UnregisterMcpServer{name}` | yes |
 | `unregister_mcp_server` | `name`, `reason` | `UnregisterMcpServer` arm: remove from plugins.toml + `KillPlugin` | re-`RegisterMcpServer` from disk (env lost) | yes (env not restored) |
 | `hot_reload_subsystem` | `subsystem` | `HotReloadSubsystem` arm: re-read agent/policy in place | `None` | **no** |
+| `request_hardware` | `part`, `capability`, `reason`, `bus?`, `source?` | `RequestHardware` arm: append to the hardware wishlist (records, mutates nothing) | `None` | **no** (a request, not a change) |
 
 ### `Subsystem` values (`Subsystem` in `types.rs`) — `hot_reload_subsystem` targets
 
