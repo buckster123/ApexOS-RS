@@ -594,14 +594,28 @@ impl Supervisor {
                             // this 401s (the whole reason cross-node a2a needs the per-peer token).
                             let mut req = reqwest::Client::new()
                                 .post(&url)
-                                .json(&serde_json::json!({ "text": body }))
+                                .json(&serde_json::json!({ "message": body }))
                                 .timeout(std::time::Duration::from_secs(15));
                             if let Some(tok) = token.as_deref() {
                                 req = req.bearer_auth(tok);
                             }
                             let resp = req.send().await;
-                            let status = resp.as_ref().ok().map(|r| r.status());
-                            let ok = status.map(|s| s.is_success()).unwrap_or(false);
+                            // The handler replies 200 with {ok:bool,…}; a
+                            // 200-with-{ok:false} (empty/rejected message) must
+                            // NOT read as a delivery — check the body, not just
+                            // the HTTP status. (Status-only is what let the old
+                            // field mismatch fail silently as a false "sent".)
+                            let (status, body_ok) = match resp {
+                                Ok(r) => {
+                                    let s = r.status();
+                                    let b = r.json::<serde_json::Value>().await.ok()
+                                        .and_then(|v| v["ok"].as_bool());
+                                    (Some(s), b)
+                                }
+                                Err(_) => (None, None),
+                            };
+                            let ok = status.map(|s| s.is_success()).unwrap_or(false)
+                                && body_ok != Some(false);
                             let detail = match (&token, status) {
                                 (None, _)                       => "no token stored for peer — set one to reach a token-gated node",
                                 (Some(_), Some(s)) if s == 401  => "peer rejected the token (401) — stale credential?",
