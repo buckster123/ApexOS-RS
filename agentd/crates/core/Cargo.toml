@@ -11,3 +11,8 @@ tokio      = { workspace = true }
 anyhow     = { workspace = true }
 image      = { workspace = true }
 base64     = { workspace = true }
+# Identity store (docs/agent-identity.md): toml persistence + PIN hashing.
+toml       = "0.8"
+sha2       = { workspace = true }
+subtle     = { workspace = true }
+rand       = { workspace = true }

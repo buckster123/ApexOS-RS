@@ -288,6 +288,7 @@ Full event list: `agentd/crates/core/src/types.rs` — `Event` enum.
 | `AGENTD_CCBS` | unset | agentd: set `0`/`false` to disable CCBS boot-priming (the daemon-side `cognitive_bootstrap` injected into the system prompt on a session's first turn) |
 | `AGENTD_BOOTSTRAP_MODE` | `standard` | agentd: CCBS token budget — `minimal` (1000) / `standard` (2000) / `full` (4500) |
 | `AGENTD_DREAM_CRON` | `0 0 3 * * *` | agentd: cron (6-field, UTC) for the nightly autonomous `dream_run`; **empty disables it** |
+| `AGENTD_IDENTITIES` | `/etc/agentd/identities.toml` | agentd: the multi-agent identity registry (`[[user]]` + `[[agent]]`); see `docs/agent-identity.md`. Data layer only so far (3a) |
 | `SLINT_BACKEND` | auto | `winit` (desktop), `linuxkms` (Pi), `linuxkms-femtovg` (Pi Zero) |
 | `SLINT_FULLSCREEN` | unset | `1` = fullscreen, no window chrome |
 | `RUST_LOG` | `info` | tracing filter |

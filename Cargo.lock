@@ -322,9 +322,13 @@ dependencies = [
  "apexos-protocol",
  "base64 0.22.1",
  "image",
+ "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "tokio",
+ "toml 0.8.23",
 ]
 
 [[package]]
