@@ -6968,6 +6968,7 @@ dependencies = [
 name = "ui-slint"
 version = "0.1.0"
 dependencies = [
+ "apexos-protocol",
  "chrono",
  "futures-util",
  "glow",

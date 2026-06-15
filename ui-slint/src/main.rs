@@ -16,6 +16,9 @@ mod face_gl; // Phase-2 face — raw GL via the rendering notifier (default on G
 use slint::Model; // row_count / row_data / set_row_data on VecModel
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+// Selective import (NOT a glob): apexos_protocol::Message would collide with
+// tokio_tungstenite's Message used below.
+use apexos_protocol::{Event, SensorReading};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -3485,6 +3488,7 @@ fn dispatch_event(
                 }
             })
             .ok();
+            return;
         }
 
         "turn_started" => {
@@ -3508,10 +3512,27 @@ fn dispatch_event(
                 }
             })
             .ok();
+            return;
         }
 
-        "agent_text" => {
-            let delta = ev["delta"].as_str().unwrap_or("").to_string();
+        _ => {}
+    }
+
+    // ── Typed `Event` dispatch ─────────────────────────────────────────────────
+    // Deserialize into the SAME enum agentd serialized from (the gateway sends the
+    // raw Event with no reshaping, so this can't fail on a real event). A frame
+    // that doesn't match the shared contract is LOGGED, not silently dropped — the
+    // old footgun was that a renamed field/variant just vanished with no error.
+    let event: Event = match serde_json::from_value(ev) {
+        Ok(e) => e,
+        Err(err) => {
+            eprintln!("[ws] dropping undecodable '{ev_type}' frame: {err}");
+            return;
+        }
+    };
+
+    match event {
+        Event::AgentText { delta, .. } => {
             if delta.is_empty() {
                 return;
             }
@@ -3546,12 +3567,12 @@ fn dispatch_event(
             .ok();
         }
 
-        "turn_complete" => {
+        Event::TurnComplete { session } => {
             let tts    = ctx.tts_enabled.load(Ordering::SeqCst);
             let rt_h   = ctx.rt_handle.clone();
             let client = Arc::clone(&ctx.http_client);
             let base   = ctx.http_base.clone();
-            let sess   = ev["session"].as_u64();
+            let sess   = Some(session.0);
             let st     = state.clone();
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
@@ -3595,7 +3616,7 @@ fn dispatch_event(
             .ok();
         }
 
-        "wake_triggered" => {
+        Event::WakeTriggered => {
             // Wake word detected — switch to chat and auto-start recording
             let rt_h   = ctx.rt_handle.clone();
             let client = Arc::clone(&ctx.http_client);
@@ -3625,16 +3646,14 @@ fn dispatch_event(
             }).ok();
         }
 
-        "tool_requested" => {
-            // Event::ToolRequested { session, call: ToolCall } — fields nest under `call`.
+        Event::ToolRequested { call, .. } => {
             // ToolCall.id is ActionId(u64) → a bare number; stringify for the row key.
-            let call      = &ev["call"];
-            let tool_name = call["tool"].as_str().unwrap_or("").to_string();
+            let tool_name = call.tool.clone();
 
             // `display_face` is APEX emoting, not a "tool action" — drive the face
             // directly from the call args and show NO tool card (it'd be noise).
             if tool_name == "display_face" {
-                let a = &call["args"];
+                let a = &call.args;
                 let fstate = a["state"].as_str().unwrap_or("neutral").to_string();
                 let fgaze  = a["gaze"].as_str().unwrap_or("center").to_string();
                 let fint   = a["intensity"].as_f64().unwrap_or(0.7).clamp(0.0, 1.0) as f32;
@@ -3646,11 +3665,11 @@ fn dispatch_event(
                 })
                 .ok();
             } else {
-                let call_id   = call["id"].as_u64().map(|n| n.to_string()).unwrap_or_default();
-                let tool_args = if call["args"].is_null() {
+                let call_id   = call.id.0.to_string();
+                let tool_args = if call.args.is_null() {
                     String::new()
                 } else {
-                    serde_json::to_string_pretty(&call["args"]).unwrap_or_default()
+                    serde_json::to_string_pretty(&call.args).unwrap_or_default()
                 };
                 let w = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
@@ -3675,13 +3694,11 @@ fn dispatch_event(
             }
         }
 
-        "tool_result" => {
-            // Event::ToolResult { session, call: ActionId, output: ToolOutput }.
-            // `call` is the bare action-id number; output nests { ok, content }.
-            let call_id = ev["call"].as_u64().map(|n| n.to_string()).unwrap_or_default();
-            let out     = &ev["output"];
-            let ok      = out["ok"].as_bool().unwrap_or(true);
-            let output  = match &out["content"] {
+        Event::ToolResult { call, output: out, .. } => {
+            // `call` is the bare action-id (ActionId.0); output nests { ok, content }.
+            let call_id = call.0.to_string();
+            let ok      = out.ok;
+            let output  = match &out.content {
                 serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Null      => String::new(),
                 other => serde_json::to_string_pretty(other).unwrap_or_default(),
@@ -3703,16 +3720,15 @@ fn dispatch_event(
             .ok();
         }
 
-        "approval_pending" => {
-            // Event::ApprovalPending { session, call: ToolCall } — same nesting as tool_requested.
-            // Normally a tool_requested arrives first (card exists); the else-branch is a fallback.
-            let call      = &ev["call"];
-            let call_id   = call["id"].as_u64().map(|n| n.to_string()).unwrap_or_default();
-            let tool_name = call["tool"].as_str().unwrap_or("").to_string();
-            let tool_args = if call["args"].is_null() {
+        Event::ApprovalPending { call, .. } => {
+            // Same nesting as tool_requested. Normally a tool_requested arrives
+            // first (card exists); the else-branch is a fallback.
+            let call_id   = call.id.0.to_string();
+            let tool_name = call.tool.clone();
+            let tool_args = if call.args.is_null() {
                 String::new()
             } else {
-                serde_json::to_string_pretty(&call["args"]).unwrap_or_default()
+                serde_json::to_string_pretty(&call.args).unwrap_or_default()
             };
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
@@ -3742,17 +3758,11 @@ fn dispatch_event(
         }
 
         // Sensor bridge events: BME688 (air_quality) + MLX90640 (thermal_frame)
-        "sensor_reading" => {
-            let reading = ev["reading"].clone();
-            match reading["kind"].as_str() {
-                Some("air_quality") => {
-                    let iaq   = reading["iaq"].as_f64().unwrap_or(0.0) as f32;
-                    let temp  = reading["temperature_c"].as_f64().unwrap_or(0.0) as f32;
-                    // sensor bridge may use "humidity" or "humidity_pct"
-                    let humid = reading["humidity_pct"]
-                        .as_f64()
-                        .or_else(|| reading["humidity"].as_f64())
-                        .unwrap_or(0.0) as f32;
+        Event::SensorReading { reading, .. } => {
+            match reading {
+                SensorReading::AirQuality { iaq, temperature_c, humidity_pct, .. } => {
+                    let temp  = temperature_c;
+                    let humid = humidity_pct;
                     let label = iaq_label(iaq).to_string();
                     let w = ui_weak.clone();
                     slint::invoke_from_event_loop(move || {
@@ -3767,10 +3777,7 @@ fn dispatch_event(
                     })
                     .ok();
                 }
-                Some("thermal_frame") => {
-                    let min_c  = reading["min_c"].as_f64().unwrap_or(0.0) as f32;
-                    let max_c  = reading["max_c"].as_f64().unwrap_or(0.0) as f32;
-                    let mean_c = reading["mean_c"].as_f64().unwrap_or(0.0) as f32;
+                SensorReading::ThermalFrame { min_c, max_c, mean_c, .. } => {
                     let w = ui_weak.clone();
                     slint::invoke_from_event_loop(move || {
                         if let Some(ui) = w.upgrade() {
@@ -3789,21 +3796,18 @@ fn dispatch_event(
         }
 
         // ── Council (G3d) ──────────────────────────────────────────────
-        "council_started" => {
-            let topic = ev["topic"].as_str().unwrap_or("").to_string();
-            let agents: Vec<CouncilAgent> = ev["agents"].as_array()
-                .map(|arr| arr.iter().enumerate().map(|(i, a)| {
-                    let id = a["id"].as_str().unwrap_or("");
-                    let persona = a["persona"].as_str().unwrap_or("");
-                    CouncilAgent {
-                        id: id.into(),
-                        persona: if persona.is_empty() { id.into() } else { persona.into() },
-                        accent: council_accent(a["color"].as_str(), i),
-                        text: "".into(),
-                        done: false,
-                    }
-                }).collect())
-                .unwrap_or_default();
+        Event::CouncilStarted { topic, agents, .. } => {
+            let agents: Vec<CouncilAgent> = agents.iter().enumerate().map(|(i, a)| {
+                let id = a.id.as_str();
+                let persona = a.persona.as_str();
+                CouncilAgent {
+                    id: id.into(),
+                    persona: if persona.is_empty() { id.into() } else { persona.into() },
+                    accent: council_accent(a.color.as_deref(), i),
+                    text: "".into(),
+                    done: false,
+                }
+            }).collect();
             let topic2 = topic.clone();
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
@@ -3824,8 +3828,8 @@ fn dispatch_event(
             notify(ToastKind::Info, format!("Council convened: {topic}"));
         }
 
-        "council_round_start" => {
-            let round = ev["round"].as_u64().unwrap_or(0) as i32;
+        Event::CouncilRoundStart { round, .. } => {
+            let round = round as i32;
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
@@ -3846,9 +3850,7 @@ fn dispatch_event(
             }).ok();
         }
 
-        "council_agent_delta" => {
-            let agent_id = ev["agent_id"].as_str().unwrap_or("").to_string();
-            let delta    = ev["delta"].as_str().unwrap_or("").to_string();
+        Event::CouncilAgentDelta { agent_id, delta, .. } => {
             if delta.is_empty() { return; }
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
@@ -3864,9 +3866,7 @@ fn dispatch_event(
             }).ok();
         }
 
-        "council_agent_done" => {
-            let agent_id  = ev["agent_id"].as_str().unwrap_or("").to_string();
-            let full_text = ev["full_text"].as_str().unwrap_or("").to_string();
+        Event::CouncilAgentDone { agent_id, full_text, .. } => {
             slint::invoke_from_event_loop(move || {
                 council_update(&agent_id, |a| {
                     if !full_text.is_empty() { a.text = full_text.into(); }
@@ -3875,18 +3875,15 @@ fn dispatch_event(
             }).ok();
         }
 
-        "council_round_done" => {
-            let conv = ev["convergence"].as_f64().unwrap_or(0.0) as f32;
+        Event::CouncilRoundDone { convergence: conv, .. } => {
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() { ui.set_council_convergence(conv); }
             }).ok();
         }
 
-        "council_complete" => {
-            let reason    = ev["reason"].as_str().unwrap_or("").to_string();
-            let synthesis = ev["synthesis"].as_str().unwrap_or("").to_string();
-            let rounds    = ev["rounds"].as_u64().unwrap_or(0) as i32;
+        Event::CouncilComplete { reason, synthesis, rounds, .. } => {
+            let rounds = rounds as i32;
             let status = match reason.as_str() {
                 "consensus"  => "consensus",
                 "max_rounds" => "max rounds",
@@ -3908,13 +3905,12 @@ fn dispatch_event(
             notify(ToastKind::Success, format!("Council {status}"));
         }
 
-        "council_butt_in" => {
-            let msg = ev["message"].as_str().unwrap_or("").to_string();
+        Event::CouncilButtIn { message: msg, .. } => {
             if !msg.is_empty() { notify(ToastKind::Info, format!("Council: {msg}")); }
         }
 
-        "sub_agent_started" => {
-            let child = ev["child"].as_u64();
+        Event::SubAgentStarted { child, .. } => {
+            let child = Some(child.0);
             let st = state.clone();
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
