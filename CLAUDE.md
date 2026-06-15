@@ -267,9 +267,13 @@ so the UI must also clear its own busy + pending tool cards):
 ```json
 {"type": "user_cancel"}
 ```
-The gateway injects `session` into every inbound frame before deserializing
-into `Event`, so frontends omit it. A frame that fails to deserialize is
-**silently dropped** — wrong field names = no error, just nothing happens.
+The gateway injects `session` into every inbound (frontend→gateway) frame before
+deserializing into `Event`, so frontends omit it. A frame that fails to
+deserialize **on the gateway** is still silently dropped — wrong field names =
+no error. **Outbound (gateway→UI) the ui-slint client now deserializes into the
+shared `apexos-protocol::Event` and logs any undecodable frame** (no longer the
+hand-rolled `["field"].as_str()` matching that vanished on a rename). Both sides
+share the same `Event` types via the `apexos-protocol` crate.
 
 Full event list: `agentd/crates/core/src/types.rs` — `Event` enum.
 
@@ -399,7 +403,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 - ~~Cerebro web UI integration~~ — shipped as the `Web` launcher (🌐): external-browser tiles for Cerebro/Sensor Head + open-any-URL bar (Slint can't embed a webview; opens via `xdg-open`/`$BROWSER`)
 - Monaco / code editor — SSH/vim or embedded webkit2gtk webview for soul.md heavy editing
 - Sub-agent windows — `Popup` per child session, maps to `SubAgentStarted` events
-- ~~`apexos-core` vendor for shared `Event` types~~ — **superseded**: the wire-protocol types are now their own lean `apexos-protocol` crate (serde-only; `core` re-exports it, so `apexos_core::Event` is unchanged daemon-side). Slice 1 (the crate) shipped; **slice 2 (UI deserializes into the typed `Event` instead of `["field"].as_str()` string-matching) is the follow-up** — that's what kills the silent-frame-drop footgun
+- ~~`apexos-core` vendor for shared `Event` types~~ — **DONE (both slices)**: wire-protocol types live in a lean serde-only `apexos-protocol` crate (`core` re-exports it, so `apexos_core::Event` is unchanged daemon-side). The UI now deserializes WS frames into the typed `Event` (`serde_json::from_value::<Event>` → `match event { … }`) instead of `["field"].as_str()` string-matching, and **logs** an undecodable frame instead of silently dropping it. Outbound frontend-intent frames (`user_prompt`/`user_approval`/`user_cancel`) stay hand-built JSON on purpose — they omit `session` (the gateway injects it), which the required-`session` `Event` variants can't express
 - ~~Vision input — core eyes~~ — shipped: the downscale **shim** (`apexos_core::vision`, `VISION_MAX_EDGE` cap = the SensorHead token-bomb guard) + the **vision tool-result path** (a tool returns `{"vision":{"path"|"b64"},"text"}` → `turn.rs::vision_rewrite` shims it → multimodal content block; Anthropic native, OAI/Ollama follow-up user msg). `sketch_snapshot` now hands APEX the drawing inline. Remaining vision follow-ups still deferred:
   - ~~**Screenshot "mirror" tool**~~ — shipped: `screenshot_mirror` (apexos-tools) → ui-slint serves its own `Window::take_snapshot()` PNG over a loopback endpoint (renderer-agnostic — winit/femtovg, linuxkms/skia, femtovg-software all snapshot the rendered scene, so **no** DRM readback and **no** Wayland screencopy) → tool writes it under the workspace and returns the same `{vision:{path}}` sentinel, zero agentd changes. Graceful "no display" when headless.
   - ~~**Camera eyes — physical-world capture**~~ — shipped: the `camera_capture` tool (apexos-tools) snaps one frame and returns the same `{vision:{path}}` sentinel — zero agentd changes, mirrors `screenshot_mirror`. Device-agnostic backend pick (the capture half of HW-tier detection): Pi CSI camera (`rpicam-jpeg`/`libcamera-jpeg`) → USB/laptop webcam over V4L2 (`ffmpeg -f v4l2`) → `fswebcam`; warmup frames per backend (no black first frame); `APEXOS_CAMERA_DEVICE`/`APEXOS_CAMERA_CMD` overrides; graceful "no camera" note. The PWA's `GET /api/snapshot` was generalized to the **same** multi-backend detection (was Pi-CSI-only) so laptop/USB-cam nodes work too. install.sh adds `rpicam-apps` on Pi (ffmpeg covers V4L2) and grants the `video` group to agentd even headless.

@@ -382,3 +382,93 @@ pub struct ImageSource {
     pub media_type: String,
     pub data: String,
 }
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+// Lock the wire contract the frontends deserialize against. The gateway sends
+// `serde_json::to_string(&event)` with no reshaping, so these strings are exactly
+// what a frontend receives. A field/variant rename that would break the typed UI
+// dispatch fails here instead of silently dropping a frame at runtime.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_serialize_as_bare_numbers() {
+        // Historical UI footgun: the ID newtypes serialize as bare numbers, not
+        // `{"0": n}` or strings — the UI must read them as numbers.
+        assert_eq!(serde_json::to_string(&SessionId(42)).unwrap(), "42");
+        assert_eq!(serde_json::to_string(&ActionId(5)).unwrap(), "5");
+    }
+
+    #[test]
+    fn agent_text_round_trips() {
+        let j = r#"{"type":"agent_text","session":42,"delta":"hi"}"#;
+        match serde_json::from_str::<Event>(j).unwrap() {
+            Event::AgentText { session, delta } => {
+                assert_eq!(session, SessionId(42));
+                assert_eq!(delta, "hi");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_requested_nests_under_call_with_bare_id() {
+        // The UI reads call.tool / call.id / call.args; id is a bare number.
+        let j = r#"{"type":"tool_requested","session":1,
+            "call":{"id":7,"tool":"read_file","args":{"path":"x"},"needs_approval":false}}"#;
+        match serde_json::from_str::<Event>(j).unwrap() {
+            Event::ToolRequested { call, .. } => {
+                assert_eq!(call.id, ActionId(7));
+                assert_eq!(call.tool, "read_file");
+                assert_eq!(call.args["path"], "x");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_call_is_a_bare_action_id() {
+        let j = r#"{"type":"tool_result","session":1,"call":7,"output":{"ok":true,"content":"done"}}"#;
+        match serde_json::from_str::<Event>(j).unwrap() {
+            Event::ToolResult { call, output, .. } => {
+                assert_eq!(call, ActionId(7));
+                assert!(output.ok);
+                assert_eq!(output.content, "done");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sensor_reading_carries_a_typed_inner_enum() {
+        let j = r#"{"type":"sensor_reading","node_id":"pi","timestamp":0,
+            "reading":{"kind":"air_quality","iaq":50.0,"co2_eq_ppm":400.0,"voc_ppm":0.5,
+                       "accuracy":3,"temperature_c":22.0,"humidity_pct":40.0,
+                       "pressure_hpa":1013.0,"sensor_id":"bme688"}}"#;
+        match serde_json::from_str::<Event>(j).unwrap() {
+            Event::SensorReading { reading: SensorReading::AirQuality { accuracy, iaq, humidity_pct, .. }, .. } => {
+                assert_eq!(accuracy, 3);
+                assert!((iaq - 50.0).abs() < 0.01);
+                assert!((humidity_pct - 40.0).abs() < 0.01);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unit_variant_and_unknown_fields_tolerated() {
+        // WakeTriggered is a unit variant: {"type":"wake_triggered"}.
+        assert!(matches!(
+            serde_json::from_str::<Event>(r#"{"type":"wake_triggered"}"#).unwrap(),
+            Event::WakeTriggered
+        ));
+        // Unknown/extra fields are ignored (forward-compatible).
+        let j = r#"{"type":"turn_complete","session":3,"extra":"ignored"}"#;
+        assert!(matches!(
+            serde_json::from_str::<Event>(j).unwrap(),
+            Event::TurnComplete { .. }
+        ));
+    }
+}

@@ -5,6 +5,9 @@ edition = "2021"
 description = "ApexOS-RS native UI — Slint frontend over agentd WebSocket"
 
 [dependencies]
+# Shared wire-protocol types — deserialize WS frames into the SAME Event enum
+# agentd serializes from (kills the hand-rolled string-matching / silent drops).
+apexos-protocol = { path = "../apexos-protocol" }
 slint = { version = "1", features = ["backend-linuxkms-noseat", "backend-winit"] }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
