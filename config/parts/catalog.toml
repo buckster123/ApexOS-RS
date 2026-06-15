@@ -1,0 +1,271 @@
+# ApexOS parts catalog — curated, human-verified hardware this node can accept.
+# Schema + curation rules: see README.md in this directory.
+# status: verified (confirmed on real HW) | inferred (best-effort, needs check) | todo (stub)
+# The agent READS this and weights entries by `status`. Never invent a spec it will trust.
+#
+# Seed set: Pi-5 basics + parts on hand. Vendor SKUs/URLs to be filled from the PiHut import.
+
+# ─────────────────────────────── SENSE ───────────────────────────────
+
+[[part]]
+id            = "camera-module-3"
+name          = "Raspberry Pi Camera Module 3"
+category      = "sense"
+provides      = "eyes — physical-world vision"
+summary       = "12 MP autofocus CSI camera; lets APEX see the room and reason over what it captures."
+bus           = "csi"
+pins          = []
+compat        = ["pi5", "pi4", "pi3", "zero2w"]
+compat_notes  = "Pi 5 uses the 22-pin FPC connector — needs the included narrow cable, NOT a Pi 4 15-pin cable (or a 15→22 adapter)."
+cost          = 25.0
+currency      = "USD"
+vendor        = "The Pi Hut"
+vendor_sku    = ""   # TODO from PiHut import
+product_url   = ""   # TODO
+enable        = [
+  "Seat the ribbon in a CAM/DISP port, silver contacts toward the board, clip down",
+  "Bookworm auto-detects; no dtoverlay usually needed",
+]
+detect        = "rpicam-hello --list-cameras ; ls /dev/video*"
+detect_tool   = "camera_capture"
+unlocks_tools = ["camera_capture"]
+power_draw    = "~250 mA peak"
+status        = "verified"
+notes         = "camera_capture already auto-detects rpicam→V4L2; this is the canonical 'give APEX eyes' part."
+
+[[part]]
+id            = "sensorhead-iaq"
+name          = "SensorHead air-quality sensor (BME680-class)"
+category      = "sense"
+provides      = "environmental sense — air quality, temp, humidity, pressure, VOC gas"
+summary       = "Feeds the IAQ badge + get_iaq; APEX's sense of the room's air."
+bus           = "i2c"
+pins          = [2, 3]
+compat        = ["pi5", "pi4", "pi3", "zero2w"]
+compat_notes  = "I2C devices coexist by address, not pin — multiple I2C parts share pins 3/5 (BCM 2/3)."
+cost          = 0.0
+currency      = "USD"
+vendor        = "SensorHead (existing rig)"
+vendor_sku    = ""
+product_url   = ""
+enable        = [
+  "Wire to I2C (3.3V/GND/SDA/SCL)",
+  "Confirm address on the bus; enable I2C in raspi-config if not already",
+]
+detect        = "i2cdetect -y 1"
+detect_tool   = "get_iaq"
+unlocks_tools = ["get_iaq"]
+power_draw    = "negligible"
+status        = "inferred"
+notes         = "Part of André's SensorHead; confirm exact chip + I2C address on real hardware (likely BME680 @ 0x76/0x77)."
+
+[[part]]
+id            = "sensorhead-thermal"
+name          = "MLX90640 thermal camera (SensorHead)"
+category      = "sense"
+provides      = "thermal vision — 32×24 IR temperature grid"
+summary       = "Drives the thermal heatmap + thermal_frame; APEX sees heat, not just light."
+bus           = "i2c"
+pins          = [2, 3]
+compat        = ["pi5", "pi4", "pi3", "zero2w"]
+compat_notes  = "High I2C data rate — best on a dedicated/fast I2C bus; long wires hurt it."
+cost          = 0.0
+currency      = "USD"
+vendor        = "SensorHead (existing rig)"
+vendor_sku    = ""
+product_url   = ""
+enable        = [
+  "Wire to I2C; bump I2C baudrate (dtparam=i2c_arm_baudrate=400000) for usable frame rate",
+]
+detect        = "i2cdetect -y 1   # expect a device near 0x33"
+detect_tool   = "thermal_frame"
+unlocks_tools = ["thermal_frame"]
+power_draw    = "~25 mA"
+status        = "inferred"
+notes         = "Confirm 0x33 address + baudrate on real hardware."
+
+# ─────────────────────────────── DISPLAY ─────────────────────────────
+
+[[part]]
+id            = "gc9a01a-round-tft"
+name          = "GC9A01A 1.28\" round TFT (240×240)"
+category      = "display"
+provides      = "a physical face — the round panel APEX's face renders to"
+summary       = "The hardware face panel; display_face writes to it (best-effort). On -RS the Slint UI is the primary renderer."
+bus           = "spi"
+pins          = [10, 11, 8, 25, 24]
+compat        = ["pi5", "pi4", "pi3", "zero2w"]
+compat_notes  = "SPI0 (MOSI 10 / SCLK 11 / CE0 8) + DC/RST on free GPIO (example BCM 25/24); confirm wiring for your module."
+cost          = 12.0
+currency      = "USD"
+vendor        = "The Pi Hut"
+vendor_sku    = ""
+product_url   = ""
+enable        = [
+  "Enable SPI (raspi-config / dtparam=spi=on)",
+  "Wire MOSI/SCLK/CS/DC/RST/BL per the module's pinout",
+]
+detect        = "ls /dev/spidev*"
+detect_tool   = "display_face"
+unlocks_tools = ["display_face"]
+power_draw    = "~40 mA + backlight"
+status        = "inferred"
+notes         = "Referenced in code (display_face GC9A01A socket write). Verify exact DC/RST/BL pins per module."
+
+# ─────────────────────────────── INPUT ───────────────────────────────
+
+[[part]]
+id            = "tactile-button"
+name          = "Momentary tactile push button"
+category      = "input"
+provides      = "physical button input — a real-world trigger APEX can read"
+summary       = "A button wired to a GPIO; APEX can poll it via gpio_read (e.g. a physical wake/ack)."
+bus           = "gpio"
+pins          = []
+compat        = ["pi5", "pi4", "pi3", "zero2w"]
+compat_notes  = "Pi 5 GPIO is behind RP1 — use lgpio/gpiod, not legacy RPi.GPIO."
+cost          = 0.5
+currency      = "USD"
+vendor        = "on hand"
+vendor_sku    = ""
+product_url   = ""
+enable        = [
+  "Wire one leg to a free GPIO, the other to GND; use the internal pull-up",
+  "Example: BCM 17 (header pin 11) + GND",
+]
+detect        = "gpioinfo | grep -i unused   # confirm a free line"
+detect_tool   = "gpio_read"
+unlocks_tools = ["gpio_read"]
+power_draw    = "none"
+status        = "verified"
+notes         = "Operator chooses the pin; set `pins` once wired so conflict-detection is accurate."
+
+[[part]]
+id            = "led-indicator"
+name          = "LED + resistor (status indicator)"
+category      = "actuator"
+provides      = "a physical light APEX can drive — presence/status signalling"
+summary       = "An LED on a GPIO; APEX blinks/sets it via gpio_write/gpio_pulse (e.g. a real-world 'thinking' light)."
+bus           = "gpio"
+pins          = []
+compat        = ["pi5", "pi4", "pi3", "zero2w"]
+compat_notes  = "Always use a current-limiting resistor (~330Ω). Pi 5 GPIO via RP1 — lgpio/gpiod."
+cost          = 0.2
+currency      = "USD"
+vendor        = "on hand"
+vendor_sku    = ""
+product_url   = ""
+enable        = [
+  "GPIO → resistor → LED anode, cathode → GND",
+  "Example: BCM 27 (header pin 13)",
+]
+detect        = "gpioinfo | grep -i unused"
+detect_tool   = "gpio_write"
+unlocks_tools = ["gpio_write", "gpio_pulse", "gpio_pwm"]
+power_draw    = "~10 mA"
+status        = "verified"
+notes         = "gpio_write/gpio_pulse are policy 'ask' by default — loosen to 'allow' for autonomous signalling."
+
+# ─────────────────────────────── COMPUTE ─────────────────────────────
+
+[[part]]
+id            = "ai-hat-hailo"
+name          = "Raspberry Pi AI HAT+ (Hailo-8L, 13 TOPS)"
+category      = "compute"
+provides      = "local neural acceleration — on-device vision inference without the cloud"
+summary       = "A Hailo NPU on the M.2 HAT+; could run local vision models so APEX sees without an API round-trip."
+bus           = "m2-hat+"
+pins          = []
+compat        = ["pi5"]
+compat_notes  = "Pi 5 ONLY — needs PCIe via the M.2 HAT+ / AI HAT+. Pi 3/4 have no PCIe; never mark them compatible."
+cost          = 70.0
+currency      = "USD"
+vendor        = "The Pi Hut"
+vendor_sku    = ""
+product_url   = ""
+enable        = [
+  "Mount the M.2 HAT+, seat the Hailo M.2 module, connect the PCIe FFC",
+  "Enable PCIe (dtparam=pciex1), install hailo-all",
+]
+detect        = "lspci | grep -i hailo ; hailortcli scan"
+detect_tool   = ""
+unlocks_tools = ["new:local_vision"]
+power_draw    = "~2-5 W under load"
+status        = "inferred"
+notes         = "No plugin yet — would need a local-inference tool written. The Pro-tier path to cloud-free eyes."
+
+# ─────────────────────────────── HEARING / VOICE ─────────────────────
+
+[[part]]
+id            = "usb-microphone"
+name          = "USB microphone"
+category      = "sense"
+provides      = "hearing — captures audio for the voice/record path"
+summary       = "Plug-and-play mic so APEX can listen (POST /api/record/start)."
+bus           = "usb"
+pins          = []
+compat        = ["pi5", "pi4", "pi3", "zero2w", "x86"]
+compat_notes  = "Pi 5 has no analog mic input — USB or I2S only."
+cost          = 10.0
+currency      = "USD"
+vendor        = "The Pi Hut"
+vendor_sku    = ""
+product_url   = ""
+enable        = [
+  "Plug in; confirm card with `arecord -l`",
+  "Add agentd to the `audio` group; set the capture device if not default",
+]
+detect        = "arecord -l"
+detect_tool   = ""
+unlocks_tools = ["new:record"]
+power_draw    = "USB-powered"
+status        = "inferred"
+notes         = "Voice-in path exists server-side; confirm device + audio-group on real hardware."
+
+# ─────────────────────────────── POWER / SUPPORT ─────────────────────
+
+[[part]]
+id            = "active-cooler"
+name          = "Raspberry Pi 5 Active Cooler"
+category      = "power"
+provides      = "thermal headroom — sustained performance without throttling"
+summary       = "Fan + heatsink on the dedicated fan header; keeps APEX from throttling under load."
+bus           = "fan"
+pins          = []
+compat        = ["pi5"]
+compat_notes  = "Pi 5 has a dedicated 4-pin JST fan header + mounting points; the Pi 4 has neither."
+cost          = 5.0
+currency      = "USD"
+vendor        = "The Pi Hut"
+vendor_sku    = ""
+product_url   = ""
+enable        = ["Clip onto the SoC, plug into the FAN header — firmware drives it automatically"]
+detect        = "cat /sys/class/thermal/cooling_device*/type"
+detect_tool   = "cpu_temp"
+unlocks_tools = []
+power_draw    = "<1 W"
+status        = "verified"
+notes         = "Not a capability part, but real selection pressure: a throttling node is a slower mind."
+
+[[part]]
+id            = "rtc-battery"
+name          = "RTC battery (Pi 5)"
+category      = "power"
+provides      = "wall-clock time across power loss — accurate timestamps offline"
+summary       = "Keeps the real-time clock alive when unplugged; matters for memory timestamps on an offline node."
+bus           = "rtc"
+pins          = []
+compat        = ["pi5"]
+compat_notes  = "Pi 5 has a dedicated RTC battery connector; earlier Pis need an I2C RTC HAT instead."
+cost          = 5.0
+currency      = "USD"
+vendor        = "The Pi Hut"
+vendor_sku    = ""
+product_url   = ""
+enable        = ["Plug into the RTC connector; the firmware uses it automatically"]
+detect        = "ls /sys/class/rtc/"
+detect_tool   = ""
+unlocks_tools = []
+power_draw    = "trickle"
+status        = "inferred"
+notes         = "Time integrity matters for Cerebro's FSRS/ACT-R salience curves on an offline node."
