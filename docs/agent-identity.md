@@ -136,7 +136,7 @@ regardless of hash strength.
 | 3b | **Per-session binding** (memory) | A `hello` frame may carry `agent_id`; agentd records `SessionId→agent_id` (`SessionBindings`). The slice-1 stamp + slice-2 CCBS boot resolve identity via `resolve_agent_id(session)` — bound agent → else `node_agent_id()`. So selecting an agent switches its **Cerebro memory space**. Unbound = APEX (current behavior). | ✅ shipped — `apexos_core::{SessionBindings, resolve_agent_id}`; gateway binds on `hello`, supervisor stamp + `root_turn` CCBS resolve per-session |
 | 3b-2 | **Per-agent soul** | A bound session also loads its agent's `soul_file` → `engine.with_system(Some(soul))` (composed with the slice-2 priming). Unbound/APEX → the global soul. Reads the 3a store. | ✅ shipped — `root_turn` loads identities (seeded at startup), `agent_soul_for()` reads a bound non-default agent's `soul_file` (async, graceful → default on miss), composed `with_system(soul).with_priming(block)` |
 | 3c | **Identity API + lockout** | HTTP CRUD (list/create users+agents, seed soul file) + `verify` (PIN + 5-guess lockout). Drives the UI. | ✅ shipped — token-gated `GET /api/identities` (PIN redacted), `POST /api/identities/{user,agent,verify}`; `PinLockout` (5 fails → 5-min cooldown, in-memory); agent create seeds `souls/<id>.md`; install.sh chowns `identities.toml` + `souls/` |
-| 3d | **Boot UI** (ui-slint) | Extend the first-boot wizard into `user → (PIN) → agent → skin → desktop`, wired to 3c; "set default + skip" persistence. | ▢ |
+| 3d | **Boot UI** (ui-slint) | `IdentityWizard` component: profile tiles → numeric PIN keypad (Rust owns the buffer; verifies via 3c) → agent tiles; picking an agent binds the session (`hello{agent_id}`). | ✅ shipped — gated so the trivial single-owner+APEX node boots straight through unchanged; renders above the persona first-boot |
 
 > Slice 3 split into 3a/3b/3b-2/3c/3d during build, smallest-first: data layer
 > (3a, inert) → memory binding (3b) → per-agent soul (3b-2) → API (3c) → UI (3d).
@@ -144,6 +144,12 @@ regardless of hash strength.
 
 The cognitive boot loop is the **missing middle**: Slice 1 *enforces* an identity, Slice 3
 *lets a human pick* one, and Slice 2 is *what loads when an identity wakes up*.
+
+> **Arc complete (all slices shipped).** Identity is system-stamped (1), the agent wakes
+> oriented (2), the registry + API + PIN exist (3a/3c), selecting an agent switches its
+> memory *and* soul (3b/3b-2), and a human picks at boot (3d). Remaining polish is optional:
+> a "set default + skip" persistence pass, binding-eviction on disconnect, and auth-gating
+> *which* agents a profile may bind (the API accepts any `agent_id` from the token-gated client today).
 
 ---
 

@@ -37,6 +37,23 @@ export struct PersonaDef {
     swatch-bg: color,    // tile background preview
 }
 
+// ── Identity boot wizard (agent-identity.md slice 3d) ────────────────────
+// A user profile and an agent, surfaced as tiles in the boot wizard. Rust owns
+// both VecModels (from GET /api/identities); the wizard filters agents to the
+// selected user's owner before showing the agent step.
+export struct UserDef {
+    id:      string,
+    name:    string,
+    has-pin: bool,
+    glyph:   string,   // emoji/initial preview
+}
+
+export struct AgentDef {
+    id:      string,
+    name:    string,
+    glyph:   string,
+}
+
 // ── Council (glowup G3d) ─────────────────────────────────────────────────
 // One deliberating agent in a council session. Rust owns the VecModel: delta
 // events append to `text`, agent_done sets `done`. `accent` is parsed from the

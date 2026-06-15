@@ -89,6 +89,38 @@ thread_local! {
     static SKETCH_ANCHOR: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((0.0, 0.0)) };
     // Calculator — pure-UI immediate-execution state machine.
     static CALC: RefCell<Calc> = RefCell::new(Calc::new());
+    // Identity boot wizard (3d): wizard state + its two tile models. Thread-local
+    // so the async identities fetch carries only Send data and populates via
+    // invoke_from_event_loop (Rc models can't cross the tokio thread boundary).
+    static ID_STATE: RefCell<IdState> = RefCell::new(IdState::new());
+    static ID_USERS: RefCell<Option<Rc<slint::VecModel<UserDef>>>> = const { RefCell::new(None) };
+    static ID_AGENTS: RefCell<Option<Rc<slint::VecModel<AgentDef>>>> = const { RefCell::new(None) };
+}
+
+// ── Identity boot wizard (3d) state + helpers ───────────────────────────────────
+#[derive(Clone, Default)]
+struct UserRow { id: String, name: String, has_pin: bool }
+#[derive(Clone, Default)]
+struct AgentRow { id: String, name: String, owner: String }
+#[derive(Default)]
+struct IdState { users: Vec<UserRow>, agents: Vec<AgentRow>, selected: String, pin: String }
+impl IdState { fn new() -> Self { Self::default() } }
+
+/// Tile glyph: the name's first character, uppercased (fallback "?").
+fn id_glyph(name: &str) -> slint::SharedString {
+    name.chars().next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_string())
+        .into()
+}
+
+/// Populate the agent tile model from ID_STATE, filtered to `owner`.
+fn id_load_agents(owner: &str) {
+    let rows: Vec<AgentDef> = ID_STATE.with(|s| s.borrow().agents.iter()
+        .filter(|a| a.owner == owner)
+        .map(|a| AgentDef { id: a.id.clone().into(), name: a.name.clone().into(), glyph: id_glyph(&a.name) })
+        .collect());
+    ID_AGENTS.with(|m| { if let Some(model) = m.borrow().as_ref() { model.set_vec(rows); } });
 }
 
 // ── Calculator (🧮) — a basic immediate-execution calculator, no agentd ─────────
@@ -2493,6 +2525,165 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
         tx_restore.send(payload).ok();
     });
+
+    // ── Identity boot wizard (agent-identity.md slice 3d) ─────────────────────
+    // Fetch the identity registry; show the wizard only when there's a real
+    // choice (>1 profile, a PIN, or >1 agent). The trivial single-owner+APEX
+    // case boots straight through unchanged (unbound session = APEX). Picking an
+    // agent binds the session via a `hello{agent_id}` frame; the persona first-
+    // boot (if any) is revealed underneath.
+    {
+        // Models live in thread-locals (Slint-thread-owned) so the async fetch
+        // carries only Send data and populates them via invoke_from_event_loop.
+        let users_model:  Rc<slint::VecModel<UserDef>>  = Rc::new(slint::VecModel::default());
+        let agents_model: Rc<slint::VecModel<AgentDef>> = Rc::new(slint::VecModel::default());
+        ui.set_identity_users(slint::ModelRc::from(users_model.clone()));
+        ui.set_identity_agents(slint::ModelRc::from(agents_model.clone()));
+        ID_USERS.with(|m| *m.borrow_mut() = Some(users_model));
+        ID_AGENTS.with(|m| *m.borrow_mut() = Some(agents_model));
+
+        // Fetch + gate on boot.
+        {
+            let ui_w = ui.as_weak();
+            let client = Arc::clone(&http_client);
+            let base = http_base.clone();
+            rt.handle().spawn(async move {
+                let v = json_get(&client, format!("{base}/api/identities")).await;
+                let users: Vec<UserRow> = v["users"].as_array().map(|a| a.iter().map(|u| UserRow {
+                    id:      u["id"].as_str().unwrap_or("").to_string(),
+                    name:    u["name"].as_str().unwrap_or("").to_string(),
+                    has_pin: u["has_pin"].as_bool().unwrap_or(false),
+                }).collect()).unwrap_or_default();
+                let agents: Vec<AgentRow> = v["agents"].as_array().map(|a| a.iter().map(|g| AgentRow {
+                    id:    g["id"].as_str().unwrap_or("").to_string(),
+                    name:  g["name"].as_str().unwrap_or("").to_string(),
+                    owner: g["owner"].as_str().unwrap_or("").to_string(),
+                }).collect()).unwrap_or_default();
+                let trivial = users.len() <= 1
+                    && users.iter().all(|u| !u.has_pin)
+                    && agents.len() <= 1;
+                slint::invoke_from_event_loop(move || {
+                    let Some(ui) = ui_w.upgrade() else { return };
+                    let user_defs: Vec<UserDef> = users.iter().map(|u| UserDef {
+                        id: u.id.clone().into(), name: u.name.clone().into(),
+                        has_pin: u.has_pin, glyph: id_glyph(&u.name),
+                    }).collect();
+                    ID_STATE.with(|s| { let mut s = s.borrow_mut(); s.users = users; s.agents = agents; });
+                    if !trivial {
+                        ID_USERS.with(|m| { if let Some(model) = m.borrow().as_ref() { model.set_vec(user_defs); } });
+                        ui.set_identity_step(0);
+                        ui.set_identity_pin_filled(0);
+                        ui.set_identity_pin_error(false);
+                        ui.set_identity_wizard_open(true);
+                    }
+                }).ok();
+            });
+        }
+
+        // Pick a profile → PIN step (if protected) or straight to agents.
+        {
+            let ui_w = ui.as_weak();
+            ui.on_identity_pick_user(move |id| {
+                let id = id.to_string();
+                let Some(ui) = ui_w.upgrade() else { return };
+                let (has_pin, name) = ID_STATE.with(|s| {
+                    let s = s.borrow();
+                    s.users.iter().find(|u| u.id == id)
+                        .map(|u| (u.has_pin, u.name.clone()))
+                        .unwrap_or((false, id.clone()))
+                });
+                ID_STATE.with(|s| { let mut s = s.borrow_mut(); s.selected = id.clone(); s.pin.clear(); });
+                ui.set_identity_selected_name(name.into());
+                ui.set_identity_pin_filled(0);
+                ui.set_identity_pin_error(false);
+                if has_pin {
+                    ui.set_identity_step(1);
+                } else {
+                    id_load_agents(&id);
+                    ui.set_identity_step(2);
+                }
+            });
+        }
+
+        // PIN keypad (Rust owns the buffer; OK verifies via the API).
+        {
+            let ui_w = ui.as_weak();
+            let client_c = Arc::clone(&http_client);
+            let base_c = http_base.clone();
+            let rt_h = rt.handle().clone();
+            ui.on_identity_key(move |k| {
+                let k = k.to_string();
+                let Some(ui) = ui_w.upgrade() else { return };
+                if k == "DEL" {
+                    let n = ID_STATE.with(|s| { let mut s = s.borrow_mut(); s.pin.pop(); s.pin.chars().count() });
+                    ui.set_identity_pin_filled(n as i32);
+                    ui.set_identity_pin_error(false);
+                } else if k == "OK" {
+                    let (user_id, pin) = ID_STATE.with(|s| { let s = s.borrow(); (s.selected.clone(), s.pin.clone()) });
+                    let ui_w2 = ui_w.clone();
+                    let client = Arc::clone(&client_c);
+                    let base = base_c.clone();
+                    rt_h.spawn(async move {
+                        let body = serde_json::json!({ "user_id": user_id, "pin": pin });
+                        let ok = match client.post(format!("{base}/api/identities/verify"))
+                            .json(&body)
+                            .timeout(std::time::Duration::from_secs(8))
+                            .send().await
+                        {
+                            Ok(r) => r.json::<Value>().await.ok()
+                                .and_then(|v| v["ok"].as_bool()).unwrap_or(false),
+                            Err(_) => false,
+                        };
+                        slint::invoke_from_event_loop(move || {
+                            let Some(ui) = ui_w2.upgrade() else { return };
+                            let owner = ID_STATE.with(|s| { let mut s = s.borrow_mut(); s.pin.clear(); s.selected.clone() });
+                            ui.set_identity_pin_filled(0);
+                            if ok {
+                                id_load_agents(&owner);
+                                ui.set_identity_pin_error(false);
+                                ui.set_identity_step(2);
+                            } else {
+                                ui.set_identity_pin_error(true);
+                            }
+                        }).ok();
+                    });
+                } else {
+                    let n = ID_STATE.with(|s| {
+                        let mut s = s.borrow_mut();
+                        if s.pin.chars().count() < 6 { s.pin.push_str(&k); }
+                        s.pin.chars().count()
+                    });
+                    ui.set_identity_pin_filled(n as i32);
+                    ui.set_identity_pin_error(false);
+                }
+            });
+        }
+
+        // Pick an agent → bind the session (hello{agent_id}) + dismiss.
+        {
+            let ui_w = ui.as_weak();
+            let tx_c = tx.clone();
+            ui.on_identity_pick_agent(move |id| {
+                let payload = serde_json::json!({ "type": "hello", "agent_id": id.to_string() }).to_string();
+                tx_c.send(payload).ok();
+                if let Some(ui) = ui_w.upgrade() {
+                    ui.set_identity_wizard_open(false);
+                }
+            });
+        }
+
+        // Back → profile select.
+        {
+            let ui_w = ui.as_weak();
+            ui.on_identity_back(move || {
+                let Some(ui) = ui_w.upgrade() else { return };
+                ID_STATE.with(|s| s.borrow_mut().pin.clear());
+                ui.set_identity_pin_filled(0);
+                ui.set_identity_pin_error(false);
+                ui.set_identity_step(0);
+            });
+        }
+    }
 
     // ── toggle-recording callback ─────────────────────────────────────────────
     // First tap  → POST /api/record/start → set recording=true

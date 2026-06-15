@@ -1,0 +1,225 @@
+// IdentityWizard (agent-identity.md slice 3d)
+//
+// Boot flow: "who are you?" → (PIN, if the profile has one) → "pick your agent".
+// Mirrors the FirstBootWizard full-screen-card pattern. Rust drives `step`, the
+// user/agent models, and the PIN buffer (the keypad only emits key() — no Slint
+// string handling, which keeps the touch-kiosk path robust). After an agent is
+// picked Rust binds the session (WS hello{agent_id}) and hands off to the
+// persona/skin step.
+
+import { ScrollView } from "std-widgets.slint";
+import { Palette } from "../palette.slint";
+import { UserDef, AgentDef } from "../types.slint";
+
+// Selectable profile/agent tile: glyph disc + name (+ a lock when PIN-protected).
+component IdTile inherits Rectangle {
+    in property <string> glyph;
+    in property <string> name;
+    in property <bool> locked;
+    callback clicked;
+
+    height: 64px;
+    border-radius: Palette.radius-lg;
+    background: touch.has-hover ? Palette.surface-hi : Palette.surface;
+    border-width: 1px;
+    border-color: touch.has-hover ? Palette.primary : Palette.border;
+    animate background, border-color { duration: 150ms; }
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+
+    HorizontalLayout {
+        padding: 14px;
+        spacing: 14px;
+        Rectangle {
+            width: 40px;
+            height: 40px;
+            border-radius: 20px;
+            background: Palette.primary-dim;
+            border-width: 2px;
+            border-color: Palette.primary;
+            y: (parent.height - self.height) / 2;
+            Text {
+                text: root.glyph;
+                color: Palette.primary;
+                font-size: 20px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.name;
+            color: Palette.text;
+            font-size: 16px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        Rectangle { horizontal-stretch: 1; }
+        if root.locked: Text {
+            text: "🔒";
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// One keypad key — emits its label to Rust, which owns the PIN buffer.
+component Key inherits Rectangle {
+    in property <string> label;
+    callback pressed(string);
+    width: 70px;
+    height: 52px;
+    border-radius: Palette.radius;
+    background: touch.has-hover ? Palette.surface-hi : Palette.surface;
+    border-width: 1px;
+    border-color: Palette.border;
+    touch := TouchArea { clicked => { root.pressed(root.label); } }
+    Text {
+        text: root.label;
+        color: Palette.text;
+        font-size: 20px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component IdentityWizard inherits Rectangle {
+    in property <[UserDef]> users;
+    in property <[AgentDef]> agents;       // Rust pre-filters to the selected user
+    in property <int> step;                // 0 user · 1 pin · 2 agent
+    in property <string> selected-name;    // shown on the pin/agent steps
+    in property <int> pin-filled;          // dots filled (Rust owns the buffer)
+    in property <bool> pin-error;
+
+    callback pick-user(string);            // user id
+    callback key(string);                  // keypad label: "0".."9" | "DEL" | "OK"
+    callback pick-agent(string);           // agent id
+    callback back();
+
+    background: rgba(0, 0, 0, 0.86);
+
+    Rectangle {
+        width: min(560px, parent.width - 48px);
+        height: min(640px, parent.height - 48px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Palette.bg;
+        border-radius: Palette.radius-lg;
+        border-width: 1px;
+        border-color: Palette.border-hi;
+        drop-shadow-blur: 60px;
+        drop-shadow-color: #000000cc;
+
+        VerticalLayout {
+            padding: 28px;
+            spacing: 8px;
+
+            Text {
+                text: root.step == 0 ? "Welcome to ApexOS"
+                    : root.step == 1 ? "Enter PIN"
+                    : "Choose your agent";
+                color: Palette.text-bright;
+                font-size: 22px;
+                font-weight: 800;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: root.step == 0 ? "Who's using this device?"
+                    : root.step == 1 ? root.selected-name
+                    : "Signed in as " + root.selected-name;
+                color: Palette.text-dim;
+                font-size: 13px;
+                horizontal-alignment: center;
+            }
+            Rectangle { height: 8px; }
+
+            // ── Step 0: pick a profile ──
+            if root.step == 0: ScrollView {
+                vertical-stretch: 1;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                viewport-width: self.visible-width;
+                viewport-height: users-col.preferred-height;
+                users-col := VerticalLayout {
+                    spacing: 10px;
+                    for u in root.users: IdTile {
+                        glyph: u.glyph;
+                        name: u.name;
+                        locked: u.has-pin;
+                        clicked => { root.pick-user(u.id); }
+                    }
+                }
+            }
+
+            // ── Step 1: PIN keypad ──
+            if root.step == 1: VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 16px;
+
+                Rectangle { vertical-stretch: 1; }
+
+                // Filled-dot indicator (up to 6).
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 12px;
+                    for i in 6: Rectangle {
+                        width: 14px;
+                        height: 14px;
+                        border-radius: 7px;
+                        background: i < root.pin-filled ? Palette.primary : Palette.surface-hi;
+                        border-width: 1px;
+                        border-color: root.pin-error ? #d9534f : Palette.border;
+                    }
+                }
+                Text {
+                    text: root.pin-error ? "Wrong PIN — try again" : " ";
+                    color: #d9534f;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                }
+
+                HorizontalLayout { alignment: center; spacing: 10px;
+                    for k in ["1", "2", "3"]: Key { label: k; pressed(l) => { root.key(l); } } }
+                HorizontalLayout { alignment: center; spacing: 10px;
+                    for k in ["4", "5", "6"]: Key { label: k; pressed(l) => { root.key(l); } } }
+                HorizontalLayout { alignment: center; spacing: 10px;
+                    for k in ["7", "8", "9"]: Key { label: k; pressed(l) => { root.key(l); } } }
+                HorizontalLayout { alignment: center; spacing: 10px;
+                    Key { label: "DEL"; pressed(l) => { root.key(l); } }
+                    Key { label: "0";   pressed(l) => { root.key(l); } }
+                    Key { label: "OK";  pressed(l) => { root.key(l); } }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+            }
+
+            // ── Step 2: pick an agent ──
+            if root.step == 2: ScrollView {
+                vertical-stretch: 1;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                viewport-width: self.visible-width;
+                viewport-height: agents-col.preferred-height;
+                agents-col := VerticalLayout {
+                    spacing: 10px;
+                    for a in root.agents: IdTile {
+                        glyph: a.glyph;
+                        name: a.name;
+                        clicked => { root.pick-agent(a.id); }
+                    }
+                }
+            }
+
+            // Back (steps 1 & 2 → previous step).
+            if root.step != 0: TouchArea {
+                height: 28px;
+                clicked => { root.back(); }
+                Text {
+                    text: "‹ Back";
+                    color: Palette.text-dim;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
