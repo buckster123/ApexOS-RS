@@ -87,6 +87,45 @@ pub struct GatewayState {
     /// its session to an agent; the supervisor stamp + CCBS boot resolve identity
     /// here. See docs/agent-identity.md (slice 3b).
     pub session_bindings:  apexos_core::SessionBindings,
+    /// The identity registry (users + agents). The API mutates it; the router
+    /// reads it for per-agent souls. See docs/agent-identity.md (slice 3a/3c).
+    pub identities:        Arc<RwLock<apexos_core::Identities>>,
+    /// In-memory PIN guess-lockout, keyed by user id (never persisted).
+    pub pin_lockouts:      Arc<std::sync::Mutex<HashMap<String, PinLockout>>>,
+}
+
+/// Per-user PIN guess-lockout: N consecutive failures locks verification for a
+/// cooldown. In-memory only — a restart clears it (consistent with the mesh
+/// pairing lockout). A 4–6 digit PIN's real protection is this, not hash strength.
+#[derive(Default)]
+pub struct PinLockout {
+    fails:        u32,
+    locked_until: Option<std::time::Instant>,
+}
+
+const PIN_MAX_FAILS: u32 = 5;
+const PIN_LOCKOUT_SECS: u64 = 300;
+
+impl PinLockout {
+    /// Remaining lockout in seconds, or None if not currently locked.
+    fn locked_for(&self, now: std::time::Instant) -> Option<u64> {
+        self.locked_until
+            .and_then(|u| (u > now).then(|| (u - now).as_secs()))
+    }
+    /// Record a verify outcome. Success resets; the Nth consecutive failure arms
+    /// the cooldown (and resets the counter so it re-arms after it expires).
+    fn record(&mut self, ok: bool, now: std::time::Instant) {
+        if ok {
+            self.fails = 0;
+            self.locked_until = None;
+        } else {
+            self.fails += 1;
+            if self.fails >= PIN_MAX_FAILS {
+                self.locked_until = Some(now + std::time::Duration::from_secs(PIN_LOCKOUT_SECS));
+                self.fails = 0;
+            }
+        }
+    }
 }
 
 /// Check Bearer token on all gated routes.
@@ -194,6 +233,10 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/notes/write",        post(notes_write_handler))
         .route("/api/sketch",             post(sketch_save_handler))
         .route("/api/sketch/latest",      get(sketch_latest_handler))
+        .route("/api/identities",         get(identities_list_handler))
+        .route("/api/identities/user",    post(identities_create_user_handler))
+        .route("/api/identities/agent",   post(identities_create_agent_handler))
+        .route("/api/identities/verify",  post(identities_verify_pin_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new()
@@ -1868,6 +1911,178 @@ async fn mesh_peers_delete_handler(
     }
 }
 
+// ── Identity API (multi-agent boot flow) ────────────────────────────────────────
+// docs/agent-identity.md slice 3c. Token-gated CRUD over the identity registry the
+// boot UI (3d) drives; PIN verify is guarded by a per-user guess lockout. Writes
+// persist to identities.toml (best-effort; see install.sh ownership).
+
+/// Where new agents' soul files live: `<dir of identities.toml>/souls`.
+fn souls_dir() -> std::path::PathBuf {
+    apexos_core::Identities::default_path()
+        .parent()
+        .map(|p| p.join("souls"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/etc/agentd/souls"))
+}
+
+/// Reduce a display name to an id slug; `upper` for agent ids (APEX/FORGE style),
+/// lowercase for user ids. Non-alphanumerics collapse to `_`; empty → "x".
+fn slug(name: &str, upper: bool) -> String {
+    let mut s: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    s = if upper { s.to_uppercase() } else { s.to_lowercase() };
+    if s.is_empty() { "x".to_string() } else { s }
+}
+
+/// Seed content for a freshly created agent's soul.
+fn agent_soul_template(name: &str) -> String {
+    format!(
+        "# {name}\n\nYou are {name}, an agent on this ApexOS node. This file is your \
+soul — your identity and values, yours to grow over time.\n\n## Identity\n\n\
+(Newly created. Evolve this as you learn who you are.)\n"
+    )
+}
+
+/// GET /api/identities — users (PIN redacted to `has_pin`) + agents.
+async fn identities_list_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let ids = state.identities.read().await;
+    let users: Vec<_> = ids.users.iter().map(|u| serde_json::json!({
+        "id": u.id, "name": u.name, "has_pin": u.has_pin(),
+        "default_agent": u.default_agent, "default_skin": u.default_skin,
+    })).collect();
+    let agents: Vec<_> = ids.agents.iter().map(|a| serde_json::json!({
+        "id": a.id, "name": a.name, "owner": a.owner, "default_skin": a.default_skin,
+    })).collect();
+    Json(serde_json::json!({ "users": users, "agents": agents }))
+}
+
+#[derive(Deserialize)]
+struct CreateUserBody {
+    name: String,
+    pin: Option<String>,
+    default_agent: Option<String>,
+    default_skin: Option<String>,
+}
+
+/// POST /api/identities/user — create a profile (optional PIN).
+async fn identities_create_user_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<CreateUserBody>,
+) -> impl IntoResponse {
+    if body.name.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "name required" }))).into_response();
+    }
+    let id = slug(&body.name, false);
+    let mut ids = state.identities.write().await;
+    if ids.user(&id).is_some() {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": format!("user '{id}' exists") }))).into_response();
+    }
+    let mut u = apexos_core::User {
+        id: id.clone(),
+        name: body.name,
+        default_agent: body.default_agent,
+        default_skin: body.default_skin,
+        ..Default::default()
+    };
+    if let Some(pin) = body.pin.filter(|p| !p.trim().is_empty()) {
+        u.set_pin(&pin);
+    }
+    let has_pin = u.has_pin();
+    ids.users.push(u);
+    if let Err(e) = ids.save(&apexos_core::Identities::default_path()) {
+        eprintln!("[identity] persist failed: {e}");
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "id": id, "has_pin": has_pin }))).into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateAgentBody {
+    name: String,
+    owner: String,
+    default_skin: Option<String>,
+}
+
+/// POST /api/identities/agent — create an agent (own Cerebro space + soul file).
+async fn identities_create_agent_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<CreateAgentBody>,
+) -> impl IntoResponse {
+    if body.name.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "name required" }))).into_response();
+    }
+    let id = slug(&body.name, true);
+    let mut ids = state.identities.write().await;
+    if ids.user(&body.owner).is_none() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("unknown owner '{}'", body.owner) }))).into_response();
+    }
+    if ids.agent(&id).is_some() {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": format!("agent '{id}' exists") }))).into_response();
+    }
+    // Seed the agent's soul file (best-effort — dir may be root-owned pre-install.sh).
+    let dir = souls_dir();
+    let soul_file = dir.join(format!("{id}.md"));
+    let _ = std::fs::create_dir_all(&dir);
+    if let Err(e) = std::fs::write(&soul_file, agent_soul_template(&body.name)) {
+        eprintln!("[identity] could not seed soul {}: {e}", soul_file.display());
+    }
+    ids.agents.push(apexos_core::AgentRecord {
+        id: id.clone(),
+        name: body.name,
+        owner: body.owner,
+        soul_file: soul_file.to_string_lossy().into_owned(),
+        default_skin: body.default_skin,
+    });
+    if let Err(e) = ids.save(&apexos_core::Identities::default_path()) {
+        eprintln!("[identity] persist failed: {e}");
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "id": id, "soul_file": soul_file.to_string_lossy() }))).into_response()
+}
+
+#[derive(Deserialize)]
+struct VerifyPinBody {
+    user_id: String,
+    pin: String,
+}
+
+/// POST /api/identities/verify — check a profile's PIN, guarded by a guess lockout.
+async fn identities_verify_pin_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<VerifyPinBody>,
+) -> impl IntoResponse {
+    let now = std::time::Instant::now();
+    // Locked? Refuse without even checking (and without revealing validity).
+    {
+        let lk = state.pin_lockouts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(remaining) = lk.get(&body.user_id).and_then(|l| l.locked_for(now)) {
+            return (StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "ok": false, "locked": true, "retry_after_secs": remaining }))
+            ).into_response();
+        }
+    }
+    let ok = state.identities.read().await
+        .user(&body.user_id)
+        .map(|u| u.verify_pin(&body.pin))
+        .unwrap_or(false);   // unknown user → fail (also counts toward lockout)
+    let locked = {
+        let mut lk = state.pin_lockouts.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = lk.entry(body.user_id).or_default();
+        entry.record(ok, now);
+        entry.locked_for(now)
+    };
+    if ok {
+        (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+    } else {
+        (StatusCode::OK, Json(serde_json::json!({
+            "ok": false,
+            "locked": locked.is_some(),
+            "retry_after_secs": locked,
+        }))).into_response()
+    }
+}
+
 // ── Mesh pairing — kiosk-friendly token exchange ────────────────────────────────
 
 /// First local IPv4 (from `hostname -I`).
@@ -2997,5 +3212,44 @@ mod image_input_tests {
         // … as is a `../` traversal escape.
         assert!(resolve_workspace_path("../etc/passwd").is_err());
         std::env::remove_var("AGENTD_WORKSPACE");
+    }
+}
+
+#[cfg(test)]
+mod pin_lockout_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn locks_after_max_fails_and_resets_on_success() {
+        let now = Instant::now();
+        let mut l = PinLockout::default();
+
+        // Below the threshold: not locked yet.
+        for _ in 0..(PIN_MAX_FAILS - 1) {
+            l.record(false, now);
+            assert!(l.locked_for(now).is_none());
+        }
+        // The Nth consecutive failure arms the cooldown.
+        l.record(false, now);
+        let remaining = l.locked_for(now).expect("locked after max fails");
+        assert!(remaining > 0 && remaining <= PIN_LOCKOUT_SECS);
+
+        // Still locked just before expiry; clear after it.
+        assert!(l.locked_for(now + Duration::from_secs(PIN_LOCKOUT_SECS - 1)).is_some());
+        assert!(l.locked_for(now + Duration::from_secs(PIN_LOCKOUT_SECS + 1)).is_none());
+
+        // A success clears state entirely.
+        l.record(true, now);
+        assert!(l.locked_for(now).is_none());
+        assert_eq!(l.fails, 0);
+    }
+
+    #[test]
+    fn success_keeps_it_unlocked() {
+        let now = Instant::now();
+        let mut l = PinLockout::default();
+        for _ in 0..10 { l.record(true, now); }
+        assert!(l.locked_for(now).is_none());
     }
 }

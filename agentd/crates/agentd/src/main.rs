@@ -259,6 +259,8 @@ async fn main() -> anyhow::Result<()> {
         node_id:              Arc::clone(&node_id),
         vast_state:           vast_state.clone(),
         session_bindings:     Arc::clone(&session_bindings),
+        identities:           Arc::clone(&identities),
+        pin_lockouts:         Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
     let gw_bind = std::env::var("AGENTD_BIND").unwrap_or_else(|_| "127.0.0.1:8787".into());
     let gw_addr: std::net::SocketAddr = gw_bind.parse()?;
