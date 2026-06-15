@@ -4,8 +4,11 @@ mode = "suggest"
 
 [rules]
 # Built-in apexos-tools -------------------------------------------------------
-"read_file"    = "allow"       # safe, read-only
-"list_dir"     = "allow"       # safe, read-only
+# read-only AND hard-confined by the tool itself to the workspace + a small read
+# allowlist (EDK parts, /sys, /proc/cpuinfo); secrets (token/keys/ssh) blocked.
+# `allow` here only means "no approval prompt" — it is NOT what bounds the path.
+"read_file"    = "allow"
+"list_dir"     = "allow"
 "cpu_temp"     = "allow"
 "disk_usage"   = "allow"
 "memory_info"  = "allow"

@@ -164,8 +164,25 @@ impl Supervisor {
             tokio::select! {
                 result = bus_rx.recv() => match result {
                     Ok(Event::ToolRequested { session, call }) => {
-                        let path = call.args["path"].as_str();
-                        let decision = self.policy.read().await.check(&call.tool, path);
+                        // Inspect every path-typed arg, not just `path`, so a
+                        // workspace-rule tool can't smuggle a write past the gate
+                        // via `output_path`/`dest`/etc. Most-restrictive wins:
+                        // Ask if ANY candidate path would Ask under the rule.
+                        let path_keys = ["path", "output_path", "dest", "destination", "target", "to"];
+                        let candidates: Vec<&str> = path_keys
+                            .iter()
+                            .filter_map(|k| call.args[*k].as_str())
+                            .collect();
+                        let decision = {
+                            let pol = self.policy.read().await;
+                            if candidates.is_empty() {
+                                pol.check(&call.tool, None)
+                            } else if candidates.iter().any(|p| pol.check(&call.tool, Some(p)) == Decision::Ask) {
+                                Decision::Ask
+                            } else {
+                                Decision::Allow
+                            }
+                        };
                         match decision {
                             Decision::Allow => {
                                 self.dispatch_tool(session, call);

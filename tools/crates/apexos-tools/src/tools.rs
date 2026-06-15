@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ pub fn list() -> Value {
     json!([
         {
             "name": "run_command",
-            "description": "Execute a shell command. Subject to a hard denylist for destructive operations.",
+            "description": "Execute a shell command. A best-effort denylist rejects the most obvious destructive operations, but it is heuristic and bypassable — the real guard is the approval gate (run_command is policy 'ask').",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -555,12 +555,131 @@ fn resolve_path(path: &str) -> std::path::PathBuf {
     Path::new(&ws).join(p)
 }
 
+// ─── Filesystem confinement ────────────────────────────────────────────────────
+// Single source of truth for which paths the file tools may touch. The tool
+// process is the ONLY enforcement gate for the read tools (read_file/list_dir
+// are policy `allow`, so the user is never prompted); confinement therefore has
+// to live here, not just in the approval layer. Model (see CLAUDE.md):
+//   • writes/creates/deletes → workspace only, hard.
+//   • reads/lists           → workspace + a small read allowlist, minus an
+//                             always-blocked secret denylist.
+
+/// The agent workspace root, canonicalized. Defaults to
+/// `/var/lib/agentd/workspace`. Falls back to the literal path when it cannot be
+/// canonicalized (e.g. on a dev box where the dir does not exist).
+fn workspace_root() -> PathBuf {
+    let ws = std::env::var("AGENTD_WORKSPACE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    fs::canonicalize(&ws).unwrap_or_else(|_| PathBuf::from(&ws))
+}
+
+/// Extra roots **reads** (never writes) may reach beyond the workspace.
+/// Default-deny everywhere else. The operator can extend this without a
+/// recompile via `AGENTD_READ_ROOTS` (colon-separated absolute paths).
+fn read_roots() -> Vec<PathBuf> {
+    let mut roots = vec![
+        PathBuf::from("/etc/agentd/parts"), // EDK on-hand parts inventory (read-only)
+        PathBuf::from("/sys"),              // thermal / board diagnostics
+        PathBuf::from("/proc/cpuinfo"),     // board model / core count
+        PathBuf::from("/proc/meminfo"),     // memory diagnostics
+    ];
+    if let Ok(extra) = std::env::var("AGENTD_READ_ROOTS") {
+        roots.extend(extra.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
+    }
+    roots
+}
+
+/// Paths that are NEVER readable, even inside an allowed read root — defence in
+/// depth against secret exfiltration if an operator widens `AGENTD_READ_ROOTS`.
+fn is_secret_path(canon: &Path) -> bool {
+    let s = canon.to_string_lossy();
+    s.starts_with("/etc/agentd/env")                       // AGENTD_TOKEN + provider keys
+        || s == "/etc/shadow" || s == "/etc/gshadow"
+        || s.contains("/.ssh/") || s.ends_with("/.ssh")
+        || s.ends_with(".api_key") || s.ends_with(".oai_api_key")
+        || (s.starts_with("/proc/") && s.ends_with("/environ")) // /proc/<pid>/environ
+}
+
+/// Canonicalize `path`, tolerating a non-existent final component (write targets
+/// that don't exist yet): canonicalize the deepest existing ancestor and
+/// re-append the remainder, so symlinks in the existing prefix are resolved.
+/// Callers MUST reject `..` first — this does not normalize parent components.
+fn canonicalize_lenient(path: &Path) -> Option<PathBuf> {
+    if let Ok(c) = fs::canonicalize(path) {
+        return Some(c);
+    }
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path;
+    while let Some(parent) = cur.parent() {
+        if let Some(name) = cur.file_name() {
+            suffix.push(name.to_owned());
+        }
+        if let Ok(mut c) = fs::canonicalize(parent) {
+            for comp in suffix.iter().rev() {
+                c.push(comp);
+            }
+            return Some(c);
+        }
+        cur = parent;
+    }
+    None
+}
+
+/// Resolve and confine a filesystem tool path. Relative paths root onto the
+/// workspace. `write = true` (write/create/delete) confines to the workspace;
+/// `write = false` (read/list) also accepts the read allowlist minus the secret
+/// denylist. Returns the canonical path to operate on, or an error string to
+/// hand back to the agent. This is the single confinement gate for FS tools.
+fn confine(path: &str, write: bool) -> Result<PathBuf, String> {
+    let resolved = resolve_path(path);
+
+    // Reject `..` up front (component-based — avoids the `foo..bar` false
+    // positive of a substring check). Without this a `..` in a non-existent
+    // write suffix would survive lenient canonicalization and defeat starts_with.
+    if resolved.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err("path traversal (..) is not allowed".to_string());
+    }
+
+    let canon = canonicalize_lenient(&resolved)
+        .ok_or_else(|| format!("cannot resolve path {}", resolved.display()))?;
+
+    let ws = workspace_root();
+    if canon.starts_with(&ws) {
+        return Ok(canon);
+    }
+    if write {
+        return Err(format!(
+            "write/delete is confined to the workspace ({}); {} is outside it",
+            ws.display(),
+            canon.display()
+        ));
+    }
+    if is_secret_path(&canon) {
+        return Err(format!("reading {} is blocked (sensitive)", canon.display()));
+    }
+    for root in read_roots() {
+        let root_canon = fs::canonicalize(&root).unwrap_or(root);
+        if canon.starts_with(&root_canon) {
+            return Ok(canon);
+        }
+    }
+    Err(format!(
+        "reading {} is outside the workspace and the read allowlist",
+        canon.display()
+    ))
+}
+
 fn read_file(args: &Value) -> Value {
     let path = match args["path"].as_str() {
         Some(p) => p,
         None => return tool_error("path is required"),
     };
-    let path = resolve_path(path);
+    let path = match confine(path, false) {
+        Ok(p) => p,
+        Err(e) => return tool_error(e),
+    };
     let max_bytes = args["max_bytes"].as_u64().unwrap_or(1_048_576) as usize;
 
     let file = match fs::File::open(&path) {
@@ -599,7 +718,10 @@ fn write_file(args: &Value) -> Value {
         None => return tool_error("content is required"),
     };
     let append = args["append"].as_bool().unwrap_or(false);
-    let path = resolve_path(path);
+    let path = match confine(path, true) {
+        Ok(p) => p,
+        Err(e) => return tool_error(e),
+    };
 
     // Create parent dirs if needed
     if let Some(parent) = path.parent() {
@@ -913,7 +1035,10 @@ fn list_dir(args: &Value) -> Value {
         None => return tool_error("path is required"),
     };
     let recursive = args["recursive"].as_bool().unwrap_or(false);
-    let path = resolve_path(path);
+    let path = match confine(path, false) {
+        Ok(p) => p,
+        Err(e) => return tool_error(e),
+    };
 
     let mut entries = Vec::new();
     collect_dir(&path.to_string_lossy(), recursive, 0, &mut entries);
@@ -956,7 +1081,10 @@ fn create_dir(args: &Value) -> Value {
         Some(p) => p,
         None => return tool_error("path is required"),
     };
-    let path = resolve_path(path);
+    let path = match confine(path, true) {
+        Ok(p) => p,
+        Err(e) => return tool_error(e),
+    };
     match fs::create_dir_all(&path) {
         Ok(_) => tool_ok(json!({ "created": path.to_string_lossy() })),
         Err(e) => tool_error(format!("create_dir failed: {}", e)),
@@ -969,61 +1097,32 @@ fn delete_path(args: &Value) -> Value {
         None => return tool_error("path is required"),
     };
 
-    // Reject traversal before any stat
-    if path.contains("..") {
-        return tool_error("path traversal (..) is not allowed");
-    }
-
-    // Resolve symlinks — prevents symlink-redirect attacks
-    let canonical = fs::canonicalize(path)
-        .unwrap_or_else(|_| std::path::PathBuf::from(path));
-    let c = canonical.to_string_lossy();
-
-    // Workspace confinement: when set, only allow deletions inside workspace.
-    // Inside workspace → skip system denylist (workspace owner accepts responsibility).
-    // Outside workspace → hard block.
-    if let Ok(ws) = std::env::var("AGENTD_WORKSPACE") {
-        if !ws.is_empty() {
-            let ws_canon = fs::canonicalize(&ws)
-                .unwrap_or_else(|_| std::path::PathBuf::from(&ws));
-            if !canonical.starts_with(&ws_canon) {
-                return tool_error(format!(
-                    "deletion outside workspace ({}) is blocked",
-                    ws_canon.display()
-                ));
-            }
-            // Inside workspace — skip denylist, proceed to deletion.
-        }
-    } else {
-        // No workspace configured — apply system directory denylist.
-        let blocked = [
-            "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
-            "/proc", "/root", "/run", "/sbin", "/snap", "/sys", "/usr", "/var",
-        ];
-        for &dir in &blocked {
-            if c == dir || c.starts_with(&format!("{}/", dir)) {
-                return tool_error(format!("deletion of {} is blocked", c));
-            }
-        }
-    }
+    // Confine to the workspace (rejects `..`, resolves symlinks, blocks escapes)
+    // via the shared gate, then operate on the returned *canonical* path — never
+    // the raw string — so a symlink swap after the check cannot redirect the
+    // delete (closes the TOCTOU the old `metadata(path)`/`remove(path)` had).
+    let canonical = match confine(path, true) {
+        Ok(p) => p,
+        Err(e) => return tool_error(e),
+    };
 
     let recursive = args["recursive"].as_bool().unwrap_or(false);
-    let meta = match fs::metadata(path) {
+    let meta = match fs::metadata(&canonical) {
         Ok(m) => m,
-        Err(e) => return tool_error(format!("cannot stat {}: {}", path, e)),
+        Err(e) => return tool_error(format!("cannot stat {}: {}", canonical.display(), e)),
     };
 
     let result = if meta.is_dir() {
         if !recursive {
             return tool_error("path is a directory — set recursive=true to delete it");
         }
-        fs::remove_dir_all(path)
+        fs::remove_dir_all(&canonical)
     } else {
-        fs::remove_file(path)
+        fs::remove_file(&canonical)
     };
 
     match result {
-        Ok(_) => tool_ok(json!({ "deleted": path })),
+        Ok(_) => tool_ok(json!({ "deleted": canonical.to_string_lossy() })),
         Err(e) => tool_error(format!("delete failed: {}", e)),
     }
 }
@@ -1099,6 +1198,21 @@ fn http_fetch(args: &Value) -> Value {
 
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
+        // Re-run the SSRF guard on every redirect hop. The ssrf_guard() above
+        // only vets the first URL, so without this a public URL could 302 to a
+        // loopback / link-local / RFC1918 address (e.g. 169.254.169.254 cloud
+        // metadata). NB: a determined attacker controlling DNS can still rebind
+        // between this check and reqwest's own resolve (TOCTOU) — closing that
+        // needs a pinned-IP connector and is tracked as a known residual.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                attempt.stop()
+            } else if ssrf_guard(attempt.url().as_str()).is_err() {
+                attempt.error("redirect to non-public address blocked")
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
     {
         Ok(c) => c,
@@ -2131,6 +2245,10 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+    // Serialize tests that mutate AGENTD_WORKSPACE — env vars are process-global
+    // and Rust runs tests in parallel by default.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn sanitize_note_name_forces_md_and_blocks_traversal() {
         // Stem gets a .md extension; an existing .md is not doubled.
@@ -2149,6 +2267,7 @@ mod tests {
 
     #[test]
     fn resolve_path_relative_vs_absolute() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Absolute paths pass through unchanged regardless of workspace.
         std::env::set_var("AGENTD_WORKSPACE", "/srv/ws");
         assert_eq!(resolve_path("/etc/hosts"), Path::new("/etc/hosts"));
@@ -2172,6 +2291,43 @@ mod tests {
         );
         // Absolute still passes through with no workspace set.
         assert_eq!(resolve_path("/tmp/x"), Path::new("/tmp/x"));
+    }
+
+    #[test]
+    fn confine_enforces_workspace_and_read_allowlist() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("AGENTD_WORKSPACE", "/tmp");
+
+        // Inside the workspace: reads and writes both pass (write target need
+        // not exist — only the parent has to resolve).
+        assert!(confine("note.txt", false).is_ok());
+        assert!(confine("/tmp/sub/out.bin", true).is_ok());
+
+        // Writes are workspace-only: an absolute path outside is blocked.
+        assert!(confine("/etc/cron.d/x", true).is_err());
+
+        // `..` traversal is rejected for both reads and writes.
+        assert!(confine("/tmp/../etc/passwd", false).is_err());
+        assert!(confine("../escape.txt", true).is_err());
+
+        // Secret-exfil vectors are never readable (the bug this fix closes).
+        assert!(confine("/proc/self/environ", false).is_err());
+        assert!(confine("/etc/shadow", false).is_err());
+
+        // Read allowlist: the EDK on-hand inventory is readable though it lives
+        // outside the workspace — but it is NOT writable (writes stay ws-only).
+        assert!(confine("/etc/agentd/parts/inventory.toml", false).is_ok());
+        assert!(confine("/etc/agentd/parts/inventory.toml", true).is_err());
+
+        // Default-deny: a non-allowlisted, non-workspace read is refused.
+        assert!(confine("/etc/hostname", false).is_err());
+
+        // Operator can widen reads via AGENTD_READ_ROOTS without a recompile.
+        std::env::set_var("AGENTD_READ_ROOTS", "/etc/hostname");
+        assert!(confine("/etc/hostname", false).is_ok());
+        std::env::remove_var("AGENTD_READ_ROOTS");
+
+        std::env::remove_var("AGENTD_WORKSPACE");
     }
 
     #[test]

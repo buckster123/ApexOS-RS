@@ -16,8 +16,8 @@
 |---|------|----------|---------|--------|
 | 1 | Root session (SessionId(0)) history grows unbounded → context-window overflow crash-loop | Bug | high | `agentd/.../main.rs:1151` |
 | 2 | Concurrent UserPrompt on same session races: orphaned abort handle + history overwrite | Bug | high | `agentd/.../main.rs:972-1000` |
-| 3 | `read_file`/`list_dir` have no path confinement — arbitrary host read (token exfil) | Security | high | `tools/.../tools.rs:486-593` + `config/policy.toml:7-8` |
-| 4 | `http_fetch` has no SSRF protection | Security | high | `tools/.../tools.rs:671-731` |
+| 3 | ✅ DONE — FS tools (`read_file`/`list_dir`/`write_file`/`create_dir`/`delete_path`) now hard-confined via `tools.rs::confine()`: writes ws-only, reads ws+allowlist, secrets blocked | Security | ~~high~~ | `tools.rs::confine` |
+| 4 | ✅ DONE — `http_fetch` SSRF guard was already in place; redirect hops are now re-checked too (residual: DNS-rebind TOCTOU) | Security | ~~high~~ | `tools.rs::ssrf_guard` |
 | 5 | `cognitive_bootstrap` advertised but unimplemented — fake-success stub; it's the step-0 boot priming call | Bug | high | `cerebro-mcp/.../dispatch.rs:921` |
 | 6 | Command injection via `bootstrap_node` SSH password / API key / repo_url (root RCE) | Security | high | `plugins/.../supervisor.rs:743-781` |
 | 7 | `apexos-update` not idempotent — flips a headless Pi into kiosk **and** clobbers self-evolved plugin registrations | Bug | high | `install.sh:367-369,729,788-797` |
@@ -29,14 +29,14 @@
 
 ## Security
 
-- **`read_file`/`list_dir` no path confinement — arbitrary host read** — `tools/crates/apexos-tools/src/tools.rs:486-593`, `config/policy.toml:7-8`. Both marked policy `allow` with no workspace rooting; agent can read `/proc/self/environ` (AGENTD_TOKEN), ssh keys, any agentd-readable secret. **[high]**
-- **`http_fetch` no SSRF protection** — `tools/crates/apexos-tools/src/tools.rs:671-731`. URL passed straight to reqwest; reaches loopback admin surface, cloud metadata, RFC1918, follows redirects; 4MB cap applied *after* full buffering (unbounded memory). Only the Ask gate stops it. **[high]**
+- ✅ **DONE — `read_file`/`list_dir` path confinement** — `tools.rs::confine()` is now the single FS-tool gate: reads confined to workspace + a small allowlist (EDK parts, `/sys`, `/proc/cpuinfo`) minus a secret denylist (`/proc/*/environ`, `/etc/agentd/env`, `~/.ssh`, `/etc/shadow`, `*.api_key`); writes/deletes are workspace-only. `/proc/self/environ` token exfil is dead. **[was high]**
+- ✅ **DONE — `http_fetch` SSRF protection** — already had `ssrf_guard` (resolves host, blocks loopback/link-local/RFC1918) + a streaming 4MB cap (not post-buffer). This PR adds a redirect policy that re-runs the guard on each hop. Residual: DNS-rebind TOCTOU (needs a pinned-IP connector). **[was high → low residual]**
 - **Command injection via `bootstrap_node`** — `agentd/crates/plugins/src/supervisor.rs:743-781`. `ssh_password`/`repo_url`/`api_key` interpolated unquoted into a `sudo -S bash -c` payload; `{:?}` leaves `$`/backtick live. Agent-callable → root RCE on target. Also TOFU (`accept-new`). **[high]**
-- **`run_command` denylist trivially bypassable** — `tools/crates/apexos-tools/src/tools.rs:343-419`. Substring/prefix heuristic defeated by var prefix, quoting, command substitution, `find / -delete`. Tool description calls it a "hard denylist" — false safety. Mitigated by Ask gate + systemd sandbox. **[medium]**
+- **`run_command` denylist trivially bypassable** — `tools/crates/apexos-tools/src/tools.rs:343-419`. Substring/prefix heuristic defeated by var prefix, quoting, command substitution, `find / -delete`. Mitigated by Ask gate + systemd sandbox. *(Misleading "hard denylist" tool-description wording fixed — now states it's best-effort/bypassable and the approval gate is the real guard.)* **[medium — denylist still heuristic by design]**
 - **Persisted API keys written world-readable** — `agentd/crates/gateway/src/lib.rs:415-449`. `tokio::fs::write` at default umask (0644) for `.api_key`/`.oai_api_key` in `/var/lib/agentd`. Set 0600 (temp+rename or `OpenOptions::mode`). **[medium]**
-- **`delete_path` confinement diverges from policy layer; TOCTOU** — `tools/crates/apexos-tools/src/tools.rs:606-669`. Canonicalizes then operates on the raw path string (symlink swap window); skips the system denylist inside workspace. Two divergent confinement impls. **[medium]**
+- ✅ **DONE — `delete_path` TOCTOU + divergent impl** — now routes through the shared `confine(path, true)` and operates on the returned **canonical** path (not the raw string), closing the symlink-swap window. No more bespoke per-tool confinement. **[was medium]**
 - **`cerebro-api.service` & `apex-sensor-bridge.service` have zero systemd hardening** — `deploy/cerebro-api.service:6-15`, `deploy/apex-sensor-bridge.service:6-13`. Run as `agentd` with none of ProtectSystem/NoNewPrivileges/ReadWritePaths; undoes agentd.service's blast-radius containment via shared uid. **[medium]**
-- **`audio_analyze`/`waveform`/`process` accept arbitrary FS paths** — `agentd/crates/gateway/src/lib.rs:1788-1908`. Token-gated but unvalidated `path`/`output_path` → arbitrary read/write as agentd. Canonicalize + workspace-root containment. **[medium]**
+- ✅ **DONE — `audio_analyze`/`waveform`/`process` arbitrary FS paths** — all three now route `path` through `resolve_workspace_path` and `output_path` through the new `resolve_workspace_write_path` (lenient: confines the parent for a not-yet-existing target). Out-of-workspace paths → 400. **[was medium]**
 - **Token comparison non-constant-time (gateway)** — `agentd/crates/gateway/src/lib.rs:103-110`. Short-circuit `==` is a timing oracle; gateway can bind 0.0.0.0 for LAN. Use `subtle::ConstantTimeEq`. **[low]**
 - **Token comparison non-constant-time (cerebro-api)** — `cerebro/crates/cerebro-api/src/main.rs:923,928`. Same issue; also accepts `?token=` (lands in logs). Prefer header-only. **[low]**
 - **sensor-bridge sends auth token as cleartext `ws://?token=`** — `tools/crates/apex-sensor-bridge/src/main.rs:244-248`. Host is configurable for mesh/LAN; no `wss`. Move to header. **[low]**
@@ -63,7 +63,7 @@
 - **`cascade_cancel` discards partial assistant output, never persists** — `agentd/.../main.rs:1656-1680,1141-1162`. Aborted turn loses streamed text/thinking; in-memory + persisted history left inconsistent; replay shows user msg with no reply. Persist partial blocks / synthetic cancel marker. **[medium]**
 - **Council convergence scores `disagree` as agreement (substring bug)** — `agentd/crates/agent/src/council.rs:134-162`. `contains("agree")` matches "disagree"/"disagreement" → false consensus + disagreement surfaced as agreement. Use word-boundary matching, exclude disagree. **[medium]**
 - **session_save priority enum casing drift** — `cerebro-mcp/.../dispatch.rs:240,272-273` + `tools.rs:205`. Schema enum uppercase, route default `"medium"`, recall filters exact match → latent retrieval miss. Normalize case both sides. **[medium]**
-- **Workspace policy guard only inspects `args["path"]`** — `agentd/crates/plugins/src/supervisor.rs:162`, `policy.rs:118-138`. `output_path`/dest-style write targets unchecked → out-of-workspace secondary write auto-allowed. Inspect all path-typed args. **[medium]**
+- ✅ **DONE — Workspace policy guard only inspected `args["path"]`** — `supervisor.rs` now inspects `path`/`output_path`/`dest`/`destination`/`target`/`to`; most-restrictive decision wins (Ask if any candidate is outside ws under a workspace rule). **[was medium]**
 - **Audio/write output paths EROFS under sandbox with no clear error** — `tools/.../tools.rs:1219-1385`, `deploy/agentd.service:26-29`. Arbitrary `output_path` outside `/var/lib/agentd` fails as opaque ffmpeg error. Root relative paths in AGENTD_WORKSPACE, message absolute-outside clearly. **[medium]**
 - **POST /api/soul Permission denied (os error 13) on Pi** — Cerebro intention + CLAUDE.md gotcha. Mitigated by install.sh chowning the four self-written files + write_atomic in-place fallback; **verify the fix actually resolved the runtime error on the live board.** **[medium, partially-done]**
 - **cerebro-api port advertised :8767, binary/service bind :8765** — `install.sh:442,519,882-917`. Every printed dashboard URL is dead; health check only does `is-active`. Pick one port. **[medium]**
@@ -76,7 +76,7 @@
 - **`start_terminal` latches STARTED before RX confirmed** — `ui-slint/src/main.rs:483-490`. If TERM_RX ever None, terminal bricks with no retry. Set STARTED only inside the `if let Some(rx)` block. **[low]**
 - **agent_busy never set for tool-first turns** — `ui-slint/src/main.rs:1762,1846`. Rust agentd emits no turn_started; busy only flips on agent_text, so a tool-first turn shows no Stop button and leaves input enabled (double-send possible). Set busy in tool_requested/approval_pending. **[medium]**
 - **Empty agent bubble persists on tool-only turns (Python path)** — `ui-slint/src/main.rs:1715-1735,1789`. turn_complete just un-streams an empty bubble. Remove empty rows in finish_last_agent_message. **[low, Python-agentd only]**
-- **read_file mis-sizes buffer for /proc /sys / growing files** — `tools/.../tools.rs:498-507`. metadata len 0 → 1-byte buffer; truncated flag wrong; single read not guaranteed. Use `take(max_bytes)` + read_to_end. **[low]**
+- ✅ **DONE — read_file buffer sizing for /proc /sys / growing files** — already uses `take(max_bytes + 1).read_to_end` (size-from-metadata abandoned; `truncated` detected by the +1 byte). **[was low]**
 - **disk_usage path filter uses bare prefix match** — `tools/.../tools.rs:802-806`. Picks wrong/multiple mounts; `/dev` skip drops `/devel`. Select longest matching mountpoint; gate /dev skip on exact prefix. **[low]**
 - **Scheduler `unique_id` is XOR of secs and subsec nanos — weak uniqueness** — `agentd/crates/agentd/src/scheduler.rs:29-34`. Same-second collisions; cancel removes both. Use UUID or AtomicU64+timestamp. **[low]**
 - **Council log writer treats broadcast Lagged as fatal** — `agentd/crates/agentd/src/council_handler.rs:144`. `Err(_) => break` truncates the council log under load. Match `Lagged(_) => continue`. **[low]**
@@ -101,7 +101,7 @@
 - **Idle WS sessions never registered in `histories`** — `agentd/.../lib.rs:189-192` vs `main.rs:978-980`. Connected-but-silent client absent from `/api/sessions/active`; resume of never-prompted id falls through to empty. Sharp edge for the session picker. **[low]**
 - **council_butt_in / council_sessions maps have no eviction** — `agentd/.../lib.rs:37-39,1389-1447`. Verify supervisor actually removes on completion; ever-growing Vec otherwise. **[low]**
 - **MCP server notifications parsed then discarded** — `cerebro-mcp/.../mcp.rs:70-71`. tools-list-changed/progress dropped; tool_registry never refreshes at runtime. **[low]**
-- **Two parallel divergent workspace-confinement implementations** — `tools/.../tools.rs:625-648` vs `plugins/.../policy.rs:118-138`. No single source of truth; easy to drift. Route all path confinement through the policy layer. **[low]**
+- ◑ **Reduced — workspace-confinement implementations** — was 3 ad-hoc copies (tools delete, policy, gateway). Now one helper per *process boundary* (can't share code across them): `tools.rs::confine` (tool-process IO enforcement), `gateway::resolve_workspace_path`/`_write_path` (HTTP IO enforcement), `policy.rs::workspace_decision` (approval gating — different purpose). Documented in CLAUDE.md. A fully-shared crate would need apexos-tools to depend on agentd; deferred. **[low]**
 - **cerebro-api session_recall lacks priority/session_type filters** — `cerebro/crates/cerebro-api/src/main.rs:444-456`. API-vs-MCP capability gap; browser/PWA can't narrow by priority/type. Add the filters. **[low]**
 - **`bootstrap_node` default repo_url points at Chromium ApexOS, not -RS** — `agentd/crates/plugins/src/supervisor.rs:663-664`. Default clone installs the wrong stack unless overridden. **[low]**
 - **`--no-voice`/NO_VOICE flag plumbed but inert** — `install.sh:203,450,521`. Parsed/printed but no install/build step acts on it. Wire or remove. **[low]**
@@ -171,9 +171,9 @@
 - **CLAUDE.md persona/glowup story absent from locked-decisions/roadmap** — a CLAUDE.md-only reader wouldn't know the persona system or its tier-2 gap exists. **[doc]**
 - **`docs/symbiosis.md:158` claims CCBS "✓ (in the cortex)"** — cognitive_bootstrap has no implementation; the Wake-loop pseudocode (lines 58-59,187) tells APEX to call a fake-success stub. **[doc]**
 - **cerebro-mcp stale tool count** — `tools.rs:3` / `main.rs:13` say "63 tools" but TOOL_NAMES has 66 (test asserts 66); `tools.rs:5-6` "Step 9 will be filled in" never done. **[doc]**
-- **`config/policy.toml:7-8` "safe, read-only" comment understates** — read_file/list_dir are read-only but not secret-safe (no workspace rooting). **[doc]**
-- **`tools.rs:14` "hard denylist" wording misleading** — the denylist is a soft, bypassable substring heuristic. **[doc]**
-- **`tools.rs:622-624` documents an intentional security relaxation** (skip system denylist inside workspace) not surfaced in CLAUDE.md gotchas/locked-decisions. **[doc]**
+- ✅ **DONE — `config/policy.toml` "safe, read-only" comment** — rewritten: notes the tool hard-confines the path and that `allow` only means "no prompt". **[doc]**
+- ✅ **DONE — `tools.rs` "hard denylist" wording** — run_command description now says best-effort/bypassable + approval-gate-is-the-guard. **[doc]**
+- ✅ **MOOT — `tools.rs` "skip system denylist inside workspace" relaxation** — gone: `delete_path` is now plain workspace-confinement via `confine()`, no denylist-skip branch. **[doc]**
 
 ---
 

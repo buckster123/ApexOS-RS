@@ -804,6 +804,22 @@ fn resolve_workspace_path(path: &str) -> Result<std::path::PathBuf, String> {
     Ok(canon)
 }
 
+/// Like `resolve_workspace_path` but for a *write* target that may not exist yet
+/// (e.g. an audio op-chain `output_path`): confine the parent directory to the
+/// workspace and re-append the final component. Rejects `..` so the new suffix
+/// cannot escape.
+fn resolve_workspace_write_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(path);
+    if p.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err("path traversal (..) is not allowed".to_string());
+    }
+    let name = p.file_name().ok_or_else(|| format!("no file name in {path}"))?;
+    let parent = p.parent().filter(|d| !d.as_os_str().is_empty());
+    let parent_str = parent.map(|d| d.to_string_lossy().into_owned()).unwrap_or_else(|| ".".to_string());
+    let parent_canon = resolve_workspace_path(&parent_str)?;
+    Ok(parent_canon.join(name))
+}
+
 /// Run raw user-attached image refs through the vision shim, returning prepared
 /// images ready to drop into `Event::UserPrompt.images`. Each ref is either
 /// `{ "path": "<workspace file>" }` or `{ "b64": "<base64>", "media_type": ... }`.
@@ -2581,7 +2597,10 @@ struct AudioPathBody {
 async fn audio_analyze_handler(
     Json(body): Json<AudioPathBody>,
 ) -> impl IntoResponse {
-    let path = body.path.clone();
+    let path = match resolve_workspace_path(&body.path) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    };
     let result = tokio::task::spawn_blocking(move || {
         audio_analyze_inner_gw(&path)
     }).await;
@@ -2604,7 +2623,10 @@ struct WaveformBody {
 async fn audio_waveform_handler(
     Json(body): Json<WaveformBody>,
 ) -> impl IntoResponse {
-    let path = body.path.clone();
+    let path = match resolve_workspace_path(&body.path) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    };
     let n = body.samples.unwrap_or(1200).min(4096);
 
     let result = tokio::task::spawn_blocking(move || {
@@ -2673,11 +2695,14 @@ struct ProcessBody {
 async fn audio_process_handler(
     Json(body): Json<ProcessBody>,
 ) -> impl IntoResponse {
-    let path = body.path.clone();
+    let path = match resolve_workspace_path(&body.path) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
+    };
     let ops = body.ops.clone();
 
-    // Default output path: <stem>_edit.<ext>
-    let output_path = match body.output_path.clone() {
+    // Default output path: <stem>_edit.<ext>, alongside the (confined) input.
+    let output_req = match body.output_path.clone() {
         Some(p) => p,
         None => {
             let p = std::path::Path::new(&path);
@@ -2686,6 +2711,11 @@ async fn audio_process_handler(
             let dir  = p.parent().and_then(|d| d.to_str()).unwrap_or(".");
             format!("{dir}/{stem}_edit.{ext}")
         }
+    };
+    // Confine the write target to the workspace (it may not exist yet).
+    let output_path = match resolve_workspace_write_path(&output_req) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response(),
     };
 
     let out = output_path.clone();
