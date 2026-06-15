@@ -7,6 +7,8 @@ repository = "https://github.com/buckster123/ApexOS-RS"
 
 [workspace]
 members = [
+    # ── Shared wire protocol (Event enum + WS/a2a contract; serde-only) ─────────
+    "apexos-protocol",
     # ── Agent daemon ──────────────────────────────────────────────────────────
     "agentd/crates/core",
     "agentd/crates/gateway",

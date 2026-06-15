@@ -1,0 +1,9 @@
+[package]
+name = "apexos-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Shared wire-protocol types (Event enum + WS/a2a contract) for the ApexOS-RS workspace. Lean: serde only."
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
