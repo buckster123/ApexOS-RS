@@ -67,6 +67,20 @@ impl ToolProxy {
     }
 }
 
+/// Stamp the caller's agent identity onto a Cerebro tool call's args, overriding
+/// any model-supplied value. In every Cerebro tool `agent_id` is the *caller's*
+/// space (storing/filter/scope); cross-agent targets use distinct params
+/// (`target_agent_id`/`to_agent_id`), so this never redirects a cross-agent op.
+/// Coerces a non-object/absent args into an object so the stamp always lands.
+fn stamp_agent_id(args: &mut serde_json::Value, agent_id: &str) {
+    if !args.is_object() {
+        *args = serde_json::json!({});
+    }
+    if let Some(obj) = args.as_object_mut() {
+        obj.insert("agent_id".to_string(), serde_json::Value::String(agent_id.to_string()));
+    }
+}
+
 pub struct Supervisor {
     bus:               BusHandle,
     plugins:           HashMap<PluginId, Plugin>,
@@ -89,6 +103,10 @@ pub struct Supervisor {
     events_dir:        Option<PathBuf>,
     /// Vast.ai instance/tunnel state — shared with gateway for API routes.
     vast_state:        Option<VastState>,
+    /// The node's bound agent identity, stamped onto Cerebro tool calls so
+    /// routing/isolation can't depend on what the model typed. Resolved once at
+    /// construction (`$AGENTD_AGENT_ID` else `APEX`). See docs/agent-identity.md.
+    agent_id:          String,
 }
 
 impl Supervisor {
@@ -109,6 +127,7 @@ impl Supervisor {
             council_tx:        None,
             events_dir:        None,
             vast_state:        None,
+            agent_id:          apexos_core::node_agent_id(),
         }
     }
 
@@ -1393,6 +1412,14 @@ impl Supervisor {
             if let Some(plugin) = self.plugins.get(&pid) {
                 let client   = plugin.client.clone();
                 let bus      = self.bus.clone();
+                let mut call = call;
+                // System-stamp the agent identity onto Cerebro calls: routing and
+                // private/shared isolation must not depend on the agent_id the
+                // model typed (it can forget, typo, or — multi-agent — spoof).
+                // See docs/agent-identity.md (slice 1).
+                if pid.0 == "cerebro" {
+                    stamp_agent_id(&mut call.args, &self.agent_id);
+                }
                 tokio::spawn(async move {
                     let output = match client.call_tool(&call.tool, &call.args).await {
                         Ok(o)  => o,
@@ -1649,6 +1676,25 @@ mod tests {
         let b = EvolutionId(NEXT_EVOLUTION_ID.fetch_add(1, Ordering::Relaxed));
         assert_ne!(a.0, b.0, "successive evolutions must not collide");
         assert_eq!(b.0, a.0 + 1, "ids must be monotonic");
+    }
+
+    #[test]
+    fn stamp_agent_id_overrides_forges_and_coerces() {
+        // Overrides whatever the model supplied (anti-spoof / anti-typo).
+        let mut a = serde_json::json!({ "query": "x", "agent_id": "SOMEONE_ELSE" });
+        stamp_agent_id(&mut a, "APEX");
+        assert_eq!(a["agent_id"], "APEX");
+        assert_eq!(a["query"], "x"); // other args untouched
+
+        // Adds it when the model omitted it.
+        let mut b = serde_json::json!({ "query": "x" });
+        stamp_agent_id(&mut b, "APEX");
+        assert_eq!(b["agent_id"], "APEX");
+
+        // Coerces a non-object (null) args into an object carrying the stamp.
+        let mut c = serde_json::Value::Null;
+        stamp_agent_id(&mut c, "LUMA");
+        assert_eq!(c["agent_id"], "LUMA");
     }
 
     #[test]

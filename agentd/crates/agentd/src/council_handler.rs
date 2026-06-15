@@ -186,7 +186,7 @@ pub fn spawn_council_handler(
                     match proxy_c.call("memory_store", serde_json::json!({
                         "content": content,
                         "tags":    ["council", "apexos"],
-                        "agent_id": "APEX"
+                        "agent_id": apexos_core::node_agent_id()
                     })).await {
                         Ok(out) if out.ok => {}
                         Ok(out) => eprintln!("[council] cerebro store not ok: {:?}", out.content),

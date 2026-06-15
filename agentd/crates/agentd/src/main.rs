@@ -617,7 +617,7 @@ fn parse_cerebro_id(output: &apexos_core::ToolOutput, json_key: &str) -> Option<
 async fn episode_start(proxy: &ToolProxy, evo_id: EvolutionId, kind: &str) -> Option<String> {
     match proxy.call("episode_start", serde_json::json!({
         "title":    format!("evolution {}: {kind}", evo_id.0),
-        "agent_id": "CLAUDE-APEX",
+        "agent_id": apexos_core::node_agent_id(),
         "tags":     ["evolution", kind]
     })).await {
         Ok(out) if out.ok => parse_cerebro_id(&out, "episode_id"),
@@ -672,7 +672,7 @@ async fn restore_rollback_store(
     rollback_store: &Arc<Mutex<HashMap<EvolutionId, EvolutionProposal>>>,
 ) {
     let text = match proxy.call("list_episodes", serde_json::json!({
-        "agent_id": "CLAUDE-APEX",
+        "agent_id": apexos_core::node_agent_id(),
         "limit":    200
     })).await {
         Ok(out) if out.ok => match mcp_text(&out) {
@@ -706,7 +706,7 @@ async fn restore_rollback_store(
 
         let mems_text = match proxy.call("get_episode_memories", serde_json::json!({
             "episode_id": episode_id,
-            "agent_id":   "CLAUDE-APEX"
+            "agent_id":   apexos_core::node_agent_id()
         })).await {
             Ok(out) if out.ok => match mcp_text(&out) { Some(t) => t, None => continue },
             _ => continue,
