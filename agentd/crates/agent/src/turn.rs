@@ -17,6 +17,21 @@ pub struct TurnEngine {
     // uptime) — agentd-generated, appended to `system` at request time. Kept SEPARATE
     // from `system` so read_soul_md / update_system_prompt manage only the identity.
     embodiment:   Arc<RwLock<String>>,
+    // Optional per-session CCBS boot-priming block (where-you-left-off / skills /
+    // intentions / relevant memories), assembled by cognitive_bootstrap and appended
+    // after soul+embodiment. Empty on the base engine; set per-session via
+    // `with_priming`. See docs/agent-identity.md (slice 2).
+    priming:      Arc<RwLock<String>>,
+}
+
+/// Compose the system prompt from identity (soul) + live embodiment + optional
+/// per-session boot-priming, skipping empty parts. Pure for testability.
+pub fn compose_system(soul: &str, embodiment: &str, priming: &str) -> String {
+    [soul.trim(), embodiment.trim(), priming.trim()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 impl TurnEngine {
@@ -30,6 +45,7 @@ impl TurnEngine {
             sem:        Arc::new(Semaphore::new(max_concurrent)),
             system:     Arc::new(RwLock::new(system.unwrap_or_default())),
             embodiment: Arc::new(RwLock::new(String::new())),
+            priming:    Arc::new(RwLock::new(String::new())),
         }
     }
 
@@ -49,11 +65,26 @@ impl TurnEngine {
             None    => Arc::clone(&self.system),
         };
         // Children share the parent's embodiment Arc — they inhabit the same node body.
+        // Sub-agents get NO boot-priming (they're spawned mid-task with their own context).
         Self {
             provider:   self.provider.clone(),
             sem:        self.sem.clone(),
             system,
             embodiment: Arc::clone(&self.embodiment),
+            priming:    Arc::new(RwLock::new(String::new())),
+        }
+    }
+
+    /// Derive an engine variant carrying a per-session CCBS boot-priming block,
+    /// appended after soul+embodiment in the system prompt. Shares every other Arc
+    /// (same provider, semaphore, live soul + embodiment).
+    pub fn with_priming(&self, priming: String) -> Self {
+        Self {
+            provider:   self.provider.clone(),
+            sem:        self.sem.clone(),
+            system:     Arc::clone(&self.system),
+            embodiment: Arc::clone(&self.embodiment),
+            priming:    Arc::new(RwLock::new(priming)),
         }
     }
 }
@@ -94,16 +125,13 @@ pub async fn run_turn(
         {
             let _permit = engine.sem.acquire().await?;
 
-            // System prompt = identity (soul) + live embodiment block, composed fresh
-            // each turn so the model always sees this node's current tools/senses/mesh.
+            // System prompt = identity (soul) + live embodiment + per-session CCBS
+            // boot-priming, composed fresh each turn so the model always sees this
+            // node's current tools/senses/mesh (and, when set, its orientation).
             let soul = engine.system.read().await.clone();
             let emb  = engine.embodiment.read().await.clone();
-            let system_str = match (soul.trim().is_empty(), emb.trim().is_empty()) {
-                (true,  true)  => String::new(),
-                (false, true)  => soul,
-                (true,  false) => emb,
-                (false, false) => format!("{soul}\n\n{emb}"),
-            };
+            let prime = engine.priming.read().await.clone();
+            let system_str = compose_system(&soul, &emb, &prime);
             let system_opt = if system_str.is_empty() { None } else { Some(system_str.as_str()) };
             let mut stream = engine.provider
                 .messages_stream(&history, &tools, system_opt)
@@ -321,6 +349,20 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::VecDeque;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn compose_system_joins_nonempty_parts_in_order() {
+        // All three present → soul, embodiment, priming joined by blank lines.
+        assert_eq!(compose_system("soul", "emb", "prime"), "soul\n\nemb\n\nprime");
+        // Empty priming (the common case before/without CCBS) → soul + embodiment.
+        assert_eq!(compose_system("soul", "emb", ""), "soul\n\nemb");
+        // Only priming (no soul/embodiment) → just priming.
+        assert_eq!(compose_system("  ", "", "prime"), "prime");
+        // All empty → empty (no system prompt).
+        assert_eq!(compose_system("", "  ", ""), "");
+        // Whitespace-only parts are trimmed out, surviving parts are trimmed.
+        assert_eq!(compose_system(" soul ", "", " prime "), "soul\n\nprime");
+    }
 
     struct MockProvider {
         responses: Arc<Mutex<VecDeque<Vec<Chunk>>>>,

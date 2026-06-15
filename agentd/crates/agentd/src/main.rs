@@ -323,6 +323,8 @@ async fn main() -> anyhow::Result<()> {
     // ToolProxy — lets the evolution applier call Cerebro tools directly for episode tracking.
     let tool_proxy = ToolProxy::new(sv_cmd_tx.clone());
     let council_proxy = tool_proxy.clone();
+    let router_proxy  = tool_proxy.clone();   // CCBS boot-priming (cognitive_bootstrap)
+    let dream_proxy   = tool_proxy.clone();   // nightly autonomous dream_run
 
     // Restore rollback snapshots from Cerebro evolution episodes on startup (best-effort).
     // CerebroCortex needs a moment to start; we wait then populate rollback_store from episodes.
@@ -397,10 +399,15 @@ async fn main() -> anyhow::Result<()> {
         cerebro_embed,
     );
 
+    // Nightly autonomous memory consolidation: call dream_run directly via the
+    // ToolProxy on a cron (default 03:00 daily) — no LLM turn, can't be skipped by
+    // the agent. Disable by setting AGENTD_DREAM_CRON empty. See docs/agent-identity.md.
+    spawn_nightly_dream(dream_proxy);
+
     // agent_rx was subscribed above, before the supervisor spawned, so the early
     // PluginUp events that populate tool_reg are captured (see the comment there).
     spawn_agent_router(agent_rx, bcast.clone(), handle.clone(),
-                       tool_reg, histories, engine, max_depth, session_store);
+                       tool_reg, histories, engine, max_depth, session_store, router_proxy);
 
     // Vast.ai backend hot-swap — listens for VastInstanceReady / VastInstanceDestroyed
     {
@@ -997,6 +1004,7 @@ fn spawn_agent_router(
     engine:        Arc<TurnEngine>,
     max_depth:     u32,
     session_store: Arc<SessionStore>,
+    tool_proxy:    ToolProxy,
 ) {
     // Per-session abort handles and parent-child tree for cascade cancellation.
     // Handles carry a generation so a turn that finishes late doesn't evict the
@@ -1015,6 +1023,9 @@ fn spawn_agent_router(
     // Internal session IDs use the top half of u64 to avoid collisions with
     // frontend-assigned IDs (which come in via UserPrompt).
     let next_child_id    = Arc::new(AtomicU64::new(1u64 << 63));
+    // CCBS boot-priming cache: one cognitive_bootstrap per session (first turn),
+    // reused on later turns so orientation stays in the system prompt all session.
+    let boot_primings    = Arc::new(Mutex::new(HashMap::<SessionId, String>::new()));
 
     tokio::spawn(async move {
         // Per-alert-key cooldown to prevent turn storms when a condition persists.
@@ -1067,6 +1078,7 @@ fn spawn_agent_router(
                         bus.clone(), bcast.clone(), tools, engine.clone(),
                         histories.clone(), Arc::clone(&session_store), snapshot_len,
                         tracker.clone(), gen,
+                        tool_proxy.clone(), boot_primings.clone(),
                     ));
                     abort_handles.lock().await.insert(session, (gen, handle.abort_handle()));
                 }
@@ -1197,6 +1209,104 @@ fn spawn_agent_router(
 
 // ── turn task helpers ─────────────────────────────────────────────────────────
 
+/// Resolve the CCBS boot-priming block for a session (cached). `None` → run
+/// un-primed (disabled via `AGENTD_CCBS=0`, or the bootstrap yielded nothing).
+/// The first call per session does one bounded `cognitive_bootstrap` and caches
+/// the result (incl. empty) so later turns never re-call.
+async fn boot_priming_for(
+    proxy:   &ToolProxy,
+    cache:   &Arc<Mutex<HashMap<SessionId, String>>>,
+    session: SessionId,
+    history: &[Message],
+) -> Option<String> {
+    let disabled = std::env::var("AGENTD_CCBS")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false);
+    if disabled {
+        return None;
+    }
+    if let Some(cached) = cache.lock().await.get(&session).cloned() {
+        return (!cached.is_empty()).then_some(cached);
+    }
+    let block = fetch_boot_priming(proxy, last_user_text(history).unwrap_or_default()).await;
+    cache.lock().await.insert(session, block.clone());
+    (!block.is_empty()).then_some(block)
+}
+
+/// One `cognitive_bootstrap` call via the proxy, scoped to this node's agent
+/// identity. Bounded (15s) and graceful: any failure/timeout returns "" so the
+/// first turn is never delayed beyond the bound nor wedged by an unavailable
+/// Cerebro — the agent can still self-orient via the soul Wake-loop.
+async fn fetch_boot_priming(proxy: &ToolProxy, query: String) -> String {
+    let mode = std::env::var("AGENTD_BOOTSTRAP_MODE").ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "standard".to_string());
+    let args = serde_json::json!({
+        "query":    query,
+        "agent_id": apexos_core::node_agent_id(),
+        "mode":     mode,
+    });
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        proxy.call("cognitive_bootstrap", args),
+    ).await {
+        Ok(Ok(out)) if out.ok => mcp_text(&out)
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.get("assembled_block").and_then(|b| b.as_str()).map(str::to_owned))
+            .unwrap_or_default(),
+        Ok(Ok(out)) => { eprintln!("[ccbs] bootstrap not ok: {:?}", out.content); String::new() }
+        Ok(Err(e))  => { eprintln!("[ccbs] bootstrap error: {e}"); String::new() }
+        Err(_)      => { eprintln!("[ccbs] bootstrap timed out (15s) — proceeding un-primed"); String::new() }
+    }
+}
+
+/// Text of the most recent non-empty User message — the bootstrap query driver.
+fn last_user_text(history: &[Message]) -> Option<String> {
+    history.iter().rev().find_map(|m| match m {
+        Message::User { content } => content.iter().find_map(|b| match b {
+            ContentBlock::Text { text } if !text.is_empty() => Some(text.clone()),
+            _ => None,
+        }),
+        _ => None,
+    })
+}
+
+/// Nightly autonomous memory consolidation: call `dream_run` directly via the
+/// ToolProxy on a cron (default 03:00 UTC daily), scoped to this node's agent
+/// identity — no LLM turn, can't be skipped by the agent. Disabled when
+/// `AGENTD_DREAM_CRON` is empty. See docs/agent-identity.md (slice 2).
+fn spawn_nightly_dream(proxy: ToolProxy) {
+    let cron_expr = std::env::var("AGENTD_DREAM_CRON")
+        .unwrap_or_else(|_| "0 0 3 * * *".to_string());
+    if cron_expr.trim().is_empty() {
+        eprintln!("[dream] nightly dream_run disabled (AGENTD_DREAM_CRON empty)");
+        return;
+    }
+    let schedule = match cron_expr.parse::<cron::Schedule>() {
+        Ok(s)  => s,
+        Err(e) => { eprintln!("[dream] invalid AGENTD_DREAM_CRON '{cron_expr}': {e} — disabled"); return; }
+    };
+    eprintln!("[dream] nightly dream_run scheduled (cron='{cron_expr}', UTC)");
+    tokio::spawn(async move {
+        loop {
+            let Some(next) = schedule.upcoming(chrono::Utc).next() else {
+                eprintln!("[dream] no upcoming dream_run time — stopping");
+                break;
+            };
+            let wait = (next - chrono::Utc::now())
+                .to_std()
+                .unwrap_or(std::time::Duration::from_secs(3600));
+            tokio::time::sleep(wait).await;
+            let args = serde_json::json!({ "agent_id": apexos_core::node_agent_id() });
+            match proxy.call("dream_run", args).await {
+                Ok(out) if out.ok => eprintln!("[dream] nightly dream_run complete"),
+                Ok(out)           => eprintln!("[dream] dream_run not ok: {:?}", out.content),
+                Err(e)            => eprintln!("[dream] dream_run error: {e}"),
+            }
+        }
+    });
+}
+
 async fn root_turn(
     session:       SessionId,
     history:       Vec<Message>,
@@ -1209,7 +1319,18 @@ async fn root_turn(
     snapshot_len:  usize,
     tracker:       SessionTracker,
     gen:           u64,
+    tool_proxy:    ToolProxy,
+    boot_primings: Arc<Mutex<HashMap<SessionId, String>>>,
 ) {
+    // CCBS (docs/agent-identity.md slice 2): on a session's first turn, prime the
+    // system prompt with the agent's live memory state (where it left off, open
+    // intentions, relevant skills) so it wakes oriented — daemon-driven, so it
+    // doesn't depend on the agent remembering to orient. Cached per session.
+    let engine = match boot_priming_for(&tool_proxy, &boot_primings, session, &history).await {
+        Some(block) => Arc::new(engine.with_priming(block)),
+        None        => engine,
+    };
+
     match run_turn(session, history, bus.clone(), bcast, tools, engine).await {
         Ok(updated) => {
             // Persist the assistant messages added during this turn.
