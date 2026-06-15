@@ -1,6 +1,7 @@
 pub mod state;
 pub mod bus;
 pub mod vision;
+pub mod identity;
 
 // The wire-protocol types now live in the standalone `apexos-protocol` crate so
 // frontends can share them. Re-export both as the crate-root glob (`apexos_core::Event`)
@@ -10,3 +11,4 @@ pub use apexos_protocol as types;
 pub use apexos_protocol::*;
 pub use state::SystemState;
 pub use bus::{Bus, BusHandle};
+pub use identity::{node_agent_id, DEFAULT_AGENT_ID};

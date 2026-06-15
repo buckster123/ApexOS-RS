@@ -130,7 +130,7 @@ Settled when we plan Slice 3; Slices 1–2 don't depend on it.
 
 | # | Slice | What lands | Status |
 |---|-------|-----------|--------|
-| 1 | **System-stamped Cerebro identity** 🔑 | agentd binds session→`agent_id` and stamps it onto every Cerebro call in `dispatch_tool` (overriding the model). Unify the `APEX`/`CLAUDE-APEX` drift to one source of truth. Default identity `APEX` → **zero behavior change for today's single agent**; pure hardening + the substrate multi-agent needs. | ▢ next |
+| 1 | **System-stamped Cerebro identity** 🔑 | agentd binds session→`agent_id` and stamps it onto every Cerebro call in `dispatch_tool` (overriding the model). Unify the `APEX`/`CLAUDE-APEX` drift to one source of truth. Default identity `APEX` → **zero behavior change for today's single agent**; pure hardening + the substrate multi-agent needs. | ✅ shipped — `apexos_core::node_agent_id()` (env `AGENTD_AGENT_ID`, default `APEX`); `Supervisor` caches it and `stamp_agent_id()` overrides `agent_id` on `cerebro`-plugin calls; council + rollback-store writes unified to it |
 | 2 | **Per-identity cognitive boot** | CCBS injection at session start keyed to the session's identity (select agent X → boot X's skills/intentions/memories) + nightly `dream_run` schedule. Absorbs the open symbiosis steps 3–4 (now unblocked: `cognitive_bootstrap` is implemented, not the stub the old BACKLOG claims). | ▢ |
 | 3 | **OS boot / auth flow (UX)** | `user → agent → skin → desktop`, light auth per the decision above. Sets the Slice-1 identity, triggers the Slice-2 boot. The human face of the arc. | ▢ |
 
