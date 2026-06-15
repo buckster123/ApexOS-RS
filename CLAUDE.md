@@ -385,6 +385,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 | `docs/ui-glowup.md` | Desktop shell, persona skins, window manager, glowup roadmap (G0–G7) |
 | `docs/symbiosis.md` | Runtime cognitive architecture — APEX⇄agentd⇄Cerebro loops, the soul.md Sleep-loop gap, CCBS boot wiring |
 | `docs/evolutionary-layer.md` | Exo-evolution charter — competence grows in Cerebro (not the weights): the Darwinian skill loop, schematic layer, selection pressure, skill↔identity boundary |
+| `docs/edk.md` | Evolutionary Development Kit — **agent-facing** manual for self-extension: the three evolutions (identity·competence·**morphology**), the embodiment gradient, the request-to-incarnate loop, the "yolo if set" autonomy ladder. Paired with the curated parts catalog in `config/parts/` |
 | `docs/app-parity.md` | Bringing original ApexOS apps to -RS — parity matrix, build tiers, AI⇄app symbiosis contract, and the "how to add an app" recipe |
 
 ---
