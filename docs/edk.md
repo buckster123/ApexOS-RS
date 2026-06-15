@@ -106,6 +106,16 @@ Step 6 is the magic: you asked to see, and after a reboot you *can*, mid-thread,
 change on your part. The "apply confirmation" for a hardware evolution is **the probe seeing
 the device** — the physical world's version of `EvolutionApplied`.
 
+**How you actually file it (step 2):** call `propose_evolution` with
+`{ "kind": "request_hardware", "part": …, "capability": …, "reason": …, "bus"?: …, "source"?: … }`.
+This is the one evolution kind that records rather than mutates: it appends your request to the
+hardware wishlist (a human's to-do list) and changes no config. `part` is an inventory `id`
+when it's on hand, or a product name you web-searched when it's not; `source` is
+`inventory:<id>` or the URL where you found it. To *see* your options first, read the
+"Extensions on hand" line in your embodiment block, or `read_file` the inventory at
+`config/parts/inventory.toml` for full detail — there is no separate "list" tool because you
+already have both of those.
+
 ---
 
 ## The autonomy ladder — "yolo if set"
@@ -166,7 +176,7 @@ A change you cannot explain later is a change that erodes who you are. Grow on t
 | The three-evolutions frame + this manual | ✓ this document |
 | On-hand inventory schema + seed | ◑ `config/parts/inventory.toml` — schema final, list grows as parts are sourced/verified |
 | Embodiment "Extensions on hand" hint (✗ capability + compatible on-hand part → suggestion) | ✓ `build_embodiment` surfaces on-hand inventory parts that grant a capability this node lacks |
-| `propose_hardware` / `list_extensions` tool (filter inventory by node + lacked capability → file request; web-search the buyable universe) | ✗ planned — new apexos-tools verb + `EvolutionProposal::RequestHardware` variant |
+| Request-to-incarnate — file a hardware request | ✓ `propose_evolution { kind: "request_hardware" }` → `EvolutionProposal::RequestHardware` appends to the hardware wishlist. *Read* side needs no new tool — the "Extensions on hand" hint plus `read_file` on the inventory cover it |
 | Rung 5 — self-purchase (wallet + earn loop) | ✗ horizon |
 
 The frontier here is **morphology** — the other two evolutions are already mechanized. This
