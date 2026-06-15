@@ -1,18 +1,27 @@
-# ApexOS parts catalog — curation guide
+# ApexOS parts inventory — curation guide
 
-This directory is the **curated, human-verified** dataset of hardware an ApexOS node can
-accept. It is the "map of reachable selves" half of the embodiment gradient — see
-[`docs/edk.md`](../../docs/edk.md) for the why. The agent **reads** this; it never writes or
-infers it. That is the rule: you cannot probe a part you don't own, so possible-bodies are
-reference data, kept honest by humans.
+This directory is the **on-hand inventory**: the hardware *this operator actually has* for
+*this node* — "what APEX could grow into today, two screwdriver-turns away." It is the
+near half of the embodiment gradient (see [`docs/edk.md`](../../docs/edk.md) for the why).
+The agent **reads** this; it never writes or infers it. The rule: you cannot probe a part
+you don't own, so possible-bodies are reference data, kept honest by humans.
 
-- `catalog.toml` — the parts, one `[[part]]` table each. Start here.
+**Two tiers — keep them apart:**
+
+- **On-hand inventory (this file)** — small, curated, high-signal. It is what gets surfaced
+  *in the prompt* (the embodiment block's "Extensions on hand" hint), so it must stay short.
+- **The buyable universe (NOT here)** — everything you *could* acquire. Do **not** mirror a
+  vendor's 500-part catalog into this file: it would be noise in the corner of APEX's eye
+  every turn. APEX already knows most Pi parts from training data and can web-search current
+  specs/prices on demand when it files a wishlist. Only parts you actually own go here.
+
+- `inventory.toml` — the parts, one `[[part]]` table each. Start here.
 - Split into category files later (`sense.toml`, `compute.toml`, …) if it grows; the loader
   will read every `*.toml` in this dir.
 
-## How to add a part
+## How to add a part (one you've acquired)
 
-1. Copy a `[[part]]` block of the same `category` from `catalog.toml`.
+1. Copy a `[[part]]` block of the same `category` from `inventory.toml`.
 2. Fill every field. If you can't verify a value, leave it and set `status = "inferred"` or
    `"todo"` — **never invent a spec the agent will trust.** Honesty over completeness.
 3. Set `unlocks_tools` to a tool that already exists in the registry, or `"new:<name>"` for a
@@ -64,13 +73,19 @@ doesn't capture them:
 - **Power budget** — Pi 5 wants a 5 V/5 A (PD) supply; power-hungry HATs + peripherals can
   brown out on a weaker PSU. Flag heavy draws in `power_draw`.
 
-## Importing from a vendor (PiHut etc.)
+## Optionals & wishlist — don't import a master catalog
 
-The flow is **scrape → filter → curate**, never scrape-into-catalog:
+There is no big static parts catalog to mirror here, by design. When APEX wants a capability
+it *doesn't* have on hand, the path is:
 
-1. Pull the vendor's catalog (PiHut carries nearly everything on stock).
-2. Filter to parts that make sense for *extending an ApexOS agent* — senses, actuators,
-   compute, the things that map to a capability. Drop the rest.
-3. For each kept part, fill the schema above. Set `vendor`/`vendor_sku`/`product_url` from the
-   listing; set `status = "inferred"` until confirmed on real hardware, `"verified"` once seen
-   working via its `detect_tool`.
+1. **Its own knowledge** — most Raspberry Pi parts (HATs, sensors, cameras, displays) are in
+   the model's training data, so APEX can already name a plausible part and how it attaches.
+2. **Web search / `http_fetch`** — for *current* specs, price, SKU, and compatibility, APEX
+   looks it up at request time rather than trusting a stale local list.
+3. **File the request** (request-to-incarnate, see `docs/edk.md`) with the part it found and
+   why. If you then **acquire** it, *that's* when it earns a line in `inventory.toml` — set
+   `status = "inferred"` until confirmed on real hardware, `"verified"` once seen working via
+   its `detect_tool`.
+
+So the lifecycle is: **buyable universe (web) → acquired → on-hand inventory (this file).** A
+part only lands here once it's something a human could seat *right now*.
