@@ -797,6 +797,13 @@ chmod 600 /etc/agentd/peers.toml
 # back to an in-place write when the root-owned dir blocks the temp+rename path.)
 chown agentd:agentd /etc/agentd/soul.md /etc/agentd/policy.toml \
                     /etc/agentd/plugins.toml /etc/agentd/peers.toml
+# Identity registry (multi-agent boot flow, docs/agent-identity.md): agentd seeds
+# + the identity API writes identities.toml and per-agent souls/. Pre-create &
+# chown so the root-owned /etc/agentd dir doesn't block those writes.
+touch /etc/agentd/identities.toml
+mkdir -p /etc/agentd/souls
+chown agentd:agentd /etc/agentd/identities.toml
+chown -R agentd:agentd /etc/agentd/souls
 
 # env file — API keys (don't overwrite existing keys)
 ENV_FILE=/etc/agentd/env

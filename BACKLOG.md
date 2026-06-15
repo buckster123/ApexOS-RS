@@ -134,7 +134,7 @@
 
 - **G5 Tier-2 — per-persona agent style preamble** — Cerebro intention (0.85) + `docs/ui-glowup.md` G5. Each persona injects a system-prompt fragment (warm+plain vs terse+technical). Touches diverged RS agentd; needs API key on Pi. UI seam ready. **[medium]**
 - **Model-facing timestamp injection** — Cerebro intention (0.85) + `docs/ui-glowup.md` G6.1. agentd injects wall-clock time into LLM context. UI half (tray clock + chat time-dividers) DONE; model-facing half deferred. Bundle with G5 tier-2. **[medium, partially-done]**
-- **Friendly frontend AUTH for web/PWA** — Cerebro intention (0.85). Usable login flow for browser/mobile (vs raw token) on a fresh post-install node. **[medium]**
+- **Friendly frontend AUTH for web/PWA** — Cerebro intention (0.85). Usable login flow for browser/mobile (vs raw token) on a fresh post-install node. *(Partial: the Agent Identity arc shipped a per-profile PIN + `POST /api/identities/verify` with guess-lockout — that's the auth primitive; a browser/PWA login UX on top is still open.)* **[medium]**
 - **G7 — Polish + tier pass** — `docs/ui-glowup.md` G7. mac dock refinement, Jarvis boot animation, Win-7 Aero persona, Nano/femtovg perf pass; all tier-gated. **[low]**
 - **Interactive PTY terminal (full VTE/ANSI grid)** — CLAUDE.md/roadmap/ui-glowup. Read-only line-mode shipped; full curses-capable terminal (custom Slint glyph-grid or alacritty_terminal) deferred; curses apps garble. **[low, partially-done]**
 - **Sub-agent windows** — CLAUDE.md/roadmap. Council badge shipped; dedicated per-child `Popup` windows mapped to SubAgentStarted still deferred. **[low, partially-done]**
