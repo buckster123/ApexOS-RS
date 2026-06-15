@@ -182,6 +182,29 @@ pub fn hash_pin(pin: &str, salt_hex: &str) -> String {
     to_hex(&h.finalize())
 }
 
+// ── Per-session identity binding (multi-agent runtime) ──────────────────────
+
+/// Process-wide map of session → bound `agent_id`. A `std::sync::Mutex` (not
+/// tokio) so the synchronous tool-dispatch path can resolve without `.await`;
+/// keep the critical section tiny (lock → clone → drop) and never hold it across
+/// an await.
+pub type SessionBindings =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<apexos_protocol::SessionId, String>>>;
+
+/// The agent identity bound to `session`, or the node default ([`node_agent_id`])
+/// when the session is unbound (legacy / pre-selection) — so single-agent nodes
+/// behave exactly as before.
+pub fn resolve_agent_id(
+    bindings: &std::sync::Mutex<std::collections::HashMap<apexos_protocol::SessionId, String>>,
+    session: apexos_protocol::SessionId,
+) -> String {
+    bindings
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&session).cloned())
+        .unwrap_or_else(node_agent_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +265,21 @@ mod tests {
         assert_eq!(apex.owner, DEFAULT_USER_ID);
         assert_eq!(apex.soul_file, "/etc/agentd/soul.md");
         assert_eq!(ids.agents_for(DEFAULT_USER_ID).len(), 1);
+    }
+
+    #[test]
+    fn resolve_agent_id_binds_or_falls_back() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("AGENTD_AGENT_ID");
+        use apexos_protocol::SessionId;
+        let map = std::sync::Mutex::new(std::collections::HashMap::new());
+        // Unbound session → node default (APEX).
+        assert_eq!(resolve_agent_id(&map, SessionId(7)), "APEX");
+        // Bound session → its agent.
+        map.lock().unwrap().insert(SessionId(7), "LUMA".to_string());
+        assert_eq!(resolve_agent_id(&map, SessionId(7)), "LUMA");
+        // A different session stays unbound → default.
+        assert_eq!(resolve_agent_id(&map, SessionId(9)), "APEX");
     }
 
     #[test]

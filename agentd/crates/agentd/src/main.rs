@@ -209,6 +209,12 @@ async fn main() -> anyhow::Result<()> {
         })
     );
 
+    // Per-session agent bindings (multi-agent runtime, docs/agent-identity.md 3b):
+    // a `hello` frame may bind its session to an agent; the Cerebro stamp + CCBS
+    // boot resolve identity here, falling back to the node default when unbound.
+    // Shared across gateway (writes), supervisor (stamp), and router (boot).
+    let session_bindings: apexos_core::SessionBindings = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
     eprintln!("[agentd] serving UI from {}", ui_dir.display());
     let gw_state = GatewayState {
         bus:                  handle.clone(),
@@ -237,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
         pairing:              Arc::new(std::sync::Mutex::new(None)),
         node_id:              Arc::clone(&node_id),
         vast_state:           vast_state.clone(),
+        session_bindings:     Arc::clone(&session_bindings),
     };
     let gw_bind = std::env::var("AGENTD_BIND").unwrap_or_else(|_| "127.0.0.1:8787".into());
     let gw_addr: std::net::SocketAddr = gw_bind.parse()?;
@@ -278,7 +285,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Supervisor — pass policy_arc so the evolution applier can hot-swap the engine.
-    let mut supervisor = Supervisor::new(handle.clone(), Arc::clone(&policy_arc));
+    let mut supervisor = Supervisor::new(handle.clone(), Arc::clone(&policy_arc), Arc::clone(&session_bindings));
     let sv_cmd_tx      = supervisor.cmd_tx();
     // Rollback channel: applier receives (session, call_id, evolution_id) requests.
     let (rollback_tx, rollback_rx) = mpsc::channel::<(SessionId, ActionId, EvolutionId)>(16);
@@ -407,7 +414,8 @@ async fn main() -> anyhow::Result<()> {
     // agent_rx was subscribed above, before the supervisor spawned, so the early
     // PluginUp events that populate tool_reg are captured (see the comment there).
     spawn_agent_router(agent_rx, bcast.clone(), handle.clone(),
-                       tool_reg, histories, engine, max_depth, session_store, router_proxy);
+                       tool_reg, histories, engine, max_depth, session_store, router_proxy,
+                       Arc::clone(&session_bindings));
 
     // Vast.ai backend hot-swap — listens for VastInstanceReady / VastInstanceDestroyed
     {
@@ -1005,6 +1013,7 @@ fn spawn_agent_router(
     max_depth:     u32,
     session_store: Arc<SessionStore>,
     tool_proxy:    ToolProxy,
+    session_bindings: apexos_core::SessionBindings,
 ) {
     // Per-session abort handles and parent-child tree for cascade cancellation.
     // Handles carry a generation so a turn that finishes late doesn't evict the
@@ -1079,6 +1088,7 @@ fn spawn_agent_router(
                         histories.clone(), Arc::clone(&session_store), snapshot_len,
                         tracker.clone(), gen,
                         tool_proxy.clone(), boot_primings.clone(),
+                        Arc::clone(&session_bindings),
                     ));
                     abort_handles.lock().await.insert(session, (gen, handle.abort_handle()));
                 }
@@ -1214,10 +1224,11 @@ fn spawn_agent_router(
 /// The first call per session does one bounded `cognitive_bootstrap` and caches
 /// the result (incl. empty) so later turns never re-call.
 async fn boot_priming_for(
-    proxy:   &ToolProxy,
-    cache:   &Arc<Mutex<HashMap<SessionId, String>>>,
-    session: SessionId,
-    history: &[Message],
+    proxy:    &ToolProxy,
+    cache:    &Arc<Mutex<HashMap<SessionId, String>>>,
+    session:  SessionId,
+    agent_id: &str,
+    history:  &[Message],
 ) -> Option<String> {
     let disabled = std::env::var("AGENTD_CCBS")
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
@@ -1228,22 +1239,22 @@ async fn boot_priming_for(
     if let Some(cached) = cache.lock().await.get(&session).cloned() {
         return (!cached.is_empty()).then_some(cached);
     }
-    let block = fetch_boot_priming(proxy, last_user_text(history).unwrap_or_default()).await;
+    let block = fetch_boot_priming(proxy, agent_id, last_user_text(history).unwrap_or_default()).await;
     cache.lock().await.insert(session, block.clone());
     (!block.is_empty()).then_some(block)
 }
 
-/// One `cognitive_bootstrap` call via the proxy, scoped to this node's agent
-/// identity. Bounded (15s) and graceful: any failure/timeout returns "" so the
-/// first turn is never delayed beyond the bound nor wedged by an unavailable
+/// One `cognitive_bootstrap` call via the proxy, scoped to the session's bound
+/// agent identity. Bounded (15s) and graceful: any failure/timeout returns "" so
+/// the first turn is never delayed beyond the bound nor wedged by an unavailable
 /// Cerebro — the agent can still self-orient via the soul Wake-loop.
-async fn fetch_boot_priming(proxy: &ToolProxy, query: String) -> String {
+async fn fetch_boot_priming(proxy: &ToolProxy, agent_id: &str, query: String) -> String {
     let mode = std::env::var("AGENTD_BOOTSTRAP_MODE").ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "standard".to_string());
     let args = serde_json::json!({
         "query":    query,
-        "agent_id": apexos_core::node_agent_id(),
+        "agent_id": agent_id,
         "mode":     mode,
     });
     match tokio::time::timeout(
@@ -1321,12 +1332,15 @@ async fn root_turn(
     gen:           u64,
     tool_proxy:    ToolProxy,
     boot_primings: Arc<Mutex<HashMap<SessionId, String>>>,
+    session_bindings: apexos_core::SessionBindings,
 ) {
     // CCBS (docs/agent-identity.md slice 2): on a session's first turn, prime the
     // system prompt with the agent's live memory state (where it left off, open
     // intentions, relevant skills) so it wakes oriented — daemon-driven, so it
     // doesn't depend on the agent remembering to orient. Cached per session.
-    let engine = match boot_priming_for(&tool_proxy, &boot_primings, session, &history).await {
+    // Scoped (3b) to the session's bound agent, else the node default.
+    let agent_id = apexos_core::resolve_agent_id(&session_bindings, session);
+    let engine = match boot_priming_for(&tool_proxy, &boot_primings, session, &agent_id, &history).await {
         Some(block) => Arc::new(engine.with_priming(block)),
         None        => engine,
     };

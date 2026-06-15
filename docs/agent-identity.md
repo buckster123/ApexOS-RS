@@ -133,11 +133,14 @@ regardless of hash strength.
 | 1 | **System-stamped Cerebro identity** 🔑 | agentd binds session→`agent_id` and stamps it onto every Cerebro call in `dispatch_tool` (overriding the model). Unify the `APEX`/`CLAUDE-APEX` drift to one source of truth. Default identity `APEX` → **zero behavior change for today's single agent**; pure hardening + the substrate multi-agent needs. | ✅ shipped — `apexos_core::node_agent_id()` (env `AGENTD_AGENT_ID`, default `APEX`); `Supervisor` caches it and `stamp_agent_id()` overrides `agent_id` on `cerebro`-plugin calls; council + rollback-store writes unified to it |
 | 2 | **Per-identity cognitive boot** | CCBS injection at session start keyed to the session's identity (select agent X → boot X's skills/intentions/memories) + nightly `dream_run` schedule. Absorbs the open symbiosis steps 3–4 (now unblocked: `cognitive_bootstrap` is implemented, not the stub the old BACKLOG claims). | ✅ shipped — `root_turn` calls `cognitive_bootstrap` via `ToolProxy` on a session's first turn (cached, 15s-bounded, graceful), composed into the prompt as `soul+embodiment+priming` by `TurnEngine::with_priming`; both scoped to `node_agent_id()`. Nightly `dream_run` runs as a dedicated direct-call task (`spawn_nightly_dream`, cron `AGENTD_DREAM_CRON`). Opt-out `AGENTD_CCBS=0` |
 | 3a | **Identity store** (data layer) | `User`/`AgentRecord`/`Identities` in `apexos_core::identity`: toml persistence (`identities.toml`), `seed_defaults` (owner + APEX), optional salted PIN (hash/verify, constant-time). Pure + unit-tested, **inert** (no wiring → zero hot-path risk). | ✅ shipped |
-| 3b | **Identity runtime + API** | HTTP CRUD (list/create users+agents, verify PIN + guess-lockout) and the per-session binding: a bound session resolves its agent's `agent_id` (→ slice-1 stamp + slice-2 boot) and soul (`with_system`), falling back to `node_agent_id()` when unbound. | ▢ |
-| 3c | **Boot UI** (ui-slint) | Extend the existing first-boot wizard into `user → (PIN) → agent → skin → desktop`, wired to 3b; "set default + skip" persistence. | ▢ |
+| 3b | **Per-session binding** (memory) | A `hello` frame may carry `agent_id`; agentd records `SessionId→agent_id` (`SessionBindings`). The slice-1 stamp + slice-2 CCBS boot resolve identity via `resolve_agent_id(session)` — bound agent → else `node_agent_id()`. So selecting an agent switches its **Cerebro memory space**. Unbound = APEX (current behavior). | ✅ shipped — `apexos_core::{SessionBindings, resolve_agent_id}`; gateway binds on `hello`, supervisor stamp + `root_turn` CCBS resolve per-session |
+| 3b-2 | **Per-agent soul** | A bound session also loads its agent's `soul_file` → `engine.with_system(Some(soul))` (composed with the slice-2 priming). Unbound/APEX → the global soul. Reads the 3a store. | ▢ |
+| 3c | **Identity API + lockout** | HTTP CRUD (list/create users+agents, seed soul file) + `verify` (PIN + 5-guess lockout). Drives the UI. | ▢ |
+| 3d | **Boot UI** (ui-slint) | Extend the first-boot wizard into `user → (PIN) → agent → skin → desktop`, wired to 3c; "set default + skip" persistence. | ▢ |
 
-> Slice 3 split into 3a/3b/3c during build: the data layer (3a) is worth landing
-> on its own — tested + inert — before the runtime binding (3b) touches the hot path.
+> Slice 3 split into 3a/3b/3b-2/3c/3d during build, smallest-first: data layer
+> (3a, inert) → memory binding (3b) → per-agent soul (3b-2) → API (3c) → UI (3d).
+> Each keeps the hot-path blast radius small (the unbound path stays byte-identical).
 
 The cognitive boot loop is the **missing middle**: Slice 1 *enforces* an identity, Slice 3
 *lets a human pick* one, and Slice 2 is *what loads when an identity wakes up*.

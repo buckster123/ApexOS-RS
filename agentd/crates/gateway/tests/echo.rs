@@ -42,6 +42,7 @@ fn make_state(handle: apexos_core::BusHandle, bcast: tokio::sync::broadcast::Sen
         pairing:              Arc::new(std::sync::Mutex::new(None)),
         node_id:              Arc::new("test-node".into()),
         vast_state:           VastState::new(),
+        session_bindings:     Arc::new(std::sync::Mutex::new(HashMap::new())),
     }
 }
 
