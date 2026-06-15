@@ -215,6 +215,21 @@ async fn main() -> anyhow::Result<()> {
     // Shared across gateway (writes), supervisor (stamp), and router (boot).
     let session_bindings: apexos_core::SessionBindings = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
+    // Identity registry (docs/agent-identity.md 3a/3b-2): users + agents. Seed the
+    // default owner + built-in APEX (pointing at the live soul.md) on a fresh node.
+    // Best-effort persist — /etc/agentd may be root-owned pre-install.sh; runtime
+    // works regardless (re-seeds in-memory; APEX always resolves).
+    let identities = {
+        let path = apexos_core::Identities::default_path();
+        let mut ids = apexos_core::Identities::load(&path);
+        if ids.seed_defaults(&soul_path.to_string_lossy()) {
+            if let Err(e) = ids.save(&path) {
+                eprintln!("[identity] could not persist {}: {e} (re-seeding in-memory)", path.display());
+            }
+        }
+        Arc::new(RwLock::new(ids))
+    };
+
     eprintln!("[agentd] serving UI from {}", ui_dir.display());
     let gw_state = GatewayState {
         bus:                  handle.clone(),
@@ -415,7 +430,7 @@ async fn main() -> anyhow::Result<()> {
     // PluginUp events that populate tool_reg are captured (see the comment there).
     spawn_agent_router(agent_rx, bcast.clone(), handle.clone(),
                        tool_reg, histories, engine, max_depth, session_store, router_proxy,
-                       Arc::clone(&session_bindings));
+                       Arc::clone(&session_bindings), Arc::clone(&identities));
 
     // Vast.ai backend hot-swap — listens for VastInstanceReady / VastInstanceDestroyed
     {
@@ -1014,6 +1029,7 @@ fn spawn_agent_router(
     session_store: Arc<SessionStore>,
     tool_proxy:    ToolProxy,
     session_bindings: apexos_core::SessionBindings,
+    identities:    Arc<RwLock<apexos_core::Identities>>,
 ) {
     // Per-session abort handles and parent-child tree for cascade cancellation.
     // Handles carry a generation so a turn that finishes late doesn't evict the
@@ -1088,7 +1104,7 @@ fn spawn_agent_router(
                         histories.clone(), Arc::clone(&session_store), snapshot_len,
                         tracker.clone(), gen,
                         tool_proxy.clone(), boot_primings.clone(),
-                        Arc::clone(&session_bindings),
+                        Arc::clone(&session_bindings), Arc::clone(&identities),
                     ));
                     abort_handles.lock().await.insert(session, (gen, handle.abort_handle()));
                 }
@@ -1219,6 +1235,30 @@ fn spawn_agent_router(
 
 // ── turn task helpers ─────────────────────────────────────────────────────────
 
+/// The soul for a bound agent (3b-2). `None` for the default agent (APEX runs on
+/// the global, hot-reloadable soul.md — leave the engine untouched), an unknown
+/// agent, or an unreadable soul_file (graceful → default soul). Async file read so
+/// it never blocks the executor.
+async fn agent_soul_for(
+    identities: &Arc<RwLock<apexos_core::Identities>>,
+    agent_id:   &str,
+) -> Option<String> {
+    if agent_id == apexos_core::node_agent_id() {
+        return None;
+    }
+    let soul_file = {
+        let ids = identities.read().await;
+        ids.agent(agent_id).map(|r| r.soul_file.clone())
+    }?;
+    match tokio::fs::read_to_string(&soul_file).await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("[identity] agent '{agent_id}' soul {soul_file} unreadable: {e} — using default soul");
+            None
+        }
+    }
+}
+
 /// Resolve the CCBS boot-priming block for a session (cached). `None` → run
 /// un-primed (disabled via `AGENTD_CCBS=0`, or the bootstrap yielded nothing).
 /// The first call per session does one bounded `cognitive_bootstrap` and caches
@@ -1333,16 +1373,27 @@ async fn root_turn(
     tool_proxy:    ToolProxy,
     boot_primings: Arc<Mutex<HashMap<SessionId, String>>>,
     session_bindings: apexos_core::SessionBindings,
+    identities:    Arc<RwLock<apexos_core::Identities>>,
 ) {
-    // CCBS (docs/agent-identity.md slice 2): on a session's first turn, prime the
-    // system prompt with the agent's live memory state (where it left off, open
-    // intentions, relevant skills) so it wakes oriented — daemon-driven, so it
-    // doesn't depend on the agent remembering to orient. Cached per session.
-    // Scoped (3b) to the session's bound agent, else the node default.
+    // Resolve the session's identity (3b): bound agent, else the node default.
     let agent_id = apexos_core::resolve_agent_id(&session_bindings, session);
-    let engine = match boot_priming_for(&tool_proxy, &boot_primings, session, &agent_id, &history).await {
-        Some(block) => Arc::new(engine.with_priming(block)),
-        None        => engine,
+
+    // Per-agent SOUL (3b-2): a bound non-default agent runs on its own soul_file;
+    // APEX / unbound / unreadable → the global (hot-reloadable) soul untouched.
+    let agent_soul = agent_soul_for(&identities, &agent_id).await;
+
+    // CCBS (slice 2): prime the system prompt with the agent's live memory state
+    // (where it left off, intentions, skills) on the first turn — daemon-driven,
+    // cached per session, scoped to the resolved agent.
+    let priming = boot_priming_for(&tool_proxy, &boot_primings, session, &agent_id, &history).await;
+
+    // Compose the per-session engine: with_system swaps soul, with_priming appends
+    // the CCBS block. The common path (APEX, no priming) reuses the global engine.
+    let engine = match (agent_soul, priming) {
+        (None,       None)        => engine,
+        (Some(soul), None)        => Arc::new(engine.with_system(Some(soul))),
+        (None,       Some(block)) => Arc::new(engine.with_priming(block)),
+        (Some(soul), Some(block)) => Arc::new(engine.with_system(Some(soul)).with_priming(block)),
     };
 
     match run_turn(session, history, bus.clone(), bcast, tools, engine).await {
