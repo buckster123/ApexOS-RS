@@ -1,8 +1,9 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, FaceGl } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, FaceGl, UserDef, AgentDef } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
+import { IdentityWizard } from "components/identity_wizard.slint";
 import { ImagePicker } from "components/image_picker.slint";
 import { ChatView } from "components/chat_view.slint";
 import { InputBar } from "components/input_bar.slint";
@@ -119,6 +120,22 @@ export component AppWindow inherits Window {
     // shows when no persona is persisted yet.
     in-out property <bool>           persona-picker-open: false;
     in-out property <bool>           first-boot: false;
+
+    // ── Identity boot wizard (agent-identity.md slice 3d) ──────────────────
+    // Rust opens this when there's a real choice (multiple profiles/agents or a
+    // PIN); the trivial single-owner+APEX case skips it entirely. Rust drives
+    // step/models/pin and binds the chosen agent (WS hello) on completion.
+    in-out property <bool>           identity-wizard-open: false;
+    in property <[UserDef]>          identity-users;
+    in property <[AgentDef]>         identity-agents;     // pre-filtered to the picked user
+    in-out property <int>            identity-step: 0;    // 0 user · 1 pin · 2 agent
+    in-out property <string>         identity-selected-name;
+    in-out property <int>            identity-pin-filled: 0;
+    in-out property <bool>           identity-pin-error: false;
+    callback identity-pick-user(string);
+    callback identity-key(string);
+    callback identity-pick-agent(string);
+    callback identity-back();
 
     // ── Image attach (🖼) — workspace picker → staged image → user_prompt ──
     in property <[ImageItem]>        workspace-images;
@@ -960,5 +977,20 @@ export component AppWindow inherits Window {
             Personas.pick(id);
             root.first-boot = false;
         }
+    }
+
+    // ── Identity boot wizard (3d) — top-most modal, before persona/desktop ──
+    if root.identity-wizard-open: IdentityWizard {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        users: root.identity-users;
+        agents: root.identity-agents;
+        step: root.identity-step;
+        selected-name: root.identity-selected-name;
+        pin-filled: root.identity-pin-filled;
+        pin-error: root.identity-pin-error;
+        pick-user(id)  => { root.identity-pick-user(id); }
+        key(k)         => { root.identity-key(k); }
+        pick-agent(id) => { root.identity-pick-agent(id); }
+        back()         => { root.identity-back(); }
     }
 }
