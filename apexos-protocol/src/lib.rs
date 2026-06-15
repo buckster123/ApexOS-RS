@@ -1,3 +1,19 @@
+//! # apexos-protocol
+//!
+//! The wire contract shared across the ApexOS-RS workspace: the `Event` enum and
+//! every type that crosses the agentd WebSocket / a2a boundary (IDs, `ToolCall`,
+//! `ContentBlock`, `SensorReading`, `EvolutionProposal`, …).
+//!
+//! Extracted from `apexos-core` so the Slint UI (and any other frontend) can
+//! **deserialize into the same types agentd serializes from** — protocol drift
+//! becomes a compile/deserialize error instead of a silently-dropped frame.
+//! Deliberately lean: `serde` + `serde_json` only, no `tokio`/`image`/runtime
+//! deps, so a frontend pays nothing to depend on it.
+//!
+//! `apexos-core` re-exports this crate (`pub use apexos_protocol as types;` plus a
+//! glob), so every existing `apexos_core::Event` / `apexos_core::types::Event`
+//! path keeps resolving unchanged.
+
 use std::collections::HashMap;
 use std::fmt;
 use serde::{Deserialize, Serialize};
