@@ -56,3 +56,13 @@ mode = "suggest"
 "check_inbox"              = "allow"
 "list_intentions"          = "allow"
 "find_relevant_procedures" = "allow"
+
+# Self-evolution + soul tools (docs/evolutionary-layer.md, docs/edk.md) ---------
+# Without these rules, suggest mode catches them in the "unknown tool -> ask"
+# fallthrough — which wrongly gates read_soul_md (a READ) and stalls the evolve
+# flow on an approval that never resolves. read_soul_md is the agent's documented
+# pre-flight before any soul edit, so it MUST be allow. propose/rollback are real
+# self-modifies → ask in suggest mode (the soul: "in suggest mode, André reviews").
+"read_soul_md"       = "allow"
+"propose_evolution"  = "ask"
+"rollback_evolution" = "ask"
