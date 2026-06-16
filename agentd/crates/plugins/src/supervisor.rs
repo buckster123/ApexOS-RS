@@ -108,6 +108,10 @@ pub struct Supervisor {
     /// default), so routing/isolation can't depend on what the model typed.
     /// See docs/agent-identity.md (slices 1 & 3b).
     session_bindings:  apexos_core::SessionBindings,
+    /// Identity registry — lets `read_soul_md` return a bound agent's OWN
+    /// soul_file (per-agent souls, docs/agent-identity.md 3b-2) rather than the
+    /// global soul.md. `None` until wired → reads fall back to the global soul.
+    identities:        Option<Arc<RwLock<apexos_core::Identities>>>,
 }
 
 impl Supervisor {
@@ -133,6 +137,7 @@ impl Supervisor {
             events_dir:        None,
             vast_state:        None,
             session_bindings,
+            identities:        None,
         }
     }
 
@@ -159,6 +164,12 @@ impl Supervisor {
     /// Shares the live soul.md Arc so `read_soul_md` returns current content.
     pub fn set_soul_arc(&mut self, arc: Arc<RwLock<String>>) {
         self.soul_arc = Some(arc);
+    }
+
+    /// Shares the identity registry so `read_soul_md` can return a bound agent's
+    /// OWN soul (per-agent souls); without it, reads fall back to the global soul.
+    pub fn set_identities(&mut self, ids: Arc<RwLock<apexos_core::Identities>>) {
+        self.identities = Some(ids);
     }
 
     pub fn set_events_dir(&mut self, dir: PathBuf) {
@@ -446,13 +457,36 @@ impl Supervisor {
         // Virtual tool: read_soul_md — returns live soul.md content so the agent can
         // read the current system prompt before proposing update_system_prompt.
         if call.tool == "read_soul_md" {
-            let call_id = call.id;
-            let bus     = self.bus.clone();
-            let soul    = self.soul_arc.clone();
+            let call_id    = call.id;
+            let bus        = self.bus.clone();
+            let soul       = self.soul_arc.clone();
+            let bindings   = self.session_bindings.clone();
+            let identities = self.identities.clone();
             tokio::spawn(async move {
-                let content = match soul {
-                    Some(arc) => arc.read().await.clone(),
-                    None      => String::from("soul.md not yet initialized"),
+                // Per-agent souls (docs/agent-identity.md 3b-2): a bound non-default
+                // agent reads ITS OWN soul_file, not the global soul.md — otherwise a
+                // bound agent reads (and, via propose_evolution, would overwrite) APEX.
+                // Unbound/APEX → the live global soul_arc, unchanged.
+                let agent_id = apexos_core::resolve_agent_id(&bindings, session);
+                let per_agent = if agent_id != apexos_core::node_agent_id() {
+                    let soul_file = match &identities {
+                        Some(ids) => ids.read().await.agent(&agent_id).map(|r| r.soul_file.clone()),
+                        None      => None,
+                    };
+                    match soul_file {
+                        Some(f) => Some(tokio::fs::read_to_string(&f).await
+                            .unwrap_or_else(|_| format!("agent '{agent_id}' soul not initialized"))),
+                        None => None,   // registry unavailable → fall back to global
+                    }
+                } else {
+                    None
+                };
+                let content = match per_agent {
+                    Some(c) => c,
+                    None => match soul {
+                        Some(arc) => arc.read().await.clone(),
+                        None      => String::from("soul.md not yet initialized"),
+                    },
                 };
                 bus.emit(Event::ToolResult {
                     session,
