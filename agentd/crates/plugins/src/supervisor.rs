@@ -827,6 +827,27 @@ impl Supervisor {
                 return;
             }
 
+            // Reject metacharacter-bearing host/user. Both are interpolated into
+            // root-run remote shell scripts AND the ssh destination, so a shell
+            // metacharacter or leading `-` here is a root-RCE / ssh argument-
+            // injection vector — validate rather than escape (ssh_password,
+            // repo_url, api_key go through shell_single_quote; a host/user never
+            // legitimately contains metacharacters).
+            if !is_valid_host(&target_ip) || !is_valid_username(&ssh_user) {
+                tokio::spawn(async move {
+                    bus.emit(Event::ToolResult {
+                        session, call: call_id,
+                        output: ToolOutput {
+                            ok:      false,
+                            content: serde_json::json!(
+                                "bootstrap_node: target_ip must be a plain IP/hostname and ssh_user a plain login name (letters, digits, '_', '-')"
+                            ),
+                        },
+                    }).await;
+                });
+                return;
+            }
+
             tokio::spawn(async move {
                 let ssh_base = vec![
                     "sshpass".to_string(),
@@ -834,6 +855,7 @@ impl Supervisor {
                     "ssh".into(),
                     "-o".into(), "StrictHostKeyChecking=accept-new".into(),
                     "-o".into(), "ConnectTimeout=5".into(),
+                    "--".into(), // end ssh option parsing — destination can't be read as a flag
                     format!("{ssh_user}@{target_ip}"),
                 ];
 
@@ -1736,6 +1758,29 @@ fn shell_single_quote(s: &str) -> String {
     out
 }
 
+/// A safe POSIX login name to interpolate into `bootstrap_node`'s root-run remote
+/// shell scripts (`/home/<user>/ApexOS`) and the ssh destination: starts with a
+/// letter or `_`, then only letters/digits/`_`/`-`, ≤32 chars. No shell
+/// metacharacters, no `/`, no leading `-` — so it can neither inject a command
+/// into `sudo -S bash -c …` nor be parsed as an ssh option. Validated, not
+/// escaped: a metacharacter here is never a legitimate username.
+fn is_valid_username(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// A safe ssh destination host (IPv4 / bracketless IPv6 / DNS hostname): no shell
+/// metacharacters and no leading `-` (which would let it be read as an ssh flag).
+/// Conservative allowlist of the characters those forms actually use.
+fn is_valid_host(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 255
+        && !s.starts_with('-')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_'))
+}
+
 // ── mesh helpers ──────────────────────────────────────────────────────────────
 
 /// Look up a peer's ws_url by node_id in peers.toml. Async because it reads a file.
@@ -1812,5 +1857,32 @@ mod tests {
         // Shell metacharacters stay inert because they remain inside the quotes.
         let q = shell_single_quote("$(touch /tmp/pwned)");
         assert_eq!(q, "'$(touch /tmp/pwned)'");
+    }
+
+    #[test]
+    fn bootstrap_node_rejects_injection_in_user_and_host() {
+        // Legitimate values pass.
+        assert!(is_valid_username("apexos"));
+        assert!(is_valid_username("pi"));
+        assert!(is_valid_username("apex_node-1"));
+        assert!(is_valid_host("192.168.0.158"));
+        assert!(is_valid_host("fe80::1"));
+        assert!(is_valid_host("node.local"));
+
+        // ssh_user injection into the root-run `sudo -S bash -c …` script — the
+        // real hole the original finding missed — is rejected.
+        assert!(!is_valid_username("x; rm -rf / #"));
+        assert!(!is_valid_username("a$(touch /tmp/p)"));
+        assert!(!is_valid_username("a`id`"));
+        assert!(!is_valid_username("../etc"));   // no '/'
+        assert!(!is_valid_username("-oProxyCommand=x")); // no leading '-'
+        assert!(!is_valid_username(""));         // empty
+        assert!(!is_valid_username("9pi"));      // must start alpha/_
+
+        // ssh destination metacharacters / option-injection are rejected.
+        assert!(!is_valid_host("-oProxyCommand=touch /tmp/x"));
+        assert!(!is_valid_host("1.2.3.4; reboot"));
+        assert!(!is_valid_host("$(id)"));
+        assert!(!is_valid_host(""));
     }
 }
