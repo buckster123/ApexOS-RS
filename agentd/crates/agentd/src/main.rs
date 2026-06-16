@@ -6,7 +6,7 @@ mod council_handler;
 use council_handler::spawn_council_handler;
 
 use apexos_core::{
-    ActionId, Bus, ContentBlock, Event, EvolutionId, EvolutionProposal, Message,
+    ActionId, Bus, ContentBlock, Event, EvolutionId, EvolutionProposal, ImageSource, Message,
     PluginId, PolicyMode, SessionId, SensorReading, Subsystem, SystemState, ToolOutput, ToolSpec,
 };
 use apexos_gateway::{serve, GatewayState, PeerRegistry};
@@ -1145,55 +1145,30 @@ fn spawn_agent_router(
         // overruns the model context window and crash-loops. 0 disables trimming.
         let history_token_budget: usize = std::env::var("AGENTD_HISTORY_TOKEN_BUDGET")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(120_000);
+
+        // Per-session turn serialization (see TurnGate): one root_turn in flight per
+        // session at a time, extra prompts queue and run FIFO when the slot frees.
+        // `turn_done` carries the "slot free" signal from each turn's Drop-guard
+        // (fires on completion AND abort). Without this, concurrent prompts on one
+        // session each spawn a turn: the second's abort handle overwrites the first
+        // (uncancellable), their history writes race (later wins, drops messages),
+        // the disk JSONL diverges, and their ActionIds collide.
+        let mut gate = TurnGate::default();
+        let (turn_done_tx, mut turn_done_rx) = mpsc::unbounded_channel::<SessionId>();
+
         loop {
-            match rx.recv().await {
-                // ── new root turn ────────────────────────────────────────────
+            // Chosen turn to spawn this iteration (first prompt or a dequeued one),
+            // run once after the select! so both paths share the spawn body.
+            let mut to_run: Option<(SessionId, String, Vec<ImageSource>)> = None;
+            tokio::select! {
+                ev = rx.recv() => match ev {
+                // ── new root turn (serialized per session) ───────────────────
                 Ok(Event::UserPrompt { session, text, images }) => {
-                    session_depths.lock().await.entry(session).or_insert(0);
-
-                    // Text first (skipped when empty — image-only prompts are
-                    // valid), then any attached images. The gateway has already
-                    // shimmed each image through vision::prepare (downscaled b64).
-                    let mut content: Vec<ContentBlock> = Vec::with_capacity(1 + images.len());
-                    if !text.is_empty() {
-                        content.push(ContentBlock::Text { text });
+                    // Run now if the session's slot is free, else queue FIFO behind
+                    // the in-flight turn (runs when it frees the slot via turn_done).
+                    if let Some((text, images)) = gate.admit(session, text, images) {
+                        to_run = Some((session, text, images));
                     }
-                    for img in images {
-                        content.push(ContentBlock::Image { media_type: img.media_type, data: img.data });
-                    }
-                    if content.is_empty() {
-                        content.push(ContentBlock::Text { text: String::new() });
-                    }
-                    let user_msg = Message::User { content };
-                    let mut hist = histories.lock().await;
-                    let history  = hist.entry(session).or_default();
-                    history.push(user_msg.clone());
-                    // Bound the in-memory window before snapshotting so neither the
-                    // context sent to the model nor the resident Vec grows unbounded
-                    // (cuts whole oldest turns at clean boundaries — never orphans a
-                    // tool_result). The on-disk JSONL stays append-only for replay.
-                    apexos_core::history::trim_history(history, history_token_budget);
-                    let snapshot     = history.clone();
-                    let snapshot_len = snapshot.len();
-                    drop(hist);
-
-                    // Persist user message immediately.
-                    {
-                        let store = Arc::clone(&session_store);
-                        tokio::spawn(async move { store.append(session, &user_msg).await; });
-                    }
-
-                    let tools  = gather_tools(&tool_reg).await;
-                    let gen    = next_turn_gen.fetch_add(1, Ordering::SeqCst);
-                    let handle = tokio::spawn(root_turn(
-                        session, snapshot,
-                        bus.clone(), bcast.clone(), tools, engine.clone(),
-                        histories.clone(), Arc::clone(&session_store), snapshot_len,
-                        tracker.clone(), gen,
-                        tool_proxy.clone(), boot_primings.clone(),
-                        Arc::clone(&session_bindings), Arc::clone(&identities),
-                    ));
-                    abort_handles.lock().await.insert(session, (gen, handle.abort_handle()));
                 }
 
                 // ── sub-agent spawn ──────────────────────────────────────────
@@ -1255,6 +1230,10 @@ fn spawn_agent_router(
                 // ── cancellation ─────────────────────────────────────────────
                 Ok(Event::UserCancel { session }) => {
                     cascade_cancel(session, &session_children, &abort_handles).await;
+                    // Drop any prompts queued behind the cancelled turn — "stop"
+                    // means stop. The in-flight turn's slot guard still fires on
+                    // abort; with the queue now empty, the gate frees the slot.
+                    gate.cancel(session);
                 }
 
                 // ── tool registry updates ────────────────────────────────────
@@ -1313,8 +1292,75 @@ fn spawn_agent_router(
                 }
 
                 Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(_) => break,
+                },
+
+                // A user-turn task ended (completed OR aborted — the slot guard
+                // fires on Drop either way). Run the next queued prompt for this
+                // session if any, else the gate frees the slot.
+                Some(session) = turn_done_rx.recv() => {
+                    if let Some((text, images)) = gate.complete(session) {
+                        to_run = Some((session, text, images)); // stays busy, drains next
+                    }
+                }
+            }
+
+            // Spawn the chosen turn (a fresh prompt, or one drained from the queue).
+            // Written once so both paths share the body; the task holds a slot guard
+            // that re-signals turn_done when it ends, draining the queue in order.
+            if let Some((session, text, images)) = to_run {
+                session_depths.lock().await.entry(session).or_insert(0);
+
+                // Text first (skipped when empty — image-only prompts are valid),
+                // then any attached images (already shimmed to downscaled b64).
+                let mut content: Vec<ContentBlock> = Vec::with_capacity(1 + images.len());
+                if !text.is_empty() {
+                    content.push(ContentBlock::Text { text });
+                }
+                for img in images {
+                    content.push(ContentBlock::Image { media_type: img.media_type, data: img.data });
+                }
+                if content.is_empty() {
+                    content.push(ContentBlock::Text { text: String::new() });
+                }
+                let user_msg = Message::User { content };
+                let mut hist = histories.lock().await;
+                let history  = hist.entry(session).or_default();
+                history.push(user_msg.clone());
+                // Bound the in-memory window before snapshotting so neither the
+                // context sent to the model nor the resident Vec grows unbounded
+                // (cuts whole oldest turns at clean boundaries — never orphans a
+                // tool_result). The on-disk JSONL stays append-only for replay.
+                apexos_core::history::trim_history(history, history_token_budget);
+                let snapshot     = history.clone();
+                let snapshot_len = snapshot.len();
+                drop(hist);
+
+                // Persist user message immediately.
+                {
+                    let store = Arc::clone(&session_store);
+                    tokio::spawn(async move { store.append(session, &user_msg).await; });
+                }
+
+                let tools  = gather_tools(&tool_reg).await;
+                let gen    = next_turn_gen.fetch_add(1, Ordering::SeqCst);
+                // Free this session's turn slot when the task ends — completes OR is
+                // aborted (Drop runs on cancel too) — so the next queued prompt runs.
+                let slot = TurnSlotGuard { session, tx: turn_done_tx.clone() };
+                let fut  = root_turn(
+                    session, snapshot,
+                    bus.clone(), bcast.clone(), tools, engine.clone(),
+                    histories.clone(), Arc::clone(&session_store), snapshot_len,
+                    tracker.clone(), gen,
+                    tool_proxy.clone(), boot_primings.clone(),
+                    Arc::clone(&session_bindings), Arc::clone(&identities),
+                );
+                let handle = tokio::spawn(async move {
+                    let _slot = slot;
+                    fut.await;
+                });
+                abort_handles.lock().await.insert(session, (gen, handle.abort_handle()));
             }
         }
     });
@@ -2230,6 +2276,68 @@ fn extract_final_text(history: &[Message]) -> String {
         .unwrap_or_default()
 }
 
+/// Per-session turn serialization: at most one turn in flight per session, extra
+/// prompts queued FIFO. A pure state machine (no async/IO) so the concurrency
+/// invariants are unit-testable; the router drives it and spawns whatever payload
+/// it returns. See the concurrent-UserPrompt race (BACKLOG #2).
+#[derive(Default)]
+struct TurnGate {
+    busy:   std::collections::HashSet<SessionId>,
+    queued: HashMap<SessionId, std::collections::VecDeque<(String, Vec<ImageSource>)>>,
+}
+
+impl TurnGate {
+    /// A prompt arrived. Returns `Some(payload)` to run now (the slot was free), or
+    /// `None` if it was queued behind an in-flight turn.
+    fn admit(&mut self, session: SessionId, text: String, images: Vec<ImageSource>)
+        -> Option<(String, Vec<ImageSource>)>
+    {
+        if self.busy.contains(&session) {
+            self.queued.entry(session).or_default().push_back((text, images));
+            None
+        } else {
+            self.busy.insert(session);
+            Some((text, images))
+        }
+    }
+
+    /// The in-flight turn for `session` ended. Returns `Some(payload)` = the next
+    /// queued prompt to run (the slot stays busy), or `None` = the slot is freed.
+    fn complete(&mut self, session: SessionId) -> Option<(String, Vec<ImageSource>)> {
+        if let Some((text, images)) = self.queued.get_mut(&session).and_then(|q| q.pop_front()) {
+            Some((text, images)) // stays busy, run next
+        } else {
+            self.busy.remove(&session);
+            self.queued.remove(&session);
+            None
+        }
+    }
+
+    /// Cancel: drop everything queued behind the (separately-aborted) in-flight
+    /// turn. `busy` clears when that turn's slot guard fires `complete`.
+    fn cancel(&mut self, session: SessionId) {
+        self.queued.remove(&session);
+    }
+}
+
+/// Frees a session's turn slot when its `root_turn` task ends — whether it
+/// completes normally or is aborted (Drop runs on cancel too). The router
+/// serializes per-session turns on this signal: a queued prompt starts only after
+/// the previous turn frees the slot. Prevents the concurrent-turn races — abort-
+/// handle overwrite (first turn uncancellable), history/disk clobber (later writer
+/// wins, drops messages), and ActionId collisions.
+struct TurnSlotGuard {
+    session: SessionId,
+    tx:      mpsc::UnboundedSender<SessionId>,
+}
+impl Drop for TurnSlotGuard {
+    fn drop(&mut self) {
+        // Best-effort: the receiver lives as long as the router loop. A dropped
+        // receiver (shutdown) just means there's no one left to serialize for.
+        let _ = self.tx.send(self.session);
+    }
+}
+
 /// Bundles the per-session bookkeeping maps so turn tasks can self-clean on
 /// completion without ballooning their argument lists. All fields are shared
 /// Arc clones of the router's maps.
@@ -2400,6 +2508,53 @@ fn spawn_discovery_loop(
 mod tests {
     use super::*;
     use apexos_core::{ContentBlock, Message};
+
+    // ── TurnGate: per-session turn serialization (concurrent-UserPrompt race) ──
+    #[test]
+    fn turngate_first_prompt_runs_extras_queue_fifo() {
+        let mut g = TurnGate::default();
+        let s = SessionId(0);
+        // First prompt on a free session runs immediately.
+        assert_eq!(g.admit(s, "a".into(), vec![]).map(|(t, _)| t), Some("a".into()));
+        // While that turn is in flight, two more arrive → both queued (None).
+        assert!(g.admit(s, "b".into(), vec![]).is_none());
+        assert!(g.admit(s, "c".into(), vec![]).is_none());
+        // Turn ends → next queued runs, in arrival order, slot stays busy.
+        assert_eq!(g.complete(s).map(|(t, _)| t), Some("b".into()));
+        assert_eq!(g.complete(s).map(|(t, _)| t), Some("c".into()));
+        // Queue drained → slot frees.
+        assert!(g.complete(s).is_none());
+        // A new prompt now runs immediately again (slot was freed).
+        assert_eq!(g.admit(s, "d".into(), vec![]).map(|(t, _)| t), Some("d".into()));
+    }
+
+    #[test]
+    fn turngate_sessions_are_independent() {
+        let mut g = TurnGate::default();
+        let (a, b) = (SessionId(1), SessionId(2));
+        assert!(g.admit(a, "a1".into(), vec![]).is_some()); // a busy
+        // b is a different session — runs concurrently, not blocked by a.
+        assert!(g.admit(b, "b1".into(), vec![]).is_some());
+        // Another a prompt queues behind a's in-flight turn.
+        assert!(g.admit(a, "a2".into(), vec![]).is_none());
+        // b completing doesn't touch a's queue.
+        assert!(g.complete(b).is_none());
+        assert_eq!(g.complete(a).map(|(t, _)| t), Some("a2".into()));
+    }
+
+    #[test]
+    fn turngate_cancel_drops_queued_then_slot_frees() {
+        let mut g = TurnGate::default();
+        let s = SessionId(0);
+        assert!(g.admit(s, "a".into(), vec![]).is_some());
+        assert!(g.admit(s, "b".into(), vec![]).is_none()); // queued
+        // Cancel drops the queue; the in-flight turn is aborted separately, and its
+        // slot guard then fires complete() → slot frees (no queued prompt runs).
+        g.cancel(s);
+        assert!(g.complete(s).is_none());
+        // Slot is free again.
+        assert!(g.admit(s, "c".into(), vec![]).is_some());
+    }
 
     #[test]
     fn local_subnet_prefix_parses_ipv4() {
