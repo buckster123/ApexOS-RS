@@ -309,6 +309,8 @@ async fn main() -> anyhow::Result<()> {
     supervisor.set_rollback_tx(rollback_tx);
     supervisor.set_events_dir(log_dir.clone());
     supervisor.set_vast_state(vast_state.clone());
+    // Per-agent souls (3b-2): read_soul_md resolves a bound agent's own soul_file.
+    supervisor.set_identities(Arc::clone(&identities));
     // Subscribe the agent-router's receiver BEFORE the supervisor starts. The
     // supervisor emits PluginUp (carrying each plugin's tools) the moment a plugin
     // finishes enumerating; a broadcast Receiver created afterwards misses those
@@ -374,6 +376,8 @@ async fn main() -> anyhow::Result<()> {
         rollback_rx,
         Arc::clone(&rollback_store),
         tool_proxy,
+        Arc::clone(&session_bindings),
+        Arc::clone(&identities),
     );
 
     // Scheduler — load persisted schedules and wire into supervisor.
@@ -495,27 +499,34 @@ fn spawn_evolution_applier(
     mut rollback_rx: mpsc::Receiver<(SessionId, ActionId, EvolutionId)>,
     rollback_store:  Arc<Mutex<HashMap<EvolutionId, EvolutionProposal>>>,
     tool_proxy:      ToolProxy,
+    session_bindings: apexos_core::SessionBindings,
+    identities:      Arc<RwLock<apexos_core::Identities>>,
 ) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 result = bus_rx.recv() => match result {
-                    Ok(Event::EvolutionProposed { id, proposal, proposed_by: _ }) => {
+                    Ok(Event::EvolutionProposed { id, proposal, proposed_by }) => {
                         let kind = evo_kind(&proposal);
 
                         // Open a Cerebro episode for this apply (best-effort).
                         let episode_id = episode_start(&tool_proxy, id, &kind).await;
 
+                        // Per-agent souls (3b-2): an UpdateSystemPrompt from a bound
+                        // non-default agent targets ITS soul_file, not the global one.
+                        let agent_soul = soul_target_for(proposed_by, &session_bindings, &identities).await;
+
                         // Snapshot current state for rollback BEFORE applying.
                         let undo = compute_undo(
                             &proposal, &soul_arc, &soul_path, &policy_path, &plugins_path,
+                            agent_soul.as_ref(),
                         ).await;
 
                         let proposal_copy = proposal.clone();
                         let result = apply_evolution(
                             id, proposal,
                             &soul_arc, &soul_path, &policy_path, &plugins_path,
-                            &policy_arc, &sv_cmd_tx,
+                            &policy_arc, &sv_cmd_tx, agent_soul.as_ref(),
                         ).await;
                         match result {
                             Ok(summary) => {
@@ -566,10 +577,13 @@ fn spawn_evolution_applier(
                             }).await;
                         }
                         Some(undo_proposal) => {
+                            // Restore to the same soul the original write targeted
+                            // (the requesting session's bound agent, else global).
+                            let agent_soul = soul_target_for(session, &session_bindings, &identities).await;
                             let result = apply_evolution(
                                 evo_id, undo_proposal,
                                 &soul_arc, &soul_path, &policy_path, &plugins_path,
-                                &policy_arc, &sv_cmd_tx,
+                                &policy_arc, &sv_cmd_tx, agent_soul.as_ref(),
                             ).await;
                             match result {
                                 Ok(summary) => {
@@ -779,10 +793,17 @@ async fn compute_undo(
     _soul_path:   &PathBuf,
     policy_path:  &PathBuf,
     plugins_path: &PathBuf,
+    agent_soul:   Option<&PathBuf>,
 ) -> Option<EvolutionProposal> {
     match proposal {
         EvolutionProposal::UpdateSystemPrompt { .. } => {
-            let old = soul_arc.read().await.clone();
+            // Snapshot the soul that WILL be overwritten: a bound agent's own
+            // soul_file when set, else the global soul_arc. Unreadable per-agent
+            // file ⇒ no meaningful undo.
+            let old = match agent_soul {
+                Some(path) => tokio::fs::read_to_string(path).await.ok()?,
+                None       => soul_arc.read().await.clone(),
+            };
             Some(EvolutionProposal::UpdateSystemPrompt {
                 content: old,
                 reason:  "rollback".into(),
@@ -881,13 +902,26 @@ async fn apply_evolution(
     plugins_path: &PathBuf,
     policy_arc:   &Arc<RwLock<PolicyEngine>>,
     sv_cmd_tx:    &mpsc::Sender<SupervisorCmd>,
+    agent_soul:   Option<&PathBuf>,
 ) -> anyhow::Result<String> {
     match proposal {
         EvolutionProposal::UpdateSystemPrompt { content, reason: _ } => {
-            tokio::fs::write(soul_path, &content).await?;
-            *soul_arc.write().await = content.clone();
-            eprintln!("[evolution] soul.md updated ({} chars)", content.len());
-            Ok(format!("system prompt updated ({} chars)", content.len()))
+            // A bound non-default agent writes ITS OWN soul_file — and does NOT
+            // touch the global soul_arc/soul.md (its per-agent soul is re-read each
+            // turn). Unbound/APEX writes the global soul.md + mirrors the live arc.
+            match agent_soul {
+                Some(path) => {
+                    tokio::fs::write(path, &content).await?;
+                    eprintln!("[evolution] agent soul {} updated ({} chars)", path.display(), content.len());
+                    Ok(format!("agent soul updated ({} chars)", content.len()))
+                }
+                None => {
+                    tokio::fs::write(soul_path, &content).await?;
+                    *soul_arc.write().await = content.clone();
+                    eprintln!("[evolution] soul.md updated ({} chars)", content.len());
+                    Ok(format!("system prompt updated ({} chars)", content.len()))
+                }
+            }
         }
 
         EvolutionProposal::UpdatePolicyRule { tool_pattern, new_rule, reason: _ } => {
@@ -1259,6 +1293,23 @@ async fn agent_soul_for(
             None
         }
     }
+}
+
+/// Which file an `UpdateSystemPrompt` evolution proposed by `session` should
+/// read/write: a bound non-default agent's OWN soul_file (`Some`), or the global
+/// soul.md (`None` ⇒ also mirror the live `soul_arc`). Unbound/APEX ⇒ `None`, so
+/// single-agent behaviour is byte-identical. Prevents a bound agent's soul edit
+/// from clobbering APEX's global soul (docs/agent-identity.md 3b-2).
+async fn soul_target_for(
+    session:    SessionId,
+    bindings:   &apexos_core::SessionBindings,
+    identities: &Arc<RwLock<apexos_core::Identities>>,
+) -> Option<PathBuf> {
+    let agent_id = apexos_core::resolve_agent_id(bindings, session);
+    if agent_id == apexos_core::node_agent_id() {
+        return None;
+    }
+    identities.read().await.agent(&agent_id).map(|r| PathBuf::from(&r.soul_file))
 }
 
 /// Resolve the CCBS boot-priming block for a session (cached). `None` → run
@@ -2460,5 +2511,40 @@ status = "inferred"
         res.expect("fallback in-place write should succeed");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Per-agent souls (3b-2): an UpdateSystemPrompt evolution must target the
+    // PROPOSING agent's own soul_file, never the global soul.md — otherwise a bound
+    // agent's self-edit clobbers APEX (the bug PROBE surfaced on apex2).
+    #[tokio::test]
+    async fn soul_target_for_isolates_bound_agent_soul() {
+        use apexos_core::{AgentRecord, Identities, SessionBindings};
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        let mut ids = Identities::default();
+        ids.agents.push(AgentRecord {
+            id:        "PROBE".into(),
+            soul_file: "/etc/agentd/souls/PROBE.md".into(),
+            ..Default::default()
+        });
+        let identities = Arc::new(RwLock::new(ids));
+
+        let bindings: SessionBindings = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut m = bindings.lock().unwrap();
+            m.insert(SessionId(5), "PROBE".to_string());            // bound, non-default
+            m.insert(SessionId(7), apexos_core::node_agent_id());   // bound to the node default
+        }
+
+        // Bound non-default agent → ITS OWN soul_file.
+        assert_eq!(
+            soul_target_for(SessionId(5), &bindings, &identities).await,
+            Some(PathBuf::from("/etc/agentd/souls/PROBE.md")),
+        );
+        // Bound to the node default (APEX) → global soul (None).
+        assert_eq!(soul_target_for(SessionId(7), &bindings, &identities).await, None);
+        // Unbound session → global soul (None) — single-agent behaviour unchanged.
+        assert_eq!(soul_target_for(SessionId(9), &bindings, &identities).await, None);
     }
 }
