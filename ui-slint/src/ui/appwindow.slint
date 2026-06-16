@@ -132,6 +132,7 @@ export component AppWindow inherits Window {
     in-out property <string>         identity-selected-name;
     in-out property <int>            identity-pin-filled: 0;
     in-out property <bool>           identity-pin-error: false;
+    in-out property <string>         identity-pin-message: "";   // wrong-PIN / lockout / network
     callback identity-pick-user(string);
     callback identity-key(string);
     callback identity-pick-agent(string);
@@ -988,6 +989,7 @@ export component AppWindow inherits Window {
         selected-name: root.identity-selected-name;
         pin-filled: root.identity-pin-filled;
         pin-error: root.identity-pin-error;
+        pin-message: root.identity-pin-message;
         pick-user(id)  => { root.identity-pick-user(id); }
         key(k)         => { root.identity-key(k); }
         pick-agent(id) => { root.identity-pick-agent(id); }

@@ -2596,6 +2596,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.set_identity_selected_name(name.into());
                 ui.set_identity_pin_filled(0);
                 ui.set_identity_pin_error(false);
+                ui.set_identity_pin_message("".into());
                 if has_pin {
                     ui.set_identity_step(1);
                 } else {
@@ -2618,6 +2619,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let n = ID_STATE.with(|s| { let mut s = s.borrow_mut(); s.pin.pop(); s.pin.chars().count() });
                     ui.set_identity_pin_filled(n as i32);
                     ui.set_identity_pin_error(false);
+                    ui.set_identity_pin_message("".into());
                 } else if k == "OK" {
                     let (user_id, pin) = ID_STATE.with(|s| { let s = s.borrow(); (s.selected.clone(), s.pin.clone()) });
                     let ui_w2 = ui_w.clone();
@@ -2625,14 +2627,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let base = base_c.clone();
                     rt_h.spawn(async move {
                         let body = serde_json::json!({ "user_id": user_id, "pin": pin });
-                        let ok = match client.post(format!("{base}/api/identities/verify"))
+                        let (ok, locked, retry, reached) = match client.post(format!("{base}/api/identities/verify"))
                             .json(&body)
                             .timeout(std::time::Duration::from_secs(8))
                             .send().await
                         {
-                            Ok(r) => r.json::<Value>().await.ok()
-                                .and_then(|v| v["ok"].as_bool()).unwrap_or(false),
-                            Err(_) => false,
+                            Ok(r) => {
+                                let v = r.json::<Value>().await.unwrap_or(Value::Null);
+                                (v["ok"].as_bool().unwrap_or(false),
+                                 v["locked"].as_bool().unwrap_or(false),
+                                 v["retry_after_secs"].as_u64(),
+                                 true)
+                            }
+                            Err(_) => (false, false, None, false),
                         };
                         slint::invoke_from_event_loop(move || {
                             let Some(ui) = ui_w2.upgrade() else { return };
@@ -2641,9 +2648,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if ok {
                                 id_load_agents(&owner);
                                 ui.set_identity_pin_error(false);
+                                ui.set_identity_pin_message("".into());
                                 ui.set_identity_step(2);
                             } else {
                                 ui.set_identity_pin_error(true);
+                                let msg = if !reached {
+                                    "Can't reach agentd — try again".to_string()
+                                } else if locked {
+                                    match retry {
+                                        Some(s) => format!("Too many tries — locked {s}s"),
+                                        None    => "Too many tries — locked".to_string(),
+                                    }
+                                } else {
+                                    "Wrong PIN — try again".to_string()
+                                };
+                                ui.set_identity_pin_message(msg.into());
                             }
                         }).ok();
                     });
@@ -2655,6 +2674,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                     ui.set_identity_pin_filled(n as i32);
                     ui.set_identity_pin_error(false);
+                    ui.set_identity_pin_message("".into());
                 }
             });
         }
@@ -2680,6 +2700,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ID_STATE.with(|s| s.borrow_mut().pin.clear());
                 ui.set_identity_pin_filled(0);
                 ui.set_identity_pin_error(false);
+                ui.set_identity_pin_message("".into());
                 ui.set_identity_step(0);
             });
         }

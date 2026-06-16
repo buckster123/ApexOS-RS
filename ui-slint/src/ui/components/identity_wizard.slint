@@ -54,10 +54,22 @@ component IdTile inherits Rectangle {
             vertical-alignment: center;
         }
         Rectangle { horizontal-stretch: 1; }
-        if root.locked: Text {
-            text: "🔒";
-            font-size: 14px;
-            vertical-alignment: center;
+        // PIN-protected → an accent lock badge (clearly distinct from open profiles).
+        if root.locked: Rectangle {
+            width: 34px;
+            height: 34px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 17px;
+            background: Palette.primary-dim;
+            border-width: 1px;
+            border-color: Palette.primary;
+            Text {
+                text: "🔒";
+                font-size: 16px;
+                color: Palette.primary;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
         }
     }
 }
@@ -90,6 +102,7 @@ export component IdentityWizard inherits Rectangle {
     in property <string> selected-name;    // shown on the pin/agent steps
     in property <int> pin-filled;          // dots filled (Rust owns the buffer)
     in property <bool> pin-error;
+    in property <string> pin-message;      // Rust-set: wrong-PIN / lockout / network error
 
     callback pick-user(string);            // user id
     callback key(string);                  // keypad label: "0".."9" | "DEL" | "OK"
@@ -171,7 +184,9 @@ export component IdentityWizard inherits Rectangle {
                     }
                 }
                 Text {
-                    text: root.pin-error ? "Wrong PIN — try again" : " ";
+                    // Rust owns the wording (bad PIN vs. lockout vs. unreachable);
+                    // a space keeps the line reserved so the keypad doesn't jump.
+                    text: root.pin-message == "" ? " " : root.pin-message;
                     color: #d9534f;
                     font-size: 12px;
                     horizontal-alignment: center;
@@ -193,7 +208,7 @@ export component IdentityWizard inherits Rectangle {
             }
 
             // ── Step 2: pick an agent ──
-            if root.step == 2: ScrollView {
+            if root.step == 2 && root.agents.length > 0: ScrollView {
                 vertical-stretch: 1;
                 horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
                 viewport-width: self.visible-width;
@@ -205,6 +220,27 @@ export component IdentityWizard inherits Rectangle {
                         name: a.name;
                         clicked => { root.pick-agent(a.id); }
                     }
+                }
+            }
+            // Empty state — a profile that owns no agents (no blank dead-end; Back
+            // still returns to the profile picker).
+            if root.step == 2 && root.agents.length == 0: VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
+                spacing: 6px;
+                Text {
+                    text: "No agents for this profile yet";
+                    color: Palette.text;
+                    font-size: 15px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Go back and pick another profile, or add an agent for this one (POST /api/identities/agent).";
+                    color: Palette.text-dim;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
                 }
             }
 
