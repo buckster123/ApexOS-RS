@@ -307,6 +307,10 @@ async fn main() -> anyhow::Result<()> {
     // Rollback channel: applier receives (session, call_id, evolution_id) requests.
     let (rollback_tx, rollback_rx) = mpsc::channel::<(SessionId, ActionId, EvolutionId)>(16);
     supervisor.set_rollback_tx(rollback_tx);
+    // Propose channel: propose_evolution hands the apply to the applier here (not
+    // the bus) so the deferred tool-result ack can't be lag-dropped.
+    let (propose_tx, propose_rx) = mpsc::channel::<(SessionId, ActionId, EvolutionId, EvolutionProposal)>(16);
+    supervisor.set_propose_tx(propose_tx);
     supervisor.set_events_dir(log_dir.clone());
     supervisor.set_vast_state(vast_state.clone());
     // Per-agent souls (3b-2): read_soul_md resolves a bound agent's own soul_file.
@@ -363,9 +367,9 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Evolution applier — subscribes to EvolutionProposed and applies changes live.
+    // Evolution applier — receives proposals over a dedicated channel and applies live.
     spawn_evolution_applier(
-        bcast.subscribe(),
+        propose_rx,
         handle.clone(),
         Arc::clone(&soul_arc),
         soul_path,
@@ -488,7 +492,7 @@ async fn main() -> anyhow::Result<()> {
 // ── evolution applier ─────────────────────────────────────────────────────────
 
 fn spawn_evolution_applier(
-    mut bus_rx:      broadcast::Receiver<Event>,
+    mut propose_rx:  mpsc::Receiver<(SessionId, ActionId, EvolutionId, EvolutionProposal)>,
     bus:             apexos_core::BusHandle,
     soul_arc:        Arc<RwLock<String>>,
     soul_path:       PathBuf,
@@ -505,60 +509,81 @@ fn spawn_evolution_applier(
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                result = bus_rx.recv() => match result {
-                    Ok(Event::EvolutionProposed { id, proposal, proposed_by }) => {
-                        let kind = evo_kind(&proposal);
+                // propose_evolution: apply, then emit the tool result reflecting the
+                // REAL outcome (deferred ack), then best-effort Cerebro bookkeeping.
+                Some((session, call_id, id, proposal)) = propose_rx.recv() => {
+                    // Per-agent souls (3b-2): an UpdateSystemPrompt from a bound
+                    // non-default agent targets ITS soul_file, not the global one.
+                    let agent_soul = soul_target_for(session, &session_bindings, &identities).await;
 
-                        // Open a Cerebro episode for this apply (best-effort).
-                        let episode_id = episode_start(&tool_proxy, id, &kind).await;
+                    // Snapshot current state for rollback BEFORE applying.
+                    let undo = compute_undo(
+                        &proposal, &soul_arc, &soul_path, &policy_path, &plugins_path,
+                        agent_soul.as_ref(),
+                    ).await;
 
-                        // Per-agent souls (3b-2): an UpdateSystemPrompt from a bound
-                        // non-default agent targets ITS soul_file, not the global one.
-                        let agent_soul = soul_target_for(proposed_by, &session_bindings, &identities).await;
+                    let proposal_copy = proposal.clone();
+                    let result = apply_evolution(
+                        id, proposal,
+                        &soul_arc, &soul_path, &policy_path, &plugins_path,
+                        &policy_arc, &sv_cmd_tx, agent_soul.as_ref(),
+                    ).await;
 
-                        // Snapshot current state for rollback BEFORE applying.
-                        let undo = compute_undo(
-                            &proposal, &soul_arc, &soul_path, &policy_path, &plugins_path,
-                            agent_soul.as_ref(),
-                        ).await;
-
-                        let proposal_copy = proposal.clone();
-                        let result = apply_evolution(
-                            id, proposal,
-                            &soul_arc, &soul_path, &policy_path, &plugins_path,
-                            &policy_arc, &sv_cmd_tx, agent_soul.as_ref(),
-                        ).await;
-                        match result {
-                            Ok(summary) => {
-                                eprintln!("[evolution] applied {:?}: {summary}", id);
-                                if let Some(undo_proposal) = undo {
-                                    // Record undo snapshot in the episode before storing in memory.
-                                    if let Some(ref eid) = episode_id {
-                                        episode_add_step(&tool_proxy, eid, &undo_proposal, &summary).await;
-                                    }
-                                    rollback_store.lock().await.insert(id, undo_proposal);
-                                }
-                                episode_end(&tool_proxy, &episode_id, "success", &summary).await;
-                                bus.emit(Event::EvolutionApplied {
-                                    id,
-                                    proposal:      proposal_copy,
-                                    patch_summary: summary,
-                                    applied_by:    None,
-                                }).await;
-                            }
-                            Err(e) => {
-                                eprintln!("[evolution] apply failed {:?}: {e}", id);
-                                episode_end(&tool_proxy, &episode_id, "failed", &e.to_string()).await;
-                                bus.emit(Event::Error {
-                                    session: None,
-                                    message: format!("evolution {}: {e}", id.0),
-                                }).await;
-                            }
+                    // DEFERRED ACK — the propose_evolution tool result now carries the
+                    // true apply outcome. Emitted BEFORE the Cerebro episode bookkeeping
+                    // so the agent's turn isn't blocked on Cerebro latency.
+                    match &result {
+                        Ok(summary) => {
+                            eprintln!("[evolution] applied {:?}: {summary}", id);
+                            bus.emit(Event::ToolResult {
+                                session, call: call_id,
+                                output: ToolOutput {
+                                    ok: true,
+                                    content: serde_json::json!({
+                                        "status": "applied", "evolution_id": id.0, "summary": summary,
+                                    }),
+                                },
+                            }).await;
+                        }
+                        Err(e) => {
+                            eprintln!("[evolution] apply failed {:?}: {e}", id);
+                            bus.emit(Event::ToolResult {
+                                session, call: call_id,
+                                output: ToolOutput {
+                                    ok: false,
+                                    content: serde_json::json!(format!("evolution failed: {e}")),
+                                },
+                            }).await;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => break,
-                    Ok(_)  => {}
+
+                    // Best-effort bookkeeping (post-ack): rollback store + Cerebro episode + bus event.
+                    let kind = evo_kind(&proposal_copy);
+                    let episode_id = episode_start(&tool_proxy, id, &kind).await;
+                    match result {
+                        Ok(summary) => {
+                            if let Some(undo_proposal) = undo {
+                                if let Some(ref eid) = episode_id {
+                                    episode_add_step(&tool_proxy, eid, &undo_proposal, &summary).await;
+                                }
+                                rollback_store.lock().await.insert(id, undo_proposal);
+                            }
+                            episode_end(&tool_proxy, &episode_id, "success", &summary).await;
+                            bus.emit(Event::EvolutionApplied {
+                                id,
+                                proposal:      proposal_copy,
+                                patch_summary: summary,
+                                applied_by:    Some(session),
+                            }).await;
+                        }
+                        Err(e) => {
+                            episode_end(&tool_proxy, &episode_id, "failed", &e.to_string()).await;
+                            bus.emit(Event::Error {
+                                session: Some(session),
+                                message: format!("evolution {}: {e}", id.0),
+                            }).await;
+                        }
+                    }
                 },
 
                 Some((session, call_id, evo_id)) = rollback_rx.recv() => {
@@ -620,6 +645,9 @@ fn spawn_evolution_applier(
                         }
                     }
                 },
+
+                // Both channels closed (supervisor dropped) → shut the applier down.
+                else => break,
             }
         }
     });
@@ -677,12 +705,15 @@ async fn episode_add_step(proxy: &ToolProxy, episode_id: &str, undo: &EvolutionP
     let undo_json = serde_json::to_string(undo).unwrap_or_default();
     let content   = format!("evolution apply: {summary}\nundo_snapshot: {undo_json}");
 
-    // Step 1: store the undo snapshot as a memory to get a memory_id.
+    // Step 1: store the undo snapshot as a memory to get its id. memory_store
+    // returns the stored node, whose id field is `id` (NOT `memory_id`) — reading
+    // the wrong key dropped the undo step, so the episode had no recoverable
+    // snapshot on cold-start restore (BACKLOG).
     let memory_id = match proxy.call("memory_store", serde_json::json!({
         "content": content,
         "tags":    ["evolution", "undo_snapshot"]
     })).await {
-        Ok(out) if out.ok => parse_cerebro_id(&out, "memory_id"),
+        Ok(out) if out.ok => parse_cerebro_id(&out, "id"),
         Ok(out) => { eprintln!("[evolution] memory_store not ok: {:?}", out.content); None }
         Err(e)  => { eprintln!("[evolution] memory_store: {e}"); None }
     };
@@ -729,20 +760,17 @@ async fn restore_rollback_store(
         Err(e)  => { eprintln!("[evolution] restore: list_episodes: {e}"); return; }
     };
 
-    let mut count = 0usize;
-    for line in text.lines() {
-        let line = line.trim();
-        if !line.starts_with("- ep_") { continue; }
-        let line = &line[2..]; // strip "- "
+    // list_episodes returns a JSON ARRAY of episode objects ({id, title, …}) —
+    // NOT the Python-Cerebro "- ep_… | steps:" text lines this loop used to scrape
+    // (so it always found zero episodes and rebuilt an empty store). Parse the array.
+    let episodes: Vec<serde_json::Value> = serde_json::from_str::<serde_json::Value>(&text).ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
 
-        let (episode_id, rest) = match line.split_once(": ") {
-            Some(pair) => pair,
-            None       => continue,
-        };
-        let title = match rest.split_once(" | steps:") {
-            Some((t, _)) => t,
-            None         => rest,
-        };
+    let mut count = 0usize;
+    for ep in &episodes {
+        let Some(episode_id) = ep["id"].as_str() else { continue };
+        let Some(title)      = ep["title"].as_str() else { continue };
         if !title.starts_with("evolution ") { continue; }
 
         let evo_id = match parse_evolution_id_from_title(title) {
@@ -758,7 +786,7 @@ async fn restore_rollback_store(
             _ => continue,
         };
 
-        if let Some(proposal) = parse_undo_snapshot_from_text(&mems_text) {
+        if let Some(proposal) = parse_undo_from_episode_memories(&mems_text) {
             rollback_store.lock().await.insert(evo_id, proposal);
             count += 1;
         }
@@ -773,6 +801,18 @@ fn parse_evolution_id_from_title(title: &str) -> Option<EvolutionId> {
     let colon = rest.find(':')?;
     let n: u64 = rest[..colon].trim().parse().ok()?;
     Some(EvolutionId(n))
+}
+
+/// Extract the undo snapshot from a `get_episode_memories` result — a JSON array
+/// of memory nodes. The marker lives inside each node's `content` string, NOT in
+/// the rendered array text (where the undo JSON is escaped-within-JSON and never
+/// parses — the bug behind the chronic "loaded 0 rollback snapshot(s)").
+fn parse_undo_from_episode_memories(mems_text: &str) -> Option<EvolutionProposal> {
+    serde_json::from_str::<serde_json::Value>(mems_text).ok()?
+        .as_array()?
+        .iter()
+        .filter_map(|n| n["content"].as_str())
+        .find_map(parse_undo_snapshot_from_text)
 }
 
 fn parse_undo_snapshot_from_text(text: &str) -> Option<EvolutionProposal> {
@@ -2546,5 +2586,33 @@ status = "inferred"
         assert_eq!(soul_target_for(SessionId(7), &bindings, &identities).await, None);
         // Unbound session → global soul (None) — single-agent behaviour unchanged.
         assert_eq!(soul_target_for(SessionId(9), &bindings, &identities).await, None);
+    }
+
+    // Cold-start rollback restore: the undo snapshot must be recovered from inside a
+    // get_episode_memories JSON-array node's `content`, NOT by scraping the array text
+    // (the old path, where the undo JSON is escaped-within-JSON and never parsed).
+    #[test]
+    fn parse_undo_from_episode_memories_recovers_snapshot() {
+        let undo = EvolutionProposal::UpdateSystemPrompt {
+            content: "# APEX\nold soul".into(),
+            reason:  "rollback".into(),
+        };
+        let undo_json = serde_json::to_string(&undo).unwrap();
+        // Exactly what episode_add_step stores as the memory content.
+        let content = format!("evolution apply: system prompt updated (13 chars)\nundo_snapshot: {undo_json}");
+        // Exactly the JSON-array shape get_episode_memories returns.
+        let mems_text = serde_json::to_string(&serde_json::json!([
+            { "id": "mem_x", "content": content, "tags": ["evolution", "undo_snapshot"] }
+        ])).unwrap();
+
+        // New path recovers the snapshot…
+        match parse_undo_from_episode_memories(&mems_text) {
+            Some(EvolutionProposal::UpdateSystemPrompt { content, .. }) => {
+                assert_eq!(content, "# APEX\nold soul");
+            }
+            other => panic!("expected UpdateSystemPrompt undo, got {other:?}"),
+        }
+        // …while the old direct-scrape of the array text recovers nothing (the bug).
+        assert!(parse_undo_snapshot_from_text(&mems_text).is_none());
     }
 }
