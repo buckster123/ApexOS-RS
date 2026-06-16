@@ -112,6 +112,11 @@ pub struct Supervisor {
     /// soul_file (per-agent souls, docs/agent-identity.md 3b-2) rather than the
     /// global soul.md. `None` until wired → reads fall back to the global soul.
     identities:        Option<Arc<RwLock<apexos_core::Identities>>>,
+    /// Dedicated channel to the evolution applier for `propose_evolution`. A
+    /// dedicated mpsc (not the broadcast bus) guarantees delivery so the DEFERRED
+    /// tool-result ack — emitted by the applier once the apply truly lands — can't
+    /// be lag-dropped on a busy turn. `None` until wired.
+    propose_tx:        Option<mpsc::Sender<(SessionId, ActionId, EvolutionId, EvolutionProposal)>>,
 }
 
 impl Supervisor {
@@ -138,6 +143,7 @@ impl Supervisor {
             vast_state:        None,
             session_bindings,
             identities:        None,
+            propose_tx:        None,
         }
     }
 
@@ -149,6 +155,12 @@ impl Supervisor {
     /// Wires the rollback channel so `rollback_evolution` can reach the applier.
     pub fn set_rollback_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, EvolutionId)>) {
         self.rollback_tx = Some(tx);
+    }
+
+    /// Wires the propose channel so `propose_evolution` hands the apply to the
+    /// applier over a guaranteed-delivery mpsc (deferred tool-result ack).
+    pub fn set_propose_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, EvolutionId, EvolutionProposal)>) {
+        self.propose_tx = Some(tx);
     }
 
     /// Wires the scheduler channel so schedule_* tools route to the scheduler task.
@@ -365,24 +377,36 @@ impl Supervisor {
             let bus          = self.bus.clone();
             match serde_json::from_value::<EvolutionProposal>(call.args.clone()) {
                 Ok(proposal) => {
+                    // DEFERRED ACK: hand the apply to the applier over a DEDICATED
+                    // mpsc (not the broadcast bus — a busy turn can lag-drop bus
+                    // events, and the agent's tool result must not be lost). The
+                    // applier emits the ToolResult only once the apply truly lands,
+                    // so the agent learns the REAL outcome — a failed apply no longer
+                    // looks like success. EvolutionProposed still goes on the bus for
+                    // the UI / event-log / audit.
+                    let propose_tx = self.propose_tx.clone();
                     tokio::spawn(async move {
                         bus.emit(Event::EvolutionProposed {
                             id: evolution_id,
-                            proposal,
+                            proposal: proposal.clone(),
                             proposed_by: session,
                         }).await;
-                        bus.emit(Event::ToolResult {
-                            session,
-                            call: call_id,
-                            output: ToolOutput {
-                                ok:      true,
-                                content: serde_json::json!({
-                                    "status":       "proposed",
-                                    "evolution_id": evolution_id.0,
-                                    "note":         "proposal queued for apply",
-                                }),
-                            },
-                        }).await;
+                        match propose_tx {
+                            Some(tx) => {
+                                if tx.send((session, call_id, evolution_id, proposal)).await.is_err() {
+                                    bus.emit(Event::ToolResult {
+                                        session, call: call_id,
+                                        output: ToolOutput { ok: false, content: serde_json::json!("evolution applier unavailable") },
+                                    }).await;
+                                }
+                            }
+                            None => {
+                                bus.emit(Event::ToolResult {
+                                    session, call: call_id,
+                                    output: ToolOutput { ok: false, content: serde_json::json!("evolution applier not wired") },
+                                }).await;
+                            }
+                        }
                     });
                 }
                 Err(e) => {
