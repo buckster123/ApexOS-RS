@@ -1139,6 +1139,12 @@ fn spawn_agent_router(
             .ok().and_then(|s| s.parse().ok()).unwrap_or(45.0);
         let alert_cooldown_secs: u64 = std::env::var("SENSOR_ALERT_COOLDOWN_SECS")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(1800);
+        // Per-session history window (rough tokens). The always-on root session
+        // (SessionId(0)) accretes every sensor alert + scheduled task forever and
+        // re-sends its full history each turn; without a bound it eventually
+        // overruns the model context window and crash-loops. 0 disables trimming.
+        let history_token_budget: usize = std::env::var("AGENTD_HISTORY_TOKEN_BUDGET")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(120_000);
         loop {
             match rx.recv().await {
                 // ── new root turn ────────────────────────────────────────────
@@ -1162,6 +1168,11 @@ fn spawn_agent_router(
                     let mut hist = histories.lock().await;
                     let history  = hist.entry(session).or_default();
                     history.push(user_msg.clone());
+                    // Bound the in-memory window before snapshotting so neither the
+                    // context sent to the model nor the resident Vec grows unbounded
+                    // (cuts whole oldest turns at clean boundaries — never orphans a
+                    // tool_result). The on-disk JSONL stays append-only for replay.
+                    apexos_core::history::trim_history(history, history_token_budget);
                     let snapshot     = history.clone();
                     let snapshot_len = snapshot.len();
                     drop(hist);

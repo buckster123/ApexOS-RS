@@ -2,6 +2,7 @@ pub mod state;
 pub mod bus;
 pub mod vision;
 pub mod identity;
+pub mod history;
 
 // The wire-protocol types now live in the standalone `apexos-protocol` crate so
 // frontends can share them. Re-export both as the crate-root glob (`apexos_core::Event`)

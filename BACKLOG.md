@@ -14,7 +14,7 @@
 
 | # | Item | Category | Sev/Pri | Source |
 |---|------|----------|---------|--------|
-| 1 | Root session (SessionId(0)) history grows unbounded → context-window overflow crash-loop | Bug | high | `agentd/.../main.rs:1151` |
+| 1 | ✅ DONE — Root-session history now a bounded window (`apexos_core::history::trim_history`, `AGENTD_HISTORY_TOKEN_BUDGET` default 120k); drops oldest whole turns at clean boundaries, never orphans a tool_result | Bug | ~~high~~ | `agentd/.../main.rs` |
 | 2 | Concurrent UserPrompt on same session races: orphaned abort handle + history overwrite | Bug | high | `agentd/.../main.rs:972-1000` |
 | 3 | ✅ DONE — FS tools (`read_file`/`list_dir`/`write_file`/`create_dir`/`delete_path`) now hard-confined via `tools.rs::confine()`: writes ws-only, reads ws+allowlist, secrets blocked | Security | ~~high~~ | `tools.rs::confine` |
 | 4 | ✅ DONE — `http_fetch` SSRF guard was already in place; redirect hops are now re-checked too (residual: DNS-rebind TOCTOU) | Security | ~~high~~ | `tools.rs::ssrf_guard` |
@@ -47,7 +47,7 @@
 
 ## Bugs / Correctness
 
-- **Root session (SessionId(0)) history grows unbounded** — `agentd/crates/agentd/src/main.rs:1151` (and 972-1000, 1113). No truncation anywhere; sensor alerts + all scheduled tasks funnel into SessionId(0); full history sent every turn. Always-on daemon eventually exceeds context window → restart-surviving crash-loop. Add token-budget/turn-cap trimming. **[high]**
+- ✅ **DONE — Root session (SessionId(0)) history grows unbounded** — fixed: the `UserPrompt` handler now calls `apexos_core::history::trim_history(history, AGENTD_HISTORY_TOKEN_BUDGET)` (default 120k tokens, `0` disables) right after pushing the user message, bounding **both** the resident `Vec` and the context sent to the model. Drops whole oldest turns but only at clean user-turn boundaries (never orphans a `tool_result` from its `tool_use`); always keeps ≥ the last turn. On-disk JSONL stays append-only (full history for replay; the model only sees the recent window). Pure + unit-tested in `core::history` (5 tests incl. the tool-pairing-safety case). Applies to all sessions; only the always-on root realistically reaches the cap. **[was high]**
 - **Concurrent UserPrompt on same session races** — `agentd/crates/agentd/src/main.rs:972-1000`. No turn-in-flight guard; second turn's abort handle overwrites the first (first becomes uncancellable), histories race (later writer wins, discards messages), disk JSONL diverges, ActionIds collide. Track in-flight sessions / cancel-or-queue. **[high]**
 - **EvolutionId resets to 1 each process → collides with cold-start-restored snapshots** — `agentd/crates/plugins/src/supervisor.rs` (`NEXT_EVOLUTION_ID`). The per-turn-ActionId derivation is fixed (process-global `AtomicU64`), but the counter restarts at its initial value every boot. Now that cold-start restore actually repopulates `rollback_store` (keyed by the OLD ids parsed from episode titles), a fresh post-restart evolution reuses `EvolutionId(1)` and overwrites/aliases a restored undo. Fix: after `restore_rollback_store`, seed `NEXT_EVOLUTION_ID` past the max restored id. **[medium — only bites a rollback of a pre-restart evolution]**
 - **`cognitive_bootstrap` advertised but unimplemented** — `cerebro/crates/cerebro-mcp/src/dispatch.rs:921` + `tools.rs:895`. Hits `_ => Ok({status:not_yet_implemented})` → success-shaped stub; it's the documented step-0 boot priming call. Implement it, or remove from TOOL_NAMES, and make the fallthrough return `Err`. **[high]**
@@ -105,6 +105,7 @@
 - **cerebro-api session_recall lacks priority/session_type filters** — `cerebro/crates/cerebro-api/src/main.rs:444-456`. API-vs-MCP capability gap; browser/PWA can't narrow by priority/type. Add the filters. **[low]**
 - **`bootstrap_node` default repo_url points at Chromium ApexOS, not -RS** — `agentd/crates/plugins/src/supervisor.rs:663-664`. Default clone installs the wrong stack unless overridden. **[low]**
 - **`--no-voice`/NO_VOICE flag plumbed but inert** — `install.sh:203,450,521`. Parsed/printed but no install/build step acts on it. Wire or remove. **[low]**
+- **Pre-existing clippy style lints (cosmetic, no correctness/security/perf impact)** — a one-pass `cargo clippy --fix` cleanup, surfaced while landing the per-agent-workspaces + history-trim slices: `tools.rs:1456` trim-before-split_whitespace, `:1490` `parts.get(0)`, `:1568`/`:1591` match-for-single-pattern (notify ntfy/telegram → `if let`), `:1731` manual `split_once`; `plugins/vast.rs:100` add `Default for VastState`; `plugins/supervisor.rs:831` useless `vec!`; `gateway/mesh.rs:15` derivable `impl`; `gateway/lib.rs:3122` manual `split_once`. None block anything; batch them in a `chore(clippy)` sweep. **[low]**
 
 ---
 
