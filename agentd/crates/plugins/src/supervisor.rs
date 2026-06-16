@@ -81,6 +81,22 @@ fn stamp_agent_id(args: &mut serde_json::Value, agent_id: &str) {
     }
 }
 
+/// Stamp the caller's per-agent workspace root onto an apexos-tools call's args,
+/// overriding any model-supplied value. apexos-tools is ONE process shared by
+/// every agent, so its FS confinement can't key off a process-global env var —
+/// the root travels per call as `__workspace`. Like [`stamp_agent_id`], the
+/// insert overwrites whatever the model typed, so a model can never widen or
+/// redirect its own confinement boundary. APEX/unbound resolves to the node base
+/// (byte-identical to pre-per-agent); a bound agent gets `<base>/workspaces/<id>`.
+fn stamp_workspace(args: &mut serde_json::Value, workspace: &str) {
+    if !args.is_object() {
+        *args = serde_json::json!({});
+    }
+    if let Some(obj) = args.as_object_mut() {
+        obj.insert("__workspace".to_string(), serde_json::Value::String(workspace.to_string()));
+    }
+}
+
 pub struct Supervisor {
     bus:               BusHandle,
     plugins:           HashMap<PluginId, Plugin>,
@@ -1484,6 +1500,14 @@ impl Supervisor {
                 if pid.0 == "cerebro" {
                     let agent_id = apexos_core::resolve_agent_id(&self.session_bindings, session);
                     stamp_agent_id(&mut call.args, &agent_id);
+                } else if pid.0 == "apexos-tools" {
+                    // System-stamp the caller's workspace so the shared (single)
+                    // tool process confines this call's FS ops to the per-agent
+                    // root. Always stamped (APEX → the node base), so a model
+                    // can't redirect confinement by injecting `__workspace`.
+                    let agent_id = apexos_core::resolve_agent_id(&self.session_bindings, session);
+                    let ws = apexos_core::agent_workspace_root(&agent_id);
+                    stamp_workspace(&mut call.args, &ws.to_string_lossy());
                 }
                 tokio::spawn(async move {
                     let output = match client.call_tool(&call.tool, &call.args).await {
@@ -1760,6 +1784,20 @@ mod tests {
         let mut c = serde_json::Value::Null;
         stamp_agent_id(&mut c, "LUMA");
         assert_eq!(c["agent_id"], "LUMA");
+    }
+
+    #[test]
+    fn stamp_workspace_overrides_model_supplied_root() {
+        // Anti-spoof: a model can't widen its confinement by injecting __workspace.
+        let mut a = serde_json::json!({ "path": "notes.txt", "__workspace": "/" });
+        stamp_workspace(&mut a, "/var/lib/agentd/workspace/workspaces/LUMA");
+        assert_eq!(a["__workspace"], "/var/lib/agentd/workspace/workspaces/LUMA");
+        assert_eq!(a["path"], "notes.txt"); // other args untouched
+
+        // Adds it when absent; coerces a non-object args into one carrying it.
+        let mut b = serde_json::Value::Null;
+        stamp_workspace(&mut b, "/var/lib/agentd/workspace");
+        assert_eq!(b["__workspace"], "/var/lib/agentd/workspace");
     }
 
     #[test]

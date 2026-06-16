@@ -350,6 +350,13 @@ pub fn list() -> Value {
 // ─── Dispatch ────────────────────────────────────────────────────────────────
 
 pub fn call(name: &str, args: &Value) -> Value {
+    // Pin the supervisor-stamped per-agent workspace for this dispatch (cleared
+    // on drop). Absent (direct MCP / tests) → workspace_base() falls back to the
+    // process-global AGENTD_WORKSPACE. The model can't widen this: the supervisor
+    // overwrites any model-supplied `__workspace` before the call reaches here.
+    let _ws = WorkspaceGuard::enter(
+        args.get("__workspace").and_then(Value::as_str).map(str::to_owned),
+    );
     match name {
         "run_command" => run_command(args),
         "read_file" => read_file(args),
@@ -539,8 +546,48 @@ fn run_command(args: &Value) -> Value {
     }
 }
 
+// ─── Per-agent workspace (the supervisor-stamped `__workspace`) ─────────────────
+// apexos-tools is ONE process shared by every agent, so the per-agent workspace
+// root can't live in a process-global env var — it arrives per tool call as the
+// supervisor-stamped `__workspace` arg (system-set, like `agent_id` for Cerebro:
+// the stamp overwrites any model-supplied value, so a model can't redirect its
+// own confinement). `call()` pins it into this thread-local for the duration of
+// the dispatch. The MCP server is single-threaded + synchronous (one `call()` at
+// a time — see main.rs), and the RAII guard clears it on drop, so a reused thread
+// can never leak a stale root. Absent (direct MCP caller / tests) → fall back to
+// the process-global `AGENTD_WORKSPACE`, byte-identical to the pre-per-agent path.
+thread_local! {
+    static CALL_WORKSPACE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// RAII guard: pins the per-call workspace, clears it on drop.
+struct WorkspaceGuard;
+impl WorkspaceGuard {
+    fn enter(ws: Option<String>) -> Self {
+        CALL_WORKSPACE.with(|c| *c.borrow_mut() = ws.filter(|s| !s.is_empty()));
+        WorkspaceGuard
+    }
+}
+impl Drop for WorkspaceGuard {
+    fn drop(&mut self) {
+        CALL_WORKSPACE.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+/// The workspace base for the current call: the supervisor-stamped per-agent root
+/// if present, else the process-global `AGENTD_WORKSPACE`, else the default. APEX
+/// and unbound sessions stamp the node base here, so the no-binding path stays
+/// byte-identical to the pre-per-agent single workspace.
+fn workspace_base() -> String {
+    CALL_WORKSPACE
+        .with(|c| c.borrow().clone())
+        .or_else(|| std::env::var("AGENTD_WORKSPACE").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string())
+}
+
 /// Root a relative path onto the agent workspace; absolute paths pass through
-/// unchanged. Relative paths join `AGENTD_WORKSPACE` (default
+/// unchanged. Relative paths join [`workspace_base`] (the per-agent root, default
 /// `/var/lib/agentd/workspace`) so e.g. `read_file("notes.txt")` resolves there
 /// instead of against the process CWD (which is `/` under systemd).
 fn resolve_path(path: &str) -> std::path::PathBuf {
@@ -548,11 +595,7 @@ fn resolve_path(path: &str) -> std::path::PathBuf {
     if p.is_absolute() {
         return p.to_path_buf();
     }
-    let ws = std::env::var("AGENTD_WORKSPACE")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
-    Path::new(&ws).join(p)
+    Path::new(&workspace_base()).join(p)
 }
 
 // ─── Filesystem confinement ────────────────────────────────────────────────────
@@ -564,14 +607,18 @@ fn resolve_path(path: &str) -> std::path::PathBuf {
 //   • reads/lists           → workspace + a small read allowlist, minus an
 //                             always-blocked secret denylist.
 
-/// The agent workspace root, canonicalized. Defaults to
-/// `/var/lib/agentd/workspace`. Falls back to the literal path when it cannot be
-/// canonicalized (e.g. on a dev box where the dir does not exist).
+/// The agent workspace root for the current call, canonicalized (per-agent via
+/// [`workspace_base`]). Defaults to `/var/lib/agentd/workspace`. Falls back to the
+/// literal path when it cannot be canonicalized (e.g. on a dev box where the dir
+/// does not exist).
 fn workspace_root() -> PathBuf {
-    let ws = std::env::var("AGENTD_WORKSPACE")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    let ws = workspace_base();
+    // Ensure the per-agent root exists before canonicalizing: (a) a missing dir
+    // would canonicalize-fail and fall back to the literal path, which can
+    // mismatch the canonicalized target and spuriously reject a legitimate write;
+    // (b) it lets the first write into a freshly-bound agent's workspace succeed
+    // even if provisioning at agent-create was skipped. Idempotent + cheap.
+    let _ = fs::create_dir_all(&ws);
     fs::canonicalize(&ws).unwrap_or_else(|_| PathBuf::from(&ws))
 }
 
@@ -2327,6 +2374,42 @@ mod tests {
         assert!(confine("/etc/hostname", false).is_ok());
         std::env::remove_var("AGENTD_READ_ROOTS");
 
+        std::env::remove_var("AGENTD_WORKSPACE");
+    }
+
+    #[test]
+    fn confine_is_per_agent_when_workspace_stamped() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A global env the per-call stamp must override (proves the stamp wins).
+        std::env::set_var("AGENTD_WORKSPACE", "/tmp");
+
+        let base  = std::path::Path::new("/tmp/apexos-pa-ws");
+        let luma  = base.join("workspaces").join("LUMA");
+        let probe = base.join("workspaces").join("PROBE");
+        let _ = fs::create_dir_all(&luma);
+        let _ = fs::create_dir_all(&probe);
+
+        // Pin LUMA's stamped workspace for the calls below (cleared on drop).
+        let _ws = WorkspaceGuard::enter(Some(luma.to_string_lossy().into_owned()));
+
+        // The stamp wins over AGENTD_WORKSPACE: a relative path lands in LUMA's root.
+        let resolved = confine("note.txt", true).expect("LUMA writes its own ws");
+        assert!(resolved.starts_with(fs::canonicalize(&luma).unwrap()));
+
+        // LUMA is sealed from a sibling agent's workspace — read and write both fail.
+        let probe_secret = probe.join("secret.txt");
+        let probe_s = probe_secret.to_string_lossy();
+        assert!(confine(&probe_s, false).is_err(), "LUMA must not read PROBE's ws");
+        assert!(confine(&probe_s, true).is_err(),  "LUMA must not write PROBE's ws");
+
+        // `..` traversal out of LUMA's root is still rejected.
+        assert!(confine("../PROBE/secret.txt", true).is_err());
+
+        drop(_ws);
+        // Back to the env fallback once unstamped: relative paths root onto /tmp.
+        assert!(confine("note.txt", false).is_ok());
+
+        let _ = fs::remove_dir_all(base);
         std::env::remove_var("AGENTD_WORKSPACE");
     }
 
