@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Default agent identity when `AGENTD_AGENT_ID` is unset or blank.
 pub const DEFAULT_AGENT_ID: &str = "APEX";
@@ -24,6 +24,40 @@ pub fn node_agent_id() -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_AGENT_ID.to_string())
+}
+
+/// The node's workspace base: `$AGENTD_WORKSPACE`, else `/var/lib/agentd/workspace`.
+pub fn workspace_base() -> PathBuf {
+    let base = std::env::var("AGENTD_WORKSPACE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    PathBuf::from(base)
+}
+
+/// The filesystem workspace root for `agent_id` — the single source of truth for
+/// per-agent ("agent-locked") workspaces (the convergence of the identity arc and
+/// the FS-confinement model; see CLAUDE.md + BACKLOG "Storage & workspaces").
+///
+/// APEX / the node identity (and any unbound session, which [`resolve_agent_id`]
+/// maps to it) → the node base, **byte-identical** to the pre-per-agent single
+/// workspace. A bound *non-default* agent → `<base>/workspaces/<agent_id>`.
+///
+/// The supervisor stamps this onto every apexos-tools call (`__workspace`, a
+/// system-set arg the model can't spoof) so the shared, single tool process
+/// confines each call to the *caller's* root; the gateway provisions the same
+/// dir on agent-create. agent_id is registry-controlled (`slug()` → `[A-Z0-9_]`),
+/// but the join is guarded anyway: a non-path-safe id (e.g. a hand-edited
+/// identities.toml) falls back to the base so it can never escape via `/`/`..`.
+pub fn agent_workspace_root(agent_id: &str) -> PathBuf {
+    let base = workspace_base();
+    let path_safe = !agent_id.is_empty()
+        && agent_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if agent_id == node_agent_id() || !path_safe {
+        base
+    } else {
+        base.join("workspaces").join(agent_id)
+    }
 }
 
 // ── Identity records (persisted in identities.toml) ─────────────────────────
@@ -280,6 +314,24 @@ mod tests {
         assert_eq!(resolve_agent_id(&map, SessionId(7)), "LUMA");
         // A different session stays unbound → default.
         assert_eq!(resolve_agent_id(&map, SessionId(9)), "APEX");
+    }
+
+    #[test]
+    fn agent_workspace_root_is_per_agent_but_byte_identical_for_node() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("AGENTD_AGENT_ID");
+        std::env::set_var("AGENTD_WORKSPACE", "/srv/ws");
+        // APEX / the node identity → the base, unchanged from pre-per-agent.
+        assert_eq!(agent_workspace_root("APEX"), Path::new("/srv/ws"));
+        // A bound non-default agent → its own subdir.
+        assert_eq!(agent_workspace_root("LUMA"), Path::new("/srv/ws/workspaces/LUMA"));
+        // A non-path-safe id (hand-edited registry) can't escape — falls back to base.
+        assert_eq!(agent_workspace_root("../etc"), Path::new("/srv/ws"));
+        assert_eq!(agent_workspace_root("a/b"), Path::new("/srv/ws"));
+        // Empty workspace var → the documented default.
+        std::env::remove_var("AGENTD_WORKSPACE");
+        assert_eq!(agent_workspace_root("LUMA"),
+                   Path::new("/var/lib/agentd/workspace/workspaces/LUMA"));
     }
 
     #[test]

@@ -2028,6 +2028,13 @@ async fn identities_create_agent_handler(
     if let Err(e) = std::fs::write(&soul_file, agent_soul_template(&body.name)) {
         eprintln!("[identity] could not seed soul {}: {e}", soul_file.display());
     }
+    // Provision the agent's per-agent ("agent-locked") workspace, the same root
+    // confine() resolves to (<AGENTD_WORKSPACE>/workspaces/<id>). Best-effort —
+    // confine() also create_dir_all's it, so a skip here self-heals on first use.
+    let agent_ws = apexos_core::agent_workspace_root(&id);
+    if let Err(e) = std::fs::create_dir_all(&agent_ws) {
+        eprintln!("[identity] could not provision workspace {}: {e}", agent_ws.display());
+    }
     ids.agents.push(apexos_core::AgentRecord {
         id: id.clone(),
         name: body.name,
