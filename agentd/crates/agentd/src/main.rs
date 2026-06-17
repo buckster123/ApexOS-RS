@@ -246,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
         sessions_dir:         log_dir.join("sessions"),
         histories:            Arc::clone(&histories),
         next_session_id:      Arc::clone(&next_session_id),
-        sensor_bridge_token:  sensor_bridge_token,
+        sensor_bridge_token,
         api_token,
         soul_path:            soul_path.clone(),
         policy_arc:           Arc::clone(&policy_arc),

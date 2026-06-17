@@ -4,16 +4,13 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PeerRole {
+    #[default]
     Full,
     Sensor,
     Thin,
-}
-
-impl Default for PeerRole {
-    fn default() -> Self { PeerRole::Full }
 }
 
 impl std::fmt::Display for PeerRole {

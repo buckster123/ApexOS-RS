@@ -56,8 +56,10 @@ impl TurnEngine {
     pub fn embodiment_arc(&self) -> Arc<RwLock<String>> { Arc::clone(&self.embodiment) }
 
     /// Derive an engine variant with a different system prompt.
-    /// - None  → child inherits the parent's Arc (shares soul hot-reloads)
-    /// - Some  → child gets its own isolated Arc (explicit sub-agent override)
+    ///
+    /// - `None` → child inherits the parent's Arc (shares soul hot-reloads)
+    /// - `Some` → child gets its own isolated Arc (explicit sub-agent override)
+    ///
     /// Shares the same provider and semaphore so concurrency limits apply globally.
     pub fn with_system(&self, system: Option<String>) -> Self {
         let system = match system {

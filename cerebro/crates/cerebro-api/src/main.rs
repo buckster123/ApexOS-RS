@@ -497,11 +497,11 @@ async fn session_recall(
     let results = brain.recall(&q.query, q.top_k * 5, scope).await?;
     let arr: Vec<Value> = results.into_iter()
         .filter(|(n, _)| n.tags.iter().any(|t| t == "session_note"))
-        .filter(|(n, _)| priority_filter.map_or(true, |p| {
+        .filter(|(n, _)| priority_filter.is_none_or(|p| {
             let want = format!("priority:{}", normalize_priority(p));
             n.tags.iter().any(|t| t == &want)
         }))
-        .filter(|(n, _)| type_filter.map_or(true, |st|
+        .filter(|(n, _)| type_filter.is_none_or(|st|
             n.tags.iter().any(|t| t == &format!("session_type:{st}"))))
         .take(q.top_k)
         .map(|(n, s)| json!({ "score": s, "memory": n }))
