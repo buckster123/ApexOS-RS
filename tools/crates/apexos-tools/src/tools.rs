@@ -1453,7 +1453,7 @@ fn memory_info() -> Value {
     for line in raw.lines() {
         let mut parts = line.splitn(2, ':');
         if let (Some(key), Some(val)) = (parts.next(), parts.next()) {
-            let kb: u64 = val.trim().split_whitespace().next()
+            let kb: u64 = val.split_whitespace().next()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
             map.insert(key.trim().to_string(), kb);
@@ -1487,7 +1487,7 @@ fn uptime() -> Value {
         Err(e) => return tool_error(format!("cannot read /proc/loadavg: {}", e)),
     };
     let parts: Vec<&str> = loadavg.split_whitespace().collect();
-    let load1: f64 = parts.get(0).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let load1: f64 = parts.first().and_then(|v| v.parse().ok()).unwrap_or(0.0);
     let load5: f64 = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
     let load15: f64 = parts.get(2).and_then(|v| v.parse().ok()).unwrap_or(0.0);
 
@@ -1565,11 +1565,11 @@ fn notify(args: &Value) -> Value {
     // 4. ntfy.sh — only if NTFY_TOPIC env present
     if let Ok(topic) = std::env::var("NTFY_TOPIC") {
         let ntfy_url = format!("https://ntfy.sh/{}", topic);
-        match reqwest::blocking::Client::builder()
+        if let Ok(client) = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
         {
-            Ok(client) => match client.post(&ntfy_url)
+            match client.post(&ntfy_url)
                 .header("Title", title.as_str())
                 .body(message.clone())
                 .send()
@@ -1577,8 +1577,7 @@ fn notify(args: &Value) -> Value {
                 Ok(r) if r.status().is_success() => fired.push("ntfy".into()),
                 Ok(r) => failed.push(json!({"surface": "ntfy", "error": format!("HTTP {}", r.status())})),
                 Err(e) => failed.push(json!({"surface": "ntfy", "error": e.to_string()})),
-            },
-            Err(_) => {}
+            }
         }
     }
 
@@ -1588,11 +1587,11 @@ fn notify(args: &Value) -> Value {
         std::env::var("TELEGRAM_CHAT_ID"),
     ) {
         let tg_url = format!("https://api.telegram.org/bot{}/sendMessage", token);
-        match reqwest::blocking::Client::builder()
+        if let Ok(client) = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
         {
-            Ok(client) => match client.post(&tg_url)
+            match client.post(&tg_url)
                 .json(&json!({
                     "chat_id": chat_id,
                     "text": format!("*{}*\n{}", title, message),
@@ -1603,8 +1602,7 @@ fn notify(args: &Value) -> Value {
                 Ok(r) if r.status().is_success() => fired.push("telegram".into()),
                 Ok(r) => failed.push(json!({"surface": "telegram", "error": format!("HTTP {}", r.status())})),
                 Err(e) => failed.push(json!({"surface": "telegram", "error": e.to_string()})),
-            },
-            Err(_) => {}
+            }
         }
     }
 
@@ -1728,7 +1726,7 @@ fn audio_analyze_inner(path: &str) -> Result<Value, String> {
 fn parse_af_value(text: &str, key: &str) -> Option<f64> {
     for line in text.lines() {
         if line.contains(key) {
-            let after_colon = line.splitn(2, ':').nth(1)?;
+            let after_colon = line.split_once(':')?.1;
             let val_str = after_colon.split_whitespace().next()?;
             return val_str.parse().ok();
         }

@@ -3166,8 +3166,7 @@ fn gw_extract_json(text: &str) -> Option<serde_json::Value> {
 
 fn gw_parse_af_val(text: &str, key: &str) -> Option<f64> {
     text.lines()
-        .find(|l| l.contains(key))?
-        .splitn(2, ':').nth(1)?
+        .find(|l| l.contains(key))?.split_once(':')?.1
         .split_whitespace().next()?
         .parse().ok()
 }

@@ -396,8 +396,11 @@ impl Supervisor {
 
     /// Dispatch a tool call immediately (policy already checked).
     fn dispatch_tool(&self, session: SessionId, call: ToolCall) {
-        // Virtual tool: propose_evolution (Phase 0 stub — emits EvolutionProposed
-        // and acks immediately; apply logic handled by evolution applier in main.rs).
+        // Virtual tool: propose_evolution — emits EvolutionProposed (for the
+        // event log/UI) and routes (session, call_id, evolution_id, proposal) to
+        // the evolution applier in main.rs over the dedicated `propose_tx` mpsc.
+        // The tool result is DEFERRED: the applier acks after the apply lands, so
+        // the result carries the real outcome (no premature success ack).
         if call.tool == "propose_evolution" {
             // Process-global monotonic id — must NOT be derived from the per-turn
             // ActionId (call.id resets each turn, so successive evolutions would

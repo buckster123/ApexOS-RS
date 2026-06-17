@@ -96,6 +96,12 @@ pub struct VastState {
     pub phase:    Arc<RwLock<VastPhase>>,
 }
 
+impl Default for VastState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VastState {
     pub fn new() -> Self {
         Self {

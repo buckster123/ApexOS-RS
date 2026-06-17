@@ -238,7 +238,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let storage = brain.storage.read().await;
             let neighbor_ids: Vec<MemoryId> = storage.graph
                 .neighbors(&MemoryId(id.to_string()))
-                .into_iter().map(|id| id.clone()).collect();
+                .into_iter().cloned().collect();
             let nodes = storage.sqlite.get_memories_by_ids(&neighbor_ids, &scope).await?;
             Ok(serde_json::to_value(&nodes)?)
         }
@@ -325,11 +325,11 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let results = brain.recall(query, k * 5, scope).await?;
             let out: Vec<Value> = results.into_iter()
                 .filter(|(n, _)| n.tags.iter().any(|t| t == "session_note"))
-                .filter(|(n, _)| priority_filter.map_or(true, |p| {
+                .filter(|(n, _)| priority_filter.is_none_or(|p| {
                     let want = format!("priority:{}", normalize_priority(p));
                     n.tags.iter().any(|t| t == &want)
                 }))
-                .filter(|(n, _)| type_filter.map_or(true, |st|
+                .filter(|(n, _)| type_filter.is_none_or(|st|
                     n.tags.iter().any(|t| t == &format!("session_type:{st}"))))
                 .take(k)
                 .map(|(node, score)| json!({ "memory": node, "score": score }))
