@@ -66,6 +66,25 @@ impl MemoryNode {
             self.access_times.drain(0..drop);
         }
     }
+
+    /// Record a successful FSRS review on this recall: recompute stability +
+    /// difficulty from the current retrievability and stamp `last_review = at`.
+    /// A recall is always a SUCCESS in this rating-free model (a lapse is the
+    /// separate forgetting path). This is what lets a memory actually decay over
+    /// time and what populates `fsrs_last_review` — which `activation_at_risk`
+    /// filters on (`WHERE fsrs_last_review IS NOT NULL`), so it was always empty
+    /// before because `last_review` was never set.
+    pub fn record_recall_review(&mut self, at: DateTime<Utc>) {
+        use crate::activation::fsrs;
+        let since = self.strength.last_review.unwrap_or(self.created_at);
+        let elapsed_days = ((at - since).num_seconds() as f32 / 86_400.0).max(0.0);
+        let r = fsrs::retrievability(elapsed_days, self.strength.stability);
+        self.strength.stability  =
+            fsrs::update_stability_on_recall(self.strength.stability, self.strength.difficulty, r);
+        self.strength.difficulty =
+            fsrs::update_difficulty_on_recall(self.strength.difficulty, r);
+        self.strength.last_review = Some(at);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,5 +141,25 @@ mod tests {
         node.record_access(Utc::now());
         assert_eq!(node.access_times.len(), 2);
         assert_eq!(node.access_count, 1);
+    }
+
+    #[test]
+    fn record_recall_review_sets_last_review_and_grows_stability() {
+        let mut node = MemoryNode::new("hi", MemoryType::Semantic);
+        // Before any recall, last_review is unset — which is exactly why
+        // activation_at_risk (WHERE fsrs_last_review IS NOT NULL) was always empty.
+        assert!(node.strength.last_review.is_none());
+        let s0 = node.strength.stability;
+
+        let later = node.created_at + chrono::Duration::days(3);
+        node.record_recall_review(later);
+
+        // last_review is now stamped → the row becomes visible to activation_at_risk.
+        assert_eq!(node.strength.last_review, Some(later));
+        // A successful recall sharpens the memory: stability rises.
+        assert!(node.strength.stability > s0,
+            "stability should grow on recall: {s0} → {}", node.strength.stability);
+        // Difficulty stays within the FSRS-valid range.
+        assert!((1.0..=10.0).contains(&node.strength.difficulty));
     }
 }

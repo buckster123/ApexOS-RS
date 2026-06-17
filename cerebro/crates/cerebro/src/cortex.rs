@@ -181,13 +181,21 @@ impl CerebroCortex {
         // carry the updated access history so the caller sees a consistent view.
         let now = Utc::now();
         for (node, _) in results.iter_mut() {
-            node.record_access(now);
+            node.record_access(now);        // ACT-R: a retrieval IS an access
+            node.record_recall_review(now); // FSRS: successful review (stability/difficulty + last_review)
         }
-        let reinforcements: Vec<(MemoryId, u32, String)> = results.iter()
+        let reinforcements: Vec<(MemoryId, u32, String, f32, f32, Option<String>)> = results.iter()
             .map(|(n, _)| {
                 let times = serde_json::to_string(&n.access_times)
                     .unwrap_or_else(|_| "[]".to_string());
-                (n.id.clone(), n.access_count, times)
+                (
+                    n.id.clone(),
+                    n.access_count,
+                    times,
+                    n.strength.stability,
+                    n.strength.difficulty,
+                    n.strength.last_review.map(|dt| dt.to_rfc3339()),
+                )
             })
             .collect();
         storage.sqlite.record_accesses(&reinforcements).await?;
