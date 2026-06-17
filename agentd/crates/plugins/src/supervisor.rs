@@ -35,8 +35,11 @@ struct PendingApproval {
 }
 
 pub enum SupervisorCmd {
-    /// Internal: process watcher detected the child exited.
-    PluginDied  { id: PluginId },
+    /// Internal: process watcher detected the child exited. `success` = clean
+    /// exit (status 0) — needed so a `RestartPolicy::OnFailure` plugin restarts
+    /// on a crash but not on a clean shutdown (the exit status was discarded
+    /// before, so `OnFailure` silently behaved like `Never`).
+    PluginDied  { id: PluginId, success: bool },
     /// Start a brand-new plugin (appended to plugins.toml by evolution applier).
     SpawnPlugin { config: PluginConfig },
     /// Kill a plugin and remove it from the registry; does NOT restart.
@@ -305,8 +308,8 @@ impl Supervisor {
                 Some(cmd) = sv_rx.recv() => {
                     let tx = self.sv_tx.clone();
                     match cmd {
-                        SupervisorCmd::PluginDied { id } => {
-                            self.handle_died(id, tx).await;
+                        SupervisorCmd::PluginDied { id, success } => {
+                            self.handle_died(id, success, tx).await;
                         }
                         SupervisorCmd::SpawnPlugin { config } => {
                             if let Err(e) = self.spawn_plugin(&config, tx).await {
@@ -1619,8 +1622,10 @@ impl Supervisor {
 
         let id_w = plugin_id.clone();
         tokio::spawn(async move {
-            let _ = child.wait().await;
-            let _ = sv_tx.send(SupervisorCmd::PluginDied { id: id_w }).await;
+            // Clean exit (status 0) → success; a non-zero exit, a signal, or a
+            // wait() error → failure (so OnFailure restarts on a crash only).
+            let success = child.wait().await.map(|s| s.success()).unwrap_or(false);
+            let _ = sv_tx.send(SupervisorCmd::PluginDied { id: id_w, success }).await;
         });
 
         self.configs.insert(plugin_id.clone(), cfg.clone());
@@ -1628,7 +1633,7 @@ impl Supervisor {
         Ok(())
     }
 
-    async fn handle_died(&mut self, id: PluginId, sv_tx: mpsc::Sender<SupervisorCmd>) {
+    async fn handle_died(&mut self, id: PluginId, success: bool, sv_tx: mpsc::Sender<SupervisorCmd>) {
         self.tool_registry.retain(|_, owner| owner != &id);
         // Only emit PluginDown if the plugin was still in our live set.
         // HotReload removes it first, so this avoids a duplicate PluginDown event.
@@ -1647,13 +1652,26 @@ impl Supervisor {
             None    => return,
         };
 
-        if cfg.restart == RestartPolicy::Always {
-            eprintln!("[supervisor] restarting '{}' in 1s…", id.0);
+        if should_restart(&cfg.restart, success) {
+            eprintln!("[supervisor] restarting '{}' in 1s… (exited {})",
+                id.0, if success { "cleanly" } else { "with failure" });
             tokio::time::sleep(Duration::from_secs(1)).await;
             if let Err(e) = self.spawn_plugin(&cfg, sv_tx).await {
                 eprintln!("[supervisor] restart of '{}' failed: {e}", id.0);
             }
         }
+    }
+}
+
+/// Whether a died plugin should be respawned, given its restart policy and
+/// whether it exited cleanly (status 0). `OnFailure` restarts on a crash but not
+/// a clean shutdown — which is why the watcher must carry the exit status through
+/// `PluginDied` (it was discarded before, so `OnFailure` silently never restarted).
+fn should_restart(policy: &RestartPolicy, exited_success: bool) -> bool {
+    match policy {
+        RestartPolicy::Always    => true,
+        RestartPolicy::OnFailure => !exited_success,
+        RestartPolicy::Never     => false,
     }
 }
 
@@ -1812,6 +1830,20 @@ async fn find_peer(node_id: &str) -> Option<(String, Option<String>)> {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn should_restart_honors_each_policy() {
+        // Always: restart regardless of how it exited.
+        assert!(should_restart(&RestartPolicy::Always, true));
+        assert!(should_restart(&RestartPolicy::Always, false));
+        // OnFailure: restart only on a non-clean exit (the bug — it used to never
+        // restart because the exit status was discarded).
+        assert!(!should_restart(&RestartPolicy::OnFailure, true));
+        assert!(should_restart(&RestartPolicy::OnFailure, false));
+        // Never: never restart.
+        assert!(!should_restart(&RestartPolicy::Never, true));
+        assert!(!should_restart(&RestartPolicy::Never, false));
+    }
 
     // Serialize the tests that mutate the process-global NEXT_EVOLUTION_ID — Rust
     // runs tests in parallel, and an interleaved fetch_add/fetch_max would break
