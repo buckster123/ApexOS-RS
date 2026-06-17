@@ -1694,6 +1694,13 @@ async fn build_embodiment(
         "- Node: {node_id} · {} · {ram} MB · tier {} · uptime {} · backend {backend}/{model}\n",
         std::env::consts::ARCH, tier_from_ram(ram), fmt_uptime(read_uptime_secs()),
     ));
+    // Wall-clock orientation: the embodiment is the agent's only model-facing clock
+    // (the UI tray clock + chat time-dividers are user-facing). Refreshed on the 30s
+    // embodiment cadence, so it's current to within a tick — enough for temporal
+    // reasoning (elapsed-since-last-session, day/night, "is the 03:00 dream due").
+    out.push_str(&format!(
+        "- Now: {} UTC\n", chrono::Utc::now().format("%Y-%m-%d %H:%M (%a)"),
+    ));
     out.push_str(&format!(
         "- Senses: camera {} · thermal/IAQ {} · GPIO {}\n",
         yn(has_cam), yn(has_sensors), yn(is_raspberry_pi()),
