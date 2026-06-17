@@ -3899,6 +3899,11 @@ fn dispatch_event(
                         });
                         // Running a tool — APEX is working.
                         ui.set_face_state("thinking".into());
+                        // Rust agentd emits no TurnStarted; a tool-first turn never
+                        // hits the agent_text lazy-bubble path, so set busy here too —
+                        // otherwise the Stop button never appears and input stays
+                        // enabled (double-send). Idempotent if agent_text already set it.
+                        ui.set_agent_busy(true);
                         bump_scroll(&ui);
                     }
                 })
@@ -3963,6 +3968,7 @@ fn dispatch_event(
                 // an existing one flipped to awaiting-approval (e.g. 3 at once).
                 if let Some(ui) = w.upgrade() {
                     ui.set_face_state("alert".into());
+                    ui.set_agent_busy(true);   // a tool awaiting approval = a turn in flight
                     bump_scroll(&ui);
                 }
             })
