@@ -670,6 +670,34 @@ if $IS_PI; then
     || warn "rpicam-apps not installed — Pi CSI camera unavailable until 'apt install rpicam-apps'"
 fi
 
+# Sensor head (BME688 + MLX90640): provision the I2C prerequisite on a Pi when the
+# sensor head was selected. The sensors live on the ARM I2C bus, read by an EXTERNAL
+# SensorHead dashboard (not -RS itself — see the sensor-head gotcha in CLAUDE.md), so
+# here we only enable the bus + tools the dashboard needs. Pi-5 gotcha: `dtparam=
+# i2c_arm=on` enables the controller but leaves NO /dev/i2c-* until the i2c-dev module
+# loads (raspi-config's do_i2c adds both; a manual config.txt edit does not) — so we
+# do both. Idempotent; needs a reboot to take effect. (Default installs skip this:
+# NO_SENSOR defaults true.)
+SENSOR_I2C_PROVISIONED=false
+if $IS_PI && ! $NO_SENSOR; then
+  I2C_CFG=/boot/firmware/config.txt; [[ -f "$I2C_CFG" ]] || I2C_CFG=/boot/config.txt
+  if [[ -f "$I2C_CFG" ]]; then
+    if grep -qE '^[[:space:]]*dtparam=i2c_arm=on' "$I2C_CFG"; then
+      :                                                   # already enabled
+    elif grep -qE '^[[:space:]]*#[[:space:]]*dtparam=i2c_arm=on' "$I2C_CFG"; then
+      sed -i -E 's/^[[:space:]]*#[[:space:]]*dtparam=i2c_arm=on.*/dtparam=i2c_arm=on/' "$I2C_CFG"
+    else
+      printf '\n# ApexOS-RS: enable I2C for the SensorHead (BME688 + MLX90640)\ndtparam=i2c_arm=on\n' >> "$I2C_CFG"
+    fi
+    echo i2c-dev > /etc/modules-load.d/i2c-dev.conf      # load the bus driver at boot
+    apt-get install -y --no-install-recommends i2c-tools >/dev/null 2>&1 || true
+    SENSOR_I2C_PROVISIONED=true
+    ok "I2C enabled for the SensorHead (reboot required to activate /dev/i2c-*)"
+  else
+    warn "Sensor head selected but no Pi config.txt found — enable I2C manually"
+  fi
+fi
+
 # Mesh advertisement (mDNS): drop the _apexos._tcp service file so avahi-daemon
 # advertises THIS node. Without it the node browses an empty mesh — nothing to find.
 # avahi watches /etc/avahi/services live, so a reload (not restart) picks it up.
@@ -1086,6 +1114,13 @@ echo -e "  ${DIM}Logs:    sudo journalctl -u agentd -f${NC}"
 echo -e "  ${DIM}Install: $LOG${NC}"
 echo -e "  ${DIM}Update:  apexos-update   (pull + rebuild + hot-swap)${NC}"
 echo ""
+if $SENSOR_I2C_PROVISIONED; then
+  echo -e "  ${YELLOW}  🌡  Sensor head: I2C enabled — ${BOLD}reboot${NC}${YELLOW} to activate /dev/i2c-*.${NC}"
+  echo -e "  ${DIM}     BME688/MLX90640 readings also need the external SensorHead dashboard"
+  echo -e "       (github.com/buckster123/SensorHead) running + SENSORHEAD_URL set on the"
+  echo -e "       bridge — see the sensor-head recipe in CLAUDE.md.${NC}"
+  echo ""
+fi
 
 # ── TUI: Final summary ────────────────────────────────────────────────────────
 if ! $YES && $HAVE_WHIPTAIL; then
@@ -1097,6 +1132,7 @@ if ! $YES && $HAVE_WHIPTAIL; then
   ! $NO_CEREBRO_API && STATUS_BODY+="  • Cerebro:   http://localhost:8765\n" || true
   ! $NO_UI          && STATUS_BODY+="  • Display:   KMS/DRM on HDMI (auto-started)\n" || true
   [[ -n "$API_CHECK" ]] && STATUS_BODY+="\n⚠  Add your Anthropic key to $ENV_FILE\n   to enable LLM calls." || true
+  $SENSOR_I2C_PROVISIONED && STATUS_BODY+="\n\n🌡  Sensor head: I2C enabled — REBOOT to activate.\n   BME688/MLX90640 also need the external SensorHead\n   dashboard + SENSORHEAD_URL (see CLAUDE.md)." || true
   STATUS_BODY+="\n\nInstall log: $LOG"
   tui_msg "Installation Complete" "$STATUS_BODY"
 fi
