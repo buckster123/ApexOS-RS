@@ -126,6 +126,14 @@ flagged `prune_candidate` and retired by dream's pruning phase. Bad procedures n
 lose. `procedure_fitness` (the dream-side selection signal) reads the sharpened salience and
 difficulty directly, so the loop is coherent end to end.
 
+But slice #3 is only **absolute** selection: a procedure is demoted when it *fails*, judged
+against itself. The keystone of Darwinian selection is **competition** — alternatives for the
+same task contending, the fitter displacing the weaker. Without it a subtly-worse procedure
+survives indefinitely as long as it is rarely *failed*; it never loses a head-to-head to the
+better one, and recall can keep picking it out of habit. The frontier extension closes this:
+**niche competition** adds *relative* selection — a procedure can now lose simply by being
+worse than a rival at the same task. See the dedicated section below.
+
 ---
 
 ## The skill ↔ identity boundary
@@ -151,6 +159,48 @@ the MCP, not just on APEX.
 
 ---
 
+## Niche competition — relative selection (the frontier)
+
+The three foundational slices gave the loop variation, absolute selection, consolidation,
+retrieval, and death. **Niche competition** adds the missing keystone: rivals contending for
+the same task, the fittest displacing the rest. It is a new **algorithmic** dream phase
+(`skill_competition`, no LLM budget) plus a real evidence base behind the fitness signal.
+
+**The fitness ledger.** Inferring fitness from salience alone punishes novelty: a brand-new
+procedure starts at salience 0.8 with no track record, so it would look "worse" than an
+established one purely for being new. So `record_procedure_outcome` now also writes a
+count-based ledger into the procedure's metadata —
+`outcomes: {successes, failures}` — the genuine win/loss record (additive to the existing
+salience/difficulty effects, which still drive ACT-R recall and the failure→prune path).
+
+**Confidence-aware fitness.** Competition ranks procedures by the **Wilson score lower
+bound** of their success rate, not the raw rate. A lucky `1/1` scores ≈0.21; a proven `8/2`
+scores ≈0.49 — so a single fluke can't dominate a niche over a procedure with real evidence,
+and more trials at the same rate rank strictly higher. This is the standard small-sample-safe
+way to rank by success rate.
+
+**The niche.** A niche is a **topical tag** shared by ≥2 *eligible* procedures (structural
+markers like `procedure`/`skill`/`prune_candidate` are not niches — competition forms on
+subject matter). Within a niche the highest-fitness procedure is the **champion** (tagged
+`skill_champion`, so retrieval can prefer it); rivals trailing the champion's Wilson fitness
+by more than a margin are **dominated** and take a bounded salience decay (gradual, not a
+one-shot kill) plus a difficulty bump — so a persistent loser drifts to the prune floor, is
+flagged `prune_candidate`, and is retired by the very next pruning phase (competition runs
+right before pruning for exactly this).
+
+**Two invariants keep it honest:**
+- **Novelty is protected.** A procedure below a minimum number of graded outcomes is *exempt*
+  — it never appears in a niche, so it can be neither champion nor demoted. Fresh procedures
+  get exercised before selection can retire them; variation (the raw material) is preserved.
+- **A champion of any niche is never demoted.** A procedure that wins one niche but loses
+  another is still the best at *something* — it is marked champion, not penalised. Selection
+  removes the also-rans, never the specialists.
+
+Net effect: each task niche converges on its fittest procedure over successive dreams, the
+also-rans fade, and `cognitive_bootstrap` can surface champions first — competence sharpening
+itself with no weight update and no human in the loop. The selection core
+(`compute_competition_verdicts`) is a pure function, unit-tested independently of any database.
+
 ## Implementation status & roadmap
 
 | Piece | Status |
@@ -161,6 +211,8 @@ the MCP, not just on APEX.
 | `record_procedure_outcome` (fitness signal) | ✓ **slice #3**: failure now DEMOTES (salience −0.15, asymmetric vs +0.1 success) and flags `prune_candidate` at the floor; dream's pruning phase retires flagged procedures. Real selection pressure |
 | `dream_run` `schema_formation` | ✓ **slice #1**: phase 3 now also clusters outcome-successful procedures (by `procedure_fitness`) and distils each into a `schematic` memory tagged `skill` + `dream_distilled`, with `derived_from` provenance and fitness-scaled salience |
 | `schematic` skill layer surfaced at boot | ✓ **slice #2**: `cognitive_bootstrap` now buckets recall hits into a dedicated `## Skills (distilled competence)` section (Schematic + `skill` tag), placed ahead of concrete procedures so the generalisation arrives first |
+| Fitness ledger (win/loss evidence base) | ✓ **slice #E1**: `record_procedure_outcome` writes `metadata.outcomes:{successes,failures}` — a real count-based record, additive to the salience/difficulty effects, so fitness no longer has to be inferred from salience alone |
+| Niche competition (relative selection) | ✓ **slice #E1**: new algorithmic `skill_competition` dream phase — procedures sharing a topical tag contend; the Wilson-fittest is tagged `skill_champion`, dominated rivals decay toward the prune floor. Novelty-exempt below 2 graded uses; a champion of any niche is never demoted |
 | Skill → identity promotion path | ✗ deliberate `propose_evolution` step, not yet conventionalized |
 
 ### Build slices (smallest first)
@@ -189,7 +241,30 @@ the MCP, not just on APEX.
    (b) conventionalize the schema → `soul.md` promotion path as an audited `propose_evolution`
    step with a rationale memory. These are proposals to surface to APEX, tracked separately.
 
-Then: land all three in standalone `CerebroCortex-RS` so the capability is generic.
+#### Beyond the foundation — the frontier
+
+The three slices above complete the *single-agent* Darwinian loop's foundation. The frontier
+extends it with genuinely new mechanisms:
+
+- **E1. Niche competition + fitness ledger.** ✓ **DONE.** `record_procedure_outcome` keeps a
+  `metadata.outcomes:{successes,failures}` ledger; a new algorithmic `skill_competition` dream
+  phase ranks same-niche procedures by their Wilson-lower-bound success rate, marks the
+  champion (`skill_champion`), and decays dominated rivals toward the prune floor. Novelty is
+  exempt below `COMPETITION_MIN_GRADED_USES` (2) graded uses; a champion of any niche is never
+  demoted. Pure selection core (`compute_competition_verdicts`) is unit-tested without a DB.
+  See the *Niche competition* section above.
+- **E2. Variation / mutation** (next). Dream proposes *variant* procedures (a refined version
+  of a high-difficulty procedure, or a merge of two partial ones) so competition has fresh
+  alternatives to select among, rather than only what the agent happened to store. Needs E1's
+  champion/niche notion to select the winners.
+- **E3. Cross-agent skill flow.** A Pro/GPU node distils a champion skill and propagates it to
+  the colony (`share_memory`/`send_message` over the mesh) so agents don't each re-evolve from
+  scratch — the "exo-evolution for any MCP consumer" thesis made concrete across the mesh.
+- **Champion-aware retrieval.** `find_relevant_procedures` / `cognitive_bootstrap` prefer
+  `skill_champion`-tagged procedures within a niche (small follow-up to E1).
+
+Then: land the foundation **and** the frontier mechanisms in standalone `CerebroCortex-RS`
+so the capability is generic (the two cerebro trees are parity — see the cross-repo mirror).
 
 ---
 
