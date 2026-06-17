@@ -1246,6 +1246,31 @@ fn spawn_agent_router(
                     // means stop. The in-flight turn's slot guard still fires on
                     // abort; with the queue now empty, the gate frees the slot.
                     gate.cancel(session);
+                    // The aborted turn never appended an assistant reply, so history
+                    // ends on a User message. Left as-is, the NEXT user_prompt makes
+                    // two consecutive User messages — which the model API rejects
+                    // (broken alternation) — and replay shows a prompt with no reply.
+                    // Append a synthetic assistant marker to restore alternation +
+                    // record the cancellation (only when a reply is actually missing;
+                    // a turn that wrote its assistant message before the cancel lands
+                    // ends on Assistant and is left untouched).
+                    let marker = {
+                        let mut hist = histories.lock().await;
+                        match hist.get_mut(&session) {
+                            Some(h) if cancel_marker_needed(h) => {
+                                let m = Message::Assistant {
+                                    content: vec![ContentBlock::Text { text: "⊘ turn cancelled".into() }],
+                                };
+                                h.push(m.clone());
+                                Some(m)
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(m) = marker {
+                        let store = Arc::clone(&session_store);
+                        tokio::spawn(async move { store.append(session, &m).await; });
+                    }
                 }
 
                 // ── tool registry updates ────────────────────────────────────
@@ -2392,6 +2417,16 @@ impl SessionTracker {
     }
 }
 
+/// After a `UserCancel`, a synthetic assistant marker is needed iff the session
+/// history ends on a `User` message — i.e. the aborted turn left no reply. Appending
+/// one keeps user/assistant strictly alternating (the model API rejects two
+/// consecutive user messages, which the next prompt would otherwise create) and gives
+/// replay something to show. A no-op when the last message is already an assistant
+/// reply (the turn finished writing before the cancel landed) or history is empty.
+fn cancel_marker_needed(history: &[Message]) -> bool {
+    matches!(history.last(), Some(Message::User { .. }))
+}
+
 async fn cascade_cancel(
     session:          SessionId,
     session_children: &Arc<Mutex<HashMap<SessionId, Vec<SessionId>>>>,
@@ -2527,6 +2562,20 @@ fn spawn_discovery_loop(
 mod tests {
     use super::*;
     use apexos_core::{ContentBlock, Message};
+
+    // ── cancel marker: restore user/assistant alternation after a cancel ──────
+    #[test]
+    fn cancel_marker_needed_only_when_history_ends_on_user() {
+        let user = Message::User { content: vec![ContentBlock::Text { text: "hi".into() }] };
+        let asst = Message::Assistant { content: vec![ContentBlock::Text { text: "ok".into() }] };
+        // Empty history → no marker (nothing to alternate against).
+        assert!(!cancel_marker_needed(&[]));
+        // Ends on a user prompt with no reply (the cancelled-mid-turn case) → marker.
+        assert!(cancel_marker_needed(&[user.clone()]));
+        assert!(cancel_marker_needed(&[asst.clone(), user.clone()]));
+        // Turn already wrote its assistant reply before the cancel landed → no marker.
+        assert!(!cancel_marker_needed(&[user.clone(), asst.clone()]));
+    }
 
     // ── TurnGate: per-session turn serialization (concurrent-UserPrompt race) ──
     #[test]
