@@ -19,6 +19,11 @@ const MAX_LLM_CALLS: usize = 20;
 const LLM_BUDGET_PATTERN: usize = 12;
 const LLM_BUDGET_SCHEMA: usize = 4;
 const LLM_BUDGET_REM: usize = 4;
+// Exo-evolution E2 (variation): LLM budget for the mutation phase that refines
+// struggling procedures into fresh variants. Shares the overall MAX_LLM_CALLS
+// cap with the other phases (gated on `calls_used`), so on a small brain the
+// hungrier pattern/schema passes are served first and variation uses the slack.
+const LLM_BUDGET_VARIATION: usize = 4;
 const CLUSTER_MIN_SIZE: usize = 3;
 const PRUNING_MIN_AGE_HOURS: i64 = 48;
 const PRUNING_MAX_SALIENCE: f32 = 0.3;
@@ -67,6 +72,16 @@ const COMPETITION_MARGIN: f32 = 0.15;
 // record improves before then.
 const COMPETITION_PENALTY: f32 = 0.1;
 
+// Exo-evolution E2 (variation/mutation, docs/evolutionary-layer.md). The dream
+// engine refines genuinely-underperforming procedures into fresh variants so
+// competition (E1) has new alternatives to select among, rather than only what
+// the agent happened to store. A procedure is a refinement candidate only if it
+// has actually FAILED (≥1 recorded failure) and its Wilson fitness is below this
+// ceiling — i.e. it underperforms in practice, not merely unproven. The variant
+// inherits the parent's niche tags and starts un-graded, so E1 treats it as
+// novelty (exempt) until it has been tried, then it competes on its own record.
+const REFINE_FITNESS_CEILING: f32 = 0.5;
+
 const SYSTEM_DREAM: &str =
     "You are the Dream Engine of CerebroCortex, a brain-analogous AI memory system. \
      You process memories during consolidation, extracting patterns, creating schemas, \
@@ -101,6 +116,20 @@ Distil them into ONE abstract, reusable skill — the general way this kind of t
 \nReturn ONLY valid JSON object. Example:\n\
 {\"content\": \"To debug async Rust, first confirm the runtime is multi-threaded, then trace each .await for a held lock or missing poll before suspecting the logic itself\", \
 \"tags\": [\"debugging\", \"async\", \"rust\"]}";
+
+const PROMPT_REFINE_PROCEDURE: &str = "This is a procedure the agent has tried on real tasks, \
+but it has been UNDERPERFORMING — it fails or underdelivers more often than it should.\n\
+\nProcedure:\n{procedure}\n\
+\nPropose ONE improved variant of it: keep what works, fix the most likely cause of failure, \
+and make it more reliable. It must be a concrete, actionable procedure for the SAME kind of \
+task — an improved how-to, not a critique of the original.\n\
+\nReturn JSON with:\n\
+- \"content\": The improved procedure (1-4 sentences, actionable guidance)\n\
+- \"tags\": Relevant topical tags (the task domain)\n\
+\nReturn ONLY valid JSON object. Example:\n\
+{\"content\": \"To restart a wedged service, first capture its last 50 log lines, stop it, \
+verify the port is released, then start and confirm readiness before declaring success\", \
+\"tags\": [\"ops\", \"service-restart\"]}";
 
 const PROMPT_REM_CONNECT: &str = "You are looking at two seemingly unrelated memories. \
 Find an unexpected but meaningful connection.\n\
@@ -200,6 +229,52 @@ fn competitive_fitness(node: &MemoryNode) -> Option<f32> {
         return None;
     }
     Some(wilson_lower_bound(s, f))
+}
+
+/// The `metadata.derived_from` provenance ids of a memory (the procedures/episodes
+/// it was distilled or mutated from), or empty if none.
+fn derived_from_ids(node: &MemoryNode) -> Vec<String> {
+    node.metadata.get("derived_from")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+/// True if some existing procedure is an UNGRADED variant of `parent_id` — a
+/// `dream_mutated` child deriving from it that has not yet been tried. Used so the
+/// variation phase never spawns a second untested variant of a parent before the
+/// first has earned an outcome (no untested-variant pile-up).
+fn has_pending_variant(procedures: &[MemoryNode], parent_id: &str) -> bool {
+    procedures.iter().any(|n| {
+        outcome_stats(n).is_none()
+            && n.tags.iter().any(|t| t == "dream_mutated")
+            && derived_from_ids(n).iter().any(|id| id == parent_id)
+    })
+}
+
+/// Indices of procedures worth refining (E2 variation), worst-fitness first.
+/// A candidate is a graded procedure that has actually failed (≥1 failure) and
+/// whose Wilson fitness is below `REFINE_FITNESS_CEILING` — genuinely
+/// underperforming — and that does not already have an untested variant awaiting
+/// trial. Pure (no I/O) so candidate selection is unit-testable. Sorting worst
+/// first means a limited LLM budget refines the most-struggling procedures.
+fn refine_candidates(procedures: &[MemoryNode]) -> Vec<usize> {
+    let mut scored: Vec<(usize, f32)> = procedures.iter().enumerate()
+        .filter_map(|(i, n)| {
+            let (s, f) = outcome_stats(n)?;
+            if f == 0 {
+                return None; // never failed → not struggling
+            }
+            let fit = wilson_lower_bound(s, f);
+            if fit >= REFINE_FITNESS_CEILING {
+                return None;
+            }
+            Some((i, fit))
+        })
+        .filter(|&(i, _)| !has_pending_variant(procedures, &procedures[i].id.0))
+        .collect();
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().map(|(i, _)| i).collect()
 }
 
 /// What the competition phase should do to one procedure this cycle.
@@ -334,8 +409,15 @@ impl DreamEngine {
             &scope, &cortex, &mut calls_used,
             effective_budget.min(LLM_BUDGET_SCHEMA), effective_budget,
         ).await;
+        // Variation/mutation (exo-evolution E2): refine struggling procedures into
+        // fresh variants so competition has new alternatives. LLM-assisted; shares
+        // the overall budget (served after the hungrier pattern/schema passes).
+        let pv = self.variation(
+            &scope, &cortex, &mut calls_used,
+            effective_budget.min(LLM_BUDGET_VARIATION), effective_budget,
+        ).await;
         let p4 = self.emotional_reprocessing(&scope, &cortex).await;
-        // Niche competition (exo-evolution): runs after distillation so champions
+        // Niche competition (exo-evolution E1): runs after distillation so champions
         // are marked, and BEFORE pruning so a rival demoted to the floor this
         // cycle can be retired the same cycle. Algorithmic — no LLM budget.
         let pc = self.skill_competition(&scope, &cortex).await;
@@ -345,7 +427,7 @@ impl DreamEngine {
             effective_budget.min(LLM_BUDGET_REM), effective_budget,
         ).await;
 
-        let phases: Vec<PhaseResult> = [p1, p2, p3, p4, pc, p5, p6]
+        let phases: Vec<PhaseResult> = [p1, p2, p3, pv, p4, pc, p5, p6]
             .into_iter()
             .map(|r| r.unwrap_or_else(|e| PhaseResult::failed(&e.to_string())))
             .collect();
@@ -796,6 +878,129 @@ impl DreamEngine {
             "Formed {} schemas from {} episodes; distilled {} skills from {} successful \
              procedure clusters (budget used: {}/{})",
             total_schemas, episodes.len(), total_skills, clusters_total, result.llm_calls, budget,
+        );
+        result.duration_secs = start.elapsed().as_secs_f64();
+        Ok(result)
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase: Variation / Mutation — LLM-assisted (exo-evolution E2)
+    //
+    // Generates fresh procedure variants so competition (E1) has new alternatives
+    // to select among. The refinement operator: take a genuinely-underperforming
+    // procedure (graded, ≥1 failure, Wilson fitness below REFINE_FITNESS_CEILING)
+    // and ask the LLM for an improved variant for the SAME task. The variant
+    // inherits the parent's topical (niche) tags + `dream_mutated`, links back via
+    // `derived_from`, and starts un-graded — so E1 treats it as novelty (exempt)
+    // until it has been tried, then it competes against the parent on its own
+    // record. Lose → mutate → re-compete is the variation→selection loop.
+    //
+    // Guards: only one untested variant per parent at a time (no pile-up), prefix
+    // dedup against existing procedures, and a bounded LLM budget (worst-fitness
+    // procedures refined first). Junk variants are self-correcting — if a variant
+    // underperforms it is demoted/pruned by selection, exactly like any procedure.
+    // -------------------------------------------------------------------------
+    async fn variation(
+        &self,
+        scope:          &VisibilityScope,
+        cortex:         &Arc<CerebroCortex>,
+        calls_used:     &mut usize,
+        budget:         usize,
+        overall_budget: usize,
+    ) -> Result<PhaseResult> {
+        let start = std::time::Instant::now();
+        let mut result = PhaseResult::new("variation");
+
+        let key = match &self.anthropic_key {
+            None => {
+                result.notes = "skipped: no ANTHROPIC_API_KEY".into();
+                result.duration_secs = start.elapsed().as_secs_f64();
+                return Ok(result);
+            }
+            Some(k) => k.clone(),
+        };
+
+        let procedures = cortex.storage.read().await.sqlite
+            .list_memories_scoped(scope, &ListFilter {
+                memory_type: Some(MemoryType::Procedural),
+                limit: 500,
+                ..Default::default()
+            })
+            .await?;
+
+        let candidates = refine_candidates(&procedures);
+        let candidates_total = candidates.len();
+        result.memories_processed = candidates_total;
+
+        let mut budget_remaining = budget;
+        let mut total_mutated = 0usize;
+
+        for idx in candidates {
+            if budget_remaining == 0 || *calls_used >= overall_budget { break; }
+            let parent = &procedures[idx];
+
+            let prompt = PROMPT_REFINE_PROCEDURE
+                .replace("{procedure}", truncate_chars(&parent.content, 400));
+            let resp = match llm_call(&key, SYSTEM_DREAM, &prompt).await {
+                Ok(r) => r,
+                Err(e) => { tracing::warn!("variation LLM call failed: {e}"); continue; }
+            };
+            *calls_used      += 1;
+            result.llm_calls += 1;
+            budget_remaining -= 1;
+
+            let variant = match parse_json_object(&resp) {
+                Some(v) => v,
+                None    => continue,
+            };
+            let content = variant["content"].as_str().unwrap_or("").trim();
+            if content.len() < 10 { continue; }
+
+            // Prefix dedup against existing procedures (incl. the parent itself, so
+            // a no-op "refinement" that just echoes the original is dropped).
+            let prefix = truncate_chars(content, 40);
+            if procedures.iter().any(|n| n.content.starts_with(prefix)) { continue; }
+
+            let llm_tags: Vec<String> = variant["tags"].as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            // Inherit the parent's topical tags so the variant lands in the SAME
+            // niche it must out-compete; add the mutation markers.
+            let parent_topical = parent.tags.iter()
+                .filter(|t| !is_structural_tag(t)).cloned();
+            let variant_tags = {
+                let mut t = vec!["procedure".to_string(), "dream_mutated".to_string()];
+                t.extend(parent_topical);
+                t.extend(llm_tags);
+                t.sort();
+                t.dedup();
+                t
+            };
+
+            let parent_id = parent.id.0.clone();
+            if let Ok(mut node) = cortex.remember(
+                content.to_string(),
+                Some(MemoryType::Procedural),
+                Some(variant_tags),
+                Some(0.7), // unproven — below the 0.8 store default and champions
+                scope.clone(),
+            ).await {
+                if let serde_json::Value::Object(ref mut map) = node.metadata {
+                    map.insert("derived_from".to_string(), json!([parent_id]));
+                } else {
+                    node.metadata = json!({ "derived_from": [parent_id] });
+                }
+                match cortex.storage.read().await.sqlite.update_memory(&node).await {
+                    Ok(_)  => total_mutated += 1,
+                    Err(e) => tracing::warn!("variation persist failed for {}: {e}", node.id.0),
+                }
+            }
+        }
+
+        result.procedures_mutated = total_mutated;
+        result.notes = format!(
+            "Refined {} of {} struggling procedures into variants (budget used: {}/{})",
+            total_mutated, candidates_total, result.llm_calls, budget,
         );
         result.duration_secs = start.elapsed().as_secs_f64();
         Ok(result)
@@ -1257,6 +1462,9 @@ pub struct PhaseResult {
     pub champions_marked:     usize,
     #[serde(default)]
     pub procedures_demoted:   usize,
+    /// Procedures refined into fresh variants by the variation phase (E2).
+    #[serde(default)]
+    pub procedures_mutated:   usize,
     pub procedures_extracted: usize,
     pub llm_calls:            usize,
     pub duration_secs:        f64,
@@ -1278,6 +1486,7 @@ impl PhaseResult {
             niches_contested:     0,
             champions_marked:     0,
             procedures_demoted:   0,
+            procedures_mutated:   0,
             procedures_extracted: 0,
             llm_calls:            0,
             duration_secs:        0.0,
@@ -1297,8 +1506,9 @@ impl PhaseResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_competition_verdicts, competitive_fitness, is_structural_tag, outcome_stats,
-        procedure_fitness, wilson_lower_bound, CompetitionAction, SKILL_MIN_FITNESS,
+        compute_competition_verdicts, competitive_fitness, has_pending_variant, is_structural_tag,
+        outcome_stats, procedure_fitness, refine_candidates, wilson_lower_bound, CompetitionAction,
+        SKILL_MIN_FITNESS,
     };
     use crate::config::FSRS_INITIAL_DIFFICULTY;
     use crate::models::MemoryNode;
@@ -1318,6 +1528,15 @@ mod tests {
         let mut n = MemoryNode::new("how I did X", MemoryType::Procedural);
         n.tags = tags.iter().map(|t| t.to_string()).collect();
         n.metadata = json!({ "outcomes": { "successes": successes, "failures": failures } });
+        n
+    }
+
+    /// An un-graded `dream_mutated` variant deriving from `parent_id` (no ledger),
+    /// as the variation phase would store it.
+    fn variant_of(parent_id: &str) -> MemoryNode {
+        let mut n = MemoryNode::new("a refined approach", MemoryType::Procedural);
+        n.tags = vec!["procedure".into(), "dream_mutated".into()];
+        n.metadata = json!({ "derived_from": [parent_id] });
         n
     }
 
@@ -1476,6 +1695,76 @@ mod tests {
         let v = compute_competition_verdicts(&procs);
         assert_eq!(v.niches_contested, 0);
         assert!(v.actions.iter().all(|a| *a == CompetitionAction::Leave));
+    }
+
+    // ---- exo-evolution E2: variation / mutation ----------------------------
+
+    #[test]
+    fn refine_targets_failing_low_fitness_procedures() {
+        let procs = vec![
+            graded_proc(&["deploy"], 1, 5),  // [0] fails often, low fitness → candidate
+            graded_proc(&["deploy"], 10, 0), // [1] never failed → not a candidate
+        ];
+        let c = refine_candidates(&procs);
+        assert_eq!(c, vec![0], "only the failing, low-fitness procedure is refined");
+    }
+
+    #[test]
+    fn refine_skips_ungraded_and_unfailed() {
+        let procs = vec![
+            MemoryNode::new("never graded", MemoryType::Procedural), // ungraded → skip
+            graded_proc(&["a"], 8, 0),                               // graded, no failures → skip
+        ];
+        assert!(refine_candidates(&procs).is_empty());
+    }
+
+    #[test]
+    fn refine_orders_worst_fitness_first() {
+        let procs = vec![
+            graded_proc(&["a"], 4, 4), // higher fitness of the two losers
+            graded_proc(&["b"], 0, 6), // rock bottom → must come first
+        ];
+        assert_eq!(refine_candidates(&procs), vec![1, 0], "most-struggling refined first");
+    }
+
+    #[test]
+    fn refine_skips_parent_with_untested_variant() {
+        // A struggling parent that already spawned an un-graded variant is skipped
+        // until that variant has been tried — no untested-variant pile-up.
+        let parent = graded_proc(&["deploy"], 1, 5);
+        let child  = variant_of(&parent.id.0);
+        let procs  = vec![parent, child];
+        assert!(refine_candidates(&procs).is_empty(),
+            "parent with a pending untested variant is not re-refined");
+    }
+
+    #[test]
+    fn refine_resumes_once_variant_is_graded() {
+        // Once the variant has an outcome, the parent is eligible again.
+        let parent = graded_proc(&["deploy"], 1, 5);
+        let mut child = variant_of(&parent.id.0);
+        child.metadata = json!({
+            "derived_from": [parent.id.0.clone()],
+            "outcomes": { "successes": 1, "failures": 0 }
+        });
+        let parent_idx_present = refine_candidates(&[parent, child]);
+        assert!(parent_idx_present.contains(&0),
+            "a graded variant no longer blocks re-refining the parent");
+    }
+
+    #[test]
+    fn has_pending_variant_only_counts_ungraded_children() {
+        let parent = graded_proc(&["deploy"], 1, 5);
+        let pid = parent.id.0.clone();
+        // ungraded child blocks
+        assert!(has_pending_variant(&[parent.clone(), variant_of(&pid)], &pid));
+        // a graded child does NOT block
+        let mut graded_child = variant_of(&pid);
+        graded_child.metadata = json!({
+            "derived_from": [pid.clone()],
+            "outcomes": { "successes": 2, "failures": 1 }
+        });
+        assert!(!has_pending_variant(&[parent, graded_child], &pid));
     }
 }
 
