@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use cerebro::{
+    config::PRUNE_CANDIDATE_SALIENCE,
     models::{AssociativeLink, MemoryNode},
     storage::ListFilter,
     types::{AgentId, LinkType, MemoryId, MemoryType, VisibilityScope},
@@ -11,12 +12,30 @@ use uuid::Uuid;
 
 use crate::tools;
 
-/// Evolutionary layer, slice #3: a procedure whose salience has decayed to (or
-/// below) this floor through repeated failure is tagged `prune_candidate` —
-/// selection pressure made concrete, so dream's pruning phase can retire it.
-/// Procedures start at salience 0.8; at −0.15 per failure this is reached after
-/// ~4 net failures, and any success clears the flag.
-const PRUNE_CANDIDATE_SALIENCE: f32 = 0.25;
+/// Append a graded outcome to a procedure's fitness ledger
+/// (`metadata.outcomes = {successes, failures}`) — the real win/loss evidence
+/// base the dream engine's niche competition ranks procedures on
+/// (docs/evolutionary-layer.md). This is *additive* to the salience/difficulty
+/// effects in `record_procedure_outcome`, which still drive ACT-R recall and the
+/// failure→`prune_candidate` path; the ledger is the count-based record that lets
+/// competition compute a confidence-aware (Wilson) success rate rather than infer
+/// fitness from salience alone.
+fn record_outcome_ledger(node: &mut MemoryNode, success: bool) {
+    if !node.metadata.is_object() {
+        node.metadata = json!({});
+    }
+    let map = node.metadata.as_object_mut().expect("metadata is an object");
+    let outcomes = map
+        .entry("outcomes")
+        .or_insert_with(|| json!({ "successes": 0, "failures": 0 }));
+    if !outcomes.is_object() {
+        *outcomes = json!({ "successes": 0, "failures": 0 });
+    }
+    let outcomes = outcomes.as_object_mut().expect("outcomes is an object");
+    let key = if success { "successes" } else { "failures" };
+    let cur = outcomes.get(key).and_then(Value::as_u64).unwrap_or(0);
+    outcomes.insert(key.to_string(), json!(cur + 1));
+}
 
 pub fn handle_initialize(req: &Value) -> Value {
     json!({
@@ -853,7 +872,11 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                     node.tags.push("prune_candidate".to_string());
                 }
             }
+            // Record the win/loss in the fitness ledger (additive — the evidence
+            // base for the dream engine's niche competition).
+            record_outcome_ledger(&mut node, success);
             storage.sqlite.update_memory(&node).await?;
+            let outcomes = node.metadata.get("outcomes").cloned().unwrap_or(json!({}));
             Ok(json!({
                 "status":          "ok",
                 "procedure_id":    procedure_id,
@@ -861,6 +884,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 "new_salience":    node.salience,
                 "new_difficulty":  node.strength.difficulty,
                 "prune_candidate": node.tags.iter().any(|t| t == "prune_candidate"),
+                "outcomes":        outcomes,
             }))
         }
 
@@ -1374,9 +1398,14 @@ mod tests {
         assert!(resp["error"].is_null(), "dream_run should not produce a protocol error: {}", resp["error"]);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         let result: Value = serde_json::from_str(text).unwrap();
-        // Report always has phases array (6 phases) and success field
+        // Report always has phases array (7 phases: the 6 classic + the exo-
+        // evolution skill_competition phase) and a success field.
         assert!(result["phases"].is_array(), "dream report should have phases: {result}");
-        assert_eq!(result["phases"].as_array().unwrap().len(), 6);
+        assert_eq!(result["phases"].as_array().unwrap().len(), 7);
+        let names: Vec<&str> = result["phases"].as_array().unwrap().iter()
+            .filter_map(|p| p["phase"].as_str()).collect();
+        assert!(names.contains(&"skill_competition"),
+            "dream report must include the niche-competition phase: {names:?}");
         assert!(result["success"].is_boolean());
     }
 
@@ -1497,6 +1526,41 @@ mod tests {
         let r = read(&dispatch_tool(outcome(true), Arc::clone(&brain)).await);
         assert!(!r["prune_candidate"].as_bool().unwrap(),
             "success must clear the prune_candidate flag");
+    }
+
+    #[tokio::test]
+    async fn record_procedure_outcome_builds_fitness_ledger() {
+        let (brain, _dir) = make_brain().await;
+
+        let store = json!({
+            "jsonrpc":"2.0","id":0,"method":"tools/call",
+            "params":{"name":"store_procedure","arguments":{
+                "content":"deploy by hot-swapping the single binary after systemctl stop",
+                "tags":["deploy"]
+            }}
+        });
+        let resp = dispatch_tool(store, Arc::clone(&brain)).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let id = serde_json::from_str::<Value>(text).unwrap()["id"].as_str().unwrap().to_string();
+
+        let outcome = |success: bool| json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"record_procedure_outcome","arguments":{
+                "procedure_id": id, "success": success
+            }}
+        });
+        let read = |resp: &Value| -> Value {
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+        };
+
+        // Two wins and a loss accumulate a 2/1 win-loss ledger in metadata.outcomes.
+        dispatch_tool(outcome(true), Arc::clone(&brain)).await;
+        dispatch_tool(outcome(true), Arc::clone(&brain)).await;
+        let r = read(&dispatch_tool(outcome(false), Arc::clone(&brain)).await);
+        assert_eq!(r["outcomes"]["successes"].as_u64().unwrap(), 2,
+            "two graded successes must be recorded");
+        assert_eq!(r["outcomes"]["failures"].as_u64().unwrap(), 1,
+            "one graded failure must be recorded");
     }
 
     #[tokio::test]

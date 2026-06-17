@@ -63,6 +63,17 @@ pub const LINK_DECAY_HALFLIFE_DAYS: f32  = 30.0;
 pub const DREAM_MAX_LLM_CALLS: usize = 20;
 
 // ---------------------------------------------------------------------------
+// Exo-evolution — competence selection (docs/evolutionary-layer.md)
+// ---------------------------------------------------------------------------
+/// A procedure whose salience decays to (or below) this floor is tagged
+/// `prune_candidate` — selection pressure made concrete, so dream's pruning
+/// phase can retire it. Reached by repeated failure (`record_procedure_outcome`,
+/// −0.15 each) or by repeatedly losing a niche competition (the new
+/// `skill_competition` dream phase). Shared by `cerebro-mcp`'s dispatch and the
+/// dream engine so the demote floor can't drift between the two writers.
+pub const PRUNE_CANDIDATE_SALIENCE: f32 = 0.25;
+
+// ---------------------------------------------------------------------------
 // Runtime config (from env)
 // ---------------------------------------------------------------------------
 #[derive(Debug, Clone)]

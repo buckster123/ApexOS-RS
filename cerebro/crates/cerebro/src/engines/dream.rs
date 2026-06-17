@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    config::FSRS_INITIAL_DIFFICULTY,
+    config::{FSRS_INITIAL_DIFFICULTY, PRUNE_CANDIDATE_SALIENCE},
     cortex::CerebroCortex,
     models::{AssociativeLink, MemoryNode},
     storage::ListFilter,
@@ -41,6 +41,31 @@ const SKILL_MIN_FITNESS: f32 = 0.8;
 // Python config.py EPISODE_AUTO_CLOSE_HOURS. Used by the pre-phase cleanup
 // in run_cycle to auto-close stale open episodes.
 const EPISODE_AUTO_CLOSE_HOURS: i64 = 24;
+
+// Exo-evolution: niche competition (docs/evolutionary-layer.md). Procedures that
+// address the same task — share a topical tag — are rivals competing for one
+// niche. The `skill_competition` phase marks the fittest the niche CHAMPION and
+// makes clearly-dominated rivals decay toward the prune floor, so a subtly-worse
+// procedure can no longer survive indefinitely just because it is never *failed*:
+// relative inferiority now demotes, not only absolute failure.
+//
+// A niche needs at least this many ELIGIBLE contenders to hold a contest.
+const COMPETITION_MIN_NICHE: usize = 2;
+// A procedure must have at least this many GRADED outcomes (ledger
+// successes+failures) to win or lose a contest. Below it the procedure is exempt
+// — it cannot be killed for losing a competition it has barely entered. This
+// protects novelty: a fresh procedure gets exercised before selection can retire
+// it (variation is the raw material the loop selects over).
+const COMPETITION_MIN_GRADED_USES: u32 = 2;
+// The champion's confidence-aware fitness (Wilson lower bound) must lead a rival
+// by more than this for the rival to count as dominated. A near-tie is not a
+// loss — only a clear fitness gap demotes.
+const COMPETITION_MARGIN: f32 = 0.15;
+// Bounded salience decay applied to a dominated rival per losing cycle. Gradual
+// by design (not a one-shot kill): a 0.8-salience loser needs several losing
+// dreams to reach the 0.25 prune floor, leaving room to recover if its win/loss
+// record improves before then.
+const COMPETITION_PENALTY: f32 = 0.1;
 
 const SYSTEM_DREAM: &str =
     "You are the Dream Engine of CerebroCortex, a brain-analogous AI memory system. \
@@ -114,13 +139,149 @@ fn procedure_fitness(node: &MemoryNode) -> f32 {
 }
 
 /// True for tags that mark a memory's *role* rather than its *topic*. Excluded
-/// when clustering procedures into skills so clusters form on subject matter
-/// (e.g. "slint", "async") not on bookkeeping markers.
+/// when clustering procedures (into skills, and into competition niches) so
+/// clusters form on subject matter (e.g. "slint", "async") not on bookkeeping
+/// markers.
 fn is_structural_tag(tag: &str) -> bool {
     matches!(
         tag,
-        "procedure" | "dream_extracted" | "schema" | "skill" | "dream_formed" | "dream_distilled"
+        "procedure"
+            | "dream_extracted"
+            | "schema"
+            | "skill"
+            | "dream_formed"
+            | "dream_distilled"
+            | "skill_champion"
+            | "prune_candidate"
     ) || tag.starts_with("support_count:")
+}
+
+/// Read a procedure's win/loss ledger (`metadata.outcomes`, written by
+/// `record_procedure_outcome`) as `(successes, failures)`. `None` if the
+/// procedure has never been graded — the ungraded case the competition phase
+/// treats as exempt.
+fn outcome_stats(node: &MemoryNode) -> Option<(u32, u32)> {
+    let o = node.metadata.get("outcomes")?;
+    let s = o.get("successes").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let f = o.get("failures").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    if s + f == 0 {
+        None
+    } else {
+        Some((s, f))
+    }
+}
+
+/// 95% Wilson score interval lower bound of the success proportion for `s`
+/// successes in `n = s + f` graded outcomes. Confidence-aware: a perfect 1/1
+/// (LB ≈ 0.21) scores well below a proven 8/10 (LB ≈ 0.49), so a single lucky
+/// success cannot dominate a niche over a procedure with a real track record.
+/// Returns 0.0 for `n == 0`.
+fn wilson_lower_bound(successes: u32, failures: u32) -> f32 {
+    let n = (successes + failures) as f32;
+    if n <= 0.0 {
+        return 0.0;
+    }
+    const Z: f32 = 1.96; // 95% confidence
+    let z2 = Z * Z;
+    let phat = successes as f32 / n;
+    let denom = 1.0 + z2 / n;
+    let centre = phat + z2 / (2.0 * n);
+    let margin = Z * ((phat * (1.0 - phat) + z2 / (4.0 * n)) / n).sqrt();
+    ((centre - margin) / denom).clamp(0.0, 1.0)
+}
+
+/// Confidence-aware fitness used to rank procedures within a competition niche.
+/// `Some(wilson_lower_bound)` once a procedure has at least
+/// `COMPETITION_MIN_GRADED_USES` graded outcomes; `None` (exempt — neither
+/// champion nor demotable) below that bar, which is how novelty is protected.
+fn competitive_fitness(node: &MemoryNode) -> Option<f32> {
+    let (s, f) = outcome_stats(node)?;
+    if s + f < COMPETITION_MIN_GRADED_USES {
+        return None;
+    }
+    Some(wilson_lower_bound(s, f))
+}
+
+/// What the competition phase should do to one procedure this cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompetitionAction {
+    /// Champion of ≥1 niche — mark `skill_champion`. A champion of any niche is
+    /// never demoted, even if it loses another (it is the best at *something*).
+    Champion,
+    /// Dominated in ≥1 niche and champion of none — selected against (decay +
+    /// prune-flag at the floor).
+    Demote,
+    /// Neither — left alone (any stale `skill_champion` marker is cleared).
+    Leave,
+}
+
+/// Result of one competition round, indexed parallel to the input procedure
+/// slice, plus the contest count for the phase report.
+struct CompetitionVerdicts {
+    actions:          Vec<CompetitionAction>,
+    niches_contested: usize,
+}
+
+/// Pure core of the competition phase: from the procedure set, decide each
+/// procedure's action this cycle. Separated from I/O so the full selection rule
+/// (including "champion of any niche is never demoted") is unit-testable without a
+/// database. A procedure is a contender in a niche only when `competitive_fitness`
+/// is `Some` (graded past the novelty bar); ungraded procedures never appear in a
+/// niche, so they can neither win nor be dominated → `Leave`.
+fn compute_competition_verdicts(procedures: &[MemoryNode]) -> CompetitionVerdicts {
+    let fitness: Vec<Option<f32>> = procedures.iter().map(competitive_fitness).collect();
+
+    // Niche = topical tag → indices of the eligible procedures carrying it.
+    let mut niches: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, node) in procedures.iter().enumerate() {
+        if fitness[i].is_none() { continue; }
+        for tag in &node.tags {
+            if is_structural_tag(tag) { continue; }
+            niches.entry(tag.clone()).or_default().push(i);
+        }
+    }
+
+    let mut won_any   = vec![false; procedures.len()];
+    let mut dominated = vec![false; procedures.len()];
+    let mut niches_contested = 0usize;
+
+    for members in niches.values() {
+        if members.len() < COMPETITION_MIN_NICHE { continue; }
+        niches_contested += 1;
+
+        // Champion = highest fitness in the niche (ties keep the first seen).
+        let champion = *members.iter()
+            .max_by(|&&a, &&b| {
+                fitness[a].unwrap()
+                    .partial_cmp(&fitness[b].unwrap())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap();
+        won_any[champion] = true;
+
+        let champ_fit = fitness[champion].unwrap();
+        for &idx in members {
+            if idx == champion { continue; }
+            if champ_fit - fitness[idx].unwrap() > COMPETITION_MARGIN {
+                dominated[idx] = true;
+            }
+        }
+    }
+
+    // Champion wins over Demote: being best at one thing beats losing another.
+    let actions = (0..procedures.len())
+        .map(|i| {
+            if won_any[i] {
+                CompetitionAction::Champion
+            } else if dominated[i] {
+                CompetitionAction::Demote
+            } else {
+                CompetitionAction::Leave
+            }
+        })
+        .collect();
+
+    CompetitionVerdicts { actions, niches_contested }
 }
 
 // ---------------------------------------------------------------------------
@@ -174,13 +335,17 @@ impl DreamEngine {
             effective_budget.min(LLM_BUDGET_SCHEMA), effective_budget,
         ).await;
         let p4 = self.emotional_reprocessing(&scope, &cortex).await;
+        // Niche competition (exo-evolution): runs after distillation so champions
+        // are marked, and BEFORE pruning so a rival demoted to the floor this
+        // cycle can be retired the same cycle. Algorithmic — no LLM budget.
+        let pc = self.skill_competition(&scope, &cortex).await;
         let p5 = self.pruning(&scope, &cortex).await;
         let p6 = self.rem_recombination(
             &scope, &cortex, &mut calls_used,
             effective_budget.min(LLM_BUDGET_REM), effective_budget,
         ).await;
 
-        let phases: Vec<PhaseResult> = [p1, p2, p3, p4, p5, p6]
+        let phases: Vec<PhaseResult> = [p1, p2, p3, p4, pc, p5, p6]
             .into_iter()
             .map(|r| r.unwrap_or_else(|e| PhaseResult::failed(&e.to_string())))
             .collect();
@@ -683,6 +848,108 @@ impl DreamEngine {
     }
 
     // -------------------------------------------------------------------------
+    // Phase: Skill Competition — algorithmic (exo-evolution)
+    //
+    // Procedures sharing a topical tag compete for that niche. The fittest
+    // (confidence-aware Wilson lower bound of its win/loss ledger) is marked the
+    // niche CHAMPION (`skill_champion` tag); rivals trailing the champion by more
+    // than COMPETITION_MARGIN are demoted (bounded salience decay + difficulty
+    // bump), so a persistent loser drifts to the prune floor and is retired by the
+    // pruning phase. This is relative inferiority as selection pressure — the
+    // complement to slice #3's absolute-failure demotion: a subtly-worse procedure
+    // can no longer survive forever simply because it is rarely *failed*.
+    //
+    // Novelty is protected: a procedure below COMPETITION_MIN_GRADED_USES graded
+    // outcomes is exempt (`competitive_fitness` → None) and neither wins nor loses,
+    // so a fresh procedure is exercised before selection can retire it. A procedure
+    // that is champion of ANY niche is never demoted, even if it loses another.
+    // -------------------------------------------------------------------------
+    async fn skill_competition(
+        &self,
+        scope:  &VisibilityScope,
+        cortex: &Arc<CerebroCortex>,
+    ) -> Result<PhaseResult> {
+        let start = std::time::Instant::now();
+        let mut result = PhaseResult::new("skill_competition");
+
+        let procedures = cortex.storage.read().await.sqlite
+            .list_memories_scoped(scope, &ListFilter {
+                memory_type: Some(MemoryType::Procedural),
+                limit: 500,
+                ..Default::default()
+            })
+            .await?;
+        result.memories_processed = procedures.len();
+
+        let CompetitionVerdicts { actions, niches_contested } =
+            compute_competition_verdicts(&procedures);
+
+        // Apply verdicts: one DB write per node that actually changed, and at most
+        // one penalty per node per cycle regardless of how many niches it lost
+        // (bounded, predictable decay).
+        let mut champions_marked   = 0usize;
+        let mut procedures_demoted = 0usize;
+
+        for (mut node, action) in procedures.into_iter().zip(actions) {
+            let has_champion_tag = node.tags.iter().any(|t| t == "skill_champion");
+            let mut changed = false;
+
+            match action {
+                CompetitionAction::Champion => {
+                    if !has_champion_tag {
+                        node.tags.push("skill_champion".to_string());
+                        changed = true;
+                    }
+                    champions_marked += 1;
+                }
+                CompetitionAction::Demote => {
+                    // No longer champion → drop the stale marker, then select
+                    // against it: bounded decay + a difficulty nudge, flagged for
+                    // pruning once it reaches the floor.
+                    if has_champion_tag {
+                        node.tags.retain(|t| t != "skill_champion");
+                    }
+                    node.salience = (node.salience - COMPETITION_PENALTY).max(0.0);
+                    node.strength.difficulty = (node.strength.difficulty + 0.3).min(10.0);
+                    if node.salience <= PRUNE_CANDIDATE_SALIENCE
+                        && !node.tags.iter().any(|t| t == "prune_candidate")
+                    {
+                        node.tags.push("prune_candidate".to_string());
+                    }
+                    procedures_demoted += 1;
+                    changed = true;
+                }
+                CompetitionAction::Leave => {
+                    // Keep the champion marker honest — clear it if this procedure
+                    // is no longer champion of any niche.
+                    if has_champion_tag {
+                        node.tags.retain(|t| t != "skill_champion");
+                        changed = true;
+                    }
+                }
+            }
+
+            if changed {
+                if let Err(e) = cortex.storage.read().await.sqlite
+                    .update_memory(&node).await
+                {
+                    tracing::warn!("skill_competition persist failed for {}: {e}", node.id.0);
+                }
+            }
+        }
+
+        result.niches_contested   = niches_contested;
+        result.champions_marked   = champions_marked;
+        result.procedures_demoted = procedures_demoted;
+        result.notes = format!(
+            "Contested {} niches: marked {} champions, demoted {} dominated procedures",
+            niches_contested, champions_marked, procedures_demoted,
+        );
+        result.duration_secs = start.elapsed().as_secs_f64();
+        Ok(result)
+    }
+
+    // -------------------------------------------------------------------------
     // Phase 5: Pruning — algorithmic
     // Soft-delete two classes of stale memory:
     //   A) isolated, low-salience sensory-layer memories (original rule)
@@ -982,6 +1249,14 @@ pub struct PhaseResult {
     /// (which lack the field) deserialisable.
     #[serde(default)]
     pub skills_distilled:     usize,
+    /// Niche-competition counters (exo-evolution `skill_competition` phase).
+    /// `#[serde(default)]` keeps older persisted reports deserialisable.
+    #[serde(default)]
+    pub niches_contested:     usize,
+    #[serde(default)]
+    pub champions_marked:     usize,
+    #[serde(default)]
+    pub procedures_demoted:   usize,
     pub procedures_extracted: usize,
     pub llm_calls:            usize,
     pub duration_secs:        f64,
@@ -1000,6 +1275,9 @@ impl PhaseResult {
             memories_pruned:      0,
             schemas_extracted:    0,
             skills_distilled:     0,
+            niches_contested:     0,
+            champions_marked:     0,
+            procedures_demoted:   0,
             procedures_extracted: 0,
             llm_calls:            0,
             duration_secs:        0.0,
@@ -1018,15 +1296,28 @@ impl PhaseResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_structural_tag, procedure_fitness, SKILL_MIN_FITNESS};
+    use super::{
+        compute_competition_verdicts, competitive_fitness, is_structural_tag, outcome_stats,
+        procedure_fitness, wilson_lower_bound, CompetitionAction, SKILL_MIN_FITNESS,
+    };
     use crate::config::FSRS_INITIAL_DIFFICULTY;
     use crate::models::MemoryNode;
     use crate::types::MemoryType;
+    use serde_json::json;
 
     fn proc(salience: f32, difficulty: f32) -> MemoryNode {
         let mut n = MemoryNode::new("how I did X", MemoryType::Procedural);
         n.salience = salience;
         n.strength.difficulty = difficulty;
+        n
+    }
+
+    /// A procedure carrying `tags` with a win/loss ledger of `successes`/`failures`,
+    /// as `record_procedure_outcome` would write it.
+    fn graded_proc(tags: &[&str], successes: u32, failures: u32) -> MemoryNode {
+        let mut n = MemoryNode::new("how I did X", MemoryType::Procedural);
+        n.tags = tags.iter().map(|t| t.to_string()).collect();
+        n.metadata = json!({ "outcomes": { "successes": successes, "failures": failures } });
         n
     }
 
@@ -1061,12 +1352,130 @@ mod tests {
 
     #[test]
     fn structural_tags_excluded_topical_kept() {
-        for t in ["procedure", "skill", "schema", "dream_distilled", "support_count:3"] {
+        for t in [
+            "procedure", "skill", "schema", "dream_distilled", "support_count:3",
+            "skill_champion", "prune_candidate",
+        ] {
             assert!(is_structural_tag(t), "{t} should be structural");
         }
         for t in ["slint", "async", "debugging", "rust"] {
             assert!(!is_structural_tag(t), "{t} should be topical");
         }
+    }
+
+    // ---- exo-evolution: fitness ledger + niche competition ------------------
+
+    #[test]
+    fn wilson_zero_outcomes_is_zero() {
+        assert_eq!(wilson_lower_bound(0, 0), 0.0);
+    }
+
+    #[test]
+    fn wilson_penalises_small_samples() {
+        // a perfect 1/1 must score below a proven 8/2 — confidence, not just rate
+        assert!(wilson_lower_bound(1, 0) < wilson_lower_bound(8, 2));
+    }
+
+    #[test]
+    fn wilson_rewards_more_evidence_at_equal_rate() {
+        // identical 100% success rate, more trials → strictly higher lower bound
+        assert!(wilson_lower_bound(10, 0) > wilson_lower_bound(2, 0));
+    }
+
+    #[test]
+    fn wilson_failures_lower_the_score() {
+        assert!(wilson_lower_bound(5, 5) < wilson_lower_bound(10, 0));
+    }
+
+    #[test]
+    fn ungraded_procedure_has_no_ledger_and_no_fitness() {
+        let n = MemoryNode::new("x", MemoryType::Procedural); // metadata = Null
+        assert!(outcome_stats(&n).is_none());
+        assert!(competitive_fitness(&n).is_none());
+    }
+
+    #[test]
+    fn one_graded_use_is_below_the_novelty_bar() {
+        // COMPETITION_MIN_GRADED_USES = 2: a single outcome is read but exempt
+        let n = graded_proc(&["slint"], 1, 0);
+        assert_eq!(outcome_stats(&n), Some((1, 0)));
+        assert!(competitive_fitness(&n).is_none(), "1 use is below the novelty bar");
+    }
+
+    #[test]
+    fn two_graded_uses_clear_the_novelty_bar() {
+        assert!(competitive_fitness(&graded_proc(&["slint"], 2, 0)).is_some());
+    }
+
+    #[test]
+    fn champion_wins_and_clear_loser_is_demoted() {
+        let procs = vec![
+            graded_proc(&["deploy"], 10, 0), // strong track record
+            graded_proc(&["deploy"], 1, 9),  // graded loser, far behind
+        ];
+        let v = compute_competition_verdicts(&procs);
+        assert_eq!(v.niches_contested, 1);
+        assert_eq!(v.actions[0], CompetitionAction::Champion);
+        assert_eq!(v.actions[1], CompetitionAction::Demote);
+    }
+
+    #[test]
+    fn ungraded_rival_is_protected_and_makes_no_contest() {
+        // A fresh procedure (1 use, below the bar) shares a niche with a strong
+        // champion. It is exempt, so the niche has only ONE eligible contender and
+        // holds no contest — novelty is never demoted for losing.
+        let procs = vec![
+            graded_proc(&["deploy"], 10, 0),
+            graded_proc(&["deploy"], 1, 0), // below novelty bar
+        ];
+        let v = compute_competition_verdicts(&procs);
+        assert_eq!(v.niches_contested, 0, "only one eligible contender → no contest");
+        assert_eq!(v.actions[0], CompetitionAction::Leave);
+        assert_eq!(v.actions[1], CompetitionAction::Leave);
+    }
+
+    #[test]
+    fn near_tie_does_not_demote() {
+        // both strong and within COMPETITION_MARGIN → a champion is marked but the
+        // runner-up is left alone (a near-tie is not a loss).
+        let procs = vec![graded_proc(&["async"], 10, 0), graded_proc(&["async"], 9, 1)];
+        let v = compute_competition_verdicts(&procs);
+        assert_eq!(v.niches_contested, 1);
+        assert!(v.actions.contains(&CompetitionAction::Champion));
+        assert!(!v.actions.contains(&CompetitionAction::Demote), "within-margin runner-up is safe");
+    }
+
+    #[test]
+    fn champion_of_one_niche_survives_losing_another() {
+        // proc 0 champions niche "a" but is dominated in niche "b"; being best at
+        // something must outrank losing elsewhere → Champion, never Demote.
+        let procs = vec![
+            graded_proc(&["a", "b"], 7, 3), // champions "a", weak in "b"
+            graded_proc(&["a"], 1, 9),      // clear loser in "a"
+            graded_proc(&["b"], 20, 0),     // champions "b"
+        ];
+        let v = compute_competition_verdicts(&procs);
+        assert_eq!(v.niches_contested, 2);
+        assert_eq!(v.actions[0], CompetitionAction::Champion);
+        assert_eq!(v.actions[1], CompetitionAction::Demote);
+        assert_eq!(v.actions[2], CompetitionAction::Champion);
+    }
+
+    #[test]
+    fn single_procedure_niche_holds_no_contest() {
+        let v = compute_competition_verdicts(&[graded_proc(&["solo"], 5, 0)]);
+        assert_eq!(v.niches_contested, 0);
+        assert_eq!(v.actions[0], CompetitionAction::Leave);
+    }
+
+    #[test]
+    fn structural_tags_alone_form_no_niche() {
+        // Sharing only the structural "procedure" marker (no topical tag) is not a
+        // niche — competition must form on subject matter, not bookkeeping.
+        let procs = vec![graded_proc(&["procedure"], 10, 0), graded_proc(&["procedure"], 1, 9)];
+        let v = compute_competition_verdicts(&procs);
+        assert_eq!(v.niches_contested, 0);
+        assert!(v.actions.iter().all(|a| *a == CompetitionAction::Leave));
     }
 }
 
