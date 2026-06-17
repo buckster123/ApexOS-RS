@@ -30,6 +30,7 @@ export component AppWindow inherits Window {
     in-out property <string>         status: "Connecting…";
     in-out property <bool>           agent-busy: false;
     in-out property <SysStats>       sys-stats;
+    in-out property <image>          thermal-image;   // MLX90640 ironbow heatmap (Rust-built)
     in-out property <[SessionItem]>  sessions;
     in-out property <int>            current-session-id: 0;
     in-out property <int>            current-view: 0;   // 0=chat 1=system 2=sensor 3=sessions 4=settings (Focus mode)
@@ -516,6 +517,7 @@ export component AppWindow inherits Window {
                     if root.current-view == 2: SensorView {
                         vertical-stretch: 1;
                         stats: root.sys-stats;
+                        thermal-image: root.thermal-image;
                     }
                     if root.current-view == 3: SessionView {
                         vertical-stretch: 1;

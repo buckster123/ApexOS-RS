@@ -15,6 +15,9 @@ export component SensorView {
     min-height: 0px;
 
     in property <SysStats> stats;
+    // 32×24 ironbow heatmap built in Rust from the MLX90640 frame (GET
+    // /api/thermal/frame); empty image until the first frame arrives.
+    in property <image> thermal-image;
 
     // IAQ colour (universal semantic scale)
     property <color> iaq-color:
@@ -270,6 +273,35 @@ export component SensorView {
                         Text { text: "MAX"; color: Palette.text-dim; font-size: 9px; letter-spacing: 1.5px; horizontal-alignment: center; }
                         Text { text: round(root.stats.thermal-max-c) + "°"; color: #ef4444; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
                     }
+                }
+            }
+
+            Rectangle { height: 20px; }
+
+            // ── 32×24 ironbow heatmap (MLX90640) ───────────────────────────
+            Text {
+                text: "HEATMAP";
+                color: Palette.text-dim;
+                font-size: 9px;
+                letter-spacing: 1.5px;
+            }
+
+            Rectangle { height: 8px; }
+
+            Rectangle {
+                height: 192px;                 // 4:3 source → contain keeps aspect
+                border-radius: Palette.radius;
+                background: #000;
+                border-width: 1px;
+                border-color: Palette.border-hi;
+                clip: true;
+
+                Image {
+                    source: root.thermal-image;
+                    width: parent.width;
+                    height: parent.height;
+                    image-fit: contain;
+                    image-rendering: pixelated;   // honest 32×24 blocks, no blur
                 }
             }
 
