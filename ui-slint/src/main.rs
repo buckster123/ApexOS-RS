@@ -1278,7 +1278,27 @@ fn ws_to_http(ws_url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::ws_to_http;
+    use super::{ws_to_http, ironbow, build_thermal_image};
+
+    #[test]
+    fn ironbow_spans_black_to_white() {
+        assert_eq!(ironbow(0.0), (0, 0, 0));         // coldest → black
+        assert_eq!(ironbow(1.0), (255, 255, 255));   // hottest → white
+        assert_eq!(ironbow(-5.0), (0, 0, 0));        // clamped
+        assert_eq!(ironbow(9.0), (255, 255, 255));   // clamped
+        let (r, g, b) = ironbow(0.55);               // mid → warm (red-ish, non-grey)
+        assert!(r > g && r > b);
+    }
+
+    #[test]
+    fn build_thermal_image_is_32x24_and_ranges() {
+        // Too-short frame → None.
+        assert!(build_thermal_image(&[20.0; 100]).is_none());
+        // A real-size frame yields a 32×24 image; uniform input doesn't panic on /0 range.
+        let img = build_thermal_image(&[25.0_f32; 768]).expect("image");
+        assert_eq!(img.size().width, 32);
+        assert_eq!(img.size().height, 24);
+    }
 
     #[test]
     fn rest_base_strips_token_query_and_ws_suffix() {
@@ -1523,6 +1543,72 @@ async fn fetch_sys_stats(client: &reqwest::Client, base_url: &str) -> Option<(f3
     let loadavg:  f32 = lines.get(3)?.trim().parse().ok()?;
     let cpu_pct = (loadavg / nproc * 100.0).min(100.0);
     Some((cpu_pct, ram_pct, disk_pct))
+}
+
+// ── Thermal heatmap (MLX90640) ──────────────────────────────────────────────
+
+/// Ironbow thermal palette: black → purple → magenta → red → orange → yellow →
+/// white, piecewise-linear over the stops below.
+fn ironbow(t: f32) -> (u8, u8, u8) {
+    const STOPS: [(f32, f32, f32, f32); 7] = [
+        (0.00,   0.0,   0.0,   0.0),
+        (0.15,  40.0,   0.0,  80.0),
+        (0.35, 140.0,   0.0, 120.0),
+        (0.55, 220.0,  40.0,  40.0),
+        (0.75, 255.0, 140.0,   0.0),
+        (0.90, 255.0, 230.0,  60.0),
+        (1.00, 255.0, 255.0, 255.0),
+    ];
+    let t = t.clamp(0.0, 1.0);
+    for w in STOPS.windows(2) {
+        let (t0, r0, g0, b0) = w[0];
+        let (t1, r1, g1, b1) = w[1];
+        if t <= t1 {
+            let f = if (t1 - t0).abs() < 1e-6 { 0.0 } else { (t - t0) / (t1 - t0) };
+            return ((r0 + (r1 - r0) * f) as u8, (g0 + (g1 - g0) * f) as u8, (b0 + (b1 - b0) * f) as u8);
+        }
+    }
+    (255, 255, 255)
+}
+
+/// Build a 32×24 ironbow image from an MLX90640 frame (≥768 °C floats, row-major),
+/// auto-ranged min→max. None if the frame is too short.
+fn build_thermal_image(frame: &[f32]) -> Option<slint::Image> {
+    const W: usize = 32;
+    const H: usize = 24;
+    if frame.len() < W * H {
+        return None;
+    }
+    let (min, max) = frame.iter().take(W * H)
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let range = (max - min).max(0.1);
+    let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(W as u32, H as u32);
+    let px = buf.make_mut_slice();
+    for (i, &v) in frame.iter().take(W * H).enumerate() {
+        let (r, g, b) = ironbow((v - min) / range);
+        px[i] = slint::Rgba8Pixel { r, g, b, a: 255 };
+    }
+    Some(slint::Image::from_rgba8(buf))
+}
+
+/// GET /api/thermal/frame → the SensorHead's raw MLX90640 grid (768 °C floats).
+/// None on any non-sensor node / dashboard-down (the endpoint 503s with an empty frame).
+async fn fetch_thermal_frame(client: &reqwest::Client, base_url: &str) -> Option<Vec<f32>> {
+    let resp = client
+        .get(format!("{base_url}/api/thermal/frame"))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: Value = resp.json().await.ok()?;
+    let arr = body["frame"].as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    Some(arr.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect())
 }
 
 // ── Tier-A parity app fetchers ──────────────────────────────────────────────
@@ -2383,6 +2469,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .ok();
             }
+        }
+    });
+
+    // ── Thermal heatmap polling (adaptive cadence) ───────────────────────────
+    // The sensor_reading WS events carry only min/max/mean, so fetch the full 32×24
+    // grid from /api/thermal/frame and build an ironbow image (on the UI thread —
+    // the Vec<f32> is Send, the slint::Image isn't). Polls fast (2s) while a sensor
+    // answers, backs off to 30s otherwise so a non-sensor node barely touches it.
+    let ui_weak_therm   = ui.as_weak();
+    let client_therm    = Arc::clone(&http_client);
+    let http_base_therm = http_base.clone();
+    rt.spawn(async move {
+        loop {
+            let frame = fetch_thermal_frame(&client_therm, &http_base_therm).await;
+            let had_frame = frame.as_ref().is_some_and(|f| f.len() >= 768);
+            if let Some(frame) = frame {
+                let w = ui_weak_therm.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = w.upgrade() {
+                        if let Some(img) = build_thermal_image(&frame) {
+                            ui.set_thermal_image(img);
+                        }
+                    }
+                })
+                .ok();
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(if had_frame { 2 } else { 30 })).await;
         }
     });
 

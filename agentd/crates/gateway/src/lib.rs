@@ -185,6 +185,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/keys",        get(get_keys_handler).post(set_keys_handler))
         .route("/api/model",       get(get_model_handler).post(set_model_handler))
         .route("/api/models",      get(get_models_handler))
+        .route("/api/thermal/frame", get(thermal_frame_handler))
         .route("/api/backend",     get(get_backend_handler).post(set_backend_handler))
         .route("/api/policy",         post(set_policy_handler))
         .route("/api/policy/rules",   get(get_policy_rules_handler))
@@ -707,6 +708,33 @@ async fn get_models_handler(State(state): State<GatewayState>) -> impl IntoRespo
         "current": current,
         "models": [{ "id": current, "name": current }],
     }))
+}
+
+/// GET /api/thermal/frame — proxy the SensorHead dashboard's raw 32×24 thermal grid
+/// (`/api/thermal/data` → `{"frame":[768 floats °C], ...}`) so the UI can render a
+/// heatmap. The sensor_reading WS events carry only min/max/mean, not the full grid,
+/// so the UI fetches this on demand (only while the Sensors view is open). SensorHead
+/// reads the MLX90640 over I2C; we just relay its JSON. Graceful 503 + empty frame
+/// when there's no SensorHead (non-sensor node, or dashboard down).
+async fn thermal_frame_handler() -> impl IntoResponse {
+    let base = std::env::var("SENSORHEAD_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+    let url  = format!("{}/api/thermal/data", base.trim_end_matches('/'));
+    static THERMAL_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    let client = THERMAL_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(4))
+            .build()
+            .unwrap_or_default()
+    });
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(body) => Json(body).into_response(),
+            Err(_)   => (StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": "bad thermal payload", "frame": [] }))).into_response(),
+        },
+        _ => (StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "no thermal sensor", "frame": [] }))).into_response(),
+    }
 }
 
 async fn get_backend_handler(State(state): State<GatewayState>) -> impl IntoResponse {
