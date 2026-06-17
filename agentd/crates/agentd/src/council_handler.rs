@@ -141,7 +141,10 @@ pub fn spawn_council_handler(
                                 }
                                 if done { break; }
                             }
-                            Err(_) => break,
+                            // A transient lag (busy bus) must not truncate the
+                            // council log — skip the dropped span and keep recording.
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed)    => break,
                         }
                     }
                 });

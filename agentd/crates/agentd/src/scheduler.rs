@@ -27,10 +27,17 @@ fn now_secs() -> u64 {
 }
 
 fn unique_id() -> String {
-    format!("sched_{:x}", now_secs() ^ (std::time::SystemTime::now()
+    // A monotonic per-process counter guarantees uniqueness within a run (the old
+    // secs^subsec_nanos XOR collided on same-second creates, and `cancel` then
+    // removed both); the full-nanosecond timestamp disambiguates across restarts
+    // (where the counter resets to 0).
+    static SCHED_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .subsec_nanos() as u64))
+        .as_nanos();
+    let seq = SCHED_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("sched_{nanos:x}_{seq:x}")
 }
 
 pub fn load_schedules(path: &PathBuf) -> Vec<ScheduledTask> {
@@ -210,5 +217,20 @@ async fn handle_cancel_schedule(
     ToolOutput {
         ok:      true,
         content: serde_json::json!({ "cancelled": schedule_id }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_id;
+    use std::collections::HashSet;
+
+    #[test]
+    fn unique_id_does_not_collide_within_a_burst() {
+        // The old secs^subsec_nanos XOR collided on same-second creates; the
+        // monotonic counter must make a tight burst of ids all distinct.
+        let ids: HashSet<String> = (0..1000).map(|_| unique_id()).collect();
+        assert_eq!(ids.len(), 1000, "all generated schedule ids must be unique");
+        assert!(ids.iter().all(|id| id.starts_with("sched_")));
     }
 }
