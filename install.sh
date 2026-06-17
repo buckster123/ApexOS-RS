@@ -85,7 +85,7 @@ ensure_bootstrap_deps() {
 # Anthropic keys are ~100 chars of "alien glyphs" — typing them into a TUI is a
 # typo nightmare. So we look for a pre-written key/env file on removable media
 # first. Filenames we accept (case-insensitive), at the root or one dir deep:
-KEYFILE_NAMES=(apexos.env apexos-rs.env agentd.env apex.env apexos.txt apexos-key.txt env.txt)
+KEYFILE_NAMES=(apexos.env apexos.conf apexos-rs.env agentd.env apex.env apexos.txt apexos-key.txt env.txt)
 
 # Set by find_key_file on success — keys plus optional install settings:
 FOUND_ANTHROPIC=""; FOUND_OPENROUTER=""; FOUND_KEY_SRC=""
