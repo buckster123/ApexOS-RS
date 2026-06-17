@@ -581,20 +581,30 @@ impl SqliteStore {
     /// run in one transaction. Rows that are soft-deleted are skipped by the
     /// `deleted_at IS NULL` guard. Called by `recall()` so retrieval strengthens
     /// base-level activation ("recall sharpens memory").
+    /// Persist the recall-time reinforcement for each node: ACT-R access history
+    /// (`access_count`/`access_times`) AND the FSRS review state
+    /// (`fsrs_stability`/`fsrs_difficulty`/`fsrs_last_review`). One batched UPDATE
+    /// per node keeps the recall hot path cheap. `last_review` is RFC3339 (NULL
+    /// when unset) to match the read-side parse.
+    // Tuple = (id, access_count, access_times_json, fsrs_stability,
+    // fsrs_difficulty, fsrs_last_review_rfc3339) — an internal one-call record;
+    // a named struct buys nothing at the single (cortex::recall) build site.
+    #[allow(clippy::type_complexity)]
     pub async fn record_accesses(
         &self,
-        updates: &[(MemoryId, u32, String)],
+        updates: &[(MemoryId, u32, String, f32, f32, Option<String>)],
     ) -> Result<()> {
         if updates.is_empty() {
             return Ok(());
         }
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
-        for (id, count, times_json) in updates {
+        for (id, count, times_json, stability, difficulty, last_review) in updates {
             tx.execute(
-                "UPDATE memories SET access_count = ?1, access_times = ?2 \
-                 WHERE id = ?3 AND deleted_at IS NULL",
-                params![*count as i64, times_json, id.0],
+                "UPDATE memories SET access_count = ?1, access_times = ?2, \
+                 fsrs_stability = ?3, fsrs_difficulty = ?4, fsrs_last_review = ?5 \
+                 WHERE id = ?6 AND deleted_at IS NULL",
+                params![*count as i64, times_json, *stability as f64, *difficulty as f64, last_review, id.0],
             )?;
         }
         tx.commit()?;
