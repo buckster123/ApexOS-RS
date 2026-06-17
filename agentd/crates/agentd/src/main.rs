@@ -491,6 +491,7 @@ async fn main() -> anyhow::Result<()> {
 
 // ── evolution applier ─────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // shared evolution/rollback orchestration state, threaded by design
 fn spawn_evolution_applier(
     mut propose_rx:  mpsc::Receiver<(SessionId, ActionId, EvolutionId, EvolutionProposal)>,
     bus:             apexos_core::BusHandle,
@@ -945,6 +946,7 @@ async fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // shared evolution/rollback orchestration state, threaded by design
 async fn apply_evolution(
     id:           EvolutionId,
     proposal:     EvolutionProposal,
@@ -1106,6 +1108,7 @@ async fn apply_evolution(
 
 // ── agent router ──────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // wires the shared turn/session orchestration state into the router loop, by design
 fn spawn_agent_router(
     mut rx:        broadcast::Receiver<Event>,
     bcast:         broadcast::Sender<Event>,
@@ -1520,6 +1523,7 @@ fn spawn_nightly_dream(proxy: ToolProxy) {
     });
 }
 
+#[allow(clippy::too_many_arguments)] // shared turn/session orchestration Arcs, by design (context-struct refactor deferred — pure churn on a stable hot path)
 async fn root_turn(
     session:       SessionId,
     history:       Vec<Message>,
@@ -1581,6 +1585,7 @@ async fn root_turn(
     tracker.finish(session, gen).await;
 }
 
+#[allow(clippy::too_many_arguments)] // shared turn/session orchestration Arcs, by design (same context as root_turn)
 async fn child_turn(
     child_id:  SessionId,
     history:   Vec<Message>,
