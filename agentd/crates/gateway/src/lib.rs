@@ -556,7 +556,15 @@ async fn set_key_handler(
 
     let persist_path = std::env::var("AGENTD_KEY_FILE")
         .unwrap_or_else(|_| "/var/lib/agentd/.api_key".into());
-    let _ = write_secret_file(&persist_path, &key);
+    if let Err(e) = write_secret_file(&persist_path, &key) {
+        // The key IS live in memory for this run; surface the persistence failure
+        // so the caller knows it won't survive a restart (was silently swallowed).
+        eprintln!("[gateway] persist api key to {persist_path} failed: {e}");
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": format!("key set in memory but not persisted: {e}")
+        }));
+    }
 
     Json(serde_json::json!({ "ok": true }))
 }
@@ -591,13 +599,19 @@ async fn set_keys_handler(
     State(state): State<GatewayState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Each key is set live in memory regardless; collect any persistence failures
+    // so a write error surfaces instead of returning a false ok:true.
+    let mut errors: Vec<String> = Vec::new();
     if let Some(key) = body["anthropic"].as_str() {
         let key = key.trim().to_string();
         if !key.is_empty() {
             *state.api_key.write().await = key.clone();
             let path = std::env::var("AGENTD_KEY_FILE")
                 .unwrap_or_else(|_| "/var/lib/agentd/.api_key".into());
-            let _ = write_secret_file(&path, &key);
+            if let Err(e) = write_secret_file(&path, &key) {
+                eprintln!("[gateway] persist anthropic key to {path} failed: {e}");
+                errors.push(format!("anthropic: {e}"));
+            }
         }
     }
     if let Some(key) = body["oai"].as_str() {
@@ -606,10 +620,20 @@ async fn set_keys_handler(
             *state.oai_api_key.write().await = key.clone();
             let path = std::env::var("AGENTD_OAI_KEY_FILE")
                 .unwrap_or_else(|_| "/var/lib/agentd/.oai_api_key".into());
-            let _ = write_secret_file(&path, &key);
+            if let Err(e) = write_secret_file(&path, &key) {
+                eprintln!("[gateway] persist oai key to {path} failed: {e}");
+                errors.push(format!("oai: {e}"));
+            }
         }
     }
-    Json(serde_json::json!({ "ok": true }))
+    if errors.is_empty() {
+        Json(serde_json::json!({ "ok": true }))
+    } else {
+        Json(serde_json::json!({
+            "ok": false,
+            "error": format!("set in memory but not persisted — {}", errors.join("; "))
+        }))
+    }
 }
 
 async fn get_model_handler(State(state): State<GatewayState>) -> impl IntoResponse {

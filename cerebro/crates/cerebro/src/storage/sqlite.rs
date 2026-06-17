@@ -1657,7 +1657,14 @@ impl SqliteStore {
         agent_id: Option<&str>,
         report:   &crate::engines::dream::DreamReport,
     ) -> Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
+        // save happens at the END of the cycle, so now == ended_at; reconstruct
+        // started_at from the measured duration (was binding both to ?3 == now, so
+        // ended_at always equalled started_at and the span was unrecoverable).
+        let ended = chrono::Utc::now();
+        let started = ended
+            - chrono::Duration::milliseconds((report.total_duration_secs * 1000.0) as i64);
+        let started_at = started.to_rfc3339();
+        let ended_at   = ended.to_rfc3339();
         let phases_json = serde_json::to_string(&report.phases)?;
         let metadata_json = serde_json::to_string(&serde_json::json!({
             "total_llm_calls":     report.total_llm_calls,
@@ -1668,8 +1675,8 @@ impl SqliteStore {
         conn.execute(
             "INSERT OR REPLACE INTO dream_reports \
              (id, agent_id, started_at, ended_at, phases, metadata) \
-             VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
-            params![id, agent_id, now, phases_json, metadata_json],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, agent_id, started_at, ended_at, phases_json, metadata_json],
         )?;
         Ok(())
     }
