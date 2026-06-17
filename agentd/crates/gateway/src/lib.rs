@@ -1747,7 +1747,22 @@ async fn handle_terminal_ws(socket: WebSocket) {
 
     std::thread::spawn(move || {
         for data in to_pty_rx {
-            unsafe { libc::write(mw, data.as_ptr() as _, data.len()); }
+            // Write the WHOLE buffer: a single libc::write can short-write (esp. a
+            // large paste exceeding the PTY buffer) or be interrupted (EINTR). The
+            // old discarded result silently truncated input. Loop until flushed.
+            let mut off = 0;
+            while off < data.len() {
+                let n = unsafe {
+                    libc::write(mw, data[off..].as_ptr() as _, data.len() - off)
+                };
+                if n > 0 {
+                    off += n as usize;
+                } else if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;            // interrupted before writing — retry
+                } else {
+                    break;               // real error (e.g. EIO on PTY close) or 0 — stop
+                }
+            }
         }
         unsafe { libc::close(mw); }
     });
