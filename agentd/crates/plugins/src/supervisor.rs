@@ -14,6 +14,17 @@ use crate::vast::{VastState, VastPhase, VastInstance, vastai, load_recipes};
 /// map (keyed by `EvolutionId`) never collides across turns.
 static NEXT_EVOLUTION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Seed the counter so the next allocated `EvolutionId` is at least `min_next`.
+/// The counter otherwise resets to 1 each boot, while cold-start restore rebuilds
+/// `rollback_store` keyed by the OLD ids parsed from Cerebro episodes — so a fresh
+/// post-restart evolution would reuse `EvolutionId(1)` and alias a restored undo
+/// snapshot (rollback restores the wrong one). agentd calls this after
+/// `restore_rollback_store` with `max_restored_id + 1`. Uses `fetch_max`, so it is
+/// idempotent and a stale/low value can never rewind the counter.
+pub fn seed_evolution_id(min_next: u64) {
+    NEXT_EVOLUTION_ID.fetch_max(min_next, std::sync::atomic::Ordering::Relaxed);
+}
+
 struct Plugin {
     client: Arc<McpClient>,
 }
@@ -1802,14 +1813,35 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
+    // Serialize the tests that mutate the process-global NEXT_EVOLUTION_ID — Rust
+    // runs tests in parallel, and an interleaved fetch_add/fetch_max would break
+    // the monotonic-by-one assertion below.
+    static EVO_ID_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn evolution_ids_are_distinct_across_proposals() {
+        let _g = EVO_ID_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Two evolutions in the same process must receive distinct ids, even
         // though the per-turn ActionId (call.id) resets each turn.
         let a = EvolutionId(NEXT_EVOLUTION_ID.fetch_add(1, Ordering::Relaxed));
         let b = EvolutionId(NEXT_EVOLUTION_ID.fetch_add(1, Ordering::Relaxed));
         assert_ne!(a.0, b.0, "successive evolutions must not collide");
         assert_eq!(b.0, a.0 + 1, "ids must be monotonic");
+    }
+
+    #[test]
+    fn seed_evolution_id_advances_but_never_rewinds() {
+        let _g = EVO_ID_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Cold-start restore seeds the counter past the max restored id so a fresh
+        // evolution can't reuse an id and alias a restored undo snapshot.
+        seed_evolution_id(100_000);
+        assert!(NEXT_EVOLUTION_ID.load(Ordering::Relaxed) >= 100_000);
+        let next = NEXT_EVOLUTION_ID.fetch_add(1, Ordering::Relaxed); // >= 100_000
+        // A lower seed (an older/smaller max) must NOT rewind the counter — fetch_max
+        // floor — so subsequently allocated ids stay strictly ahead.
+        seed_evolution_id(5);
+        assert!(NEXT_EVOLUTION_ID.load(Ordering::Relaxed) > next,
+            "seed must never rewind the counter");
     }
 
     #[test]
