@@ -213,6 +213,7 @@ itself with no weight update and no human in the loop. The selection core
 | `schematic` skill layer surfaced at boot | ✓ **slice #2**: `cognitive_bootstrap` now buckets recall hits into a dedicated `## Skills (distilled competence)` section (Schematic + `skill` tag), placed ahead of concrete procedures so the generalisation arrives first |
 | Fitness ledger (win/loss evidence base) | ✓ **slice #E1**: `record_procedure_outcome` writes `metadata.outcomes:{successes,failures}` — a real count-based record, additive to the salience/difficulty effects, so fitness no longer has to be inferred from salience alone |
 | Niche competition (relative selection) | ✓ **slice #E1**: new algorithmic `skill_competition` dream phase — procedures sharing a topical tag contend; the Wilson-fittest is tagged `skill_champion`, dominated rivals decay toward the prune floor. Novelty-exempt below 2 graded uses; a champion of any niche is never demoted |
+| Variation / mutation (fresh alternatives) | ◑ **slice #E2**: new LLM `variation` dream phase refines underperforming procedures into `dream_mutated` variants (inherit niche tags, link via `derived_from`, start un-graded → exempt until tried). Lose→mutate→re-compete. Refinement operator done; merge/recombination (E2b) next |
 | Skill → identity promotion path | ✗ deliberate `propose_evolution` step, not yet conventionalized |
 
 ### Build slices (smallest first)
@@ -253,10 +254,17 @@ extends it with genuinely new mechanisms:
   exempt below `COMPETITION_MIN_GRADED_USES` (2) graded uses; a champion of any niche is never
   demoted. Pure selection core (`compute_competition_verdicts`) is unit-tested without a DB.
   See the *Niche competition* section above.
-- **E2. Variation / mutation** (next). Dream proposes *variant* procedures (a refined version
-  of a high-difficulty procedure, or a merge of two partial ones) so competition has fresh
-  alternatives to select among, rather than only what the agent happened to store. Needs E1's
-  champion/niche notion to select the winners.
+- **E2. Variation / mutation.** ◑ **Refinement operator DONE; merge next.** A new LLM dream
+  phase `variation` refines genuinely-underperforming procedures (graded, ≥1 failure, Wilson
+  fitness below `REFINE_FITNESS_CEILING`) into fresh variants: the variant inherits the
+  parent's niche tags + `dream_mutated`, links back via `derived_from`, and starts *un-graded*
+  so E1 treats it as novelty (exempt) until tried — then it competes against the parent on its
+  own record. **Lose → mutate → re-compete** is the variation→selection loop. Guards: one
+  untested variant per parent (no pile-up via `has_pending_variant`), prefix dedup, bounded
+  budget (worst-fitness first), and junk variants are self-correcting (selection demotes/prunes
+  them like any procedure). The candidate selector `refine_candidates` is pure and unit-tested.
+  *Next (E2b):* the **merge/recombination** operator — synthesise two strong same-niche
+  procedures into a hybrid that combines their strengths.
 - **E3. Cross-agent skill flow.** A Pro/GPU node distils a champion skill and propagates it to
   the colony (`share_memory`/`send_message` over the mesh) so agents don't each re-evolve from
   scratch — the "exo-evolution for any MCP consumer" thesis made concrete across the mesh.
