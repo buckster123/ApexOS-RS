@@ -1367,6 +1367,30 @@ fn cpu_temp() -> Value {
     }))
 }
 
+/// Kernel pseudo-filesystems excluded from disk-usage reports. Matched at a path-
+/// component boundary so a real mount like `/devel` or `/system` isn't dropped by a
+/// bare prefix (the bug this replaces: `"/devel".starts_with("/dev")` was `true`).
+fn is_pseudo_mount(m: &str) -> bool {
+    m == "none"
+        || ["/proc", "/sys", "/dev", "/run"]
+            .iter()
+            .any(|p| m == *p || m.starts_with(&format!("{p}/")))
+}
+
+/// The mountpoint whose filesystem actually holds `fp`: the LONGEST candidate that is
+/// `fp` itself or a parent of it at a component boundary. So `/home` beats `/` for
+/// `/home/x`, and `/dev` never false-matches `/devel`. (Was a bare `starts_with`,
+/// which matched every ancestor mount at once.)
+fn best_mount_for<'a>(mounts: &[&'a str], fp: &str) -> Option<&'a str> {
+    mounts
+        .iter()
+        .copied()
+        .filter(|m| {
+            *m == "/" || fp == *m || fp.starts_with(&format!("{}/", m.trim_end_matches('/')))
+        })
+        .max_by_key(|m| m.len())
+}
+
 fn disk_usage(args: &Value) -> Value {
     let filter_path = args["path"].as_str();
 
@@ -1375,37 +1399,33 @@ fn disk_usage(args: &Value) -> Value {
         Err(e) => return tool_error(format!("cannot read /proc/mounts: {}", e)),
     };
 
+    // Real (non-pseudo) mountpoints, in /proc/mounts order.
+    let mounts: Vec<&str> = mounts_raw
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .filter(|m| !is_pseudo_mount(m))
+        .collect();
+
     let mut results = Vec::new();
-    for line in mounts_raw.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let mount = parts[1];
-
-        // Skip pseudo filesystems
-        if mount == "none" || mount.starts_with("/proc") || mount.starts_with("/sys")
-            || mount.starts_with("/dev") || mount == "/run"
-        {
-            continue;
-        }
-
-        if let Some(fp) = filter_path {
-            if !fp.starts_with(mount) {
-                continue;
+    if let Some(fp) = filter_path {
+        // Report only the single filesystem that holds fp (the longest match) — not
+        // every ancestor mount.
+        if let Some(best) = best_mount_for(&mounts, fp) {
+            if let Some(stat) = statvfs(best) {
+                results.push(stat);
             }
         }
-
-        // statvfs via /proc/mounts entry
-        if let Some(stat) = statvfs(mount) {
-            results.push(stat);
+    } else {
+        for m in &mounts {
+            if let Some(stat) = statvfs(m) {
+                results.push(stat);
+            }
         }
-    }
-
-    if results.is_empty() && filter_path.is_none() {
-        // Fallback: just do /
-        if let Some(stat) = statvfs("/") {
-            results.push(stat);
+        if results.is_empty() {
+            // Fallback: just do /
+            if let Some(stat) = statvfs("/") {
+                results.push(stat);
+            }
         }
     }
 
@@ -2293,6 +2313,27 @@ mod tests {
     // Serialize tests that mutate AGENTD_WORKSPACE — env vars are process-global
     // and Rust runs tests in parallel by default.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn disk_usage_skips_pseudo_at_boundary_and_picks_longest_mount() {
+        // Pseudo skip matches at a path boundary — a real mount sharing a prefix stays.
+        assert!(is_pseudo_mount("/dev"));
+        assert!(is_pseudo_mount("/dev/shm"));
+        assert!(is_pseudo_mount("/proc"));
+        assert!(is_pseudo_mount("/run/user/1000"));
+        assert!(!is_pseudo_mount("/devel"));     // the bare-prefix bug
+        assert!(!is_pseudo_mount("/home"));
+        assert!(!is_pseudo_mount("/system"));
+
+        // The holding filesystem = the longest matching mountpoint, boundary-aware.
+        let mounts = ["/", "/home", "/home/user/data"];
+        assert_eq!(best_mount_for(&mounts, "/home/user/data/x"), Some("/home/user/data"));
+        assert_eq!(best_mount_for(&mounts, "/home/bob"), Some("/home"));
+        assert_eq!(best_mount_for(&mounts, "/etc/passwd"), Some("/"));
+        assert_eq!(best_mount_for(&mounts, "/homestead"), Some("/")); // not /home
+        assert_eq!(best_mount_for(&mounts, "/home"), Some("/home"));   // exact
+        assert_eq!(best_mount_for(&["/data"], "/etc"), None);          // nothing holds it
+    }
 
     #[test]
     fn sanitize_note_name_forces_md_and_blocks_traversal() {
