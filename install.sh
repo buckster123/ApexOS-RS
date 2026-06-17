@@ -23,6 +23,12 @@
 #   APEXOS_MODE=kiosk|headless|desktop      APEXOS_TIER=nano|micro|standard|pro
 #   APEXOS_NO_UI=1   APEXOS_NO_SENSOR=0   APEXOS_NO_CEREBRO_API=0   APEXOS_VOICE=1
 #
+# Idempotency: the resolved choices are saved to /etc/agentd/install.conf and
+# restored on every re-run, so `apexos-update` (a no-flag, no-USB re-run) keeps the
+# same deployment shape instead of re-auto-detecting (no headless→kiosk flip).
+# Precedence: CLI flag > USB apexos.conf > install.conf > auto-detect. Change a
+# node's shape with a flag, a fresh USB file, or by deleting install.conf.
+#
 # Options:
 #   -y / --yes              Force unattended (also implied when stdin isn't a TTY)
 #   --tui                   Force the interactive menus even under curl|bash
@@ -91,6 +97,13 @@ KEYFILE_NAMES=(apexos.env apexos.conf apexos-rs.env agentd.env apex.env apexos.t
 FOUND_ANTHROPIC=""; FOUND_OPENROUTER=""; FOUND_KEY_SRC=""
 FOUND_MODE=""; FOUND_TIER=""; FOUND_NO_UI=""; FOUND_NO_SENSOR=""
 FOUND_NO_CEREBRO_API=""; FOUND_VOICE=""
+
+# Resolved-choices record: written at the end of a successful install and restored
+# on every re-run (load_persisted_config) so `apexos-update` keeps the same
+# deployment shape instead of re-auto-detecting (which flips a headless node →
+# kiosk). Lower precedence than a CLI flag or a freshly-plugged USB provisioning
+# file, higher than auto-detect.
+CONF_FILE=/etc/agentd/install.conf
 
 # Echo the value of KEY= in an env-style file (handles `export `, quotes, CRLF).
 _envval() {
@@ -175,14 +188,54 @@ load_boot_provisioning() {
   find_key_file || return 0          # nothing on removable media — fine
   [[ -z "$API_KEY"        && -n "$FOUND_ANTHROPIC"  ]] && API_KEY="$FOUND_ANTHROPIC"
   [[ -z "$OPENROUTER_KEY" && -n "$FOUND_OPENROUTER" ]] && OPENROUTER_KEY="$FOUND_OPENROUTER"
-  [[ "$TIER" == "auto" && -n "$FOUND_TIER" ]] && TIER="$FOUND_TIER"
-  [[ "$MODE" == "auto" && -n "$FOUND_MODE" ]] && MODE="$FOUND_MODE"
-  [[ -n "$FOUND_NO_UI"          ]] && { _truthy "$FOUND_NO_UI"          && NO_UI=true          || NO_UI=false; }
-  [[ -n "$FOUND_NO_SENSOR"      ]] && { _truthy "$FOUND_NO_SENSOR"      && NO_SENSOR=true      || NO_SENSOR=false; }
-  [[ -n "$FOUND_NO_CEREBRO_API" ]] && { _truthy "$FOUND_NO_CEREBRO_API" && NO_CEREBRO_API=true || NO_CEREBRO_API=false; }
-  [[ -n "$FOUND_VOICE"          ]] && { _truthy "$FOUND_VOICE"          && NO_VOICE=false      || NO_VOICE=true; }
+  # A freshly-plugged USB file overrides a stored install.conf (deliberate re-
+  # provisioning) but never a CLI flag — so gate on the *_CLI provenance markers,
+  # not the "auto" sentinel (install.conf may already have filled MODE/TIER).
+  [[ -n "$FOUND_TIER" ]] && ! $TIER_CLI && TIER="$FOUND_TIER"
+  [[ -n "$FOUND_MODE" ]] && ! $MODE_CLI && MODE="$FOUND_MODE"
+  [[ -n "$FOUND_NO_UI"          ]] && ! $NO_UI_CLI          && { _truthy "$FOUND_NO_UI"          && NO_UI=true          || NO_UI=false; }
+  [[ -n "$FOUND_NO_SENSOR"      ]] && ! $NO_SENSOR_CLI      && { _truthy "$FOUND_NO_SENSOR"      && NO_SENSOR=true      || NO_SENSOR=false; }
+  [[ -n "$FOUND_NO_CEREBRO_API" ]] && ! $NO_CEREBRO_API_CLI && { _truthy "$FOUND_NO_CEREBRO_API" && NO_CEREBRO_API=true || NO_CEREBRO_API=false; }
+  [[ -n "$FOUND_VOICE"          ]] && ! $NO_VOICE_CLI       && { _truthy "$FOUND_VOICE"          && NO_VOICE=false      || NO_VOICE=true; }
   local what="settings"; [[ -n "$FOUND_ANTHROPIC" ]] && what="key + settings"
   ok "Provisioned from ${FOUND_KEY_SRC} ($what)"
+}
+
+# Restore the resolved choices from a prior install so a re-run (`apexos-update`,
+# which re-invokes this script with no flags and no USB) keeps the same deployment
+# shape rather than re-auto-detecting — the bug that flipped a headless Pi → kiosk
+# and a manually-enabled sensor head back off. Only fills knobs the user did not set
+# on the command line; a freshly-plugged USB file (load_boot_provisioning, runs
+# after) still overrides this. Precedence: CLI > USB file > install.conf > auto.
+load_persisted_config() {
+  if [[ ! -f "$CONF_FILE" ]]; then
+    # No record yet. Either a truly fresh install (agentd not present → let auto-
+    # detect run) OR a node deployed before install.conf existed — the first
+    # `apexos-update` carrying this fix. For the latter, infer the live UI/API shape
+    # from enabled services so THIS run is already idempotent (it persists below),
+    # instead of re-auto-detecting and flipping a headless Pi → kiosk. The kiosk vs
+    # headless axis is exactly what the old detect flipped; tiers re-detect harmlessly.
+    if [[ -x /usr/local/bin/agentd ]]; then
+      [[ "$MODE" == "auto" ]] && ! $MODE_CLI && { systemctl is-enabled apexos-rs-ui &>/dev/null && MODE="kiosk" || MODE="headless"; }
+      ! $NO_CEREBRO_API_CLI && { systemctl is-enabled cerebro-api &>/dev/null && NO_CEREBRO_API=false || NO_CEREBRO_API=true; }
+      info "No install.conf — inferred existing shape from services (mode=$MODE)"
+    fi
+    return 0
+  fi
+  local c_mode c_tier c_no_ui c_no_sensor c_no_api c_voice
+  c_mode=$(_envval "$CONF_FILE" APEXOS_MODE)
+  c_tier=$(_envval "$CONF_FILE" APEXOS_TIER)
+  c_no_ui=$(_envval "$CONF_FILE" APEXOS_NO_UI)
+  c_no_sensor=$(_envval "$CONF_FILE" APEXOS_NO_SENSOR)
+  c_no_api=$(_envval "$CONF_FILE" APEXOS_NO_CEREBRO_API)
+  c_voice=$(_envval "$CONF_FILE" APEXOS_VOICE)
+  [[ -n "$c_mode" ]] && ! $MODE_CLI && MODE="$c_mode"
+  [[ -n "$c_tier" ]] && ! $TIER_CLI && TIER="$c_tier"
+  [[ -n "$c_no_ui"     ]] && ! $NO_UI_CLI          && { _truthy "$c_no_ui"     && NO_UI=true          || NO_UI=false; }
+  [[ -n "$c_no_sensor" ]] && ! $NO_SENSOR_CLI      && { _truthy "$c_no_sensor" && NO_SENSOR=true      || NO_SENSOR=false; }
+  [[ -n "$c_no_api"    ]] && ! $NO_CEREBRO_API_CLI && { _truthy "$c_no_api"    && NO_CEREBRO_API=true || NO_CEREBRO_API=false; }
+  [[ -n "$c_voice"     ]] && ! $NO_VOICE_CLI       && { _truthy "$c_voice"     && NO_VOICE=false      || NO_VOICE=true; }
+  ok "Restored install choices from $CONF_FILE (mode=$MODE tier=$TIER)"
 }
 
 # ── Args ───────────────────────────────────────────────────────────────────────
@@ -193,18 +246,24 @@ NO_UI=false; NO_CEREBRO_API=false; NO_SENSOR=true; NO_VOICE=true
 API_KEY=""; OPENROUTER_KEY=""
 TIER="auto"; MODE="auto"; REPO_DIR=""
 
+# Provenance markers — which knobs were set explicitly on the command line. A CLI
+# flag always wins; stored install.conf and USB provisioning only fill knobs the
+# user did NOT pass. (Precedence: CLI > USB file > install.conf > auto-detect.)
+MODE_CLI=false; TIER_CLI=false
+NO_UI_CLI=false; NO_CEREBRO_API_CLI=false; NO_SENSOR_CLI=false; NO_VOICE_CLI=false
+
 for arg in "$@"; do
   case "$arg" in
     -y|--yes)              YES=true ;;
     --tui)                 TUI_FORCE=true ;;
-    --no-ui)               NO_UI=true ;;
-    --no-cerebro-api)      NO_CEREBRO_API=true ;;
-    --no-sensor)           NO_SENSOR=true ;;
-    --no-voice)            NO_VOICE=true ;;
+    --no-ui)               NO_UI=true; NO_UI_CLI=true ;;
+    --no-cerebro-api)      NO_CEREBRO_API=true; NO_CEREBRO_API_CLI=true ;;
+    --no-sensor)           NO_SENSOR=true; NO_SENSOR_CLI=true ;;
+    --no-voice)            NO_VOICE=true; NO_VOICE_CLI=true ;;
     --api-key=*)           API_KEY="${arg#*=}" ;;
     --openrouter-key=*)    OPENROUTER_KEY="${arg#*=}" ;;
-    --tier=*)              TIER="${arg#*=}" ;;
-    --mode=*)              MODE="${arg#*=}" ;;
+    --tier=*)              TIER="${arg#*=}"; TIER_CLI=true ;;
+    --mode=*)              MODE="${arg#*=}"; MODE_CLI=true ;;
     --repo-dir=*)          REPO_DIR="${arg#*=}" ;;
     *) warn "unknown option: $arg" ;;
   esac
@@ -352,8 +411,11 @@ if [[ -f /proc/device-tree/model ]]; then
   echo "$PI_MODEL" | grep -qi "raspberry" && IS_PI=true
 fi
 
-# Load key + optional settings from a boot/USB file BEFORE filling tier/mode
-# defaults, so an apexos.env / apexos.conf can steer an unattended install.
+# Restore prior resolved choices first (so apexos-update is idempotent — it won't
+# re-auto-detect and flip the deployment shape), THEN let a freshly-plugged boot/USB
+# file override them, THEN auto-detect fills any remaining gaps below.
+# Precedence: CLI flags > USB provisioning file > /etc/agentd/install.conf > auto.
+load_persisted_config
 load_boot_provisioning
 
 if [[ "$TIER" == "auto" ]]; then
@@ -758,9 +820,18 @@ case "$TIER" in
   micro|standard|pro) EMBED_MODEL="BAAI/bge-small-en-v1.5" ;;
 esac
 
-install -m 644 "$REPO_DIR/config/plugins.toml" /etc/agentd/plugins.toml
-if [[ -n "$EMBED_MODEL" ]]; then
-  sed -i "/FASTEMBED_CACHE_DIR/a CEREBRO_EMBED_MODEL = \"$EMBED_MODEL\"" /etc/agentd/plugins.toml
+# Seed from the template only if absent. `apexos-update` re-runs this script, and
+# agentd self-evolution can register_mcp_server into the live plugins.toml at
+# runtime — re-installing the template every update would silently drop those
+# entries. Same seed-if-absent contract as policy.toml / soul.md / peers.toml below.
+# Tradeoff: a NEW built-in plugin shipped in a future release won't reach an already-
+# deployed node until the operator merges it in (acceptable — inert until plugin
+# self-evolution ships; revisit with a name-keyed merge then).
+if [[ ! -f /etc/agentd/plugins.toml ]]; then
+  install -m 644 "$REPO_DIR/config/plugins.toml" /etc/agentd/plugins.toml
+  if [[ -n "$EMBED_MODEL" ]]; then
+    sed -i "/FASTEMBED_CACHE_DIR/a CEREBRO_EMBED_MODEL = \"$EMBED_MODEL\"" /etc/agentd/plugins.toml
+  fi
 fi
 
 # policy.toml (don't overwrite an existing policy)
@@ -804,6 +875,30 @@ touch /etc/agentd/identities.toml
 mkdir -p /etc/agentd/souls
 chown agentd:agentd /etc/agentd/identities.toml
 chown -R agentd:agentd /etc/agentd/souls
+
+# install.conf — persist the resolved deployment shape so a re-run restores it
+# (load_persisted_config above) instead of re-auto-detecting. Non-secret (mode/tier/
+# component flags), so root-owned 0644. Rewritten every install: a manual mode/
+# component change here becomes the new sticky default for the next apexos-update.
+write_install_conf() {
+  local tmp; tmp=$(mktemp "${CONF_FILE}.XXXXXX")
+  {
+    echo "# ApexOS-RS resolved install choices — written by install.sh."
+    echo "# apexos-update re-reads this so a re-run keeps the same deployment shape"
+    echo "# (no re-auto-detect → a headless node won't flip to kiosk). Override with a"
+    echo "# CLI flag, a freshly-plugged apexos.conf on USB, or by deleting this file."
+    echo "APEXOS_MODE=$MODE"
+    echo "APEXOS_TIER=$TIER"
+    echo "APEXOS_NO_UI=$NO_UI"
+    echo "APEXOS_NO_SENSOR=$NO_SENSOR"
+    echo "APEXOS_NO_CEREBRO_API=$NO_CEREBRO_API"
+    echo "APEXOS_VOICE=$( $NO_VOICE && echo false || echo true )"
+  } > "$tmp"
+  chmod 644 "$tmp"; chown root:root "$tmp"
+  mv "$tmp" "$CONF_FILE"
+  ok "Install choices saved → $CONF_FILE (mode=$MODE tier=$TIER)"
+}
+write_install_conf
 
 # env file — API keys (don't overwrite existing keys)
 ENV_FILE=/etc/agentd/env
