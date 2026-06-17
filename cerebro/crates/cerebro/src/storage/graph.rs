@@ -76,4 +76,59 @@ impl GraphStore {
                 .collect(),
         }
     }
+
+    /// Remove a node (and its incident edges) from the in-memory graph. Used when
+    /// a memory is deleted/purged so spreading-activation stops traversing it
+    /// immediately, not just after the next restart-time rebuild. Idempotent: a
+    /// no-op when the id isn't present.
+    ///
+    /// `petgraph::Graph` (not `StableGraph`) removes by **swap**: the last node is
+    /// moved into the removed slot, so its `NodeIndex` changes. We repair the
+    /// `index` map for that swapped node — without this, the map would point a
+    /// surviving id at the wrong (or an out-of-range) node.
+    pub fn remove_node(&mut self, id: &MemoryId) {
+        let Some(idx) = self.index.remove(id) else { return };
+        self.graph.remove_node(idx); // swaps the last node into `idx`
+        // If a node was swapped into `idx`, its map entry is now stale → repair it.
+        if let Some(swapped_id) = self.graph.node_weight(idx) {
+            self.index.insert(swapped_id.clone(), idx);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::LinkType;
+
+    fn id(s: &str) -> MemoryId { MemoryId(s.to_string()) }
+
+    #[test]
+    fn remove_node_repairs_swapped_index_and_keeps_edges() {
+        let mut g = GraphStore::new();
+        let (a, b, c) = (id("a"), id("b"), id("c"));
+        g.add_node(a.clone());
+        g.add_node(b.clone());
+        g.add_node(c.clone()); // c is the last node — it gets swapped into a's slot
+        g.add_edge(AssociativeLink::new(b.clone(), c.clone(), LinkType::Semantic, 1.0)).unwrap();
+
+        g.remove_node(&a);
+
+        // a is gone; the other two remain.
+        assert!(g.index.get(&a).is_none());
+        assert_eq!(g.graph.node_count(), 2);
+        // The index map points each survivor at the node that actually holds its id
+        // (this is exactly what the swap-remove repair guarantees).
+        for survivor in [&b, &c] {
+            let idx = *g.index.get(survivor).expect("survivor still indexed");
+            assert_eq!(g.graph.node_weight(idx), Some(survivor),
+                "index map must track the swapped node");
+        }
+        // The b→c edge survived the swap with correct endpoints.
+        assert_eq!(g.neighbors(&b), vec![&c]);
+
+        // Idempotent: removing an absent id is a no-op.
+        g.remove_node(&a);
+        assert_eq!(g.graph.node_count(), 2);
+    }
 }

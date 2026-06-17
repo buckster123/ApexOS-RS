@@ -181,8 +181,8 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
         "delete_memory" => {
             let id = args["memory_id"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("memory_id is required"))?;
-            let deleted = brain.storage.read().await
-                .sqlite.delete_memory(&MemoryId(id.to_string())).await?;
+            let deleted = brain.storage.write().await
+                .delete_memory(&MemoryId(id.to_string())).await?;
             Ok(json!({ "deleted": deleted }))
         }
 
@@ -352,16 +352,16 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
         "restore_memory" => {
             let id = args["memory_id"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("memory_id is required"))?;
-            let restored = brain.storage.read().await
-                .sqlite.restore_memory(&MemoryId(id.to_string())).await?;
+            let restored = brain.storage.write().await
+                .restore_memory(&MemoryId(id.to_string())).await?;
             Ok(json!({ "restored": restored }))
         }
 
         "purge_memory" => {
             let id = args["memory_id"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("memory_id is required"))?;
-            let purged = brain.storage.read().await
-                .sqlite.purge_memory(&MemoryId(id.to_string())).await?;
+            let purged = brain.storage.write().await
+                .purge_memory(&MemoryId(id.to_string())).await?;
             Ok(json!({ "purged": purged }))
         }
 
@@ -377,8 +377,8 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 .iter()
                 .filter_map(|v| v.as_str().map(|s| MemoryId(s.to_string())))
                 .collect();
-            let count = brain.storage.read().await
-                .sqlite.bulk_delete(&ids).await?;
+            let count = brain.storage.write().await
+                .bulk_delete(&ids).await?;
             Ok(json!({ "deleted_count": count }))
         }
 
