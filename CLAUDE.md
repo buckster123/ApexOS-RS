@@ -273,7 +273,14 @@ deserialize **on the gateway** is still silently dropped — wrong field names =
 no error. **Outbound (gateway→UI) the ui-slint client now deserializes into the
 shared `apexos-protocol::Event` and logs any undecodable frame** (no longer the
 hand-rolled `["field"].as_str()` matching that vanished on a rename). Both sides
-share the same `Event` types via the `apexos-protocol` crate.
+share the same `Event` types via the `apexos-protocol` crate. **The gateway
+write task filters outbound frames per-socket** (`event_session`): a session-scoped
+event (the conversation stream — `agent_text`/`tool_requested`/`turn_complete`/
+`approval_pending`/…, plus `sub_agent_started`→parent) reaches only the socket bound
+to that session; global/status events (sensors, council, mesh, vast, evolution) go
+to every client. So a frontend receives **only its own session's stream + globals**
+— clients don't (and shouldn't) filter outbound frames themselves. The supervisor
+subscribes to the bus separately, so this never affects routing.
 
 Full event list: `agentd/crates/core/src/types.rs` — `Event` enum.
 

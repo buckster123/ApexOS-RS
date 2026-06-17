@@ -258,6 +258,33 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
+/// The session a broadcast event belongs to, or `None` if it's a global/status
+/// event every connected client should receive. The WS write task forwards a
+/// session-scoped event only to the socket bound to that session — without this,
+/// a client viewing session 42 also receives (and splices) session 43's deltas
+/// and approval buttons (the multi-client / PWA bug). Conservative: only the
+/// per-session conversation stream is scoped; anything whose routing is ambiguous
+/// stays global (forwarded to all), so no status event is ever hidden. The
+/// supervisor subscribes to the bus on its own, so this never affects routing.
+fn event_session(event: &Event) -> Option<SessionId> {
+    match event {
+        Event::AgentText      { session, .. }
+        | Event::AgentThinking  { session, .. }
+        | Event::ToolRequested  { session, .. }
+        | Event::TurnComplete   { session }
+        | Event::ToolResult     { session, .. }
+        | Event::ApprovalPending { session, .. }
+        | Event::UserPrompt     { session, .. }
+        | Event::UserApproval   { session, .. }
+        | Event::UserCancel     { session } => Some(*session),
+        Event::SubAgentStarted  { parent, .. } => Some(*parent),
+        Event::Error            { session, .. } => *session, // already Option<SessionId>
+        // Sensors, council, mesh/peers, plugins, vast, evolution, a2a — global
+        // status; broadcast to every client (current behaviour).
+        _ => None,
+    }
+}
+
 async fn handle_socket(socket: WebSocket, state: GatewayState) {
     let mut rx = state.bcast.subscribe();
     let (mut sink, stream) = socket.split();
@@ -268,6 +295,12 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
 
     // Assign a fresh session_id immediately — no blocking on hello.
     let session_id = state.next_session_id.fetch_add(1, Ordering::SeqCst);
+
+    // The socket's current session, shared with the write task so it can drop
+    // session-scoped events belonging to OTHER sessions. The read task updates it
+    // on a `hello` resume (a client switching sessions). Lock-free atomic.
+    let sock_session   = Arc::new(AtomicU64::new(session_id));
+    let sock_session_w = sock_session.clone();
 
     // Send initial session_init (empty history — new session) before write task starts.
     let _ = prio_tx.send(make_session_init(session_id, &[])).await;
@@ -282,6 +315,11 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                 }
                 result = rx.recv() => match result {
                     Ok(event) => {
+                        // Session-scoped events go only to the socket bound to that
+                        // session; session-less (global/status) events go to all.
+                        if let Some(s) = event_session(&event) {
+                            if s.0 != sock_session_w.load(Ordering::Relaxed) { continue; }
+                        }
                         if let Ok(json) = serde_json::to_string(&event) {
                             if sink.send(Message::Text(json.into())).await.is_err() { break; }
                         }
@@ -320,6 +358,9 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                             _ => vec![],  // keep current session_id
                         }
                     };
+                    // Keep the write task's per-session event filter in sync with
+                    // the (possibly new) session this socket now follows.
+                    sock_session.store(session_id, Ordering::Relaxed);
                     // Bind this session to the chosen agent identity, if provided
                     // (multi-agent runtime, slice 3b). The stamp + CCBS resolve it;
                     // unbound sessions fall back to the node default (APEX).
@@ -3181,6 +3222,36 @@ mod auth_tests {
         let encoded  = "a%20b%2Bc%2Fd";
         let decoded  = percent_encoding::percent_decode_str(encoded).decode_utf8_lossy();
         assert!(tokens_match(&decoded, expected));
+    }
+}
+
+#[cfg(test)]
+mod ws_filter_tests {
+    use super::*;
+
+    #[test]
+    fn conversation_stream_events_are_session_scoped() {
+        assert_eq!(event_session(&Event::AgentText { session: SessionId(42), delta: "hi".into() }), Some(SessionId(42)));
+        assert_eq!(event_session(&Event::AgentThinking { session: SessionId(42), delta: "…".into() }), Some(SessionId(42)));
+        assert_eq!(event_session(&Event::TurnComplete { session: SessionId(7) }), Some(SessionId(7)));
+        assert_eq!(event_session(&Event::UserCancel { session: SessionId(7) }), Some(SessionId(7)));
+        // Sub-agent events route to the PARENT session's client.
+        assert_eq!(
+            event_session(&Event::SubAgentStarted { parent: SessionId(3), child: SessionId(9000), prompt: "x".into() }),
+            Some(SessionId(3))
+        );
+        // Error scopes to its session, or is global when session-less.
+        assert_eq!(event_session(&Event::Error { session: Some(SessionId(5)), message: "boom".into() }), Some(SessionId(5)));
+        assert_eq!(event_session(&Event::Error { session: None, message: "global".into() }), None);
+    }
+
+    #[test]
+    fn global_status_events_go_to_all_clients() {
+        // No session field → None → forwarded to every socket (unchanged behaviour),
+        // so no status event is ever hidden by the per-session filter.
+        assert_eq!(event_session(&Event::PeerLost { node_id: "n1".into() }), None);
+        assert_eq!(event_session(&Event::PeerSeen { node_id: "n1".into(), ip: "10.0.0.2".into() }), None);
+        assert_eq!(event_session(&Event::VastTunnelLost { instance_id: "i1".into() }), None);
     }
 }
 

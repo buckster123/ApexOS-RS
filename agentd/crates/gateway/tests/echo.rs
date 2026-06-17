@@ -131,9 +131,10 @@ async fn user_prompt_with_image_is_shimmed_and_echoed() {
 }
 
 #[tokio::test]
-async fn multiple_clients_both_receive_broadcast() {
+async fn global_events_reach_all_clients() {
     let (bus_actor, handle, bcast) = Bus::new(SystemState::default());
     tokio::spawn(bus_actor.run());
+    let bcast_tx = bcast.clone();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -144,18 +145,50 @@ async fn multiple_clients_both_receive_broadcast() {
     let (mut ws1, _) = connect_async(format!("ws://{}/ws", addr)).await.unwrap();
     let (mut ws2, _) = connect_async(format!("ws://{}/ws", addr)).await.unwrap();
 
-    // Yield so both write tasks subscribe to broadcast before ws1 fires.
+    // Yield so both write tasks subscribe to broadcast before the event fires.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    // ws1 gets session_id=1 (first connection). Send user_prompt — server injects 1.
-    ws1.send(Message::Text(r#"{"type":"user_prompt","text":"broadcast"}"#.into())).await.unwrap();
+    // A session-less (global) status event must reach EVERY connected client.
+    bcast_tx.send(Event::PeerSeen { node_id: "n1".into(), ip: "10.0.0.2".into() }).unwrap();
 
     let (r1, r2) = tokio::join!(recv_event(&mut ws1), recv_event(&mut ws2));
     for r in [r1, r2] {
         let event: Event = serde_json::from_str(&r).unwrap();
-        assert!(matches!(event, Event::UserPrompt { session: SessionId(1), .. }),
-            "unexpected event: {r}");
+        assert!(matches!(event, Event::PeerSeen { .. }), "unexpected event: {r}");
     }
+}
+
+#[tokio::test]
+async fn session_scoped_events_are_filtered_per_client() {
+    // The fix for the multi-client splicing bug: a session-scoped event reaches
+    // only the socket bound to that session; a global event still reaches all.
+    let (bus_actor, handle, bcast) = Bus::new(SystemState::default());
+    tokio::spawn(bus_actor.run());
+    let bcast_tx = bcast.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let state = make_state(handle, bcast);
+    tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+
+    // ws1 → session 1, ws2 → session 2 (next_session_id starts at 1, connect order fixed).
+    let (mut ws1, _) = connect_async(format!("ws://{}/ws", addr)).await.unwrap();
+    let (mut ws2, _) = connect_async(format!("ws://{}/ws", addr)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // A delta for session 1, then a global event. ws1 sees the delta first; ws2
+    // must SKIP the session-1 delta and see the global event as its first frame.
+    bcast_tx.send(Event::AgentText { session: SessionId(1), delta: "for-ws1".into() }).unwrap();
+    bcast_tx.send(Event::PeerSeen { node_id: "n1".into(), ip: "10.0.0.2".into() }).unwrap();
+
+    let r1: Event = serde_json::from_str(&recv_event(&mut ws1).await).unwrap();
+    assert!(matches!(r1, Event::AgentText { session: SessionId(1), .. }),
+        "ws1 should receive its own session's delta first, got: {r1:?}");
+
+    let r2: Event = serde_json::from_str(&recv_event(&mut ws2).await).unwrap();
+    assert!(matches!(r2, Event::PeerSeen { .. }),
+        "ws2 must skip session 1's delta and receive only the global event, got: {r2:?}");
 }
 
 /// Spawn a gateway server on an ephemeral port; returns its http base.
