@@ -2210,7 +2210,7 @@ fn bootstrap_node_spec() -> ToolSpec {
                 },
                 "repo_url": {
                     "type":        "string",
-                    "description": "Git repo URL (default: https://github.com/buckster123/ApexOS.git)."
+                    "description": "Git repo URL (default: https://github.com/buckster123/ApexOS-RS.git)."
                 }
             },
             "required": ["target_ip", "ssh_password"]

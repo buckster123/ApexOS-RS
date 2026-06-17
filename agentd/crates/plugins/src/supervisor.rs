@@ -827,7 +827,7 @@ impl Supervisor {
             let ssh_user    = call.args["ssh_user"].as_str().unwrap_or("apexos").to_owned();
             let api_key     = call.args["api_key"].as_str().unwrap_or("").to_owned();
             let repo_url    = call.args["repo_url"].as_str()
-                .unwrap_or("https://github.com/buckster123/ApexOS.git").to_owned();
+                .unwrap_or("https://github.com/buckster123/ApexOS-RS.git").to_owned();
             let call_id     = call.id;
             let bus         = self.bus.clone();
 
@@ -931,8 +931,8 @@ impl Supervisor {
                 let repo_url_q = shell_single_quote(&repo_url);
                 let prep_cmd = format!(
                     "apt-get install -y -q git 2>/dev/null; \
-                     git clone {repo_url_q} /home/{ssh_user}/ApexOS 2>/dev/null || \
-                     git -C /home/{ssh_user}/ApexOS pull"
+                     git clone {repo_url_q} /home/{ssh_user}/ApexOS-RS 2>/dev/null || \
+                     git -C /home/{ssh_user}/ApexOS-RS pull"
                 );
                 let prep = tokio::time::timeout(
                     tokio::time::Duration::from_secs(60),
@@ -963,7 +963,7 @@ impl Supervisor {
                     format!("export ANTHROPIC_API_KEY={}; ", shell_single_quote(&api_key))
                 };
                 let install_cmd = format!(
-                    "cd /home/{ssh_user}/ApexOS && \
+                    "cd /home/{ssh_user}/ApexOS-RS && \
                      {api_key_export}\
                      nohup bash install.sh > /tmp/apex-install.log 2>&1 &\
                      echo $!"
@@ -1791,7 +1791,7 @@ fn shell_single_quote(s: &str) -> String {
 }
 
 /// A safe POSIX login name to interpolate into `bootstrap_node`'s root-run remote
-/// shell scripts (`/home/<user>/ApexOS`) and the ssh destination: starts with a
+/// shell scripts (`/home/<user>/ApexOS-RS`) and the ssh destination: starts with a
 /// letter or `_`, then only letters/digits/`_`/`-`, ≤32 chars. No shell
 /// metacharacters, no `/`, no leading `-` — so it can neither inject a command
 /// into `sudo -S bash -c …` nor be parsed as an ssh option. Validated, not
