@@ -14,5 +14,15 @@ Environment=CEREBRO_DATA_DIR=/var/lib/agentd/cerebro
 Environment=FASTEMBED_CACHE_DIR=/var/lib/agentd/cerebro/models
 EnvironmentFile=-/etc/agentd/env
 
+# Sandbox: runs as the agentd uid, so without this it could write everything
+# agentd can — undoing agentd.service's blast-radius containment. It only writes
+# its DB + model cache under /var/lib/agentd/cerebro (created by install.sh) and
+# needs the network (HTTP server + model download); the rest of the FS is read-only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agentd/cerebro
+ProtectHome=true
+PrivateTmp=true
+
 [Install]
 WantedBy=multi-user.target

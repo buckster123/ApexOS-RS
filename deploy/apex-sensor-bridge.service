@@ -14,5 +14,15 @@ ExecStart=/usr/local/bin/apex-sensor-bridge
 Restart=always
 RestartSec=10
 
+# Sandbox: runs as the agentd uid, so without this it could write everything
+# agentd can. It writes nothing to disk (reads /etc/hostname + /sys/class/thermal,
+# talks to the BME688 over /dev/i2c-*, forwards over WS) → no ReadWritePaths. NOT
+# PrivateDevices (it needs /dev/i2c-* for I2C) and NOT ProtectKernelTunables (keeps
+# /sys readable). The whole FS is otherwise read-only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
 [Install]
 WantedBy=multi-user.target
