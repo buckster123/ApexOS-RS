@@ -767,7 +767,8 @@ async fn restore_rollback_store(
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
 
-    let mut count = 0usize;
+    let mut count  = 0usize;
+    let mut max_id = 0u64;
     for ep in &episodes {
         let Some(episode_id) = ep["id"].as_str() else { continue };
         let Some(title)      = ep["title"].as_str() else { continue };
@@ -777,6 +778,10 @@ async fn restore_rollback_store(
             Some(id) => id,
             None     => { eprintln!("[evolution] restore: can't parse id from '{title}'"); continue; }
         };
+        // Track the high-water mark across ALL evolution episodes (even ones whose
+        // undo snapshot doesn't parse), so the reseeded counter clears every id
+        // this node has ever used — no id reuse / episode-title duplication.
+        max_id = max_id.max(evo_id.0);
 
         let mems_text = match proxy.call("get_episode_memories", serde_json::json!({
             "episode_id": episode_id,
@@ -792,7 +797,14 @@ async fn restore_rollback_store(
         }
     }
 
-    eprintln!("[evolution] restore: loaded {count} rollback snapshot(s) from Cerebro");
+    // Reseed the process-global EvolutionId counter past every restored id. Without
+    // this it resets to 1 each boot, so a fresh post-restart evolution would reuse
+    // EvolutionId(1) and alias a restored undo snapshot (rollback would restore the
+    // wrong one). Idempotent (fetch_max floor); no-op when no episodes were found.
+    if max_id > 0 {
+        apexos_plugins::seed_evolution_id(max_id + 1);
+    }
+    eprintln!("[evolution] restore: loaded {count} rollback snapshot(s) from Cerebro (next id ≥ {})", max_id + 1);
 }
 
 fn parse_evolution_id_from_title(title: &str) -> Option<EvolutionId> {
