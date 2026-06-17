@@ -56,12 +56,15 @@ Rust additions:
 - `handle_event` dispatches `agent_text`, `turn_started`, `turn_complete`
 - `send_message()` serialises `{"type":"user_prompt","text":"..."}` to WS
 
-## Step 5 in detail: Thermal heatmap
+## Step 5 in detail: Thermal heatmap — ✅ DONE (#105)
 
-Slint custom painter using `slint::Image::from_rgba8_premultiplied` or the
-`RenderingHelper` trait. Receive `sensor_reading` events with `thermal_frame: [[f32; 32]; 24]`
-from agentd, map to RGBA pixels (blue→red colormap), push to Slint `Image` property.
-Matches what the current JS canvas wallpaper does.
+Shipped, with one design correction: the `sensor_reading`/`thermal_frame` WS events
+deliberately carry only min/max/mean (kept small), so the full 32×24 grid rides an
+**on-demand HTTP path** instead — gateway `GET /api/thermal/frame` proxies the
+SensorHead dashboard's `/api/thermal/data` (768 floats), ui-slint polls it (adaptive
+2s/30s), maps each cell through an **ironbow** colormap into a `SharedPixelBuffer<
+Rgba8Pixel>` → `slint::Image::from_rgba8`, and renders it (`image-rendering: pixelated`)
+in the SensorView. Live on apex1's MLX90640.
 
 ## Step 10 in detail: KMS/DRM deploy
 
