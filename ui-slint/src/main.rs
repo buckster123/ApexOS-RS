@@ -699,7 +699,7 @@ async fn run_terminal_ws(
                 },
                 line = rx.recv() => {
                     if let Some(l) = line {
-                        write.send(Message::Binary(l.into_bytes().into())).await.ok();
+                        write.send(Message::Binary(l.into_bytes())).await.ok();
                     }
                 }
             }
@@ -812,7 +812,7 @@ fn clear_messages() {
 
 thread_local! {
     // Epoch (secs) of the last chat time-divider; 0 = none yet this transcript.
-    static LAST_STAMP: std::cell::Cell<i64> = std::cell::Cell::new(0);
+    static LAST_STAMP: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
     // Agent-chosen expression (state, gaze, intensity) from `display_face`, held
     // so it lingers past turn-end instead of snapping back to idle. Cleared when
     // the user sends the next prompt (a fresh exchange). None = no held emote.
@@ -2387,7 +2387,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (mut write, mut read) = ws.split();
 
             let init = serde_json::json!({"type": "session_init"});
-            write.send(Message::Text(init.to_string().into())).await.ok();
+            write.send(Message::Text(init.to_string())).await.ok();
 
             {
                 let w = ui_weak.clone();
@@ -2439,7 +2439,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     out = rx.recv() => {
                         if let Some(text) = out {
-                            write.send(Message::Text(text.into())).await.ok();
+                            write.send(Message::Text(text)).await.ok();
                         }
                     }
                 }
@@ -3451,7 +3451,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         else { sketch_update_shape(x, y); }
     });
     ui.on_sketch_up(|| { /* stroke/shape complete; nothing to finalise */ });
-    ui.on_sketch_clear(|| sketch_clear_all());
+    ui.on_sketch_clear(sketch_clear_all);
     ui.on_sketch_set_color(|i| SKETCH_COLOR.with(|c| c.set(i)));
     ui.on_sketch_set_width(|i| SKETCH_WIDTH.with(|c| c.set(i)));
     ui.on_sketch_set_tool(|i| SKETCH_TOOL.with(|t| t.set(i)));

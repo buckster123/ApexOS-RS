@@ -263,6 +263,7 @@ async fn synthesize(
 
 // ── Main entry point ──────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // shared council orchestration state (engine, bus, members, transcript, …), threaded by design
 pub async fn run_council(
     council_id:          String,
     topic:               String,

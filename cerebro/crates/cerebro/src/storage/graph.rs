@@ -115,7 +115,7 @@ mod tests {
         g.remove_node(&a);
 
         // a is gone; the other two remain.
-        assert!(g.index.get(&a).is_none());
+        assert!(!g.index.contains_key(&a));
         assert_eq!(g.graph.node_count(), 2);
         // The index map points each survivor at the node that actually holds its id
         // (this is exactly what the swap-remove repair guarantees).

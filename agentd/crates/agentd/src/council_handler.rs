@@ -14,6 +14,7 @@ pub type CouncilMsg = (SessionId, ActionId, serde_json::Value);
 ///
 /// Receives `convene_council` tool calls from the supervisor and direct API
 /// starts from the gateway. Runs each council as an isolated tokio task.
+#[allow(clippy::too_many_arguments)] // shared council orchestration state, threaded by design
 pub fn spawn_council_handler(
     mut rx:          mpsc::Receiver<CouncilMsg>,
     bcast:           broadcast::Sender<Event>,
