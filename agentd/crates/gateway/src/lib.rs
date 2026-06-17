@@ -640,10 +640,15 @@ async fn get_models_handler(State(state): State<GatewayState>) -> impl IntoRespo
     // OAI-compatible backend: query {base_url}/models for live model list
     let models_url = format!("{}/models", oai_base.trim_end_matches('/'));
     let api_key = state.oai_api_key.read().await.clone();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .unwrap_or_default();
+    // Shared across calls so repeated /api/models probes don't each rebuild a TLS
+    // client (function-local — only this handler needs it).
+    static MODELS_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    let client = MODELS_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap_or_default()
+    });
 
     let mut req = client.get(&models_url);
     if !api_key.is_empty() {
