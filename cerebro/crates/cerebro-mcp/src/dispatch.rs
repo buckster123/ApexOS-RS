@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use cerebro::{
     config::PRUNE_CANDIDATE_SALIENCE,
+    engines::dream::{is_skill_champion, retrieval_rank},
     models::{AssociativeLink, MemoryNode},
     storage::ListFilter,
     types::{AgentId, LinkType, MemoryId, MemoryType, VisibilityScope},
@@ -825,15 +826,24 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             };
             let nodes = brain.storage.read().await.sqlite
                 .list_memories_scoped(&scope, &filter).await?;
-            let filtered: Vec<_> = nodes.into_iter()
+            let mut filtered: Vec<_> = nodes.into_iter()
                 .filter(|n| {
                     let tag_hit = tags.iter().any(|t| n.tags.iter().any(|nt| nt == t));
                     let meta_str = n.metadata.to_string();
                     let concept_hit = concepts.iter().any(|c| meta_str.contains(c.as_str()));
                     tag_hit || concept_hit
                 })
-                .take(max_results)
                 .collect();
+            // Champion-aware ordering (E1 follow-up). The tag/concept match above
+            // is a *binary* relevance gate — it imposes no order, so prior to this
+            // the surfaced `max_results` were whatever the DB happened to list
+            // first. Rank the matched set by the SAME fitness the dream
+            // competition uses (`retrieval_rank`): a niche champion leads, then by
+            // Wilson fitness, ungraded falling back to salience. So when several
+            // procedures fit a niche, the one competition crowned surfaces first.
+            filtered.sort_by(|a, b| retrieval_rank(b)
+                .partial_cmp(&retrieval_rank(a)).unwrap_or(std::cmp::Ordering::Equal));
+            filtered.truncate(max_results);
             Ok(json!(filtered))
         }
 
@@ -1136,8 +1146,16 @@ async fn assemble_bootstrap(
             .filter(|n| n.tags.iter().any(|t| t == "session_note")).collect();
         let skills: Vec<&MemoryNode> = hits.iter().map(|(n, _)| n)
             .filter(|n| is_skill(n)).collect();
-        let procedures: Vec<&MemoryNode> = hits.iter().map(|(n, _)| n)
+        let mut procedures: Vec<&MemoryNode> = hits.iter().map(|(n, _)| n)
             .filter(|n| n.memory_type == MemoryType::Procedural).collect();
+        // Champion-aware promotion (E1 follow-up). `recall` already ordered these
+        // by relevance/activation; keep that order but float a niche champion to
+        // the front of the relevant set so the procedure competition crowned is
+        // the one that makes the (capped-at-3) cut. A *stable* sort on the
+        // champion flag preserves recall's relevance ranking among equals, so a
+        // champion never displaces a strictly more-relevant procedure — it only
+        // wins ties — and fitness never overrides relevance for non-champions.
+        procedures.sort_by_key(|n| !is_skill_champion(n));
         let others: Vec<&MemoryNode> = hits.iter().map(|(n, _)| n)
             .filter(|n| n.memory_type != MemoryType::Procedural
                 && !n.tags.iter().any(|t| t == "session_note")
@@ -1482,6 +1500,73 @@ mod tests {
         let sections = result["sections_loaded"].as_array().unwrap();
         assert!(sections.iter().any(|s| s.as_str().unwrap_or("").starts_with("skills(")),
             "skills section must be listed in sections_loaded: {sections:?}");
+    }
+
+    // ---- exo-evolution E1 follow-up: champion-aware retrieval ---------------
+
+    #[tokio::test]
+    async fn find_relevant_procedures_surfaces_the_champion_first() {
+        let (brain, _dir) = make_brain().await;
+        let store = |content: &str, tags: Value| json!({
+            "jsonrpc":"2.0","id":0,"method":"tools/call",
+            "params":{"name":"store_procedure","arguments":{ "content": content, "tags": tags }}
+        });
+
+        // A plain niche procedure, stored FIRST (so unordered DB listing would
+        // surface it first)…
+        let r = dispatch_tool(store("deploy: scp the binary over and pray", json!(["deploy"])),
+            Arc::clone(&brain)).await;
+        assert!(r["error"].is_null(), "store should not error: {}", r["error"]);
+        // …and the niche CHAMPION, stored SECOND.
+        let r = dispatch_tool(store("deploy: stop service, hot-swap binary, start, tail journal",
+            json!(["deploy", "skill_champion"])), Arc::clone(&brain)).await;
+        assert!(r["error"].is_null(), "store should not error: {}", r["error"]);
+
+        let find = json!({
+            "jsonrpc":"2.0","id":7,"method":"tools/call",
+            "params":{"name":"find_relevant_procedures","arguments":{ "tags":["deploy"], "limit": 5 }}
+        });
+        let resp = dispatch_tool(find, Arc::clone(&brain)).await;
+        assert!(resp["error"].is_null(), "find should not error: {}", resp["error"]);
+        let text  = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let procs: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(procs.as_array().unwrap().len(), 2, "both niche procedures returned");
+        // The champion floats to the front despite being stored second.
+        assert!(procs[0]["tags"].as_array().unwrap().iter().any(|t| t == "skill_champion"),
+            "champion must surface first, got: {}", procs[0]);
+    }
+
+    #[tokio::test]
+    async fn cognitive_bootstrap_promotes_the_champion_in_procedures() {
+        let (brain, _dir) = make_brain().await;
+        let store = |content: &str, tags: Value| json!({
+            "jsonrpc":"2.0","id":0,"method":"tools/call",
+            "params":{"name":"store_procedure","arguments":{ "content": content, "tags": tags }}
+        });
+
+        // Two procedures both relevant to the query; the champion is stored first
+        // so that ordering — not insertion order — is what floats it to the top.
+        dispatch_tool(store("deploy the release by hot-swapping the systemd binary",
+            json!(["deploy", "skill_champion"])), Arc::clone(&brain)).await;
+        dispatch_tool(store("deploy the release by copying files over manually",
+            json!(["deploy"])), Arc::clone(&brain)).await;
+
+        let boot = json!({
+            "jsonrpc":"2.0","id":44,"method":"tools/call",
+            "params":{"name":"cognitive_bootstrap","arguments":{
+                "query":"deploy the release", "mode":"standard"
+            }}
+        });
+        let resp = dispatch_tool(boot, Arc::clone(&brain)).await;
+        assert!(resp["error"].is_null(), "bootstrap should not error: {}", resp["error"]);
+        let text   = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        let block  = result["assembled_block"].as_str().unwrap();
+
+        let champ_at = block.find("hot-swapping").expect("champion procedure must appear");
+        let rival_at = block.find("copying files").expect("rival procedure must appear");
+        assert!(champ_at < rival_at,
+            "champion must be listed ahead of the non-champion rival:\n{block}");
     }
 
     #[tokio::test]
