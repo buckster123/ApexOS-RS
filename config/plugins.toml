@@ -26,3 +26,28 @@ restart = "always"
 # restart = "always"
 # [plugin.env]
 # SUNO_DOWNLOAD_DIR = "/var/lib/agentd/workspace/sonus"
+
+# Occipital — the agent's reading cortex: web_search / web_fetch / web_recall / web_save / web_forget.
+# Standalone sibling repo (github.com/buckster123/Occipital-RS) — NOT a workspace member, so
+# `cargo build --release --workspace` does NOT produce this binary. Build + deploy it separately,
+# then uncomment. The ui-slint follow-along reader window renders web_fetch/web_search results live.
+# See docs/occipital.md for the full deploy + integration story.
+#
+#   # on the node — Nano/FTS5 default (no ONNX, keyword recall only):
+#   git clone https://github.com/buckster123/Occipital-RS && cd Occipital-RS
+#   cargo build --release -p occipital-mcp
+#   sudo cp target/release/occipital-mcp /usr/local/bin/
+#   sudo install -d -o agentd -g agentd /var/lib/agentd/occipital
+#   # Micro+ semantic recall: build `-p occipital-mcp --features embeddings` and set OCCIPITAL_EMBED_MODEL.
+#
+# [[plugin]]
+# id      = "occipital"
+# cmd     = "/usr/local/bin/occipital-mcp"
+# args    = []
+# restart = "always"
+# [plugin.env]
+# OCCIPITAL_DB        = "/var/lib/agentd/occipital/occipital.db"
+# OCCIPITAL_KEYS_FILE = "/var/lib/agentd/occipital/keys.toml"   # 0600 — optional Brave/Tavily/Bing keys
+# RUST_LOG            = "warn"
+# # OCCIPITAL_EMBED_MODEL = "BAAI/bge-small-en-v1.5"            # Micro+ only (needs --features embeddings)
+# # FASTEMBED_CACHE_DIR   = "/var/lib/agentd/occipital/models"
