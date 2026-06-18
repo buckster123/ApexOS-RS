@@ -250,6 +250,35 @@ fn competitive_fitness(node: &MemoryNode) -> Option<f32> {
     Some(wilson_lower_bound(s, f))
 }
 
+/// The tag the competition phase stamps on the fittest procedure of a niche. The
+/// single source of truth for the literal — read it via [`is_skill_champion`]
+/// rather than re-spelling the string at call sites.
+pub const SKILL_CHAMPION_TAG: &str = "skill_champion";
+
+/// True if `node` is the marked champion of ≥1 competition niche
+/// (carries [`SKILL_CHAMPION_TAG`], stamped by the dream `skill_competition`
+/// phase).
+pub fn is_skill_champion(node: &MemoryNode) -> bool {
+    node.tags.iter().any(|t| t == SKILL_CHAMPION_TAG)
+}
+
+/// Champion-aware retrieval rank for a procedure — higher surfaces first. The
+/// public counterpart to the competition phase's ordering, so the MCP retrieval
+/// path (`find_relevant_procedures`, `cognitive_bootstrap`) prefers the same
+/// procedures competition crowned rather than inventing a second, drifting
+/// notion of "best". A niche champion gets a full +1.0 band so it always leads
+/// the field; within a band, a graded procedure ranks by its confidence-aware
+/// Wilson fitness and an ungraded one falls back to its raw salience — novelty
+/// stays visible instead of sinking under proven-but-mediocre rivals.
+pub fn retrieval_rank(node: &MemoryNode) -> f32 {
+    let base = competitive_fitness(node).unwrap_or(node.salience);
+    if is_skill_champion(node) {
+        base + 1.0
+    } else {
+        base
+    }
+}
+
 /// The `metadata.derived_from` provenance ids of a memory (the procedures/episodes
 /// it was distilled or mutated from), or empty if none.
 fn derived_from_ids(node: &MemoryNode) -> Vec<String> {
@@ -1264,13 +1293,13 @@ impl DreamEngine {
         let mut procedures_demoted = 0usize;
 
         for (mut node, action) in procedures.into_iter().zip(actions) {
-            let has_champion_tag = node.tags.iter().any(|t| t == "skill_champion");
+            let has_champion_tag = is_skill_champion(&node);
             let mut changed = false;
 
             match action {
                 CompetitionAction::Champion => {
                     if !has_champion_tag {
-                        node.tags.push("skill_champion".to_string());
+                        node.tags.push(SKILL_CHAMPION_TAG.to_string());
                         changed = true;
                     }
                     champions_marked += 1;
@@ -1280,7 +1309,7 @@ impl DreamEngine {
                     // against it: bounded decay + a difficulty nudge, flagged for
                     // pruning once it reaches the floor.
                     if has_champion_tag {
-                        node.tags.retain(|t| t != "skill_champion");
+                        node.tags.retain(|t| t != SKILL_CHAMPION_TAG);
                     }
                     node.salience = (node.salience - COMPETITION_PENALTY).max(0.0);
                     node.strength.difficulty = (node.strength.difficulty + 0.3).min(10.0);
@@ -1296,7 +1325,7 @@ impl DreamEngine {
                     // Keep the champion marker honest — clear it if this procedure
                     // is no longer champion of any niche.
                     if has_champion_tag {
-                        node.tags.retain(|t| t != "skill_champion");
+                        node.tags.retain(|t| t != SKILL_CHAMPION_TAG);
                         changed = true;
                     }
                 }
@@ -1679,8 +1708,8 @@ impl PhaseResult {
 mod tests {
     use super::{
         compute_competition_verdicts, competitive_fitness, has_pending_merge, has_pending_variant,
-        is_structural_tag, merge_candidates, outcome_stats, procedure_fitness, refine_candidates,
-        wilson_lower_bound, CompetitionAction, SKILL_MIN_FITNESS,
+        is_skill_champion, is_structural_tag, merge_candidates, outcome_stats, procedure_fitness,
+        refine_candidates, retrieval_rank, wilson_lower_bound, CompetitionAction, SKILL_MIN_FITNESS,
     };
     use crate::config::FSRS_INITIAL_DIFFICULTY;
     use crate::models::MemoryNode;
@@ -1887,6 +1916,46 @@ mod tests {
         let v = compute_competition_verdicts(&procs);
         assert_eq!(v.niches_contested, 0);
         assert!(v.actions.iter().all(|a| *a == CompetitionAction::Leave));
+    }
+
+    // ---- exo-evolution E1 follow-up: champion-aware retrieval ranking -------
+
+    #[test]
+    fn is_skill_champion_reads_the_tag() {
+        assert!(is_skill_champion(&graded_proc(&["deploy", "skill_champion"], 2, 0)));
+        assert!(!is_skill_champion(&graded_proc(&["deploy"], 2, 0)));
+    }
+
+    #[test]
+    fn retrieval_rank_floats_champion_above_a_fitter_rival() {
+        // The core contract: the niche champion ALWAYS leads, even when a
+        // non-champion rival has a strictly higher raw Wilson fitness. The +1.0
+        // band guarantees it — "prefer the procedure competition crowned".
+        let champion = graded_proc(&["deploy", "skill_champion"], 2, 2); // Wilson ≈ 0.15
+        let fitter   = graded_proc(&["deploy"], 20, 0);                  // Wilson ≈ 0.84
+        assert!(competitive_fitness(&fitter) > competitive_fitness(&champion),
+            "rival is genuinely fitter on raw Wilson");
+        assert!(retrieval_rank(&champion) > retrieval_rank(&fitter),
+            "but the champion still surfaces first");
+    }
+
+    #[test]
+    fn retrieval_rank_orders_graded_non_champions_by_wilson() {
+        let strong = graded_proc(&["deploy"], 10, 0);
+        let weak   = graded_proc(&["deploy"], 3, 3);
+        assert!(retrieval_rank(&strong) > retrieval_rank(&weak));
+    }
+
+    #[test]
+    fn retrieval_rank_falls_back_to_salience_for_ungraded() {
+        // An ungraded procedure has no Wilson fitness, so it ranks by its raw
+        // salience (recall strength) — not forced to zero, so novelty stays
+        // visible and a higher-salience fresh procedure leads a lower-salience one.
+        let hi = proc(0.9, FSRS_INITIAL_DIFFICULTY);
+        let lo = proc(0.4, FSRS_INITIAL_DIFFICULTY);
+        assert!(competitive_fitness(&hi).is_none(), "ungraded → no Wilson fitness");
+        assert!((retrieval_rank(&hi) - 0.9).abs() < 1e-6, "uses salience, not 0");
+        assert!(retrieval_rank(&hi) > retrieval_rank(&lo));
     }
 
     // ---- exo-evolution E2: variation / mutation ----------------------------

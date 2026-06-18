@@ -182,7 +182,7 @@ way to rank by success rate.
 **The niche.** A niche is a **topical tag** shared by ≥2 *eligible* procedures (structural
 markers like `procedure`/`skill`/`prune_candidate` are not niches — competition forms on
 subject matter). Within a niche the highest-fitness procedure is the **champion** (tagged
-`skill_champion`, so retrieval can prefer it); rivals trailing the champion's Wilson fitness
+`skill_champion`, which retrieval prefers via `retrieval_rank`); rivals trailing the champion's Wilson fitness
 by more than a margin are **dominated** and take a bounded salience decay (gradual, not a
 one-shot kill) plus a difficulty bump — so a persistent loser drifts to the prune floor, is
 flagged `prune_candidate`, and is retired by the very next pruning phase (competition runs
@@ -197,7 +197,8 @@ right before pruning for exactly this).
   removes the also-rans, never the specialists.
 
 Net effect: each task niche converges on its fittest procedure over successive dreams, the
-also-rans fade, and `cognitive_bootstrap` can surface champions first — competence sharpening
+also-rans fade, and retrieval (`find_relevant_procedures` / `cognitive_bootstrap`) surfaces
+champions first — competence sharpening
 itself with no weight update and no human in the loop. The selection core
 (`compute_competition_verdicts`) is a pure function, unit-tested independently of any database.
 
@@ -214,6 +215,7 @@ itself with no weight update and no human in the loop. The selection core
 | Fitness ledger (win/loss evidence base) | ✓ **slice #E1**: `record_procedure_outcome` writes `metadata.outcomes:{successes,failures}` — a real count-based record, additive to the salience/difficulty effects, so fitness no longer has to be inferred from salience alone |
 | Niche competition (relative selection) | ✓ **slice #E1**: new algorithmic `skill_competition` dream phase — procedures sharing a topical tag contend; the Wilson-fittest is tagged `skill_champion`, dominated rivals decay toward the prune floor. Novelty-exempt below 2 graded uses; a champion of any niche is never demoted |
 | Variation / mutation (fresh alternatives) | ✓ **slice #E2 + #E2b**: LLM `variation` dream phase. E2 *refines* underperformers (`dream_mutated`); E2b *merges* two strong distinct same-niche procedures into a hybrid (`dream_merged`). Variants inherit niche tags, link via `derived_from`, start un-graded → exempt until tried → re-compete. Pure `refine_candidates` + `merge_candidates`, unit-tested |
+| Champion-aware retrieval | ✓ **E1 follow-up**: `find_relevant_procedures` (full-sorts) + `cognitive_bootstrap` (stable champion-promotion) surface the crowned procedure first, via the shared `retrieval_rank` (champion +1.0 band → Wilson → salience). Same metric as competition — one source of truth |
 | Skill → identity promotion path | ✗ deliberate `propose_evolution` step, not yet conventionalized |
 
 ### Build slices (smallest first)
@@ -275,8 +277,14 @@ extends it with genuinely new mechanisms:
 - **E3. Cross-agent skill flow.** A Pro/GPU node distils a champion skill and propagates it to
   the colony (`share_memory`/`send_message` over the mesh) so agents don't each re-evolve from
   scratch — the "exo-evolution for any MCP consumer" thesis made concrete across the mesh.
-- **Champion-aware retrieval.** `find_relevant_procedures` / `cognitive_bootstrap` prefer
-  `skill_champion`-tagged procedures within a niche (small follow-up to E1).
+- **Champion-aware retrieval.** ✓ **DONE.** `find_relevant_procedures` and `cognitive_bootstrap`
+  now surface the procedure competition crowned, ranking by the **same** fitness the dream phase
+  uses (`retrieval_rank` = a `skill_champion` +1.0 band, then Wilson lower bound, ungraded
+  falling back to salience) — single source of truth, no second drifting notion of "best".
+  `find_relevant_procedures` (a binary tag/concept gate, no relevance score) full-sorts by
+  `retrieval_rank`; `cognitive_bootstrap` (recall hits already relevance-ordered) instead does a
+  *stable* champion-promotion, so a champion only wins ties and fitness never overrides
+  relevance for non-champions. Without this the matched set surfaced in arbitrary DB order.
 
 Then: land the foundation **and** the frontier mechanisms in standalone `CerebroCortex-RS`
 so the capability is generic (the two cerebro trees are parity — see the cross-repo mirror).
