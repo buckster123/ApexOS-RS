@@ -66,4 +66,45 @@ Full env list: Occipital's `docs/build-roadmap.md`. Without any key, search uses
 
 ## 2. Follow-along reader window (9b/9c)
 
-*(Documented when the window lands — PR2.)*
+A native Slint window (`AppKind::Occipital`, 📖 in the Start menu under the tech apps,
+next to 🌐 Web) that **mirrors what APEX reads** — a read-only follow-along browser. The
+integration is additive: **no agentd changes**, reusing the tool-event side-channel + the
+TurnGate, exactly like `display_face` / `sketch_snapshot`.
+
+### How it consumes results (9b)
+
+Every `web_fetch` / `web_search` / `web_recall` returns a flat, `kind`-discriminated object
+(the contract in Occipital's `docs/follow-along.md`). agentd's MCP client passes it through as
+the MCP content array `[{"type":"text","text":"<json>"}]` (`mcp.rs`), and `Event::ToolResult`
+carries **no tool name** — so ui-slint detects an Occipital read by the payload's `kind`, not
+the tool name (`occipital_payload()` recovers it from a bare object / JSON string / MCP array,
+mirroring how `turn.rs` recovers the vision sentinel). It then switches on `kind`:
+
+| `kind` | Rendered as |
+|--------|-------------|
+| `page` | reader-mode **markdown parsed natively** (Slint has no webview) into headings / paragraphs / bullets / blockquote / code / rule, plus the page's link list as clickable rows |
+| `results` | ranked result rows (`#1…`), each with title · URL · snippet |
+| `recall` | memory-hit rows with a cosine-score chip (`0.82`) or `kw` for FTS5 keyword hits |
+
+Each row is clickable (the steer). A `● LIVE` / `● CACHED` badge (from `from_cache`) shows
+freshness; a breadcrumb **trail** tracks the agent's path this session. The body is a std-widgets
+`ScrollView` (the linuxkms no-wheel-scroll gotcha — a bare Flickable is unscrollable on the kiosk).
+
+The window **auto-reveals the first time APEX browses** (so the human notices it start reading)
+but won't re-pop if the user closes it — closing sets a suppress flag that relaunching from the
+menu clears.
+
+### The steer (9c)
+
+Clicking a row — or typing into the window's URL bar — sends a queued `user_prompt`
+*"(navigation) Go here next: &lt;url&gt;…"* over the WS. The gateway injects the session and it
+funnels through the existing **TurnGate** like any user message, so it can't race the in-flight
+turn (ApexOS's serialized-turn invariant). The agent finishes its step, sees the hint, and
+`web_fetch`es the URL. The human is a collaborator in the agent's browsing, not a driver of a
+separate browser.
+
+### Dev / verify
+
+`APEX_OCCIPITAL_DEMO=1` (or `=results` / `=recall`) opens the reader at launch with a sample
+payload — no agentd, no network — so the window can be snapshotted via the screen-mirror server
+(`APEXOS_UI_SNAPSHOT_ADDR`, `take_snapshot()`), the same way the GL face is verified.

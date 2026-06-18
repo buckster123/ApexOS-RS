@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, ReaderBlock, ReaderLink } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -32,6 +32,7 @@ import { SketchpadView } from "sketchpad_view.slint";
 import { WebView } from "web_view.slint";
 import { CalculatorView } from "calculator_view.slint";
 import { ExplorerView } from "explorer_view.slint";
+import { OccipitalView } from "occipital_view.slint";
 
 component CaptionButton inherits Rectangle {
     in property <string> glyph;
@@ -144,6 +145,17 @@ export component AppWindowFrame inherits Rectangle {
     in-out property <string>     web-custom-url;
     in property <string>         calc-display;
     in property <string>         staged-image-name;
+    // Occipital (📖) follow-along reader
+    in property <string>         occipital-mode;
+    in property <string>         occipital-title;
+    in property <string>         occipital-url;
+    in property <string>         occipital-meta;
+    in property <string>         occipital-badge;
+    in property <int>            occipital-scroll-tick;
+    in property <[ReaderBlock]>  occipital-blocks;
+    in property <[ReaderLink]>   occipital-links;
+    in property <[ReaderLink]>   occipital-trail;
+    in-out property <string>     occipital-url-input;
     // Explorer (📁 Files)
     in property <[ExplorerEntry]> explorer-entries;
     in property <string>         explorer-current-path;
@@ -202,6 +214,7 @@ export component AppWindowFrame inherits Rectangle {
     callback sketch-set-tool(int);
     callback open-url(string);
     callback calc-key(string);
+    callback occipital-steer(string);   // a clicked link / URL-bar "go here" nudge
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -596,6 +609,21 @@ export component AppWindowFrame inherits Rectangle {
             vertical-stretch: 1;
             display: root.calc-display;
             key(k) => { root.calc-key(k); }
+        }
+
+        if root.kind == AppKind.occipital: OccipitalView {
+            vertical-stretch: 1;
+            mode: root.occipital-mode;
+            title: root.occipital-title;
+            url: root.occipital-url;
+            meta: root.occipital-meta;
+            badge: root.occipital-badge;
+            scroll-tick: root.occipital-scroll-tick;
+            blocks: root.occipital-blocks;
+            links: root.occipital-links;
+            trail: root.occipital-trail;
+            url-input <=> root.occipital-url-input;
+            steer(u) => { root.occipital-steer(u); }
         }
     }
 
