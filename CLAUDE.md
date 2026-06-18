@@ -414,6 +414,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 | `docs/edk.md` | Evolutionary Development Kit — **agent-facing** manual for self-extension: the three evolutions (identity·competence·**morphology**), the embodiment gradient, the request-to-incarnate loop, the "yolo if set" autonomy ladder. Paired with the on-hand parts inventory in `config/parts/inventory.toml` (buyable universe is web-searched, never listed) |
 | `docs/app-parity.md` | Bringing original ApexOS apps to -RS — parity matrix, build tiers, AI⇄app symbiosis contract, and the "how to add an app" recipe |
 | `docs/agent-identity.md` | Agent Identity charter — identity is system-**stamped** not agent-supplied: enforced per-session `agent_id` (Cerebro space + soul + policy + skin), the user↔agent↔skin boot flow, the auth-weight open decision, the 3-slice arc |
+| `docs/occipital.md` | Occipital integration — the agent's reading cortex (standalone sibling repo): registering `occipital-mcp` (web_search/fetch/recall), the deploy + activation paths, and the ui-slint follow-along reader window |
 
 ---
 
