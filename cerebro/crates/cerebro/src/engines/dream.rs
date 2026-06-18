@@ -82,6 +82,12 @@ const COMPETITION_PENALTY: f32 = 0.1;
 // novelty (exempt) until it has been tried, then it competes on its own record.
 const REFINE_FITNESS_CEILING: f32 = 0.5;
 
+// E2b (merge/recombination): both parents of a merge must be genuinely PROVEN —
+// confidence-aware (Wilson) fitness at or above this floor — so the engine
+// recombines two strong-but-different approaches to a task, not a champion with a
+// weak straggler (that's refinement's job). ~3 clean successes clears it.
+const MERGE_FITNESS_FLOOR: f32 = 0.4;
+
 const SYSTEM_DREAM: &str =
     "You are the Dream Engine of CerebroCortex, a brain-analogous AI memory system. \
      You process memories during consolidation, extracting patterns, creating schemas, \
@@ -130,6 +136,17 @@ task — an improved how-to, not a critique of the original.\n\
 {\"content\": \"To restart a wedged service, first capture its last 50 log lines, stop it, \
 verify the port is released, then start and confirm readiness before declaring success\", \
 \"tags\": [\"ops\", \"service-restart\"]}";
+
+const PROMPT_MERGE_PROCEDURES: &str = "These are TWO procedures the agent uses for the SAME \
+kind of task. Each has a solid track record, but they take different approaches.\n\
+\nProcedure A:\n{procedure_a}\n\nProcedure B:\n{procedure_b}\n\
+\nSynthesise ONE hybrid procedure that combines the strengths of both — the most reliable \
+way to do this task, drawing the best steps from each. It must be a concrete, actionable \
+procedure, not a comparison of the two.\n\
+\nReturn JSON with:\n\
+- \"content\": The combined procedure (1-4 sentences, actionable guidance)\n\
+- \"tags\": Relevant topical tags (the task domain)\n\
+\nReturn ONLY valid JSON object.";
 
 const PROMPT_REM_CONNECT: &str = "You are looking at two seemingly unrelated memories. \
 Find an unexpected but meaningful connection.\n\
@@ -180,6 +197,8 @@ fn is_structural_tag(tag: &str) -> bool {
             | "skill"
             | "dream_formed"
             | "dream_distilled"
+            | "dream_mutated"
+            | "dream_merged"
             | "skill_champion"
             | "prune_candidate"
     ) || tag.starts_with("support_count:")
@@ -275,6 +294,77 @@ fn refine_candidates(procedures: &[MemoryNode]) -> Vec<usize> {
         .collect();
     scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.into_iter().map(|(i, _)| i).collect()
+}
+
+/// True if a niche already holds an UNGRADED merged child — a `dream_merged`
+/// procedure carrying `niche_tag` that has not yet been tried. Used so the merge
+/// pass doesn't recombine the same niche every cycle before its last hybrid has
+/// earned an outcome (no untested-merge pile-up).
+fn has_pending_merge(procedures: &[MemoryNode], niche_tag: &str) -> bool {
+    procedures.iter().any(|n| {
+        outcome_stats(n).is_none()
+            && n.tags.iter().any(|t| t == "dream_merged")
+            && n.tags.iter().any(|t| t == niche_tag)
+    })
+}
+
+/// Whether two procedure contents share a 40-char prefix — a cheap "these are
+/// effectively the same procedure" check, so the merge pass doesn't recombine
+/// near-duplicates (no new strength to combine).
+fn same_prefix(a: &str, b: &str) -> bool {
+    truncate_chars(a, 40) == truncate_chars(b, 40)
+}
+
+/// Pairs of procedure indices worth merging (E2b recombination): within each
+/// niche, the fittest procedure and the best DISTINCT-content partner, both at or
+/// above `MERGE_FITNESS_FLOOR` (two *proven* approaches, not a champion + a weak
+/// straggler). Niches that already hold an untested merged child are skipped, and
+/// each unordered pair is emitted once. Pure (no I/O) so it is unit-testable.
+fn merge_candidates(procedures: &[MemoryNode]) -> Vec<(usize, usize)> {
+    let fitness: Vec<Option<f32>> = procedures.iter().map(competitive_fitness).collect();
+
+    // Niche = topical tag → indices of the eligible procedures carrying it.
+    let mut niches: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, node) in procedures.iter().enumerate() {
+        if fitness[i].is_none() { continue; }
+        for tag in &node.tags {
+            if is_structural_tag(tag) { continue; }
+            niches.entry(tag.clone()).or_default().push(i);
+        }
+    }
+
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+
+    for (tag, members) in &niches {
+        if members.len() < 2 { continue; }
+        if has_pending_merge(procedures, tag) { continue; }
+
+        // Rank the niche by fitness, descending.
+        let mut ranked = members.clone();
+        ranked.sort_by(|&a, &b| {
+            fitness[b].unwrap()
+                .partial_cmp(&fitness[a].unwrap())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let best = ranked[0];
+        if fitness[best].unwrap() < MERGE_FITNESS_FLOOR { continue; }
+        // Best partner that is also proven and not a near-duplicate of the best.
+        let partner = ranked.iter().skip(1).copied().find(|&idx| {
+            fitness[idx].unwrap() >= MERGE_FITNESS_FLOOR
+                && !same_prefix(&procedures[best].content, &procedures[idx].content)
+        });
+
+        if let Some(p) = partner {
+            let key = if best < p { (best, p) } else { (p, best) };
+            if seen.insert(key) {
+                pairs.push(key);
+            }
+        }
+    }
+
+    pairs
 }
 
 /// What the competition phase should do to one procedure this cycle.
@@ -884,21 +974,27 @@ impl DreamEngine {
     }
 
     // -------------------------------------------------------------------------
-    // Phase: Variation / Mutation — LLM-assisted (exo-evolution E2)
+    // Phase: Variation / Mutation — LLM-assisted (exo-evolution E2 / E2b)
     //
     // Generates fresh procedure variants so competition (E1) has new alternatives
-    // to select among. The refinement operator: take a genuinely-underperforming
-    // procedure (graded, ≥1 failure, Wilson fitness below REFINE_FITNESS_CEILING)
-    // and ask the LLM for an improved variant for the SAME task. The variant
-    // inherits the parent's topical (niche) tags + `dream_mutated`, links back via
-    // `derived_from`, and starts un-graded — so E1 treats it as novelty (exempt)
-    // until it has been tried, then it competes against the parent on its own
-    // record. Lose → mutate → re-compete is the variation→selection loop.
+    // to select among. Two operators share the phase budget:
+    //   (a) REFINEMENT (E2): take a genuinely-underperforming procedure (graded,
+    //       ≥1 failure, Wilson fitness below REFINE_FITNESS_CEILING) and ask the
+    //       LLM for an improved variant for the SAME task (`dream_mutated`).
+    //   (b) MERGE/recombination (E2b): take the two fittest DISTINCT procedures in
+    //       a niche, both above MERGE_FITNESS_FLOOR, and synthesise a hybrid that
+    //       combines their strengths (`dream_merged`) — crossover, not refinement.
     //
-    // Guards: only one untested variant per parent at a time (no pile-up), prefix
-    // dedup against existing procedures, and a bounded LLM budget (worst-fitness
-    // procedures refined first). Junk variants are self-correcting — if a variant
-    // underperforms it is demoted/pruned by selection, exactly like any procedure.
+    // Every variant inherits its parent(s)' topical (niche) tags, links back via
+    // `derived_from`, and starts un-graded — so E1 treats it as novelty (exempt)
+    // until it has been tried, then it competes against its parent(s) on its own
+    // record. Lose/recombine → re-compete is the variation→selection loop.
+    //
+    // Guards: one untested variant per parent / merged child per niche (no pile-up),
+    // prefix dedup against existing procedures, distinct-content merge parents, and
+    // a bounded LLM budget (refinement worst-fitness first; ~half reserved for
+    // merge). Junk variants are self-correcting — if one underperforms it is
+    // demoted/pruned by selection, exactly like any procedure.
     // -------------------------------------------------------------------------
     async fn variation(
         &self,
@@ -932,11 +1028,15 @@ impl DreamEngine {
         let candidates_total = candidates.len();
         result.memories_processed = candidates_total;
 
+        // Reserve roughly half the phase budget for the merge pass (b) so a
+        // refinement-heavy brain still recombines — mirrors schema_formation.
+        let merge_reserve = (budget / 2).max(1);
         let mut budget_remaining = budget;
         let mut total_mutated = 0usize;
 
+        // ---- (a) Refinement: improve a struggling procedure into a variant ----
         for idx in candidates {
-            if budget_remaining == 0 || *calls_used >= overall_budget { break; }
+            if budget_remaining <= merge_reserve || *calls_used >= overall_budget { break; }
             let parent = &procedures[idx];
 
             let prompt = PROMPT_REFINE_PROCEDURE
@@ -997,10 +1097,78 @@ impl DreamEngine {
             }
         }
 
+        // ---- (b) Merge: recombine two strong same-niche procedures into a hybrid ----
+        let merge_pairs = merge_candidates(&procedures);
+        let merge_pairs_total = merge_pairs.len();
+        let mut total_merged = 0usize;
+
+        for (a, b) in merge_pairs {
+            if budget_remaining == 0 || *calls_used >= overall_budget { break; }
+            let (pa, pb) = (&procedures[a], &procedures[b]);
+
+            let prompt = PROMPT_MERGE_PROCEDURES
+                .replace("{procedure_a}", truncate_chars(&pa.content, 300))
+                .replace("{procedure_b}", truncate_chars(&pb.content, 300));
+            let resp = match llm_call(&key, SYSTEM_DREAM, &prompt).await {
+                Ok(r) => r,
+                Err(e) => { tracing::warn!("variation merge LLM call failed: {e}"); continue; }
+            };
+            *calls_used      += 1;
+            result.llm_calls += 1;
+            budget_remaining -= 1;
+
+            let merged = match parse_json_object(&resp) {
+                Some(v) => v,
+                None    => continue,
+            };
+            let content = merged["content"].as_str().unwrap_or("").trim();
+            if content.len() < 10 { continue; }
+
+            // Prefix dedup against existing procedures (incl. either parent).
+            let prefix = truncate_chars(content, 40);
+            if procedures.iter().any(|n| n.content.starts_with(prefix)) { continue; }
+
+            let llm_tags: Vec<String> = merged["tags"].as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            // Inherit BOTH parents' topical tags so the hybrid competes in their
+            // shared niche; add the merge markers.
+            let parent_topical = pa.tags.iter().chain(pb.tags.iter())
+                .filter(|t| !is_structural_tag(t)).cloned();
+            let variant_tags = {
+                let mut t = vec!["procedure".to_string(), "dream_merged".to_string()];
+                t.extend(parent_topical);
+                t.extend(llm_tags);
+                t.sort();
+                t.dedup();
+                t
+            };
+
+            let parent_ids = vec![pa.id.0.clone(), pb.id.0.clone()];
+            if let Ok(mut node) = cortex.remember(
+                content.to_string(),
+                Some(MemoryType::Procedural),
+                Some(variant_tags),
+                Some(0.7), // unproven — competes on its own record once tried
+                scope.clone(),
+            ).await {
+                if let serde_json::Value::Object(ref mut map) = node.metadata {
+                    map.insert("derived_from".to_string(), json!(parent_ids));
+                } else {
+                    node.metadata = json!({ "derived_from": parent_ids });
+                }
+                match cortex.storage.read().await.sqlite.update_memory(&node).await {
+                    Ok(_)  => total_merged += 1,
+                    Err(e) => tracing::warn!("variation merge persist failed for {}: {e}", node.id.0),
+                }
+            }
+        }
+
         result.procedures_mutated = total_mutated;
+        result.procedures_merged  = total_merged;
         result.notes = format!(
-            "Refined {} of {} struggling procedures into variants (budget used: {}/{})",
-            total_mutated, candidates_total, result.llm_calls, budget,
+            "Refined {} of {} struggling procedures; merged {} of {} niche pairs (budget used: {}/{})",
+            total_mutated, candidates_total, total_merged, merge_pairs_total, result.llm_calls, budget,
         );
         result.duration_secs = start.elapsed().as_secs_f64();
         Ok(result)
@@ -1465,6 +1633,9 @@ pub struct PhaseResult {
     /// Procedures refined into fresh variants by the variation phase (E2).
     #[serde(default)]
     pub procedures_mutated:   usize,
+    /// Procedure pairs recombined into hybrid variants by the variation phase (E2b).
+    #[serde(default)]
+    pub procedures_merged:    usize,
     pub procedures_extracted: usize,
     pub llm_calls:            usize,
     pub duration_secs:        f64,
@@ -1487,6 +1658,7 @@ impl PhaseResult {
             champions_marked:     0,
             procedures_demoted:   0,
             procedures_mutated:   0,
+            procedures_merged:    0,
             procedures_extracted: 0,
             llm_calls:            0,
             duration_secs:        0.0,
@@ -1506,9 +1678,9 @@ impl PhaseResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_competition_verdicts, competitive_fitness, has_pending_variant, is_structural_tag,
-        outcome_stats, procedure_fitness, refine_candidates, wilson_lower_bound, CompetitionAction,
-        SKILL_MIN_FITNESS,
+        compute_competition_verdicts, competitive_fitness, has_pending_merge, has_pending_variant,
+        is_structural_tag, merge_candidates, outcome_stats, procedure_fitness, refine_candidates,
+        wilson_lower_bound, CompetitionAction, SKILL_MIN_FITNESS,
     };
     use crate::config::FSRS_INITIAL_DIFFICULTY;
     use crate::models::MemoryNode;
@@ -1537,6 +1709,26 @@ mod tests {
         let mut n = MemoryNode::new("a refined approach", MemoryType::Procedural);
         n.tags = vec!["procedure".into(), "dream_mutated".into()];
         n.metadata = json!({ "derived_from": [parent_id] });
+        n
+    }
+
+    /// Like `graded_proc` but with explicit `content` — needed for merge tests,
+    /// where same-niche procedures must have DISTINCT content to be merge-worthy.
+    fn graded_proc_c(content: &str, tags: &[&str], successes: u32, failures: u32) -> MemoryNode {
+        let mut n = MemoryNode::new(content, MemoryType::Procedural);
+        n.tags = tags.iter().map(|t| t.to_string()).collect();
+        n.metadata = json!({ "outcomes": { "successes": successes, "failures": failures } });
+        n
+    }
+
+    /// A `dream_merged` hybrid carrying `niche`, graded or not — for pending-merge
+    /// guard tests.
+    fn merged_node(niche: &str, graded: bool) -> MemoryNode {
+        let mut n = MemoryNode::new("a hybrid approach", MemoryType::Procedural);
+        n.tags = vec!["procedure".into(), "dream_merged".into(), niche.into()];
+        if graded {
+            n.metadata = json!({ "outcomes": { "successes": 1, "failures": 0 } });
+        }
         n
     }
 
@@ -1573,7 +1765,7 @@ mod tests {
     fn structural_tags_excluded_topical_kept() {
         for t in [
             "procedure", "skill", "schema", "dream_distilled", "support_count:3",
-            "skill_champion", "prune_candidate",
+            "skill_champion", "prune_candidate", "dream_mutated", "dream_merged",
         ] {
             assert!(is_structural_tag(t), "{t} should be structural");
         }
@@ -1765,6 +1957,71 @@ mod tests {
             "outcomes": { "successes": 2, "failures": 1 }
         });
         assert!(!has_pending_variant(&[parent, graded_child], &pid));
+    }
+
+    // ---- exo-evolution E2b: merge / recombination --------------------------
+
+    #[test]
+    fn merge_pairs_two_strong_distinct_procedures_in_a_niche() {
+        let procs = vec![
+            graded_proc_c("approach one: stop, swap, verify", &["deploy"], 8, 0),
+            graded_proc_c("approach two: drain, swap, smoke-test", &["deploy"], 5, 0),
+        ];
+        assert_eq!(merge_candidates(&procs), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn merge_skips_a_weak_partner() {
+        // champion is strong, but the only same-niche partner is below the floor →
+        // nothing proven to recombine with.
+        let procs = vec![
+            graded_proc_c("strong approach", &["deploy"], 8, 0),
+            graded_proc_c("weak approach", &["deploy"], 1, 3),
+        ];
+        assert!(merge_candidates(&procs).is_empty());
+    }
+
+    #[test]
+    fn merge_skips_near_duplicate_partners() {
+        // both strong, but effectively the same procedure (shared 40-char prefix) →
+        // no new strength to combine.
+        let dup = "identical opening that runs past forty characters for sure, then diverges";
+        let procs = vec![
+            graded_proc_c(dup, &["deploy"], 8, 0),
+            graded_proc_c(dup, &["deploy"], 6, 0),
+        ];
+        assert!(merge_candidates(&procs).is_empty());
+    }
+
+    #[test]
+    fn merge_skips_niche_with_a_pending_merged_child() {
+        let procs = vec![
+            graded_proc_c("approach one here", &["deploy"], 8, 0),
+            graded_proc_c("approach two here", &["deploy"], 5, 0),
+            merged_node("deploy", false), // ungraded hybrid already awaiting trial
+        ];
+        assert!(merge_candidates(&procs).is_empty(), "don't re-merge a niche with a pending hybrid");
+    }
+
+    #[test]
+    fn merge_dedups_a_pair_shared_across_two_niches() {
+        // both procedures carry two topical tags → the same pair would surface in
+        // niche "a" and niche "b"; it must be emitted only once.
+        let procs = vec![
+            graded_proc_c("approach one", &["a", "b"], 8, 0),
+            graded_proc_c("approach two", &["a", "b"], 5, 0),
+        ];
+        assert_eq!(merge_candidates(&procs), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn has_pending_merge_only_counts_ungraded_children_in_the_niche() {
+        // ungraded hybrid in the niche blocks
+        assert!(has_pending_merge(&[merged_node("deploy", false)], "deploy"));
+        // a graded hybrid does not block
+        assert!(!has_pending_merge(&[merged_node("deploy", true)], "deploy"));
+        // an ungraded hybrid in a DIFFERENT niche does not block "deploy"
+        assert!(!has_pending_merge(&[merged_node("other", false)], "deploy"));
     }
 }
 

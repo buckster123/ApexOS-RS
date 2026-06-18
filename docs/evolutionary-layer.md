@@ -213,7 +213,7 @@ itself with no weight update and no human in the loop. The selection core
 | `schematic` skill layer surfaced at boot | ✓ **slice #2**: `cognitive_bootstrap` now buckets recall hits into a dedicated `## Skills (distilled competence)` section (Schematic + `skill` tag), placed ahead of concrete procedures so the generalisation arrives first |
 | Fitness ledger (win/loss evidence base) | ✓ **slice #E1**: `record_procedure_outcome` writes `metadata.outcomes:{successes,failures}` — a real count-based record, additive to the salience/difficulty effects, so fitness no longer has to be inferred from salience alone |
 | Niche competition (relative selection) | ✓ **slice #E1**: new algorithmic `skill_competition` dream phase — procedures sharing a topical tag contend; the Wilson-fittest is tagged `skill_champion`, dominated rivals decay toward the prune floor. Novelty-exempt below 2 graded uses; a champion of any niche is never demoted |
-| Variation / mutation (fresh alternatives) | ◑ **slice #E2**: new LLM `variation` dream phase refines underperforming procedures into `dream_mutated` variants (inherit niche tags, link via `derived_from`, start un-graded → exempt until tried). Lose→mutate→re-compete. Refinement operator done; merge/recombination (E2b) next |
+| Variation / mutation (fresh alternatives) | ✓ **slice #E2 + #E2b**: LLM `variation` dream phase. E2 *refines* underperformers (`dream_mutated`); E2b *merges* two strong distinct same-niche procedures into a hybrid (`dream_merged`). Variants inherit niche tags, link via `derived_from`, start un-graded → exempt until tried → re-compete. Pure `refine_candidates` + `merge_candidates`, unit-tested |
 | Skill → identity promotion path | ✗ deliberate `propose_evolution` step, not yet conventionalized |
 
 ### Build slices (smallest first)
@@ -254,17 +254,24 @@ extends it with genuinely new mechanisms:
   exempt below `COMPETITION_MIN_GRADED_USES` (2) graded uses; a champion of any niche is never
   demoted. Pure selection core (`compute_competition_verdicts`) is unit-tested without a DB.
   See the *Niche competition* section above.
-- **E2. Variation / mutation.** ◑ **Refinement operator DONE; merge next.** A new LLM dream
-  phase `variation` refines genuinely-underperforming procedures (graded, ≥1 failure, Wilson
-  fitness below `REFINE_FITNESS_CEILING`) into fresh variants: the variant inherits the
-  parent's niche tags + `dream_mutated`, links back via `derived_from`, and starts *un-graded*
-  so E1 treats it as novelty (exempt) until tried — then it competes against the parent on its
-  own record. **Lose → mutate → re-compete** is the variation→selection loop. Guards: one
-  untested variant per parent (no pile-up via `has_pending_variant`), prefix dedup, bounded
-  budget (worst-fitness first), and junk variants are self-correcting (selection demotes/prunes
-  them like any procedure). The candidate selector `refine_candidates` is pure and unit-tested.
-  *Next (E2b):* the **merge/recombination** operator — synthesise two strong same-niche
-  procedures into a hybrid that combines their strengths.
+- **E2. Variation / mutation.** ✓ **DONE (both operators).** The LLM `variation` dream phase
+  generates fresh variants so competition has new alternatives, via two operators sharing the
+  phase budget:
+  - **Refinement** (E2): refine a genuinely-underperforming procedure (graded, ≥1 failure,
+    Wilson fitness below `REFINE_FITNESS_CEILING`) into an improved variant (`dream_mutated`).
+  - **Merge/recombination** (E2b): take the two fittest DISTINCT procedures in a niche, both
+    above `MERGE_FITNESS_FLOOR`, and synthesise a hybrid combining their strengths
+    (`dream_merged`) — crossover, not refinement.
+
+  Every variant inherits its parent(s)' niche tags, links via `derived_from`, and starts
+  *un-graded* so E1 treats it as novelty (exempt) until tried — then it competes against its
+  parent(s) on its own record. **Lose / recombine → re-compete** is the variation→selection
+  loop. Guards: one untested variant per parent + one pending merged child per niche (no
+  pile-up), prefix dedup, distinct-content merge parents, bounded budget (refinement
+  worst-fitness first, ~half reserved for merge); junk variants self-correct via selection.
+  Pure selectors `refine_candidates` + `merge_candidates` are unit-tested. *(E2b also fixed a
+  latent E2 bug: `dream_mutated`/`dream_merged` are now `is_structural_tag`, so role markers
+  never form a spurious cross-task niche in competition or skill distillation.)*
 - **E3. Cross-agent skill flow.** A Pro/GPU node distils a champion skill and propagates it to
   the colony (`share_memory`/`send_message` over the mesh) so agents don't each re-evolve from
   scratch — the "exo-evolution for any MCP consumer" thesis made concrete across the mesh.
