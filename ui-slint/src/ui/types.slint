@@ -10,7 +10,7 @@ export enum ShellMode { desktop, focus }
 // Every app is a window. Rust owns the set (which windows exist, z-order =
 // model order with the last element on top); Slint owns live-drag geometry
 // for smoothness and commits back to Rust on release.
-export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer, occipital }
 
 // ── Persona system (glowup G4) ───────────────────────────────────────────
 // A persona is a named bundle: theme + chrome + wallpaper + default shell mode
@@ -246,6 +246,29 @@ export struct SketchStroke {
     commands: string,
     color:    color,
     width:    float,    // logical px; bound as stroke-width: width * 1px
+}
+
+// ── Occipital follow-along reader (Phase 9) ──────────────────────────────
+// The agent's "reading cortex" window. Rust parses each web_fetch/web_search/
+// web_recall tool result (flat, `kind`-discriminated — see Occipital's
+// docs/follow-along.md) into these and the window mirrors what the agent reads.
+
+// One rendered block of a reader-mode page. Rust parses the page markdown into
+// a flat list; the view styles by `kind`.
+export struct ReaderBlock {
+    kind:  string,   // "h1"|"h2"|"h3"|"p"|"code"|"bullet"|"quote"|"rule"
+    text:  string,
+    depth: int,      // bullet nesting (0-based)
+}
+
+// One interactive row: a page link, a search result, or a recall hit. Clicking
+// it steers the agent ("go here" — 9c). Rust fills per mode; the view shows
+// whatever is non-empty.
+export struct ReaderLink {
+    label:  string,   // link text / result title / hit title (fallback: url)
+    url:    string,
+    detail: string,   // snippet (results/recall) — "" for page links
+    badge:  string,   // "#1" (search rank) / "0.82" (recall score) / ""
 }
 
 export struct MessageItem {

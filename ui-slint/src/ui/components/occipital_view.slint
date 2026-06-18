@@ -1,0 +1,417 @@
+import { ScrollView } from "std-widgets.slint";
+import { Palette } from "../palette.slint";
+import { Personas } from "../personas.slint";
+import { ReaderBlock, ReaderLink } from "../types.slint";
+
+// ── OccipitalView (📖) — the follow-along reading cortex ─────────────────────
+//
+// A read-only mirror of where the agent is browsing. Rust populates this from
+// each web_fetch / web_search / web_recall tool result (flat `kind`-discriminated
+// payload — Occipital's docs/follow-along.md): mode "page" renders reader-mode
+// markdown + a clickable link list; "results"/"recall" render clickable rows.
+// The one interaction is the steer: clicking a row (or the URL bar) sends a
+// queued "go here" nudge to the agent (9c). Markdown is rendered NATIVELY (Slint
+// has no webview) and the body is a std-widgets ScrollView (linuxkms drops the
+// scroll-wheel — a bare Flickable would be unscrollable on the kiosk).
+
+// One clickable navigation row (link / result / hit).
+component LinkRow inherits Rectangle {
+    in property <ReaderLink> entry;
+    callback steer(string);
+
+    height: row.preferred-height + 14px;
+    border-radius: Palette.radius;
+    background: ta.has-hover ? Palette.surface-hi : Palette.surface;
+    border-width: 1px;
+    border-color: ta.has-hover ? Palette.primary-dim : Palette.border;
+    animate background, border-color { duration: 120ms; }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { if (root.entry.url != "") { root.steer(root.entry.url); } }
+    }
+
+    row := HorizontalLayout {
+        padding: 10px;
+        spacing: 10px;
+
+        if root.entry.badge != "": Rectangle {
+            y: 2px;
+            width: 34px;
+            height: 18px;
+            border-radius: Palette.radius-sm;
+            background: Palette.primary-dim;
+            Text {
+                text: root.entry.badge;
+                color: Palette.primary;
+                font-size: 9px * Personas.font-scale;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        VerticalLayout {
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.entry.label;
+                color: Palette.text-bright;
+                font-size: 12px * Personas.font-scale;
+                font-weight: 700;
+                wrap: word-wrap;
+            }
+            if root.entry.url != "": Text {
+                text: root.entry.url;
+                color: Palette.secondary;
+                font-size: 10px * Personas.font-scale;
+                overflow: elide;
+            }
+            if root.entry.detail != "": Text {
+                text: root.entry.detail;
+                color: Palette.text-dim;
+                font-size: 11px * Personas.font-scale;
+                wrap: word-wrap;
+            }
+        }
+
+        Text {
+            text: "→";
+            color: ta.has-hover ? Palette.primary : Palette.text-dim;
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component OccipitalView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <string>        mode: "idle";   // idle|page|results|recall
+    in property <string>        title: "";
+    in property <string>        url: "";
+    in property <string>        meta: "";
+    in property <string>        badge: "";      // "cache"|"live"|""
+    in property <int>           scroll-tick: 0; // bump → scroll body to top
+    in property <[ReaderBlock]> blocks;
+    in property <[ReaderLink]>  links;
+    in property <[ReaderLink]>  trail;
+
+    in-out property <string>    url-input: "";
+    callback steer(string);
+
+    changed scroll-tick => { sv.viewport-y = 0px; }
+
+    VerticalLayout {
+        // ── Header: tag + freshness badge ───────────────────────────────
+        Rectangle {
+            height: 44px;
+            background: Palette.surface;
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 14px;
+                spacing: 8px;
+                Text {
+                    text: "OCCIPITAL · READER";
+                    color: Palette.text-dim;
+                    font-size: 9px * Personas.font-scale;
+                    letter-spacing: 2px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                if root.badge != "": Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    height: 20px;
+                    width: badge-row.preferred-width + 16px;
+                    border-radius: 10px;
+                    background: root.badge == "live" ? Palette.primary-dim : Palette.surface-hi;
+                    border-width: 1px;
+                    border-color: root.badge == "live" ? Palette.primary : Palette.border;
+                    badge-row := HorizontalLayout {
+                        alignment: center;
+                        spacing: 4px;
+                        Rectangle {
+                            y: (parent.height - self.height) / 2;
+                            width: 6px;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: root.badge == "live" ? Palette.primary : Palette.text-dim;
+                        }
+                        Text {
+                            text: root.badge == "live" ? "LIVE" : "CACHED";
+                            color: root.badge == "live" ? Palette.primary : Palette.text-dim;
+                            font-size: 9px * Personas.font-scale;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Context: title + url/meta ───────────────────────────────────
+        if root.mode != "idle": Rectangle {
+            background: Palette.bg;
+            VerticalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-top: 10px;
+                padding-bottom: 8px;
+                spacing: 3px;
+                Text {
+                    text: root.title != "" ? root.title : "(untitled)";
+                    color: Palette.text-bright;
+                    font-size: 15px * Personas.font-scale;
+                    font-weight: 800;
+                    wrap: word-wrap;
+                }
+                if root.url != "": Text {
+                    text: root.url;
+                    color: Palette.secondary;
+                    font-size: 10px * Personas.font-scale;
+                    overflow: elide;
+                }
+                if root.meta != "": Text {
+                    text: root.meta;
+                    color: Palette.text-dim;
+                    font-size: 10px * Personas.font-scale;
+                }
+                // Breadcrumb trail of the agent's path this session.
+                if root.trail.length > 0: HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "trail:";
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        vertical-alignment: center;
+                    }
+                    for crumb in root.trail: Rectangle {
+                        height: 16px;
+                        width: crumb-txt.preferred-width + 10px;
+                        border-radius: Palette.radius-sm;
+                        background: crumb-ta.has-hover ? Palette.surface-hi : Palette.surface;
+                        crumb-ta := TouchArea {
+                            mouse-cursor: crumb.url != "" ? pointer : default;
+                            clicked => { if (crumb.url != "") { root.steer(crumb.url); } }
+                        }
+                        crumb-txt := Text {
+                            x: 5px;
+                            text: crumb.label;
+                            color: Palette.text-dim;
+                            font-size: 9px * Personas.font-scale;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+        }
+        if root.mode != "idle": Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Body ────────────────────────────────────────────────────────
+        sv := ScrollView {
+            vertical-stretch: 1;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            viewport-width: sv.visible-width;
+            viewport-height: max(body.preferred-height, sv.visible-height);
+
+            body := VerticalLayout {
+                padding: 16px;
+                spacing: 8px;
+                alignment: start;
+
+                // Empty / idle state.
+                if root.mode == "idle": VerticalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "Nothing read yet";
+                        color: Palette.text;
+                        font-size: 14px * Personas.font-scale;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: "When APEX searches or fetches the web, its reading appears here. Type a URL below to send it somewhere.";
+                        color: Palette.text-dim;
+                        font-size: 11px * Personas.font-scale;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // ── Page mode: rendered markdown ────────────────────────
+                if root.mode == "page": VerticalLayout {
+                    spacing: 6px;
+                    for b in root.blocks: VerticalLayout {
+                        if b.kind == "h1": Text {
+                            text: b.text;
+                            color: Palette.text-bright;
+                            font-size: 19px * Personas.font-scale;
+                            font-weight: 800;
+                            wrap: word-wrap;
+                        }
+                        if b.kind == "h2": Text {
+                            text: b.text;
+                            color: Palette.text-bright;
+                            font-size: 16px * Personas.font-scale;
+                            font-weight: 700;
+                            wrap: word-wrap;
+                        }
+                        if b.kind == "h3": Text {
+                            text: b.text;
+                            color: Palette.secondary;
+                            font-size: 13px * Personas.font-scale;
+                            font-weight: 700;
+                            wrap: word-wrap;
+                        }
+                        if b.kind == "p": Text {
+                            text: b.text;
+                            color: Palette.text;
+                            font-size: 12px * Personas.font-scale;
+                            wrap: word-wrap;
+                        }
+                        if b.kind == "bullet": HorizontalLayout {
+                            padding-left: (b.depth + 1) * 14px;
+                            spacing: 8px;
+                            Text {
+                                text: "•";
+                                color: Palette.primary;
+                                font-size: 12px * Personas.font-scale;
+                            }
+                            Text {
+                                text: b.text;
+                                color: Palette.text;
+                                font-size: 12px * Personas.font-scale;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        if b.kind == "quote": HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle { width: 3px; background: Palette.primary-dim; }
+                            Text {
+                                text: b.text;
+                                color: Palette.text-dim;
+                                font-size: 12px * Personas.font-scale;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        if b.kind == "code": Rectangle {
+                            background: Palette.surface;
+                            border-radius: Palette.radius;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            VerticalLayout {
+                                padding: 10px;
+                                Text {
+                                    text: b.text;
+                                    color: Palette.secondary;
+                                    font-size: 11px * Personas.font-scale;
+                                    font-family: "monospace";
+                                    wrap: char-wrap;
+                                }
+                            }
+                        }
+                        if b.kind == "rule": Rectangle {
+                            height: 1px;
+                            background: Palette.border;
+                        }
+                    }
+
+                    // Links on the page = the interactive surface.
+                    if root.links.length > 0: Text {
+                        text: "LINKS ON THIS PAGE";
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        letter-spacing: 2px;
+                    }
+                    for entry in root.links: LinkRow {
+                        entry: entry;
+                        steer(u) => { root.steer(u); }
+                    }
+                }
+
+                // ── Results / recall mode: clickable rows ───────────────
+                if root.mode == "results" || root.mode == "recall": VerticalLayout {
+                    spacing: 8px;
+                    if root.links.length == 0: Text {
+                        text: root.mode == "recall" ? "No remembered pages match." : "No results.";
+                        color: Palette.text-dim;
+                        font-size: 12px * Personas.font-scale;
+                        horizontal-alignment: center;
+                    }
+                    for entry in root.links: LinkRow {
+                        entry: entry;
+                        steer(u) => { root.steer(u); }
+                    }
+                }
+            }
+        }
+
+        // ── Footer: steer bar ───────────────────────────────────────────
+        Rectangle { height: 1px; background: Palette.border; }
+        Rectangle {
+            height: 52px;
+            background: Palette.surface;
+            HorizontalLayout {
+                padding: 10px;
+                spacing: 8px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 32px;
+                    border-radius: Palette.radius;
+                    background: Palette.bg;
+                    border-width: 1px;
+                    border-color: url-field.has-focus ? Palette.primary : Palette.border;
+                    clip: true;
+                    url-field := TextInput {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        single-line: true;
+                        font-size: 12px * Personas.font-scale;
+                        color: Palette.text;
+                        selection-background-color: Palette.primary-dim;
+                        text <=> root.url-input;
+                        accepted => {
+                            if (root.url-input != "") { root.steer(root.url-input); root.url-input = ""; }
+                        }
+                    }
+                    if root.url-input == "": Text {
+                        x: 10px;
+                        text: "send APEX to a URL…";
+                        color: Palette.text-dim;
+                        font-size: 12px * Personas.font-scale;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    width: 76px;
+                    height: 32px;
+                    border-radius: Palette.radius;
+                    background: go-ta.has-hover ? Palette.primary : Palette.primary-dim;
+                    animate background { duration: 150ms; }
+                    go-ta := TouchArea {
+                        clicked => {
+                            if (root.url-input != "") { root.steer(root.url-input); root.url-input = ""; }
+                        }
+                    }
+                    Text {
+                        text: "GO HERE";
+                        color: Palette.bg;
+                        font-size: 10px * Personas.font-scale;
+                        font-weight: 700;
+                        letter-spacing: 1px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
