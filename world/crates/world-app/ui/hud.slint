@@ -1,0 +1,221 @@
+// ui/hud.slint — apexos-world host window.
+//
+// Pattern A (DESIGN.md §5, doc 03 §1): Slint owns the window + winit event loop and
+// draws all 2D chrome; the 3D scene renders to an offscreen wgpu texture that Slint
+// draws into a full-window `Image`. Fullscreen takeover (Mode II) is a z-order change
+// here, NOT an event-loop handoff.
+//
+// This scaffold ships:
+//   - the full-window 3D viewport `Image` (fed by `world_texture` from main.rs);
+//   - a persistent minimal HUD (never blurred) — the OS chrome: connection status,
+//     node name, FPS, heading, alert ribbon (DESIGN.md §3);
+//   - an activated-station panel PLACEHOLDER that fills the view over a dimmed
+//     viewport when `active_station_id >= 0` (Mode II). The real per-kind surfaces
+//     (chat / sensors / council / terminal / memory) are reused from ui-slint in M0+
+//     — here it is a single labelled placeholder. // TODO(Mn): M0 mount ChatPanel.
+
+import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+
+// One streamed chat line. Mirrors ui-slint's MessageItem prop contract so surfaces
+// stay portable (doc 05 §4). // TODO(Mn): expand to tool-card / approval rows in M1.
+export struct ChatLine {
+    role: string,   // "user" | "agent" | "system"
+    text: string,
+}
+
+// ── HUD overlay — always on top, never blurred (DESIGN.md §3) ──────────────────
+component Hud inherits Rectangle {
+    in property <string> conn_status;   // "connected" | "reconnecting" | "offline"
+    in property <string> node_name;
+    in property <float>  fps;
+    in property <string> alert;         // empty = no alert ribbon
+
+    // Top status bar
+    Rectangle {
+        x: 0; y: 0;
+        width: 100%; height: 32px;
+        background: #0a0f1ecc;
+        HorizontalLayout {
+            padding-left: 12px; padding-right: 12px;
+            spacing: 16px;
+            Text {
+                text: root.node_name == "" ? "apexos-world" : root.node_name;
+                color: #a0b0d0; font-size: 13px; font-weight: 600;
+                vertical-alignment: center;
+            }
+            Text {
+                text: "agentd: " + root.conn_status;
+                color: root.conn_status == "connected" ? #00ff9f : #ffb000;
+                font-size: 12px; vertical-alignment: center;
+            }
+            Rectangle { }  // spacer
+            Text {
+                text: Math.round(root.fps) + " fps";
+                color: #6a7a9a; font-size: 12px;
+                horizontal-alignment: right; vertical-alignment: center;
+            }
+        }
+    }
+
+    // Alert ribbon (bleeds through even in ACTIVE state — DESIGN.md §3)
+    if root.alert != "" : Rectangle {
+        x: 0; y: 32px;
+        width: 100%; height: 24px;
+        background: #b00020dd;
+        Text {
+            text: root.alert; color: #ffffff; font-size: 12px;
+            vertical-alignment: center; horizontal-alignment: center;
+        }
+    }
+
+    // Reticle / activation hint (Walk-mode cue — DESIGN.md §3, doc 03 §6)
+    Text {
+        x: parent.width / 2 - self.width / 2;
+        y: parent.height - 48px;
+        text: "[E] activate  ·  [Esc] back  ·  WASD + mouse to roam";
+        color: #ffffff66; font-size: 12px;
+    }
+}
+
+// ── Activated-station panel PLACEHOLDER (Mode II fullscreen takeover) ──────────
+component StationPanel inherits Rectangle {
+    in property <string> title;
+    in property <string> kind;           // StationKind as snake_case
+    in property <[ChatLine]> lines;
+    callback send_prompt(string);
+    callback dismiss();
+
+    background: #0a0f1eee;   // dims the 3D viewport behind (which keeps rendering)
+
+    VerticalLayout {
+        padding: 24px;
+        spacing: 12px;
+
+        // Header
+        HorizontalLayout {
+            spacing: 12px;
+            Text {
+                text: root.title == "" ? "Station" : root.title;
+                color: #ffffff; font-size: 18px; font-weight: 700;
+                vertical-alignment: center;
+            }
+            Text {
+                text: "(" + root.kind + ")";
+                color: #6a7a9a; font-size: 13px; vertical-alignment: center;
+            }
+            Rectangle { }  // spacer
+            Button {
+                text: "Esc — back";
+                clicked => { root.dismiss(); }
+            }
+        }
+
+        // Surface body — placeholder. // TODO(Mn): swap by `kind` to the reused
+        // ui-slint surface (ChatPanel / SensorPanel / CouncilView / Terminal).
+        Rectangle {
+            background: #121a2e;
+            border-radius: 6px;
+            ScrollView {
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 6px;
+                    if root.lines.length == 0 : Text {
+                        text: "Activated station surface placeholder.\nM0 mounts the real chat surface here, bound to this station's agentd session.";
+                        color: #6a7a9a; font-size: 13px; wrap: word-wrap;
+                    }
+                    for line[i] in root.lines : Text {
+                        text: (line.role == "user" ? "you  " : line.role == "agent" ? "··   " : "—    ") + line.text;
+                        color: line.role == "user" ? #cfe3ff : line.role == "agent" ? #00ff9f : #6a7a9a;
+                        font-size: 14px; wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        // Input bar (Chat-kind only in M0; harmless for other kinds in the scaffold)
+        HorizontalLayout {
+            spacing: 8px;
+            prompt := LineEdit {
+                placeholder-text: "Speak to this station's agent…";
+            }
+            Button {
+                text: "Send";
+                clicked => {
+                    if prompt.text != "" {
+                        root.send_prompt(prompt.text);
+                        prompt.text = "";
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Host window ────────────────────────────────────────────────────────────────
+export component WorldWindow inherits Window {
+    title: "apexos-world";
+    preferred-width: 1400px;
+    preferred-height: 900px;
+    background: #000000;
+
+    // Fed from Rust (main.rs). The 3D scene's offscreen wgpu texture as a Slint Image.
+    // Empty until the renderer is wired (M0 / Spike 1). // TODO(Mn): bind world_texture.
+    in property <image> world_texture;
+
+    // HUD state (driven from the WS connection status + frame timer).
+    in property <string> conn_status: "offline";
+    in property <string> node_name;
+    in property <float>  fps;
+    in property <string> alert;
+
+    // Activation state. -1 = ROAMING (no panel); >=0 = ACTIVE (panel fills view).
+    in-out property <int>     active_station_id: -1;
+    in property <string>      active_station_title;
+    in property <string>      active_station_kind;
+    in property <[ChatLine]>  active_lines;
+
+    // Callbacks the Rust side wires to bridge/sessions/world.
+    callback activate(int /*station_id*/);          // raised by picking (world.rs) or key
+    callback dismiss();                              // Esc / step back
+    callback send_prompt(string /*text*/);           // -> user_prompt intent for the active session
+    callback approve(int /*action_id*/, bool /*granted*/);  // // TODO(Mn): M1 tool cards
+
+    // Full-window 3D viewport.
+    Image {
+        width: 100%;
+        height: 100%;
+        source: root.world_texture;
+        image-fit: fill;
+    }
+
+    // Persistent HUD chrome.
+    hud := Hud {
+        width: 100%; height: 100%;
+        conn_status: root.conn_status;
+        node_name: root.node_name;
+        fps: root.fps;
+        alert: root.alert;
+    }
+
+    // ACTIVE state: the station surface fills the view over the dimmed viewport.
+    if root.active_station_id >= 0 : StationPanel {
+        width: 100%; height: 100%;
+        title: root.active_station_title;
+        kind: root.active_station_kind;
+        lines: root.active_lines;
+        send_prompt(t) => { root.send_prompt(t); }
+        dismiss => { root.dismiss(); }
+    }
+
+    // Esc dismisses the active station (loop invariant: one-input exit — DESIGN.md §3).
+    forward-focus: key_handler;
+    key_handler := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape && root.active_station_id >= 0 {
+                root.dismiss();
+                return accept;
+            }
+            reject
+        }
+    }
+}
