@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, FaceGl, UserDef, AgentDef } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { IdentityWizard } from "components/identity_wizard.slint";
 import { ImagePicker } from "components/image_picker.slint";
@@ -17,7 +17,7 @@ import { StartMenu, Win98StartMenu } from "components/start_menu.slint";
 import { NotifCenter } from "components/notif_center.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
-export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, FaceGl }
+export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, FaceGl, ReaderBlock, ReaderLink }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -90,6 +90,18 @@ export component AppWindow inherits Window {
     in-out property <string>         web-sensorhead-url: "";
     in-out property <string>         web-custom-url: "";
     in-out property <string>         calc-display: "0";
+
+    // ── Occipital (📖) follow-along reader (Phase 9) ────────────────────
+    in-out property <string>         occipital-mode: "idle";   // idle|page|results|recall
+    in-out property <string>         occipital-title: "";
+    in-out property <string>         occipital-url: "";
+    in-out property <string>         occipital-meta: "";
+    in-out property <string>         occipital-badge: "";      // cache|live|""
+    in-out property <int>            occipital-scroll-tick: 0;
+    in-out property <[ReaderBlock]>  occipital-blocks;
+    in-out property <[ReaderLink]>   occipital-links;
+    in-out property <[ReaderLink]>   occipital-trail;
+    in-out property <string>         occipital-url-input: "";
 
     // ── Explorer (📁 Files) ─────────────────────────────────────────────
     in-out property <[ExplorerEntry]> explorer-entries;
@@ -193,6 +205,7 @@ export component AppWindow inherits Window {
     callback sketch-set-tool(int);
     callback open-url(string);
     callback calc-key(string);
+    callback occipital-steer(string);   // a clicked link / URL-bar "go here" nudge (9c)
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -683,6 +696,16 @@ export component AppWindow inherits Window {
                         web-sensorhead-url: root.web-sensorhead-url;
                         web-custom-url <=> root.web-custom-url;
                         calc-display: root.calc-display;
+                        occipital-mode: root.occipital-mode;
+                        occipital-title: root.occipital-title;
+                        occipital-url: root.occipital-url;
+                        occipital-meta: root.occipital-meta;
+                        occipital-badge: root.occipital-badge;
+                        occipital-scroll-tick: root.occipital-scroll-tick;
+                        occipital-blocks: root.occipital-blocks;
+                        occipital-links: root.occipital-links;
+                        occipital-trail: root.occipital-trail;
+                        occipital-url-input <=> root.occipital-url-input;
                         staged-image-name: root.staged-image-name;
                         explorer-entries: root.explorer-entries;
                         explorer-current-path: root.explorer-current-path;
@@ -738,6 +761,7 @@ export component AppWindow inherits Window {
                         sketch-set-tool(i) => { root.sketch-set-tool(i); }
                         open-url(u) => { root.open-url(u); }
                         calc-key(k) => { root.calc-key(k); }
+                        occipital-steer(u) => { root.occipital-steer(u); }
 
                         req-focus => { root.focus-window(w.id); }
                         req-close => { root.close-window(w.id); }

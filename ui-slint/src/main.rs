@@ -95,6 +95,12 @@ thread_local! {
     static ID_STATE: RefCell<IdState> = RefCell::new(IdState::new());
     static ID_USERS: RefCell<Option<Rc<slint::VecModel<UserDef>>>> = const { RefCell::new(None) };
     static ID_AGENTS: RefCell<Option<Rc<slint::VecModel<AgentDef>>>> = const { RefCell::new(None) };
+    // Occipital (📖) follow-along reader (Phase 9): the breadcrumb trail of the
+    // agent's reads this session (newest last, capped). SUPPRESS goes true when
+    // the user closes the window — so a later web read won't re-pop it uninvited;
+    // launching it from the menu clears it again.
+    static OCCIPITAL_TRAIL: RefCell<Option<Rc<slint::VecModel<ReaderLink>>>> = const { RefCell::new(None) };
+    static OCCIPITAL_SUPPRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 // ── Identity boot wizard (3d) state + helpers ───────────────────────────────────
@@ -299,6 +305,7 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::Web => 15,
         AppKind::Calculator => 16,
         AppKind::Explorer => 17,
+        AppKind::Occipital => 18,
     }
 }
 
@@ -321,6 +328,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         15 => AppKind::Web,
         16 => AppKind::Calculator,
         17 => AppKind::Explorer,
+        18 => AppKind::Occipital,
         _ => AppKind::Chat,
     }
 }
@@ -478,6 +486,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Web => "Web",
         AppKind::Calculator => "Calculator",
         AppKind::Explorer => "Files",
+        AppKind::Occipital => "Occipital",
     }
 }
 
@@ -503,9 +512,440 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Web => (460.0, 400.0),
         AppKind::Calculator => (300.0, 440.0),
         AppKind::Explorer => (680.0, 520.0),
+        AppKind::Occipital => (720.0, 620.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
+}
+
+// ── Occipital follow-along reader (Phase 9) ─────────────────────────────────────
+// The agent's web reads (web_fetch/web_search/web_recall) return a flat,
+// `kind`-discriminated payload (Occipital's docs/follow-along.md). agentd's MCP
+// client passes the tool result through as the MCP content array
+// `[{"type":"text","text":"<json>"}]` (mcp.rs) and Event::ToolResult carries no
+// tool name — so we recover the payload from any transport shape and route on
+// its `kind`, mirroring how turn.rs recovers the vision sentinel. Markdown is
+// parsed into ReaderBlocks and rendered natively (Slint has no webview).
+
+/// Plain (Send) render plan built off the Slint thread; the invoke closure turns
+/// the tuples into ReaderBlock/ReaderLink on the Slint thread.
+struct OccipitalRender {
+    mode:        String,   // page|results|recall
+    title:       String,
+    url:         String,
+    meta:        String,
+    badge:       String,   // cache|live|""
+    blocks:      Vec<(String, String, i32)>,             // kind, text, depth
+    links:       Vec<(String, String, String, String)>,  // label, url, detail, badge
+    crumb_label: String,
+    crumb_url:   String,
+}
+
+/// Recover an Occipital payload (an object with `kind` ∈ {page,results,recall})
+/// from a tool result's content, whatever the transport shape: a bare object, a
+/// JSON string, or an MCP text-content array.
+fn occipital_payload(content: &Value) -> Option<Value> {
+    fn is_occipital(v: &Value) -> bool {
+        matches!(
+            v.get("kind").and_then(|k| k.as_str()),
+            Some("page" | "results" | "recall")
+        )
+    }
+    if is_occipital(content) {
+        return Some(content.clone());
+    }
+    if let Some(s) = content.as_str() {
+        if let Ok(v) = serde_json::from_str::<Value>(s) {
+            if is_occipital(&v) {
+                return Some(v);
+            }
+        }
+    }
+    if let Some(arr) = content.as_array() {
+        for item in arr {
+            if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(s) = item.get("text").and_then(|t| t.as_str()) {
+                    if let Ok(v) = serde_json::from_str::<Value>(s) {
+                        if is_occipital(&v) {
+                            return Some(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Strip inline markdown to clean reading text: `[t](u)`→t, `![a](u)`→"🖼 a",
+/// and the `**`/`*`/`` ` `` emphasis+code markers (links are surfaced separately
+/// in the page's link list). Occipital uses `*` for emphasis, never `_`, so
+/// underscores in identifiers/URLs are left intact.
+fn strip_inline_md(s: &str) -> String {
+    fn take_until(chars: &mut std::iter::Peekable<std::str::Chars>, end: char) -> String {
+        let mut out = String::new();
+        for c in chars.by_ref() {
+            if c == end { break; }
+            out.push(c);
+        }
+        out
+    }
+    fn skip_paren(chars: &mut std::iter::Peekable<std::str::Chars>) {
+        if chars.peek() == Some(&'(') {
+            chars.next();
+            for c in chars.by_ref() {
+                if c == ')' { break; }
+            }
+        }
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => { if let Some(n) = chars.next() { out.push(n); } }
+            '`' | '*' => {}
+            '!' if chars.peek() == Some(&'[') => {
+                chars.next();
+                let alt = take_until(&mut chars, ']');
+                skip_paren(&mut chars);
+                if !alt.is_empty() { out.push_str("🖼 "); out.push_str(&alt); }
+            }
+            '[' => {
+                let text = take_until(&mut chars, ']');
+                if chars.peek() == Some(&'(') {
+                    skip_paren(&mut chars);
+                    out.push_str(&text);
+                } else {
+                    out.push('['); out.push_str(&text); out.push(']');
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out.trim().to_string()
+}
+
+const OCCIPITAL_MAX_BLOCKS: usize = 400;
+
+/// Parse reader-mode markdown into a flat list of (kind, text, depth) blocks.
+fn parse_reader_markdown(md: &str) -> Vec<(String, String, i32)> {
+    let mut blocks: Vec<(String, String, i32)> = Vec::new();
+    let mut para = String::new();
+    let mut in_code = false;
+    let mut code = String::new();
+
+    let flush_para = |para: &mut String, blocks: &mut Vec<(String, String, i32)>| {
+        let p = para.trim();
+        if !p.is_empty() {
+            blocks.push(("p".into(), strip_inline_md(p), 0));
+        }
+        para.clear();
+    };
+
+    for raw in md.lines() {
+        if blocks.len() >= OCCIPITAL_MAX_BLOCKS {
+            blocks.push(("rule".into(), String::new(), 0));
+            blocks.push(("p".into(), "… (page truncated for display)".into(), 0));
+            return blocks;
+        }
+        let trimmed = raw.trim_end();
+        let lead = trimmed.trim_start();
+
+        if in_code {
+            if lead.starts_with("```") {
+                let body = code.trim_end().to_string();
+                let body = if body.len() > 4000 { format!("{}…", &body[..4000]) } else { body };
+                blocks.push(("code".into(), body, 0));
+                code.clear();
+                in_code = false;
+            } else {
+                code.push_str(raw);
+                code.push('\n');
+            }
+            continue;
+        }
+
+        if lead.starts_with("```") {
+            flush_para(&mut para, &mut blocks);
+            in_code = true;
+        } else if lead.is_empty() {
+            flush_para(&mut para, &mut blocks);
+        } else if lead.starts_with('#') {
+            flush_para(&mut para, &mut blocks);
+            let hashes = lead.chars().take_while(|&c| c == '#').count();
+            let level = hashes.clamp(1, 3);
+            let text = lead.trim_start_matches('#').trim();
+            blocks.push((format!("h{level}"), strip_inline_md(text), 0));
+        } else if matches!(lead, "---" | "***" | "___" | "- - -") {
+            flush_para(&mut para, &mut blocks);
+            blocks.push(("rule".into(), String::new(), 0));
+        } else if let Some(rest) = bullet_rest(lead) {
+            flush_para(&mut para, &mut blocks);
+            let indent = trimmed.len() - lead.len();
+            let depth = (indent / 2).min(4) as i32;
+            blocks.push(("bullet".into(), strip_inline_md(rest), depth));
+        } else if let Some(rest) = lead.strip_prefix("> ").or_else(|| lead.strip_prefix(">")) {
+            flush_para(&mut para, &mut blocks);
+            blocks.push(("quote".into(), strip_inline_md(rest.trim()), 0));
+        } else {
+            if !para.is_empty() { para.push(' '); }
+            para.push_str(lead);
+        }
+    }
+    flush_para(&mut para, &mut blocks);
+    if in_code && !code.trim().is_empty() {
+        blocks.push(("code".into(), code.trim_end().to_string(), 0));
+    }
+    blocks
+}
+
+/// A leading `- ` / `* ` / `+ ` bullet marker → the text after it.
+fn bullet_rest(lead: &str) -> Option<&str> {
+    for m in ["- ", "* ", "+ "] {
+        if let Some(rest) = lead.strip_prefix(m) {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+fn json_str(v: &Value, key: &str) -> String {
+    v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+/// Trim a breadcrumb label to a chip-friendly length (char-safe).
+fn cap_crumb(s: &str) -> String {
+    let mut out: String = s.chars().take(24).collect();
+    if s.chars().count() > 24 {
+        out.push('…');
+    }
+    out
+}
+
+/// Build the (Send) render plan from a recovered Occipital payload.
+fn build_occipital_render(p: &Value) -> OccipitalRender {
+    let kind = json_str(p, "kind");
+    let from_cache = p.get("from_cache").and_then(|b| b.as_bool());
+    let badge = match (kind.as_str(), from_cache) {
+        ("recall", _) => String::new(),
+        (_, Some(true)) => "cache".into(),
+        (_, Some(false)) => "live".into(),
+        _ => String::new(),
+    };
+
+    match kind.as_str() {
+        "page" => {
+            let url = json_str(p, "url");
+            let title = {
+                let t = json_str(p, "title");
+                if t.is_empty() { url.clone() } else { t }
+            };
+            let markdown = json_str(p, "markdown");
+            let saved = json_str(p, "status") == "saved";
+            let blocks = if markdown.is_empty() {
+                Vec::new()
+            } else {
+                parse_reader_markdown(&markdown)
+            };
+            let links: Vec<(String, String, String, String)> = p
+                .get("links")
+                .and_then(|l| l.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .take(60)
+                        .map(|l| {
+                            let u = json_str(l, "url");
+                            let t = json_str(l, "text");
+                            let label = if t.trim().is_empty() { u.clone() } else { t };
+                            (label, u, String::new(), String::new())
+                        })
+                        .filter(|(_, u, _, _)| !u.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let meta = if saved {
+                "📌 saved to memory".into()
+            } else {
+                format!("{} link{} on page", links.len(), if links.len() == 1 { "" } else { "s" })
+            };
+            let crumb = cap_crumb(&title);
+            OccipitalRender {
+                mode: "page".into(), title, url, meta, badge, blocks, links,
+                crumb_label: crumb, crumb_url: json_str(p, "url"),
+            }
+        }
+        "results" => {
+            let query = json_str(p, "query");
+            let provider = json_str(p, "provider");
+            let links: Vec<(String, String, String, String)> = p
+                .get("results")
+                .and_then(|r| r.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .take(60)
+                        .map(|r| {
+                            let u = json_str(r, "url");
+                            let t = json_str(r, "title");
+                            let label = if t.trim().is_empty() { u.clone() } else { t };
+                            let rank = r.get("rank").and_then(|x| x.as_u64()).unwrap_or(0);
+                            (label, u, json_str(r, "snippet"), format!("#{}", rank + 1))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let meta = format!(
+                "{}{} result{}",
+                if provider.is_empty() { String::new() } else { format!("{provider} · ") },
+                links.len(),
+                if links.len() == 1 { "" } else { "s" }
+            );
+            OccipitalRender {
+                mode: "results".into(),
+                title: query.clone(),
+                url: String::new(),
+                meta, badge,
+                blocks: Vec::new(),
+                links,
+                crumb_label: cap_crumb(&format!("find: {query}")),
+                crumb_url: String::new(),
+            }
+        }
+        _ => {
+            // recall
+            let query = json_str(p, "query");
+            let links: Vec<(String, String, String, String)> = p
+                .get("hits")
+                .and_then(|h| h.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .take(60)
+                        .map(|h| {
+                            let u = json_str(h, "url");
+                            let t = json_str(h, "title");
+                            let label = if t.trim().is_empty() { u.clone() } else { t };
+                            let badge = h
+                                .get("score")
+                                .and_then(|s| s.as_f64())
+                                .map(|s| format!("{s:.2}"))
+                                .unwrap_or_else(|| "kw".into());
+                            (label, u, json_str(h, "snippet"), badge)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let meta = format!("{} memory hit{}", links.len(), if links.len() == 1 { "" } else { "s" });
+            OccipitalRender {
+                mode: "recall".into(),
+                title: query.clone(),
+                url: String::new(),
+                meta,
+                badge: String::new(),
+                blocks: Vec::new(),
+                links,
+                crumb_label: cap_crumb(&format!("mem: {query}")),
+                crumb_url: String::new(),
+            }
+        }
+    }
+}
+
+/// Apply a built render plan to the reader window (Slint thread only): set the
+/// scalars, rebuild the block/link models, push the trail breadcrumb, and reveal
+/// the window the first time APEX browses (unless the user has closed it).
+fn apply_occipital_render(ui: &AppWindow, r: OccipitalRender) {
+    let blocks: Vec<ReaderBlock> = r
+        .blocks
+        .into_iter()
+        .map(|(kind, text, depth)| ReaderBlock { kind: kind.into(), text: text.into(), depth })
+        .collect();
+    let links: Vec<ReaderLink> = r
+        .links
+        .into_iter()
+        .map(|(label, url, detail, badge)| ReaderLink {
+            label: label.into(),
+            url: url.into(),
+            detail: detail.into(),
+            badge: badge.into(),
+        })
+        .collect();
+
+    ui.set_occipital_mode(r.mode.into());
+    ui.set_occipital_title(r.title.into());
+    ui.set_occipital_url(r.url.into());
+    ui.set_occipital_meta(r.meta.into());
+    ui.set_occipital_badge(r.badge.into());
+    ui.set_occipital_blocks(slint::ModelRc::from(Rc::new(slint::VecModel::from(blocks))));
+    ui.set_occipital_links(slint::ModelRc::from(Rc::new(slint::VecModel::from(links))));
+
+    // Trail breadcrumb (newest last, cap 8; skip an immediate repeat).
+    OCCIPITAL_TRAIL.with(|t| {
+        if let Some(model) = t.borrow().as_ref() {
+            let crumb = ReaderLink {
+                label: r.crumb_label.into(),
+                url: r.crumb_url.into(),
+                detail: "".into(),
+                badge: "".into(),
+            };
+            let dup = model
+                .row_count()
+                .checked_sub(1)
+                .and_then(|i| model.row_data(i))
+                .map(|l| l.label == crumb.label)
+                .unwrap_or(false);
+            if !dup {
+                model.push(crumb);
+                while model.row_count() > 8 {
+                    model.remove(0);
+                }
+            }
+        }
+    });
+
+    ui.set_occipital_scroll_tick(ui.get_occipital_scroll_tick() + 1);
+
+    // Reveal the reader the first time APEX browses, unless the user closed it.
+    WINDOWS.with(|w| {
+        if let Some(model) = w.borrow().as_ref() {
+            let exists = wm_index_by_kind(model, AppKind::Occipital).is_some();
+            if !exists && !OCCIPITAL_SUPPRESS.with(|s| s.get()) {
+                wm_launch(ui, model, AppKind::Occipital);
+            }
+        }
+    });
+}
+
+/// Sample render for `APEX_OCCIPITAL_DEMO` (page|results|recall) — lets the reader
+/// window be verified via the snapshot server with no agentd / no network.
+fn occipital_demo_render(mode: &str) -> OccipitalRender {
+    let payload = match mode.trim() {
+        "results" => serde_json::json!({
+            "kind": "results", "query": "raspberry pi 5 power delivery",
+            "provider": "duckduckgo", "count": 3, "from_cache": false,
+            "results": [
+                {"title": "Raspberry Pi 5 — 27W Power Supply", "url": "https://www.raspberrypi.com/products/27w-power-supply/", "snippet": "The official 27W USB-C PD supply delivers 5V/5A for full Pi 5 performance and peripheral power.", "rank": 0},
+                {"title": "Pi 5 USB-C PD requirements", "url": "https://forums.raspberrypi.com/viewtopic.php?t=357789", "snippet": "Without a 5V/5A PD source the firmware caps downstream USB to 600mA.", "rank": 1},
+                {"title": "USB-C PD trigger boards explained", "url": "https://example.com/pd-trigger", "snippet": "A PD trigger negotiates a fixed 5V/5A profile from any compliant USB-C PD brick.", "rank": 2}
+            ]
+        }),
+        "recall" => serde_json::json!({
+            "kind": "recall", "query": "pi power delivery", "count": 2,
+            "hits": [
+                {"url": "https://www.raspberrypi.com/products/27w-power-supply/", "title": "Pi 5 27W PSU", "snippet": "5V/5A USB-C PD — the official supply.", "score": 0.83},
+                {"url": "https://forums.raspberrypi.com/viewtopic.php?t=357789", "title": "PD requirements thread", "snippet": "Caps peripherals without 5A.", "score": null}
+            ]
+        }),
+        _ => serde_json::json!({
+            "kind": "page", "url": "https://www.raspberrypi.com/products/raspberry-pi-5/",
+            "from_cache": true, "title": "Raspberry Pi 5",
+            "markdown": "# Raspberry Pi 5\n\nThe **Raspberry Pi 5** is the latest single-board computer, delivering a *significant* performance uplift over the Pi 4.\n\n## Specifications\n\n- Broadcom BCM2712 quad-core Cortex-A76 @ 2.4GHz\n- VideoCore VII GPU\n- Up to 16GB LPDDR4X RAM\n\n## Power\n\nUse the [official 27W PD supply](https://www.raspberrypi.com/products/27w-power-supply/) for full performance.\n\n> A 5V/5A USB-C PD source is required to power peripherals at full current.\n\n```\nvcgencmd measure_temp\n```\n\n---\n\nMore on the [product page](https://www.raspberrypi.com/products/raspberry-pi-5/).",
+            "links": [
+                {"text": "official 27W PD supply", "url": "https://www.raspberrypi.com/products/27w-power-supply/"},
+                {"text": "product page", "url": "https://www.raspberrypi.com/products/raspberry-pi-5/"}
+            ],
+            "content_hash": "abc123"
+        }),
+    };
+    build_occipital_render(&payload)
 }
 
 fn wm_index_by_id(model: &Rc<slint::VecModel<WindowDesc>>, id: i32) -> Option<usize> {
@@ -1312,6 +1752,83 @@ mod tests {
         assert_eq!(ws_to_http("ws://localhost:8787/ws"), "http://localhost:8787");
         // TLS scheme + token.
         assert_eq!(ws_to_http("wss://host:8787/ws?token=x"), "https://host:8787");
+    }
+
+    // ── Occipital follow-along reader (Phase 9) ─────────────────────────────
+    use super::{occipital_payload, strip_inline_md, parse_reader_markdown, build_occipital_render};
+    use serde_json::json;
+
+    #[test]
+    fn occipital_payload_recovers_from_every_transport_shape() {
+        let obj = json!({"kind": "page", "url": "https://x", "markdown": "# hi"});
+        // 1. Bare object.
+        assert!(occipital_payload(&obj).is_some());
+        // 2. A JSON string.
+        assert!(occipital_payload(&json!(obj.to_string())).is_some());
+        // 3. The MCP content array agentd actually delivers (mcp.rs).
+        let mcp = json!([{ "type": "text", "text": obj.to_string() }]);
+        assert!(occipital_payload(&mcp).is_some());
+        // Non-occipital tool output is ignored.
+        assert!(occipital_payload(&json!({"ok": true, "content": "hello"})).is_none());
+        assert!(occipital_payload(&json!([{ "type": "text", "text": "{\"foo\":1}" }])).is_none());
+    }
+
+    #[test]
+    fn strip_inline_md_cleans_links_and_emphasis() {
+        assert_eq!(strip_inline_md("see [the docs](https://x/y) now"), "see the docs now");
+        assert_eq!(strip_inline_md("**bold** and *italic* and `code`"), "bold and italic and code");
+        assert_eq!(strip_inline_md("![a cat](https://x/c.png)"), "🖼 a cat");
+        // Underscores in identifiers survive (Occipital emits * for emphasis, not _).
+        assert_eq!(strip_inline_md("call foo_bar_baz()"), "call foo_bar_baz()");
+        // A literal bracket pair that isn't a link keeps its brackets.
+        assert_eq!(strip_inline_md("array[0] value"), "array[0] value");
+    }
+
+    #[test]
+    fn parse_reader_markdown_classifies_blocks() {
+        let md = "# Title\n\nA para with **bold**.\n\n## Section\n\n- one\n- two\n\n> a quote\n\n```\ncode line\n```\n\n---\n";
+        let blocks = parse_reader_markdown(md);
+        let kinds: Vec<&str> = blocks.iter().map(|(k, _, _)| k.as_str()).collect();
+        assert_eq!(kinds, ["h1", "p", "h2", "bullet", "bullet", "quote", "code", "rule"]);
+        assert_eq!(blocks[0].1, "Title");
+        assert_eq!(blocks[1].1, "A para with bold.");   // emphasis stripped
+        assert_eq!(blocks[6].1, "code line");           // code body verbatim
+    }
+
+    #[test]
+    fn build_occipital_render_per_mode() {
+        // results → live badge + ranked rows
+        let r = build_occipital_render(&json!({
+            "kind": "results", "query": "q", "provider": "duckduckgo", "from_cache": false,
+            "results": [{"title": "T", "url": "https://a", "snippet": "s", "rank": 0}]
+        }));
+        assert_eq!(r.mode, "results");
+        assert_eq!(r.badge, "live");
+        assert_eq!(r.links[0].3, "#1");                 // 1-based rank chip
+
+        // recall → cosine score vs keyword fallback, no fetch badge
+        let r = build_occipital_render(&json!({
+            "kind": "recall", "query": "q",
+            "hits": [
+                {"url": "https://a", "title": "A", "snippet": "s", "score": 0.83},
+                {"url": "https://b", "title": "B", "snippet": "s", "score": null}
+            ]
+        }));
+        assert_eq!(r.mode, "recall");
+        assert_eq!(r.badge, "");
+        assert_eq!(r.links[0].3, "0.83");
+        assert_eq!(r.links[1].3, "kw");
+
+        // page (cached) → parsed blocks + page links
+        let r = build_occipital_render(&json!({
+            "kind": "page", "url": "https://x", "title": "X", "from_cache": true,
+            "markdown": "# X\n\nbody", "links": [{"text": "next", "url": "https://n"}]
+        }));
+        assert_eq!(r.mode, "page");
+        assert_eq!(r.badge, "cache");
+        assert_eq!(r.title, "X");
+        assert!(r.blocks.iter().any(|(k, t, _)| k == "h1" && t == "X"));
+        assert_eq!(r.links[0].0, "next");
     }
 }
 
@@ -2137,6 +2654,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_sketch_strokes(slint::ModelRc::from(sketch_strokes_vec.clone()));
     SKETCH_STROKES.with(|m| *m.borrow_mut() = Some(sketch_strokes_vec.clone()));
 
+    // Occipital (📖) reader trail — persistent breadcrumb model (Phase 9).
+    let occipital_trail_vec: Rc<slint::VecModel<ReaderLink>> = Rc::new(slint::VecModel::default());
+    ui.set_occipital_trail(slint::ModelRc::from(occipital_trail_vec.clone()));
+    OCCIPITAL_TRAIL.with(|t| *t.borrow_mut() = Some(occipital_trail_vec.clone()));
+
     // Feedback subsystem: bind the toast model + global callbacks.
     let toasts_vec: Rc<slint::VecModel<ToastItem>> = Rc::new(slint::VecModel::default());
     ui.global::<Notifications>().set_toasts(slint::ModelRc::from(toasts_vec.clone()));
@@ -2174,6 +2696,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // verification of the face, GL or 2D). Independent of the render path.
     if std::env::var_os("APEX_FACE_AUTOOPEN").is_some() {
         wm_launch(&ui, &windows, AppKind::Face);
+    }
+    // Dev: APEX_OCCIPITAL_DEMO=1 opens the Occipital reader at launch with a
+    // sample page so the follow-along window can be verified without agentd
+    // (snapshot server). APEX_OCCIPITAL_DEMO=results|recall previews those modes.
+    if let Some(demo) = std::env::var_os("APEX_OCCIPITAL_DEMO") {
+        apply_occipital_render(&ui, occipital_demo_render(&demo.to_string_lossy()));
     }
 
     // ── Terminal (G3d): stdin channel + WS URL (parked until first launch) ────
@@ -2225,6 +2753,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     AppKind::Sonus => ui.invoke_refresh_sonus(),
                     AppKind::Notes => ui.invoke_refresh_notes(),
                     AppKind::Explorer => ui.invoke_refresh_explorer(),
+                    // Re-enable auto-reveal: opening it from the menu signals the
+                    // user wants to follow along again.
+                    AppKind::Occipital => OCCIPITAL_SUPPRESS.with(|s| s.set(false)),
                     _ => {}
                 }
             }
@@ -2242,7 +2773,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let uw = ui.as_weak();
         ui.on_close_window(move |id| {
             if let Some(ui) = uw.upgrade() {
-                if let Some(i) = wm_index_by_id(&w, id) { w.remove(i); }
+                if let Some(i) = wm_index_by_id(&w, id) {
+                    // Closing the reader suppresses auto-reveal so a later web
+                    // read won't re-pop it uninvited (until relaunched).
+                    if w.row_data(i).map(|d| d.kind) == Some(AppKind::Occipital) {
+                        OCCIPITAL_SUPPRESS.with(|s| s.set(true));
+                    }
+                    w.remove(i);
+                }
                 wm_refocus_top(&ui, &w);
             }
         });
@@ -2600,6 +3138,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ui) = stop_weak.upgrade() {
             ui.set_agent_busy(false);
             ui.set_face_state("idle".into());
+        }
+    });
+
+    // ── Occipital steer (9c): a clicked link / URL-bar "go here" nudge ─────────
+    // Routes a normal user_prompt through the WS — the gateway injects the
+    // session and it funnels through the TurnGate like any user message, so it
+    // can't race the in-flight turn (ApexOS's serialized-turn invariant). The
+    // agent finishes its step, then sees the hint and web_fetches the URL. No
+    // new agentd code (additive: register_mcp_server + tool-event + user_prompt).
+    let tx_occ   = tx.clone();
+    let occ_weak = ui.as_weak();
+    ui.on_occipital_steer(move |url| {
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return;
+        }
+        clear_face_hold();
+        maybe_push_time_divider();
+        push_message(MessageItem {
+            role: "user".into(),
+            text: format!("🧭 go here: {url}").into(),
+            streaming: false,
+            call_id: "".into(),
+            tool_name: "".into(),
+            tool_args: "".into(),
+            tool_output: "".into(),
+            tool_status: "".into(),
+            awaiting_approval: false,
+        });
+        let text =
+            format!("(navigation) Go here next: {url}\n\nFetch and read it with web_fetch, then continue.");
+        let frame = serde_json::json!({ "type": "user_prompt", "text": text }).to_string();
+        tx_occ.send(frame).ok();
+        if let Some(ui) = occ_weak.upgrade() {
+            bump_scroll(&ui);
         }
     });
 
@@ -4034,6 +4607,14 @@ fn dispatch_event(
                 other => serde_json::to_string_pretty(other).unwrap_or_default(),
             };
             let status = if ok { "done" } else { "error" };
+            // Occipital follow-along: a successful web read mirrors into the
+            // reader window (detected by the flat `kind` payload, not the tool
+            // name — ToolResult carries none). Built off-thread (Send tuples).
+            let occ = if ok {
+                occipital_payload(&out.content).map(|p| build_occipital_render(&p))
+            } else {
+                None
+            };
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(row) = find_tool_row(&call_id) {
@@ -4044,6 +4625,9 @@ fn dispatch_event(
                     });
                 }
                 if let Some(ui) = w.upgrade() {
+                    if let Some(r) = occ {
+                        apply_occipital_render(&ui, r);
+                    }
                     bump_scroll(&ui);
                 }
             })

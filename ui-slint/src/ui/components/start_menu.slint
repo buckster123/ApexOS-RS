@@ -97,6 +97,7 @@ export component StartMenu inherits Rectangle {
         if Personas.show-tech-apps: MenuRow { glyph: "⚡"; label: "Inference"; clicked => { root.launch(9); } }
         if Personas.show-tech-apps: MenuRow { glyph: "🎛"; label: "Audio Editor"; clicked => { root.launch(10); } }
         if Personas.show-tech-apps: MenuRow { glyph: "🌐"; label: "Web";          clicked => { root.launch(15); } }
+        if Personas.show-tech-apps: MenuRow { glyph: "📖"; label: "Occipital";    clicked => { root.launch(18); } }
     }
 }
 
@@ -203,6 +204,7 @@ export component Win98StartMenu inherits Rectangle {
             if Personas.show-tech-apps: WinMenuRow { glyph: "⚡"; label: "Inference"; clicked => { root.launch(9); } }
             if Personas.show-tech-apps: WinMenuRow { glyph: "🎛"; label: "Audio Editor"; clicked => { root.launch(10); } }
             if Personas.show-tech-apps: WinMenuRow { glyph: "🌐"; label: "Web";          clicked => { root.launch(15); } }
+            if Personas.show-tech-apps: WinMenuRow { glyph: "📖"; label: "Occipital";    clicked => { root.launch(18); } }
         }
     }
 
