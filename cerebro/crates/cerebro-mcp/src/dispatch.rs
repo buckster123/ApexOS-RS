@@ -1398,14 +1398,16 @@ mod tests {
         assert!(resp["error"].is_null(), "dream_run should not produce a protocol error: {}", resp["error"]);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         let result: Value = serde_json::from_str(text).unwrap();
-        // Report always has phases array (7 phases: the 6 classic + the exo-
-        // evolution skill_competition phase) and a success field.
+        // Report always has phases array (8 phases: the 6 classic + the exo-
+        // evolution variation + skill_competition phases) and a success field.
         assert!(result["phases"].is_array(), "dream report should have phases: {result}");
-        assert_eq!(result["phases"].as_array().unwrap().len(), 7);
+        assert_eq!(result["phases"].as_array().unwrap().len(), 8);
         let names: Vec<&str> = result["phases"].as_array().unwrap().iter()
             .filter_map(|p| p["phase"].as_str()).collect();
         assert!(names.contains(&"skill_competition"),
             "dream report must include the niche-competition phase: {names:?}");
+        assert!(names.contains(&"variation"),
+            "dream report must include the variation/mutation phase: {names:?}");
         assert!(result["success"].is_boolean());
     }
 
