@@ -1,3 +1,7 @@
+// The `tools::list()` schema is one large `json!` array literal; the extra git
+// tool schemas push it past serde_json's default macro recursion depth (128).
+#![recursion_limit = "256"]
+
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
