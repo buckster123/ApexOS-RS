@@ -350,6 +350,7 @@ async fn main() -> anyhow::Result<()> {
     ));
     let soul_arc = engine.system_arc();
     let embodiment_arc = engine.embodiment_arc();
+    let ambient_arc = engine.ambient_arc();
 
     // Share soul_arc with the supervisor so read_soul_md returns live content.
     if sv_cmd_tx.send(SupervisorCmd::SetSoulArc { arc: soul_arc.clone() }).await.is_err() {
@@ -455,6 +456,7 @@ async fn main() -> anyhow::Result<()> {
     // it can never go stale). Cloned arcs since tool_reg/engine move into the router.
     spawn_embodiment_refresher(
         embodiment_arc,
+        ambient_arc,
         Arc::clone(&tool_reg),
         Arc::clone(&backend_arc),
         Arc::clone(&model_arc),
@@ -1715,8 +1717,24 @@ async fn gather_tools(
 /// Regenerate the live embodiment block every 30s (after a short delay so plugins
 /// finish enumerating). soul.md = identity; this block = the body APEX currently
 /// inhabits. Agentd-owned and separate from CCBS (cerebro-side priming).
+/// The agent's only model-facing clock: live wall-clock + node uptime. Injected into
+/// the OUTBOUND messages each turn (turn.rs::inject_ambient), NOT the system prompt —
+/// it changes every minute, so keeping it in `system` would invalidate the cacheable
+/// soul+embodiment+tools prefix every turn. Current to within the 30s refresh tick,
+/// which is plenty for temporal reasoning (elapsed-since-last-session, day/night,
+/// "is the 03:00 dream due"). Returned as one line the model reads as ambient context.
+fn build_ambient_clock() -> String {
+    format!(
+        "[ambient — this node's live clock] Now: {} UTC · uptime {}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M (%a)"),
+        fmt_uptime(read_uptime_secs()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // live-node wiring: each arc is a distinct source
 fn spawn_embodiment_refresher(
     embodiment:    Arc<RwLock<String>>,
+    ambient:       Arc<RwLock<String>>,
     tool_reg:      Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
     backend_arc:   Arc<RwLock<String>>,
     model_arc:     Arc<RwLock<String>>,
@@ -1725,11 +1743,15 @@ fn spawn_embodiment_refresher(
     cerebro_embed: Option<String>,
 ) {
     tokio::spawn(async move {
+        // Seed the clock immediately so the first turn (which can fire before the 2s
+        // settle) still gets a timestamp; the loop then keeps both fresh on the 30s tick.
+        *ambient.write().await = build_ambient_clock();
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         loop {
             let block = build_embodiment(&tool_reg, &backend_arc, &model_arc,
                                          &peer_registry, &node_id, &cerebro_embed).await;
             *embodiment.write().await = block;
+            *ambient.write().await    = build_ambient_clock();
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }
     });
@@ -1764,16 +1786,14 @@ async fn build_embodiment(
     let mut out = String::new();
     out.push_str("## Current embodiment — auto-generated from this node's live state. Trust this\n");
     out.push_str("## over any hardware or tool list in your identity above; it reflects THIS body.\n\n");
+    // NB: node clock (Now + uptime) deliberately lives OUTSIDE this block — see
+    // build_ambient_clock(). Both change every minute; keeping them here would bust
+    // the prompt-cache prefix (soul+embodiment+tools) every turn. This block must stay
+    // byte-stable in steady state so it caches — only mutate it on real state changes
+    // (tier, senses, mesh peers, model, tool registry).
     out.push_str(&format!(
-        "- Node: {node_id} · {} · {ram} MB · tier {} · uptime {} · backend {backend}/{model}\n",
-        std::env::consts::ARCH, tier_from_ram(ram), fmt_uptime(read_uptime_secs()),
-    ));
-    // Wall-clock orientation: the embodiment is the agent's only model-facing clock
-    // (the UI tray clock + chat time-dividers are user-facing). Refreshed on the 30s
-    // embodiment cadence, so it's current to within a tick — enough for temporal
-    // reasoning (elapsed-since-last-session, day/night, "is the 03:00 dream due").
-    out.push_str(&format!(
-        "- Now: {} UTC\n", chrono::Utc::now().format("%Y-%m-%d %H:%M (%a)"),
+        "- Node: {node_id} · {} · {ram} MB · tier {} · backend {backend}/{model}\n",
+        std::env::consts::ARCH, tier_from_ram(ram),
     ));
     out.push_str(&format!(
         "- Senses: camera {} · thermal/IAQ {} · GPIO {}\n",

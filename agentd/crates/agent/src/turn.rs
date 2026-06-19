@@ -22,6 +22,12 @@ pub struct TurnEngine {
     // after soul+embodiment. Empty on the base engine; set per-session via
     // `with_priming`. See docs/agent-identity.md (slice 2).
     priming:      Arc<RwLock<String>>,
+    // Live wall-clock + uptime line, agentd-refreshed. Injected into the OUTBOUND
+    // messages each turn — deliberately NOT in `system`, because it changes every
+    // minute and would bust the prompt-cache prefix (soul+embodiment+tools) on every
+    // turn. Riding in messages (after the cached prefix) keeps that prefix byte-stable
+    // and costs no cache breakpoint. See docs/self-update.md / prompt-caching notes.
+    ambient:      Arc<RwLock<String>>,
 }
 
 /// Compose the system prompt from identity (soul) + live embodiment + optional
@@ -46,6 +52,7 @@ impl TurnEngine {
             system:     Arc::new(RwLock::new(system.unwrap_or_default())),
             embodiment: Arc::new(RwLock::new(String::new())),
             priming:    Arc::new(RwLock::new(String::new())),
+            ambient:    Arc::new(RwLock::new(String::new())),
         }
     }
 
@@ -54,6 +61,9 @@ impl TurnEngine {
 
     /// Returns the embodiment Arc so agentd can refresh the live node block.
     pub fn embodiment_arc(&self) -> Arc<RwLock<String>> { Arc::clone(&self.embodiment) }
+
+    /// Returns the ambient-clock Arc so agentd can refresh the live wall-clock line.
+    pub fn ambient_arc(&self) -> Arc<RwLock<String>> { Arc::clone(&self.ambient) }
 
     /// Derive an engine variant with a different system prompt.
     ///
@@ -74,6 +84,7 @@ impl TurnEngine {
             system,
             embodiment: Arc::clone(&self.embodiment),
             priming:    Arc::new(RwLock::new(String::new())),
+            ambient:    Arc::clone(&self.ambient),
         }
     }
 
@@ -87,8 +98,26 @@ impl TurnEngine {
             system:     Arc::clone(&self.system),
             embodiment: Arc::clone(&self.embodiment),
             priming:    Arc::new(RwLock::new(priming)),
+            ambient:    Arc::clone(&self.ambient),
         }
     }
+}
+
+/// Append the live wall-clock note to the final user turn — for the OUTBOUND request
+/// only (never persisted, so it can't accumulate in the JSONL or appear on replay).
+/// The clock rides here, *after* the cacheable system+tools prefix, so refreshing it
+/// every turn costs no cache breakpoint and never invalidates the prefix. No-op when
+/// the clock is empty (tests / pre-refresh) or the history doesn't end in a user turn
+/// — in `run_turn` every provider call ends on a user turn, so in practice it lands.
+fn inject_ambient(history: &[Message], ambient: &str) -> Vec<Message> {
+    let mut out = history.to_vec();
+    if !ambient.is_empty() {
+        if let Some(Message::User { content }) = out.last_mut() {
+            // Appended last so any tool_result blocks stay at the front of the turn.
+            content.push(ContentBlock::Text { text: ambient.to_string() });
+        }
+    }
+    out
 }
 
 /// Run one assistant turn (streaming + tool round-trips).
@@ -135,8 +164,13 @@ pub async fn run_turn(
             let prime = engine.priming.read().await.clone();
             let system_str = compose_system(&soul, &emb, &prime);
             let system_opt = if system_str.is_empty() { None } else { Some(system_str.as_str()) };
+            // The live clock rides in the messages (not `system`) so the cacheable
+            // soul+embodiment+tools prefix stays byte-stable across turns. Ephemeral —
+            // built from `history`, never written back, so it can't bloat the JSONL.
+            let ambient  = engine.ambient.read().await.clone();
+            let outbound = inject_ambient(&history, &ambient);
             let mut stream = engine.provider
-                .messages_stream(&history, &tools, system_opt)
+                .messages_stream(&outbound, &tools, system_opt)
                 .await?;
 
             while let Some(chunk) = stream.next().await {
@@ -364,6 +398,54 @@ mod tests {
         assert_eq!(compose_system("", "  ", ""), "");
         // Whitespace-only parts are trimmed out, surviving parts are trimmed.
         assert_eq!(compose_system(" soul ", "", " prime "), "soul\n\nprime");
+    }
+
+    #[test]
+    fn inject_ambient_appends_clock_to_last_user_turn() {
+        let history = vec![Message::User {
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+        }];
+        let out = inject_ambient(&history, "Now: 2026-06-19 14:32 UTC");
+        match &out[0] {
+            Message::User { content } => {
+                assert_eq!(content.len(), 2, "clock appended after the prompt");
+                assert!(matches!(&content[1], ContentBlock::Text { text } if text.contains("Now:")));
+            }
+            _ => panic!("expected user turn"),
+        }
+        // Source history is untouched (injection is ephemeral, never persisted).
+        match &history[0] {
+            Message::User { content } => assert_eq!(content.len(), 1),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn inject_ambient_empty_clock_is_noop() {
+        let history = vec![Message::User { content: vec![ContentBlock::Text { text: "hi".into() }] }];
+        let out = inject_ambient(&history, "");
+        match &out[0] {
+            Message::User { content } => assert_eq!(content.len(), 1, "empty clock appends nothing"),
+            _ => panic!("expected user turn"),
+        }
+    }
+
+    #[test]
+    fn inject_ambient_lands_after_tool_results() {
+        // A tool-result user turn: the clock must append LAST so tool_results stay first.
+        let history = vec![Message::User {
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(), content: serde_json::json!("ok"), is_error: false,
+            }],
+        }];
+        let out = inject_ambient(&history, "Now: x");
+        match &out[0] {
+            Message::User { content } => {
+                assert!(matches!(&content[0], ContentBlock::ToolResult { .. }), "tool_result stays first");
+                assert!(matches!(&content[1], ContentBlock::Text { .. }), "clock appended last");
+            }
+            _ => panic!(),
+        }
     }
 
     struct MockProvider {
