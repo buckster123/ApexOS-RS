@@ -35,6 +35,7 @@
 #   --no-ui                 Skip apexos-rs-ui (headless / server mode)
 #   --no-cerebro-api        Skip cerebro-api REST dashboard
 #   --no-sensor             Skip apex-sensor-bridge (no sensorhead attached)
+#   --no-occipital          Skip the Occipital web cortex (clone + build of the sibling repo)
 #   --no-voice              Skip whisper + piper wake-word
 #   --api-key=KEY           Set ANTHROPIC_API_KEY non-interactively
 #   --openrouter-key=KEY    Set OPENROUTER_API_KEY
@@ -96,7 +97,7 @@ KEYFILE_NAMES=(apexos.env apexos.conf apexos-rs.env agentd.env apex.env apexos.t
 # Set by find_key_file on success — keys plus optional install settings:
 FOUND_ANTHROPIC=""; FOUND_OPENROUTER=""; FOUND_KEY_SRC=""
 FOUND_MODE=""; FOUND_TIER=""; FOUND_NO_UI=""; FOUND_NO_SENSOR=""
-FOUND_NO_CEREBRO_API=""; FOUND_VOICE=""
+FOUND_NO_CEREBRO_API=""; FOUND_VOICE=""; FOUND_NO_OCCIPITAL=""
 
 # Resolved-choices record: written at the end of a successful install and restored
 # on every re-run (load_persisted_config) so `apexos-update` keeps the same
@@ -129,7 +130,8 @@ _parse_key_file() {
   FOUND_NO_SENSOR=$(_envval "$f" APEXOS_NO_SENSOR)
   FOUND_NO_CEREBRO_API=$(_envval "$f" APEXOS_NO_CEREBRO_API)
   FOUND_VOICE=$(_envval "$f" APEXOS_VOICE)
-  [[ -n "${FOUND_ANTHROPIC}${FOUND_OPENROUTER}${FOUND_MODE}${FOUND_TIER}${FOUND_NO_UI}${FOUND_NO_SENSOR}${FOUND_NO_CEREBRO_API}${FOUND_VOICE}" ]]
+  FOUND_NO_OCCIPITAL=$(_envval "$f" APEXOS_NO_OCCIPITAL)
+  [[ -n "${FOUND_ANTHROPIC}${FOUND_OPENROUTER}${FOUND_MODE}${FOUND_TIER}${FOUND_NO_UI}${FOUND_NO_SENSOR}${FOUND_NO_CEREBRO_API}${FOUND_VOICE}${FOUND_NO_OCCIPITAL}" ]]
 }
 
 # Scan mounted media + the SD boot partition, then probe UNmounted removable
@@ -196,6 +198,7 @@ load_boot_provisioning() {
   [[ -n "$FOUND_NO_UI"          ]] && ! $NO_UI_CLI          && { _truthy "$FOUND_NO_UI"          && NO_UI=true          || NO_UI=false; }
   [[ -n "$FOUND_NO_SENSOR"      ]] && ! $NO_SENSOR_CLI      && { _truthy "$FOUND_NO_SENSOR"      && NO_SENSOR=true      || NO_SENSOR=false; }
   [[ -n "$FOUND_NO_CEREBRO_API" ]] && ! $NO_CEREBRO_API_CLI && { _truthy "$FOUND_NO_CEREBRO_API" && NO_CEREBRO_API=true || NO_CEREBRO_API=false; }
+  [[ -n "$FOUND_NO_OCCIPITAL"   ]] && ! $NO_OCCIPITAL_CLI   && { _truthy "$FOUND_NO_OCCIPITAL"   && NO_OCCIPITAL=true   || NO_OCCIPITAL=false; }
   [[ -n "$FOUND_VOICE"          ]] && ! $NO_VOICE_CLI       && { _truthy "$FOUND_VOICE"          && NO_VOICE=false      || NO_VOICE=true; }
   local what="settings"; [[ -n "$FOUND_ANTHROPIC" ]] && what="key + settings"
   ok "Provisioned from ${FOUND_KEY_SRC} ($what)"
@@ -222,18 +225,20 @@ load_persisted_config() {
     fi
     return 0
   fi
-  local c_mode c_tier c_no_ui c_no_sensor c_no_api c_voice
+  local c_mode c_tier c_no_ui c_no_sensor c_no_api c_voice c_no_occipital
   c_mode=$(_envval "$CONF_FILE" APEXOS_MODE)
   c_tier=$(_envval "$CONF_FILE" APEXOS_TIER)
   c_no_ui=$(_envval "$CONF_FILE" APEXOS_NO_UI)
   c_no_sensor=$(_envval "$CONF_FILE" APEXOS_NO_SENSOR)
   c_no_api=$(_envval "$CONF_FILE" APEXOS_NO_CEREBRO_API)
   c_voice=$(_envval "$CONF_FILE" APEXOS_VOICE)
+  c_no_occipital=$(_envval "$CONF_FILE" APEXOS_NO_OCCIPITAL)
   [[ -n "$c_mode" ]] && ! $MODE_CLI && MODE="$c_mode"
   [[ -n "$c_tier" ]] && ! $TIER_CLI && TIER="$c_tier"
   [[ -n "$c_no_ui"     ]] && ! $NO_UI_CLI          && { _truthy "$c_no_ui"     && NO_UI=true          || NO_UI=false; }
   [[ -n "$c_no_sensor" ]] && ! $NO_SENSOR_CLI      && { _truthy "$c_no_sensor" && NO_SENSOR=true      || NO_SENSOR=false; }
   [[ -n "$c_no_api"    ]] && ! $NO_CEREBRO_API_CLI && { _truthy "$c_no_api"    && NO_CEREBRO_API=true || NO_CEREBRO_API=false; }
+  [[ -n "$c_no_occipital" ]] && ! $NO_OCCIPITAL_CLI && { _truthy "$c_no_occipital" && NO_OCCIPITAL=true || NO_OCCIPITAL=false; }
   [[ -n "$c_voice"     ]] && ! $NO_VOICE_CLI       && { _truthy "$c_voice"     && NO_VOICE=false      || NO_VOICE=true; }
   ok "Restored install choices from $CONF_FILE (mode=$MODE tier=$TIER)"
 }
@@ -243,6 +248,10 @@ YES=false; TUI_FORCE=false
 # Sensor head OFF by default (most devices have no BME688/MLX90640 attached); a
 # boot-file APEXOS_NO_SENSOR=false or the manual checklist turns it on.
 NO_UI=false; NO_CEREBRO_API=false; NO_SENSOR=true; NO_VOICE=true
+# Occipital (web reading cortex) defaults ON — a fresh install clones + builds the
+# sibling repo and registers occipital-mcp. Skip with --no-occipital / a boot-file
+# APEXOS_NO_OCCIPITAL=1. (OCC_FEATURES/OCCIPITAL_INSTALLED initialised for `set -u`.)
+NO_OCCIPITAL=false; OCC_FEATURES=""; OCCIPITAL_INSTALLED=false
 API_KEY=""; OPENROUTER_KEY=""
 TIER="auto"; MODE="auto"; REPO_DIR=""
 
@@ -251,6 +260,7 @@ TIER="auto"; MODE="auto"; REPO_DIR=""
 # user did NOT pass. (Precedence: CLI > USB file > install.conf > auto-detect.)
 MODE_CLI=false; TIER_CLI=false
 NO_UI_CLI=false; NO_CEREBRO_API_CLI=false; NO_SENSOR_CLI=false; NO_VOICE_CLI=false
+NO_OCCIPITAL_CLI=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -259,6 +269,7 @@ for arg in "$@"; do
     --no-ui)               NO_UI=true; NO_UI_CLI=true ;;
     --no-cerebro-api)      NO_CEREBRO_API=true; NO_CEREBRO_API_CLI=true ;;
     --no-sensor)           NO_SENSOR=true; NO_SENSOR_CLI=true ;;
+    --no-occipital)        NO_OCCIPITAL=true; NO_OCCIPITAL_CLI=true ;;
     --no-voice)            NO_VOICE=true; NO_VOICE_CLI=true ;;
     --api-key=*)           API_KEY="${arg#*=}" ;;
     --openrouter-key=*)    OPENROUTER_KEY="${arg#*=}" ;;
@@ -497,19 +508,22 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
   SENSOR_STATE="ON"; $NO_SENSOR && SENSOR_STATE="OFF"
   API_STATE="ON";    $NO_CEREBRO_API && API_STATE="OFF"
   UI_STATE="ON";     $NO_UI && UI_STATE="OFF"
+  OCC_STATE="ON";    $NO_OCCIPITAL && OCC_STATE="OFF"
 
   ADDONS=$(tui_checklist "Components" \
     "Select the components to install:\n(Space to toggle, Enter to confirm)" \
-    "ui"      "apexos-rs-ui     Native Slint UI — KMS/DRM display"         "$UI_STATE" \
-    "cerebro" "Cerebro API      REST dashboard + memory UI on :8765"        "$API_STATE" \
-    "sensor"  "Sensor Head      BME688 air quality + MLX90640 thermal cam"  "$SENSOR_STATE" \
-    "voice"   "Voice            Wake-word + whisper transcription"          "OFF")
+    "ui"        "apexos-rs-ui     Native Slint UI — KMS/DRM display"         "$UI_STATE" \
+    "cerebro"   "Cerebro API      REST dashboard + memory UI on :8765"        "$API_STATE" \
+    "occipital" "Web Cortex       web_search/fetch + semantic recall"         "$OCC_STATE" \
+    "sensor"    "Sensor Head      BME688 air quality + MLX90640 thermal cam"  "$SENSOR_STATE" \
+    "voice"     "Voice            Wake-word + whisper transcription"          "OFF")
 
   # Parse whiptail checklist output (space-separated quoted tags)
-  echo "$ADDONS" | grep -q '"ui"'      || NO_UI=true
-  echo "$ADDONS" | grep -q '"cerebro"' || NO_CEREBRO_API=true
-  echo "$ADDONS" | grep -q '"sensor"'  && NO_SENSOR=false || NO_SENSOR=true
-  echo "$ADDONS" | grep -q '"voice"'   && NO_VOICE=false  || NO_VOICE=true
+  echo "$ADDONS" | grep -q '"ui"'        || NO_UI=true
+  echo "$ADDONS" | grep -q '"cerebro"'   || NO_CEREBRO_API=true
+  echo "$ADDONS" | grep -q '"occipital"' && NO_OCCIPITAL=false || NO_OCCIPITAL=true
+  echo "$ADDONS" | grep -q '"sensor"'    && NO_SENSOR=false || NO_SENSOR=true
+  echo "$ADDONS" | grep -q '"voice"'     && NO_VOICE=false  || NO_VOICE=true
 fi
 
 # ── API keys ──────────────────────────────────────────────────────────────────
@@ -579,6 +593,9 @@ if ! $YES; then
   ADDONS_LIST=""
   ! $NO_UI          && ADDONS_LIST+="  ✓ apexos-rs-ui  (KMS/DRM display)\n"
   ! $NO_CEREBRO_API && ADDONS_LIST+="  ✓ cerebro-api   (REST dashboard :8765)\n"
+  OCC_RECALL="FTS5 keyword recall"
+  case "$TIER" in micro|standard|pro) OCC_RECALL="semantic recall (bge-small)" ;; esac
+  ! $NO_OCCIPITAL   && ADDONS_LIST+="  ✓ occipital     (web cortex — $OCC_RECALL)\n"
   ! $NO_SENSOR      && ADDONS_LIST+="  ✓ sensor-head   (BME688 + MLX90640)\n"
   ! $NO_VOICE       && ADDONS_LIST+="  ✓ voice         (whisper transcription)\n"
   [[ -n "$API_KEY" ]]        && KEY_STATUS="Anthropic key: set" \
@@ -837,6 +854,60 @@ if ! $NO_UI; then
   ok "apexos-rs-ui → /usr/local/bin/apexos-rs-ui"
 fi
 
+# ── Occipital (web reading cortex) ───────────────────────────────────────────────
+# The agent's reading cortex — web_search / web_fetch / web_recall / web_save /
+# web_forget — lives in a SEPARATE sibling repo (github.com/buckster123/Occipital-RS),
+# NOT a workspace member, so the build above doesn't produce it. Clone + build + deploy
+# occipital-mcp alongside the workspace binaries (the plugin block is enabled in the
+# Config section below, only on success). Default ON; skip with --no-occipital.
+# Tier split mirrors cerebro's: Micro+ build `--features embeddings` for bge-small
+# semantic recall (web_recall by meaning); Nano stays FTS5 keyword recall (no ONNX).
+# Best-effort: a clone/build failure WARNS and continues — occipital is an enhancement,
+# not core (agentd runs fine without it), and apexos-update retries next run.
+if ! $NO_OCCIPITAL; then
+  hdr "Occipital (web reading cortex)"
+  OCCIPITAL_DIR="$(dirname "$REPO_DIR")/Occipital-RS"   # sibling of the ApexOS-RS clone
+  case "$TIER" in
+    micro|standard|pro) OCC_FEATURES="--features embeddings" ;;   # semantic recall
+    *)                  OCC_FEATURES="" ;;                        # nano → FTS5 only
+  esac
+
+  occipital_provision() {
+    ensure_bootstrap_deps                              # git/curl/ca-certs (idempotent)
+    if [[ -d "$OCCIPITAL_DIR/.git" ]]; then
+      [[ "$BUILD_USER" != "root" ]] && chown -R "$BUILD_USER:" "$OCCIPITAL_DIR"
+      info "Updating Occipital-RS clone at $OCCIPITAL_DIR …"
+      local GIT_OCC=(git -C "$OCCIPITAL_DIR")
+      [[ "$BUILD_USER" != "root" ]] && GIT_OCC=(sudo -u "$BUILD_USER" git -C "$OCCIPITAL_DIR")
+      "${GIT_OCC[@]}" checkout -- Cargo.lock 2>/dev/null || true   # self-heal build drift
+      "${GIT_OCC[@]}" pull --ff-only
+    else
+      info "Cloning Occipital-RS …"
+      git clone --depth=1 https://github.com/buckster123/Occipital-RS "$OCCIPITAL_DIR"
+      [[ "$BUILD_USER" != "root" ]] && chown -R "$BUILD_USER:" "$OCCIPITAL_DIR"
+    fi
+    info "Building occipital-mcp${OCC_FEATURES:+ ($OCC_FEATURES)} …"
+    # NOT --locked: a foreign repo whose committed lock we don't gate-keep — a stale
+    # lock shouldn't fail the build (the checkout above keeps re-runs from dirtying it).
+    sudo -u "$BUILD_USER" "$CARGO" build --release -p occipital-mcp $OCC_FEATURES \
+      --manifest-path "$OCCIPITAL_DIR/Cargo.toml" 2>&1 \
+      | grep --line-buffered -E "(^[[:space:]]*Compiling occipital|Finished|^error)" || true
+    [[ -x "$OCCIPITAL_DIR/target/release/occipital-mcp" ]] \
+      || { warn "occipital-mcp build produced no binary"; return 1; }
+    install -m 755 "$OCCIPITAL_DIR/target/release/occipital-mcp" /usr/local/bin/occipital-mcp
+    install -d -o agentd -g agentd /var/lib/agentd/occipital
+    [[ -n "$OCC_FEATURES" ]] && install -d -o agentd -g agentd /var/lib/agentd/occipital/models
+    ok "occipital-mcp → /usr/local/bin/occipital-mcp ($([[ -n "$OCC_FEATURES" ]] && echo 'semantic recall' || echo 'FTS5 keyword recall'))"
+    return 0
+  }
+
+  if occipital_provision; then
+    OCCIPITAL_INSTALLED=true
+  else
+    warn "Occipital not installed — agentd runs without the web cortex; apexos-update retries"
+  fi
+fi
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 hdr "Configuration"
 
@@ -862,6 +933,33 @@ if [[ ! -f /etc/agentd/plugins.toml ]]; then
   if [[ -n "$EMBED_MODEL" ]]; then
     sed -i "/FASTEMBED_CACHE_DIR/a CEREBRO_EMBED_MODEL = \"$EMBED_MODEL\"" /etc/agentd/plugins.toml
   fi
+fi
+
+# Enable the Occipital plugin only when occipital-mcp actually installed — the
+# template ships the block COMMENTED so agentd is never pointed at a missing binary.
+# Additive + idempotent: the grep is anchored to an UNcommented `id = "occipital"`,
+# so it skips both the commented template line AND a prior run / an APEX
+# register_mcp_server entry (preserving the seed-if-absent + self-evolution contract).
+# This is what brings the web cortex to already-deployed nodes on apexos-update.
+if $OCCIPITAL_INSTALLED && [[ -f /etc/agentd/plugins.toml ]] \
+   && ! grep -qE '^[[:space:]]*id[[:space:]]*=[[:space:]]*"occipital"' /etc/agentd/plugins.toml; then
+  {
+    echo ""
+    echo "[[plugin]]"
+    echo 'id      = "occipital"'
+    echo 'cmd     = "/usr/local/bin/occipital-mcp"'
+    echo "args    = []"
+    echo 'restart = "always"'
+    echo "[plugin.env]"
+    echo 'OCCIPITAL_DB        = "/var/lib/agentd/occipital/occipital.db"'
+    echo 'OCCIPITAL_KEYS_FILE = "/var/lib/agentd/occipital/keys.toml"'
+    echo 'RUST_LOG            = "warn"'
+    if [[ -n "$OCC_FEATURES" ]]; then
+      echo 'OCCIPITAL_EMBED_MODEL = "BAAI/bge-small-en-v1.5"'
+      echo 'FASTEMBED_CACHE_DIR   = "/var/lib/agentd/occipital/models"'
+    fi
+  } >> /etc/agentd/plugins.toml
+  ok "Occipital plugin registered in /etc/agentd/plugins.toml"
 fi
 
 # policy.toml (don't overwrite an existing policy)
@@ -921,6 +1019,7 @@ write_install_conf() {
     echo "APEXOS_TIER=$TIER"
     echo "APEXOS_NO_UI=$NO_UI"
     echo "APEXOS_NO_SENSOR=$NO_SENSOR"
+    echo "APEXOS_NO_OCCIPITAL=$NO_OCCIPITAL"
     echo "APEXOS_NO_CEREBRO_API=$NO_CEREBRO_API"
     echo "APEXOS_VOICE=$( $NO_VOICE && echo false || echo true )"
   } > "$tmp"
