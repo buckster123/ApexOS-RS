@@ -343,6 +343,116 @@ pub fn list() -> Value {
                 },
                 "required": ["state"]
             }
+        },
+        {
+            "name": "git_status",
+            "description": "Show a git working-tree summary (branch + changed/staged/untracked files, short format). `path` is the repo directory (default: your workspace). Confined to the workspace + AGENTD_GIT_ROOTS.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "Repo directory (default: workspace)" } }
+            }
+        },
+        {
+            "name": "git_diff",
+            "description": "Show changes as a stat summary + patch. `staged: true` diffs the index instead of the working tree. Output is length-capped.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path":   { "type": "string", "description": "Repo directory (default: workspace)" },
+                    "staged": { "type": "boolean", "description": "Diff staged (index) changes instead of working tree (default false)" }
+                }
+            }
+        },
+        {
+            "name": "git_log",
+            "description": "Recent commits, one line each (with refs).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Repo directory (default: workspace)" },
+                    "n":    { "type": "integer", "description": "How many commits (default 10, max 200)" }
+                }
+            }
+        },
+        {
+            "name": "git_branch",
+            "description": "With `name`: create a branch. Without: list all branches.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Repo directory (default: workspace)" },
+                    "name": { "type": "string", "description": "New branch name (omit to list)" }
+                }
+            }
+        },
+        {
+            "name": "git_init",
+            "description": "Initialize a git repository in `path` (default: your workspace) so it can be version-controlled.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "Directory to init (default: workspace)" } }
+            }
+        },
+        {
+            "name": "git_commit",
+            "description": "Stage and commit. `paths` stages just those files; omit to stage all changes. Committer is your agent identity. (Allowed inside the workspace; for a repo outside it — added via AGENTD_GIT_ROOTS — the edits themselves still go through gated tools.)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path":    { "type": "string", "description": "Repo directory (default: workspace)" },
+                    "message": { "type": "string", "description": "Commit message" },
+                    "paths":   { "type": "array", "items": { "type": "string" }, "description": "Files to stage (default: all changes)" }
+                },
+                "required": ["message"]
+            }
+        },
+        {
+            "name": "git_push",
+            "description": "Push to a remote (default origin). Publishes externally — approval-gated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path":   { "type": "string", "description": "Repo directory (default: workspace)" },
+                    "remote": { "type": "string", "description": "Remote name (default origin)" },
+                    "branch": { "type": "string", "description": "Branch to push (default: current)" }
+                }
+            }
+        },
+        {
+            "name": "git_checkout",
+            "description": "Switch to a branch / commit / restore a path. Rewrites the working tree — approval-gated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Repo directory (default: workspace)" },
+                    "ref":  { "type": "string", "description": "Branch, commit, or path to check out" }
+                },
+                "required": ["ref"]
+            }
+        },
+        {
+            "name": "git_reset",
+            "description": "Reset HEAD to `ref` (default HEAD). `hard: true` also discards working-tree changes (destructive) — approval-gated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Repo directory (default: workspace)" },
+                    "ref":  { "type": "string", "description": "Target ref (default HEAD)" },
+                    "hard": { "type": "boolean", "description": "Discard working-tree changes (default false)" }
+                }
+            }
+        },
+        {
+            "name": "git_merge",
+            "description": "Merge `branch` into the current branch (no-edit). May rewrite the tree / conflict — approval-gated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path":   { "type": "string", "description": "Repo directory (default: workspace)" },
+                    "branch": { "type": "string", "description": "Branch to merge in" }
+                },
+                "required": ["branch"]
+            }
         }
     ])
 }
@@ -389,6 +499,16 @@ pub fn call(name: &str, args: &Value) -> Value {
         "gpio_pwm" => gpio_pwm(args),
         "gpio_servo" => gpio_servo(args),
         "display_face" => display_face(args),
+        "git_status" => git_status(args),
+        "git_diff" => git_diff(args),
+        "git_log" => git_log(args),
+        "git_branch" => git_branch(args),
+        "git_init" => git_init(args),
+        "git_commit" => git_commit(args),
+        "git_push" => git_push(args),
+        "git_checkout" => git_checkout(args),
+        "git_reset" => git_reset(args),
+        "git_merge" => git_merge(args),
         _ => tool_error(format!("unknown tool: {}", name)),
     }
 }
@@ -716,6 +836,218 @@ fn confine(path: &str, write: bool) -> Result<PathBuf, String> {
         "reading {} is outside the workspace and the read allowlist",
         canon.display()
     ))
+}
+
+// ─── Git tools ────────────────────────────────────────────────────────────────
+// git_* shell out to the system `git` via cmd_capture — argv, never `/bin/sh`, so
+// there is no shell-injection surface; a leading-`-` guard defeats option
+// injection on positional refs/branches/paths. Repos are confined to a "git
+// roots" allowlist (mirrors read_roots): the agent workspace by default, extended
+// by AGENTD_GIT_ROOTS (colon-sep absolute paths, e.g. the agentd source repo for
+// the self-update loop). Policy: read-only verbs + git_init/branch/commit are
+// `allow` (so they MUST self-confine, like read_file — git_roots is the gate);
+// push/checkout/reset/merge (publish or rewrite the tree) are `ask`. With the
+// default (no AGENTD_GIT_ROOTS) the only git root is the workspace, so an `allow`
+// commit can only ever touch the agent's own workspace repo.
+
+/// Directories a git op may touch: the workspace + AGENTD_GIT_ROOTS (colon-sep).
+fn git_roots() -> Vec<PathBuf> {
+    let mut roots = vec![workspace_root()];
+    if let Ok(extra) = std::env::var("AGENTD_GIT_ROOTS") {
+        roots.extend(
+            extra
+                .split(':')
+                .filter(|s| !s.is_empty())
+                .map(|s| fs::canonicalize(s).unwrap_or_else(|_| PathBuf::from(s))),
+        );
+    }
+    roots
+}
+
+/// Resolve + confine a repo path (relative → workspace; default `.` = workspace)
+/// to within a git root. Rejects `..`; canonicalizes. Returns the dir for `git -C`.
+fn confine_git_repo(path: Option<&str>) -> Result<PathBuf, String> {
+    let resolved = resolve_path(path.unwrap_or("."));
+    if resolved.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err("path traversal (..) is not allowed".to_string());
+    }
+    let canon = canonicalize_lenient(&resolved)
+        .ok_or_else(|| format!("cannot resolve path {}", resolved.display()))?;
+    for root in git_roots() {
+        if canon.starts_with(&root) {
+            return Ok(canon);
+        }
+    }
+    Err(format!(
+        "{} is outside the git roots (workspace + AGENTD_GIT_ROOTS)",
+        canon.display()
+    ))
+}
+
+/// Reject a positional arg git could read as an option (leading `-`).
+fn git_safe_arg(label: &str, v: &str) -> Result<(), String> {
+    if v.starts_with('-') {
+        return Err(format!("{label} may not start with '-': {v:?}"));
+    }
+    Ok(())
+}
+
+/// Run `git -C <repo> <args…>` (args exclude the leading `-C <repo>`) and shape
+/// the result. Output is char-capped so a huge diff/log can't blow the context.
+fn run_git(repo: &Path, args: Vec<String>) -> Value {
+    let repo_s = repo.to_string_lossy().into_owned();
+    let mut full: Vec<String> = vec!["-C".into(), repo_s.clone()];
+    full.extend(args);
+    let refs: Vec<&str> = full.iter().map(String::as_str).collect();
+    let (out, err, ok) = cmd_capture("git", &refs);
+    if !ok {
+        return tool_error(format!("git failed: {}", err.trim()));
+    }
+    let out = out.trim_end();
+    let capped: String = if out.chars().count() > 16000 {
+        out.chars().take(16000).collect::<String>() + "\n… (truncated)"
+    } else {
+        out.to_string()
+    };
+    tool_ok(json!({ "repo": repo_s, "output": capped }))
+}
+
+/// Committer identity = the node agent id (AGENTD_AGENT_ID, default APEX), so
+/// commits are attributable without per-repo `git config user.*`.
+fn git_identity() -> (String, String) {
+    let id = std::env::var("AGENTD_AGENT_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "APEX".to_string());
+    let email = format!("{}@apexos.local", id.to_lowercase());
+    (id, email)
+}
+
+/// Shared repo-arg resolution for the git tools.
+fn git_repo_arg(args: &Value) -> Result<PathBuf, Value> {
+    confine_git_repo(args["path"].as_str()).map_err(tool_error)
+}
+
+fn git_status(args: &Value) -> Value {
+    let repo = match git_repo_arg(args) { Ok(r) => r, Err(e) => return e };
+    run_git(&repo, vec!["status".into(), "--short".into(), "--branch".into()])
+}
+
+fn git_diff(args: &Value) -> Value {
+    let repo = match git_repo_arg(args) { Ok(r) => r, Err(e) => return e };
+    let mut a = vec!["diff".into(), "--stat".into(), "--patch".into()];
+    if args["staged"].as_bool().unwrap_or(false) {
+        a.push("--staged".into());
+    }
+    run_git(&repo, a)
+}
+
+fn git_log(args: &Value) -> Value {
+    let repo = match git_repo_arg(args) { Ok(r) => r, Err(e) => return e };
+    let n = args["n"].as_u64().unwrap_or(10).clamp(1, 200).to_string();
+    run_git(&repo, vec!["log".into(), "--oneline".into(), "--decorate".into(), "-n".into(), n])
+}
+
+fn git_branch(args: &Value) -> Value {
+    let repo = match git_repo_arg(args) { Ok(r) => r, Err(e) => return e };
+    match args["name"].as_str().filter(|s| !s.is_empty()) {
+        Some(name) => {
+            if let Err(e) = git_safe_arg("branch name", name) { return tool_error(e); }
+            run_git(&repo, vec!["branch".into(), name.to_string()])
+        }
+        None => run_git(&repo, vec!["branch".into(), "--all".into()]),
+    }
+}
+
+fn git_init(args: &Value) -> Value {
+    let repo = match git_repo_arg(args) { Ok(r) => r, Err(e) => return e };
+    run_git(&repo, vec!["init".into()])
+}
+
+fn git_commit(args: &Value) -> Value {
+    let repo = match git_repo_arg(args) { Ok(r) => r, Err(e) => return e };
+    let message = match args["message"].as_str() {
+        Some(m) if !m.trim().is_empty() => m.to_string(),
+        _ => return tool_error("message is required"),
+    };
+    let paths: Vec<String> = args["paths"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+    for p in &paths {
+        if let Err(e) = git_safe_arg("path", p) { return tool_error(e); }
+    }
+    // Stage: explicit paths (after `--`), else everything.
+    let mut add: Vec<String> = vec!["add".into()];
+    if paths.is_empty() {
+        add.push("-A".into());
+    } else {
+        add.push("--".into());
+        add.extend(paths);
+    }
+    {
+        let repo_s = repo.to_string_lossy().into_owned();
+        let mut full: Vec<String> = vec!["-C".into(), repo_s];
+        full.extend(add);
+        let refs: Vec<&str> = full.iter().map(String::as_str).collect();
+        let (_, err, ok) = cmd_capture("git", &refs);
+        if !ok {
+            return tool_error(format!("git add: {}", err.trim()));
+        }
+    }
+    let (name, email) = git_identity();
+    run_git(
+        &repo,
+        vec![
+            "-c".into(), format!("user.name={name}"),
+            "-c".into(), format!("user.email={email}"),
+            "commit".into(), "-m".into(), message,
+        ],
+    )
+}
+
+fn git_push(args: &Value) -> Value {
+    let repo = match git_repo_arg(args) { Ok(r) => r, Err(e) => return e };
+    let remote = args["remote"].as_str().unwrap_or("origin").to_string();
+    if let Err(e) = git_safe_arg("remote", &remote) { return tool_error(e); }
+    let mut a = vec!["push".into(), remote];
+    if let Some(b) = args["branch"].as_str().filter(|s| !s.is_empty()) {
+        if let Err(e) = git_safe_arg("branch", b) { return tool_error(e); }
+        a.push(b.to_string());
+    }
+    run_git(&repo, a)
+}
+
+fn git_checkout(args: &Value) -> Value {
+    let repo = match git_repo_arg(args) { Ok(r) => r, Err(e) => return e };
+    let r = match args["ref"].as_str().filter(|s| !s.is_empty()) {
+        Some(r) => r,
+        None => return tool_error("ref is required"),
+    };
+    if let Err(e) = git_safe_arg("ref", r) { return tool_error(e); }
+    run_git(&repo, vec!["checkout".into(), r.to_string()])
+}
+
+fn git_reset(args: &Value) -> Value {
+    let repo = match git_repo_arg(args) { Ok(r) => r, Err(e) => return e };
+    let r = args["ref"].as_str().filter(|s| !s.is_empty()).unwrap_or("HEAD");
+    if let Err(e) = git_safe_arg("ref", r) { return tool_error(e); }
+    let mut a = vec!["reset".into()];
+    if args["hard"].as_bool().unwrap_or(false) {
+        a.push("--hard".into());
+    }
+    a.push(r.to_string());
+    run_git(&repo, a)
+}
+
+fn git_merge(args: &Value) -> Value {
+    let repo = match git_repo_arg(args) { Ok(r) => r, Err(e) => return e };
+    let b = match args["branch"].as_str().filter(|s| !s.is_empty()) {
+        Some(b) => b,
+        None => return tool_error("branch is required"),
+    };
+    if let Err(e) = git_safe_arg("branch", b) { return tool_error(e); }
+    run_git(&repo, vec!["merge".into(), "--no-edit".into(), b.to_string()])
 }
 
 fn read_file(args: &Value) -> Value {
@@ -2474,5 +2806,77 @@ mod tests {
         assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(172, 15, 0, 1))));
         assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
         assert!(!is_blocked_ip(IpAddr::V6("2606:4700:4700::1111".parse().unwrap())));
+    }
+
+    // ─── Git tools ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn git_safe_arg_blocks_option_injection() {
+        assert!(git_safe_arg("ref", "main").is_ok());
+        assert!(git_safe_arg("ref", "HEAD~1").is_ok());
+        assert!(git_safe_arg("ref", "feature/x").is_ok());
+        // A leading dash would be read by git as an option, not a ref.
+        assert!(git_safe_arg("ref", "--upload-pack=evil").is_err());
+        assert!(git_safe_arg("branch", "-x").is_err());
+    }
+
+    #[test]
+    fn confine_git_repo_workspace_and_roots() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ws = std::env::temp_dir().join("apexos_git_confine_ws");
+        fs::create_dir_all(&ws).unwrap();
+        std::env::set_var("AGENTD_WORKSPACE", &ws);
+        std::env::remove_var("AGENTD_GIT_ROOTS");
+
+        let ws_canon = fs::canonicalize(&ws).unwrap();
+        // Default (`.`) resolves to the workspace.
+        assert_eq!(confine_git_repo(None).unwrap(), ws_canon);
+        // `..` is rejected.
+        assert!(confine_git_repo(Some("../escape")).is_err());
+
+        // An absolute path outside the workspace is rejected by default…
+        let outside = std::env::temp_dir().join("apexos_git_confine_outside");
+        fs::create_dir_all(&outside).unwrap();
+        let outside_s = outside.to_str().unwrap().to_string();
+        assert!(confine_git_repo(Some(&outside_s)).is_err());
+        // …until the operator opts it in via AGENTD_GIT_ROOTS.
+        std::env::set_var("AGENTD_GIT_ROOTS", &outside_s);
+        assert!(confine_git_repo(Some(&outside_s)).is_ok());
+
+        std::env::remove_var("AGENTD_GIT_ROOTS");
+        std::env::remove_var("AGENTD_WORKSPACE");
+        let _ = fs::remove_dir_all(&ws);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn git_init_commit_log_roundtrip() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Skip gracefully if git isn't installed (it is in CI/dev).
+        if !cmd_capture("git", &["--version"]).2 {
+            return;
+        }
+        let ws = std::env::temp_dir().join("apexos_git_roundtrip_ws");
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).unwrap();
+        std::env::set_var("AGENTD_WORKSPACE", &ws);
+        std::env::remove_var("AGENTD_GIT_ROOTS");
+
+        let ok = |r: &Value| r.get("isError").is_none();
+        // git_init in the workspace (default path).
+        assert!(ok(&git_init(&json!({}))), "init failed");
+        // Commit a new file (stage-all path).
+        fs::write(ws.join("hello.txt"), "hi").unwrap();
+        assert!(ok(&git_commit(&json!({ "message": "first commit" }))), "commit failed");
+        // git_log surfaces the commit message.
+        let r = git_log(&json!({ "n": 5 }));
+        let inner: Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(
+            inner["output"].as_str().unwrap().contains("first commit"),
+            "log missing commit: {inner}"
+        );
+
+        std::env::remove_var("AGENTD_WORKSPACE");
+        let _ = fs::remove_dir_all(&ws);
     }
 }

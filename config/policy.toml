@@ -40,6 +40,21 @@ mode = "suggest"
 "gpio_pwm"           = "ask"
 "gpio_servo"         = "ask"
 
+# Git tools (apexos-tools) — confined by the tool to the workspace + AGENTD_GIT_ROOTS.
+# Read-only verbs + init/branch/commit are allow (self-confined, like read_file:
+# with no AGENTD_GIT_ROOTS the only git root is the workspace, so an allow commit
+# can only touch the agent's own repo). Publish / tree-rewrite verbs always ask.
+"git_status"   = "allow"
+"git_diff"     = "allow"
+"git_log"      = "allow"
+"git_branch"   = "allow"
+"git_init"     = "allow"
+"git_commit"   = "allow"
+"git_push"     = "ask"
+"git_checkout" = "ask"
+"git_reset"    = "ask"
+"git_merge"    = "ask"
+
 # Cerebro plugin tools --------------------------------------------------------
 "remember"     = "allow"
 "recall"       = "allow"
