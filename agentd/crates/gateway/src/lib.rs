@@ -188,6 +188,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/model",       get(get_model_handler).post(set_model_handler))
         .route("/api/models",      get(get_models_handler))
         .route("/api/cache",       get(get_cache_handler).post(set_cache_handler))
+        .route("/api/usage",       get(get_usage_handler))
         .route("/api/thermal/frame", get(thermal_frame_handler))
         .route("/api/backend",     get(get_backend_handler).post(set_backend_handler))
         .route("/api/policy",         post(set_policy_handler))
@@ -824,6 +825,54 @@ async fn set_cache_handler(
         "cache_conversation": c.cache_conversation,
         "ttl":                c.ttl.label(),
         "summary":            c.summary(),
+    }))
+}
+
+/// Approximate Anthropic input/output price in $ per million tokens, by model family.
+/// Pricing drifts — this is a labelled estimate for the tokenomics readout, not billing.
+fn anthropic_pricing(model: &str) -> (f64, f64) {
+    let m = model.to_ascii_lowercase();
+    if m.contains("haiku") { (1.0, 5.0) }
+    else if m.contains("sonnet") { (3.0, 15.0) }
+    else if m.contains("fable") || m.contains("mythos") { (10.0, 50.0) }
+    else { (5.0, 25.0) } // opus-tier default
+}
+
+/// Cumulative token + cache accounting since daemon boot, plus the "cache bank"
+/// economics: what caching has saved vs re-sending every prefix at full price. The
+/// $ figures are an estimate at the *current* model's price (usage may span models).
+async fn get_usage_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let u = apexos_agent::usage::snapshot();
+    let model = state.model.read().await.clone();
+    let (in_price, out_price) = anthropic_pricing(&model);
+    let m = 1_000_000.0_f64;
+
+    // Anthropic input billing tiers: full × input, 1.25× × cache-creation, 0.1× × cache-read.
+    let spent = (u.input_tokens as f64
+        + u.cache_creation_tokens as f64 * 1.25
+        + u.cache_read_tokens as f64 * 0.10) / m * in_price
+        + u.output_tokens as f64 / m * out_price;
+    // Baseline if caching were off: every input token (incl. what's now cached) at full price.
+    let uncached = u.total_input() as f64 / m * in_price + u.output_tokens as f64 / m * out_price;
+    let saved = uncached - spent;
+    // The "cache bank": net input-token-equivalents kept off the bill (reads at 0.9× discount
+    // minus the 0.25× write premium). The headline number for the cache-banking insight.
+    let banked_tokens = (u.cache_read_tokens as f64 * 0.90) - (u.cache_creation_tokens as f64 * 0.25);
+
+    Json(serde_json::json!({
+        "turns": u.turns,
+        "tokens": {
+            "input":          u.input_tokens,
+            "cache_read":     u.cache_read_tokens,
+            "cache_creation": u.cache_creation_tokens,
+            "output":         u.output_tokens,
+            "total_input":    u.total_input(),
+        },
+        "cache_hit_rate": u.cache_hit_rate(),
+        "banked_tokens":  banked_tokens.round() as i64,
+        "model": model,
+        "pricing": { "input_per_mtok": in_price, "output_per_mtok": out_price, "note": "approximate, current model" },
+        "cost_usd": { "spent": spent, "uncached_baseline": uncached, "saved": saved },
     }))
 }
 

@@ -262,6 +262,9 @@ fn sse_to_chunks(
         let mut carry: Vec<u8> = Vec::new(); // partial multi-byte chars between chunks
         let mut blocks: HashMap<usize, BlockState> = HashMap::new();
         let mut stop   = false;
+        // This turn's usage — input/cache from message_start, output from message_delta,
+        // committed to the cumulative accounting once at message_stop (crate::usage).
+        let (mut u_in, mut u_cr, mut u_cw, mut u_out): (u64, u64, u64, u64) = (0, 0, 0, 0);
 
         tokio::pin!(byte_stream);
 
@@ -299,15 +302,23 @@ fn sse_to_chunks(
                     // is working; read stuck at 0 = a silent invalidator in the prefix.
                     "message_start" => {
                         let u   = &val["message"]["usage"];
-                        let inp = u["input_tokens"].as_u64().unwrap_or(0);
-                        let cr  = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
-                        let cw  = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-                        let total = inp + cr + cw;
-                        let pct = (cr * 100).checked_div(total).unwrap_or(0);
+                        u_in = u["input_tokens"].as_u64().unwrap_or(0);
+                        u_cr = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                        u_cw = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                        let total = u_in + u_cr + u_cw;
+                        let pct = (u_cr * 100).checked_div(total).unwrap_or(0);
                         eprintln!(
-                            "[anthropic] prompt cache: read={cr} write={cw} uncached={inp} \
+                            "[anthropic] prompt cache: read={u_cr} write={u_cw} uncached={u_in} \
                              ({pct}% of input from cache)"
                         );
+                    }
+
+                    // Final output-token count rides on message_delta (cumulative for
+                    // this message); take the latest so a multi-delta stream still nets right.
+                    "message_delta" => {
+                        if let Some(o) = val["usage"]["output_tokens"].as_u64() {
+                            u_out = o;
+                        }
                     }
 
                     "content_block_start" => {
@@ -386,6 +397,8 @@ fn sse_to_chunks(
                     }
 
                     "message_stop" => {
+                        // Commit this turn's usage to the cumulative tokenomics accounting.
+                        crate::usage::record_turn_usage(u_in, u_cr, u_cw, u_out);
                         stop = true;
                         break;
                     }
