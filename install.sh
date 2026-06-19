@@ -1005,6 +1005,13 @@ systemctl daemon-reload
 systemctl enable --now apexos-self-update.path >/dev/null 2>&1 || true
 ok "Self-update watchdog installed (apexos-self-update.path armed)"
 
+# The opt-in provisioning command (option B — agentd-owned toolchain + repo). NOT
+# run automatically: it installs ~1.5 GB of Rust toolchain and is Standard+ only.
+# An operator runs `sudo apexos-provision-selfupdate` once on a node meant to
+# self-evolve; then APEX can `apply_daemon_update`. See docs/self-update.md.
+install -m 755 "$REPO_DIR/deploy/apexos-provision-selfupdate.sh" /usr/local/bin/apexos-provision-selfupdate
+ok "Self-update provisioning command available (run: apexos-provision-selfupdate)"
+
 # ── Self-update command ────────────────────────────────────────────────────────
 # Drop an `apexos-update` so updates need zero cargo/git knowledge: it just re-runs
 # this installer against the existing clone (pull → rebuild → hot-swap → restart).
