@@ -337,7 +337,13 @@ async fn run_update(
     let req = SelfUpdateRequest {
         staged: staged.to_string_lossy().to_string(),
         staged_sha256: sha,
-        target_commit: commit.clone(),
+        // MUST be the full 40-char sha (`resolved`), NOT the caller's `commit` arg.
+        // The health marker reports the full `build.rs git rev-parse HEAD` sha; the
+        // watchdog confirms on `health.commit == target`. A short sha or "HEAD" here
+        // never matches the full marker → a healthy new binary times out + rolls
+        // back. (Caught live on apex2's first real self-update: target "24ea3a4" vs
+        // health "24ea3a42b0ed…" → false rollback.)
+        target_commit: resolved.clone(),
         prev_commit: build_commit().to_string(),
         created_at: now_unix(),
         timeout: probe_timeout(),
