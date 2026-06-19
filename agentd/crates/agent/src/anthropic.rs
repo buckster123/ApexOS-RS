@@ -1,3 +1,4 @@
+use crate::cache::CacheConfig;
 use crate::provider::{Chunk, ChunkStream, Provider};
 use apexos_core::{ContentBlock, Message, ToolSpec};
 use async_trait::async_trait;
@@ -11,6 +12,9 @@ pub struct AnthropicProvider {
     http:    reqwest::Client,
     api_key: Arc<RwLock<String>>,
     model:   Arc<RwLock<String>>,
+    // Prompt-caching config, read once per request. Shared Arc so the settings layer
+    // can retune TTL / toggle conversation caching at runtime (see crate::cache).
+    cache:   Arc<RwLock<CacheConfig>>,
 }
 
 impl AnthropicProvider {
@@ -19,16 +23,22 @@ impl AnthropicProvider {
             http:    build_http_client(),
             api_key: Arc::new(RwLock::new(api_key.into())),
             model:   Arc::new(RwLock::new(model.into())),
+            cache:   Arc::new(RwLock::new(CacheConfig::default())),
         }
     }
 
-    /// Shares existing Arcs so gateway HTTP handlers can update key/model at runtime.
-    pub fn new_shared(api_key: Arc<RwLock<String>>, model: Arc<RwLock<String>>) -> Self {
-        Self { http: build_http_client(), api_key, model }
+    /// Shares existing Arcs so gateway HTTP handlers can update key/model/cache at runtime.
+    pub fn new_shared(
+        api_key: Arc<RwLock<String>>,
+        model:   Arc<RwLock<String>>,
+        cache:   Arc<RwLock<CacheConfig>>,
+    ) -> Self {
+        Self { http: build_http_client(), api_key, model, cache }
     }
 
     pub fn key_arc(&self)   -> Arc<RwLock<String>> { Arc::clone(&self.api_key) }
     pub fn model_arc(&self) -> Arc<RwLock<String>> { Arc::clone(&self.model) }
+    pub fn cache_arc(&self) -> Arc<RwLock<CacheConfig>> { Arc::clone(&self.cache) }
 }
 
 #[async_trait]
@@ -41,7 +51,8 @@ impl Provider for AnthropicProvider {
     ) -> anyhow::Result<ChunkStream> {
         let api_key = self.api_key.read().await.clone();
         let model   = self.model.read().await.clone();
-        let body = build_body(&model, history, tools, system);
+        let cache   = self.cache.read().await.clone();
+        let body = build_body(&model, history, tools, system, &cache);
         if api_key.is_empty() {
             return Err(anyhow::anyhow!("ANTHROPIC_API_KEY not set — enter it via the browser UI"));
         }
@@ -76,8 +87,22 @@ fn build_http_client() -> reqwest::Client {
 
 // ── request body ─────────────────────────────────────────────────────────────
 
-fn build_body(model: &str, history: &[Message], tools: &[ToolSpec], system: Option<&str>) -> Value {
-    let messages: Vec<Value> = history.iter().map(msg_to_json).collect();
+fn build_body(
+    model:   &str,
+    history: &[Message],
+    tools:   &[ToolSpec],
+    system:  Option<&str>,
+    cache:   &CacheConfig,
+) -> Value {
+    let mut messages: Vec<Value> = history.iter().map(msg_to_json).collect();
+
+    // Conversation caching: roll breakpoints back through the STABLE history (every
+    // turn but the clock-bearing current one) so a long agentic transcript caches
+    // incrementally — each turn reads the prior history at ~0.1× and writes only the
+    // new delta. The dominant cost on 1M giga-sessions.
+    if cache.enabled && cache.cache_conversation {
+        apply_conversation_cache(&mut messages, &cache.control());
+    }
 
     let mut body = serde_json::json!({
         "model":      model,
@@ -88,17 +113,22 @@ fn build_body(model: &str, history: &[Message], tools: &[ToolSpec], system: Opti
     });
 
     if let Some(sys) = system {
-        // Prompt caching: one `cache_control` breakpoint on the system block. Render
-        // order is tools → system → messages, so this single marker caches BOTH the
-        // tool definitions and the system prompt (soul + embodiment + priming) — the
-        // large, stable prefix we resend every turn. The live clock is injected into
-        // the messages (see turn.rs::inject_ambient), so this prefix stays byte-stable
-        // and reads from cache (~0.1× input price) on every turn after the first;
-        // writes cost 1.25× on the default 5-minute TTL. Verify with the response's
-        // `usage.cache_read_input_tokens` (zero across turns ⇒ a silent invalidator).
-        body["system"] = serde_json::json!([
-            { "type": "text", "text": sys, "cache_control": { "type": "ephemeral" } }
-        ]);
+        if cache.enabled {
+            // One `cache_control` breakpoint on the system block. Render order is
+            // tools → system → messages, so this single marker caches BOTH the tool
+            // definitions and the system prompt (soul + embodiment + priming) — the
+            // large, stable prefix we resend every turn. The live clock is injected
+            // into the messages (turn.rs::inject_ambient), so this prefix stays
+            // byte-stable and reads from cache on every turn after the first. Verify
+            // with `usage.cache_read_input_tokens` (zero across turns ⇒ a silent
+            // invalidator slipped into the prefix).
+            body["system"] = serde_json::json!([
+                { "type": "text", "text": sys, "cache_control": cache.control() }
+            ]);
+        } else {
+            // Caching off — exactly the pre-caching shape (plain string, no markers).
+            body["system"] = Value::String(sys.to_string());
+        }
     }
 
     if !tools.is_empty() {
@@ -106,13 +136,56 @@ fn build_body(model: &str, history: &[Message], tools: &[ToolSpec], system: Opti
         // flattens a HashMap whose order shifts when a plugin registers at runtime
         // (register_mcp_server); an unsorted reorder would sit at render position 0 and
         // invalidate the whole cached prefix. Order is functionally irrelevant to the
-        // model, so a stable sort is free insurance for the cache.
+        // model, so a stable sort is free insurance for the cache (harmless when off).
         let mut sorted: Vec<&ToolSpec> = tools.iter().collect();
         sorted.sort_by(|a, b| a.name.cmp(&b.name));
         body["tools"] = Value::Array(sorted.into_iter().map(tool_to_json).collect());
     }
 
     body
+}
+
+/// Roll prompt-cache breakpoints back through the conversation so a long transcript
+/// caches incrementally. Marks the last content block of up to 3 *stable* messages
+/// (everything but the final, clock-bearing turn — see turn.rs::inject_ambient): the
+/// newest stable turn always (the "rolling" breakpoint that reads the prior cache and
+/// extends it by one turn), then anchors roughly every `STRIDE` blocks walking back.
+///
+/// The stride stays under Anthropic's 20-block cache lookback so the chain reconnects
+/// turn-to-turn even when a tool-heavy turn adds many blocks at once; a single turn
+/// larger than the covered span (~3×STRIDE) degrades gracefully to a partial re-write,
+/// not a hard miss. With at most 3 marks here + 1 on system = the 4-breakpoint cap.
+fn apply_conversation_cache(messages: &mut [Value], control: &Value) {
+    const STRIDE: usize = 15;
+    const MAX_BP: usize = 3;
+
+    // < 2 messages ⇒ only the current (clock-bearing) turn exists; nothing stable yet.
+    if messages.len() < 2 {
+        return;
+    }
+    let stable = messages.len() - 1; // exclude the final, clock-bearing turn
+    let mut placed = 0;
+    let mut blocks_since = STRIDE; // primed so the newest stable turn always gets a mark
+
+    for msg in messages[..stable].iter_mut().rev() {
+        if placed >= MAX_BP {
+            break;
+        }
+        let n = msg.get("content").and_then(Value::as_array).map_or(0, Vec::len);
+        blocks_since = blocks_since.saturating_add(n);
+        if blocks_since >= STRIDE {
+            if let Some(last) = msg
+                .get_mut("content")
+                .and_then(Value::as_array_mut)
+                .and_then(|a| a.last_mut())
+                .and_then(Value::as_object_mut)
+            {
+                last.insert("cache_control".to_string(), control.clone());
+                placed += 1;
+                blocks_since = 0;
+            }
+        }
+    }
 }
 
 fn msg_to_json(msg: &Message) -> Value {
@@ -330,11 +403,19 @@ fn sse_to_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::{CacheConfig, CacheTtl};
     use futures_util::StreamExt;
+
+    fn user(text: &str) -> Message {
+        Message::User { content: vec![ContentBlock::Text { text: text.into() }] }
+    }
+    fn assistant(text: &str) -> Message {
+        Message::Assistant { content: vec![ContentBlock::Text { text: text.into() }] }
+    }
 
     #[test]
     fn build_body_system_carries_cache_control() {
-        let body = build_body("claude-opus-4-8", &[], &[], Some("soul + embodiment"));
+        let body = build_body("claude-opus-4-8", &[], &[], Some("soul + embodiment"), &CacheConfig::default());
         let sys = &body["system"];
         assert!(sys.is_array(), "system is a block array (not a bare string) for cache_control");
         assert_eq!(sys[0]["type"], "text");
@@ -348,7 +429,7 @@ mod tests {
             name: n.into(), description: String::new(), input_schema: serde_json::json!({}),
         };
         let tools = vec![mk("zebra"), mk("alpha"), mk("mike")];
-        let body = build_body("claude-opus-4-8", &[], &tools, None);
+        let body = build_body("claude-opus-4-8", &[], &tools, None, &CacheConfig::default());
         let names: Vec<&str> = body["tools"].as_array().unwrap()
             .iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["alpha", "mike", "zebra"], "tools sorted by name regardless of input order");
@@ -356,8 +437,63 @@ mod tests {
 
     #[test]
     fn build_body_no_system_omits_field() {
-        let body = build_body("claude-opus-4-8", &[], &[], None);
+        let body = build_body("claude-opus-4-8", &[], &[], None, &CacheConfig::default());
         assert!(body.get("system").is_none(), "no system → no system field");
+    }
+
+    #[test]
+    fn build_body_disabled_sends_plain_system_and_no_cache_control() {
+        let off = CacheConfig { enabled: false, ..Default::default() };
+        let hist = vec![assistant("a"), user("b")];
+        let body = build_body("claude-opus-4-8", &hist, &[], Some("soul"), &off);
+        assert_eq!(body["system"], Value::String("soul".into()), "plain string when caching off");
+        // No cache_control anywhere in messages either.
+        let dump = body.to_string();
+        assert!(!dump.contains("cache_control"), "no breakpoints when caching is off");
+    }
+
+    #[test]
+    fn build_body_1h_ttl_sets_ttl_on_system_block() {
+        let cfg = CacheConfig { ttl: CacheTtl::OneHour, ..Default::default() };
+        let body = build_body("claude-opus-4-8", &[], &[], Some("soul"), &cfg);
+        assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn build_body_caches_conversation_but_not_the_current_turn() {
+        // A multi-turn history: the newest STABLE turn is cached; the final
+        // (clock-bearing) user turn is left uncached so the clock can't bust it.
+        let hist = vec![user("q1"), assistant("a1"), user("q2 + clock")];
+        let body = build_body("claude-opus-4-8", &hist, &[], Some("soul"), &CacheConfig::default());
+        let msgs = body["messages"].as_array().unwrap();
+        // msgs[1] = assistant("a1") is the newest stable turn → marked.
+        assert_eq!(msgs[1]["content"][0]["cache_control"]["type"], "ephemeral",
+            "newest stable turn carries the rolling breakpoint");
+        // msgs[2] = the current turn → never marked.
+        assert!(msgs[2]["content"][0].get("cache_control").is_none(),
+            "the clock-bearing current turn stays uncached");
+    }
+
+    #[test]
+    fn build_body_conversation_caching_respects_four_breakpoint_cap() {
+        // Long history (many short turns) + system: total cache_control markers must
+        // never exceed Anthropic's 4 (1 system + ≤3 conversation).
+        let mut hist: Vec<Message> = Vec::new();
+        for i in 0..40 {
+            hist.push(if i % 2 == 0 { user("q") } else { assistant("a") });
+        }
+        let body = build_body("claude-opus-4-8", &hist, &[], Some("soul"), &CacheConfig::default());
+        let count = body.to_string().matches("cache_control").count();
+        assert!(count <= 4, "≤4 breakpoints (got {count})");
+        assert!(count >= 2, "system + at least one conversation breakpoint (got {count})");
+    }
+
+    #[test]
+    fn build_body_conversation_off_caches_only_system() {
+        let cfg = CacheConfig { cache_conversation: false, ..Default::default() };
+        let hist = vec![user("q1"), assistant("a1"), user("q2")];
+        let body = build_body("claude-opus-4-8", &hist, &[], Some("soul"), &cfg);
+        assert_eq!(body.to_string().matches("cache_control").count(), 1, "only the system breakpoint");
     }
 
     #[test]

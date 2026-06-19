@@ -1,3 +1,4 @@
+pub mod cache;
 pub mod provider;
 pub mod anthropic;
 pub mod oai;
@@ -5,6 +6,7 @@ pub mod routing;
 pub mod turn;
 pub mod council;
 
+pub use cache::{CacheConfig, CacheTtl};
 pub use provider::{Chunk, ChunkStream, Provider};
 pub use anthropic::AnthropicProvider;
 pub use oai::OaiProvider;
