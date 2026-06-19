@@ -21,6 +21,9 @@ image = { workspace = true }
 # (femtovg NativeOpenGL). Version matches femtovg's own glow → no duplicate build.
 # Env-gated (APEX_FACE_GL=1); dormant otherwise.
 glow = "0.17"
+# Surfaces Slint/femtovg/linuxkms backend `log` output to the journal (defaults to
+# warn) so GL/DRM faults are captured instead of vanishing into a silent exit.
+env_logger = "0.11"
 
 [build-dependencies]
 slint-build = "1"
