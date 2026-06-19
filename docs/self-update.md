@@ -1,6 +1,6 @@
 # Daemon self-update loop — design (mk3)
 
-> **Status: DESIGN, locked for review.** Implement in slices (bottom of doc).
+> **Status: DESIGN locked; implementation underway — slice 1 (health marker + commit embed) LANDED.** Implement the rest in slices (bottom of doc).
 > The one self-modification that *leaves the process model* — so it carries the
 > most safety machinery. Seeded by APEX's own wishlist proposal (`apex-forge-wishlist.md`,
 > item 2); refined here against the real systemd/agentd constraints.
@@ -147,12 +147,21 @@ after a staged set of checks pass**, on every boot:
   "checks": { "listeners_bound": true, "plugins_loaded": 3, "cognitive_ok": true } }
 ```
 
-Health gate (all must pass before writing `healthy`):
-1. WS + HTTP listeners bound (`AGENTD_BIND`).
-2. All `restart="always"` plugins reported `up` by the supervisor.
-3. `cognitive_bootstrap` returned (Cerebro reachable) — bounded, non-fatal: if
+Health gate (both **hard** gates must pass before writing `healthy`):
+1. WS + HTTP listeners bound — loopback TCP probe of the gateway port (works even
+   when `AGENTD_BIND=0.0.0.0`). **hard.**
+2. All `restart="always"` plugins reported `up` by the supervisor (folded from the
+   `PluginUp`/`PluginDown` bus events). **hard.**
+3. Cerebro reachable — a **bounded, lightweight probe** (`cortex_stats`, not a full
+   `cognitive_bootstrap` re-run — the first turn already does that). **soft**: if
    Cerebro is down we still write `healthy` but flag `cognitive_ok:false` (don't
    roll back a good daemon just because memory was briefly unreachable).
+
+The marker is written `status:"booting"` the instant the task starts (fresh
+`booted_at` + the correct embedded commit, so a stale `healthy` from the previous
+binary can't be mistaken for this boot), flips to `"healthy"` when both hard gates
+pass, or settles `"degraded"` if they don't within the gate deadline (180 s,
+above the watchdog probe TIMEOUT so the watchdog decides the rollback in prod).
 
 `commit` comes from a **`build.rs`-embedded `GIT_COMMIT`** so the marker proves
 *which* binary booted — the watchdog matches it against the request's target. The
@@ -192,10 +201,15 @@ agent continuity across reboots gives the *updater* its result channel.
 
 ## What agentd needs (the code)
 
-1. **Health marker writer** — on boot, after the staged checks, write `health.json`
-   (+ refresh `booted_at`). Small, additive, safe.
-2. **`build.rs` `GIT_COMMIT` embed** — `git rev-parse HEAD` → a const; the marker
-   reports it.
+1. **Health marker writer** — ✅ IMPLEMENTED (slice 1, `agentd/src/health.rs`):
+   `spawn_health_marker` writes a `booting` marker immediately, then `health.json`
+   `{status:"healthy"}` once the staged gates pass. Marker dir = `AGENTD_UPDATE_DIR`
+   (default `/var/lib/agentd/update`). Subscribes to the bus *before* the supervisor
+   spawns so no early `PluginUp` is missed.
+2. **`build.rs` `GIT_COMMIT` embed** — ✅ IMPLEMENTED (slice 1, `agentd/build.rs`):
+   `git rev-parse HEAD` → `cargo:rustc-env=GIT_COMMIT`; the marker reports
+   `health::build_commit()`. Re-runs on `.git/logs/HEAD` change (catches new commits
+   on the same branch, which the staging build relies on).
 3. **`apply_daemon_update` tool** (agentd, not a plugin — it needs the bus +
    sub-agent + session APIs): the stage 0–4 gates, then write `request.json`.
    Policy: `ask` in suggest, autonomous in yolo (the gates/rollback are identical
@@ -248,25 +262,30 @@ changes whether André pre-approves:
 Each slice is independently shippable + testable; build in order, and **prove slice 2
 (rollback) on the test rig before wiring slice 3.**
 
-1. **Health marker + commit embed** (agentd). Additive, deploys normally. Foundation.
+1. **Health marker + commit embed** (agentd). Additive, deploys normally. Foundation. **← ✅ LANDED.**
 2. **Watchdog + units + rollback** (`deploy/` + `install.sh`). *Test the forced-
-   rollback + power-loss drills hard on the rig.* No agent involvement yet — drive it
-   by hand-writing a `request.json`.
+   rollback + power-loss drills hard on the rig (apex2 .146).* No agent involvement yet
+   — drive it by hand-writing a `request.json`.
 3. **`apply_daemon_update` tool + gates + Cerebro wiring** (agentd). Now the agent
    can trigger it. Dry-run first.
 4. **Adversarial LLM review gate** (sub-agent).
 5. **Probation crash-loop guard** (`StartLimit` + conditional `OnFailure`).
 
-## Open questions for André
+## Resolved decisions (locked with André, 2026-06-19)
 
-1. **Source of the change** — build from a *committed git ref* (proposed: clean,
-   integrity, source-rollback for free) vs. accept a raw diff? I lean committed-ref.
-2. **Review model** — single fresh-context reviewer, or an N-way refute panel (like
-   the workflow adversarial-verify pattern)? Cost vs. confidence.
-3. **Where does the staging build run** — on the node (simple, slow, proposed) or
-   offloaded to a Pro/mesh build node and only the *binary* shipped? Mesh build is a
-   nice later optimization.
-4. **`TIMEOUT` + probation window** defaults (120 s probe / 10 min probation?).
-5. **Scope of v1** — agentd-core only, or also formalize plugin self-update (easier:
-   the supervisor already `restart="always"`s plugins — a plugin swap is just a file
-   replace + supervisor bounce, no watchdog needed)?
+1. **Source of the change** — **committed git ref.** `apply_daemon_update(commit, …)`
+   builds from a clean SHA: integrity, free source-rollback, matches the #117 git
+   tools workflow. APEX must commit before it can self-update. (Not a raw diff.)
+2. **Review model** — **single fresh-context reviewer for v1**, structured so an
+   N-way refute panel is a drop-in upgrade. The build/test/health/rollback gates
+   already carry most of the safety; a panel is a later confidence boost.
+3. **Staging build location** — **on-node for v1.** Mesh/Pro build-offload (ship
+   only the binary) is a later optimization, not v1.
+4. **`TIMEOUT` + probation** — **120 s health probe / 10 min probation** (both
+   env-tunable). The slice-1 gate deadline (180 s) sits above the probe TIMEOUT so
+   the watchdog owns the rollback decision in production.
+5. **Scope of v1** — **agentd-core only.** Plugin self-update is a clean follow-up
+   (the supervisor already `restart="always"`s plugins — a plugin swap is just a
+   file replace + supervisor bounce, no watchdog needed).
+6. **Test rig** — **apex2 (.146)** for the forced-rollback + power-loss drills.
+   apex1 is APEX's permanent brain — never validated there first.

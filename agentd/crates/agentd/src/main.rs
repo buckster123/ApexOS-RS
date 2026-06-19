@@ -4,6 +4,7 @@ mod scheduler;
 use scheduler::{load_schedules, run_scheduler, spawn_scheduler_handler, SchedulerState};
 mod council_handler;
 use council_handler::spawn_council_handler;
+mod health;
 
 use apexos_core::{
     ActionId, Bus, ContentBlock, Event, EvolutionId, EvolutionProposal, ImageSource, Message,
@@ -324,6 +325,14 @@ async fn main() -> anyhow::Result<()> {
     // not down by spawn_agent_router. The receiver buffers (cap 1024) until the
     // router task drains it.
     let agent_rx = bcast.subscribe();
+    // Boot-health marker (self-update watchdog reads it — docs/self-update.md slice 1):
+    // subscribe + snapshot the restart=always plugin set BEFORE the supervisor spawns
+    // so no early PluginUp is missed (same race the agent router guards against above).
+    let health_rx = bcast.subscribe();
+    let expected_up_plugins: Vec<PluginId> = plugin_configs.iter()
+        .filter(|p| p.restart == RestartPolicy::Always)
+        .map(|p| PluginId(p.id.clone()))
+        .collect();
     tokio::spawn(supervisor.run(plugin_configs, bcast.subscribe()));
 
     // Agent turn engine — RoutingProvider dispatches per-call based on backend_arc
@@ -355,6 +364,7 @@ async fn main() -> anyhow::Result<()> {
     let council_proxy = tool_proxy.clone();
     let router_proxy  = tool_proxy.clone();   // CCBS boot-priming (cognitive_bootstrap)
     let dream_proxy   = tool_proxy.clone();   // nightly autonomous dream_run
+    let health_proxy  = tool_proxy.clone();   // boot-health Cerebro reachability probe
 
     // Restore rollback snapshots from Cerebro evolution episodes on startup (best-effort).
     // CerebroCortex needs a moment to start; we wait then populate rollback_store from episodes.
@@ -482,6 +492,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Event log
     tokio::spawn(run_log_writer(log_dir, bcast.subscribe()));
+
+    // Boot-health marker — spawned LAST so the gates it polls (gateway listener,
+    // restart=always plugins) are already coming up. Writes <update_dir>/health.json
+    // once healthy; the root self-update watchdog reads it. (docs/self-update.md slice 1)
+    health::spawn_health_marker(
+        gw_addr,
+        expected_up_plugins,
+        health_rx,
+        health_proxy,
+        apexos_core::node_agent_id(),
+    );
 
     eprintln!("[agentd] ready — gateway ws://{gw_bind}/ws");
     tokio::signal::ctrl_c().await?;
