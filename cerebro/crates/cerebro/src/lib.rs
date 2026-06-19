@@ -5,6 +5,7 @@ pub mod engines;
 pub mod models;
 pub mod storage;
 pub mod types;
+pub mod vision;
 
 pub use cortex::CerebroCortex;
 pub use types::*;

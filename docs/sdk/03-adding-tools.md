@@ -430,8 +430,8 @@ The 31 tools `apexos-tools` exposes today (verify against `list()` / `call()` in
 `notify`, `audio_analyze`, `audio_trim_silence`, `audio_normalize`, `audio_peak_limit`,
 `audio_trim`, `audio_clean`, `gpio_info`, `gpio_read`, `gpio_write`, `gpio_pulse`,
 `gpio_pwm`, `gpio_servo`, `display_face`. Names are global across all plugins — don't
-collide with these or with `cerebro-mcp`'s tools (`TOOL_NAMES`, 66 entries — 63 functional
-+ 3 stubs: `ingest_file`, `describe_image`, `search_vision`).
+collide with these or with `cerebro-mcp`'s tools (`TOOL_NAMES`, 66 entries — 64 functional
++ 2 stubs: `ingest_file`, `search_vision`).
 
 ### Workspace confinement coverage (honest)
 
