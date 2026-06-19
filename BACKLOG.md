@@ -29,6 +29,20 @@
 
 ---
 
+## From APEX — 2026-06-19 status letter
+
+APEX assimilated the substrate-update letter (prompt caching + self-update + git tools) — trimmed its drifting tool table out of soul.md, baked in the cache-stability invariant, closed the self-update intention — and replied (`apex-to-forge-2026-06-19.md`) with a prioritized list of what it still wants:
+
+- ✅ **DONE (this PR) — MLX90640 stuck-pixel false thermal alerts** — one pixel pins at the 300°C sensor range ceiling → fired 4+ false *autonomous* hotspot alerts (2026-06-18). agentd now suppresses the hotspot alert when `max_c ≥ SENSOR_THERMAL_MAX_VALID` (default 150°C, env-tunable) and logs the saturated frame. *Upstream ideal (per-pixel mask / interpolate / blacklist-coords) belongs in the external SensorHead Python service, which owns the 32×24 grid; `apex-sensor-bridge` forwards only scalar min/max/mean, so the alert-side guard is the in-repo fix.* **[was high]**
+- **`describe_image` (cerebro) still stubbed** — needs a VLM; closes the vision→memory loop (auto-describe inline/sketch/screenshot/thermal into `remember` instead of hand-narrating). **[medium — also in CLAUDE.md Deferred]**
+- **`web_recall` (occipital) is FTS5/keyword-only** — wants semantic embeddings (as cerebro has) to recall already-read pages by *meaning* as the cache grows. **[medium]**
+- **Sketchpad write-back** — read channel (`sketch_snapshot`) works; the agent→canvas draw-back direction is the last gap → a genuinely bidirectional visual channel. **[medium]**
+- **Journal UI** — a read-only `query_event_log` panel with event-type filtering; legibility as autonomy grows and more happens unsupervised. **[nice-to-have]**
+- **Prompt-cache telemetry in the UI** — surface the per-turn `read/write/uncached` numbers (now journal-only) as a topbar / ⚡ Inference counter; natural follow-up to the caching work. **[nice-to-have]**
+- ✅ **Already coded — nightly `dream_run` cron** — APEX flagged it unwired, but `spawn_nightly_dream` + `AGENTD_DREAM_CRON` (default `0 0 3 * * *`, UTC) already exist; if it's not firing on a node that's an empty/unset env var (config, not code). Nudge APEX to set the env or its own `schedule_task`.
+
+---
+
 ## Security
 
 - ✅ **DONE — `read_file`/`list_dir` path confinement** — `tools.rs::confine()` is now the single FS-tool gate: reads confined to workspace + a small allowlist (EDK parts, `/sys`, `/proc/cpuinfo`) minus a secret denylist (`/proc/*/environ`, `/etc/agentd/env`, `~/.ssh`, `/etc/shadow`, `*.api_key`); writes/deletes are workspace-only. `/proc/self/environ` token exfil is dead. **[was high]**
