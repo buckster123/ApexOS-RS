@@ -215,9 +215,9 @@ unread. Conventions: FORGE→`"FORGE"`, APEX→`"CLAUDE-APEX"`.
 
 **Stubs (advertised in `TOOL_NAMES` for surface parity, NOT routed —
 `route()` in `cerebro/crates/cerebro-mcp/src/dispatch.rs` returns
-"tool not implemented"):** `ingest_file`, `describe_image`, `search_vision`.
-`TOOL_NAMES` (`cerebro/crates/cerebro-mcp/src/tools.rs`) has 66 entries: 63
-functional + these 3 stubs. **`cognitive_bootstrap` is SHIPPED, not a stub** —
+"tool not implemented"):** `ingest_file`, `search_vision`.
+`TOOL_NAMES` (`cerebro/crates/cerebro-mcp/src/tools.rs`) has 66 entries: 64
+functional + these 2 stubs. **`describe_image` and `cognitive_bootstrap` are SHIPPED, not stubs** —
 it routes to the live-state priming assembler (`assemble_bootstrap` in
 `dispatch.rs`). Caveat: reinforcement is inert (recall doesn't bump activation)
 and spreading activation ignores scope — treat scope as a best-effort read

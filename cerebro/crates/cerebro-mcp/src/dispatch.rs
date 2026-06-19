@@ -1045,10 +1045,58 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             assemble_bootstrap(&brain, query, mode, max_tokens, scope).await
         }
 
-        // Deferred Tier-7 tools (ingest_file, describe_image, search_vision) and
-        // any unknown name. C-RS-007: these are still advertised in tools/list
-        // (surface parity with Python's 66) but must NOT return a success payload
-        // — that reads as "it worked." Return an honest not-implemented error so
+        // Tier-7 vision: caption an image via the tiered VLM backend
+        // (Ollama local/LAN → Anthropic fallback; `cerebro::vision`). Accepts a
+        // workspace `path` or inline `b64` (+ optional `media_type`); with
+        // `remember:true` the caption is folded into memory, closing the
+        // vision→memory loop (default off — describe is a read primitive).
+        "describe_image" => {
+            let path = args["path"].as_str().filter(|p| !p.is_empty());
+            let b64 = args["b64"].as_str().filter(|b| !b.is_empty());
+            let prompt = args["prompt"].as_str();
+            let media_type = args["media_type"].as_str();
+
+            let image = match (path, b64) {
+                (Some(p), _) => cerebro::vision::prepare_from_path(p)?,
+                (_, Some(b)) => cerebro::vision::prepare_from_b64(b, media_type)?,
+                (None, None) => {
+                    return Err(anyhow::anyhow!("describe_image: `path` or `b64` is required"))
+                }
+            };
+
+            let cfg = cerebro::vision::VisionConfig::from_env();
+            let caption = cerebro::vision::describe(&cfg, &image, prompt).await?;
+
+            // Optionally fold the caption into memory (vision→memory loop).
+            let memory_id = if args["remember"].as_bool().unwrap_or(false) {
+                let memory_type: MemoryType = serde_json::from_value(args["memory_type"].clone())
+                    .unwrap_or(MemoryType::Episodic);
+                let mut tags = coerce_str_list(&args["tags"]);
+                if !tags.iter().any(|t| t == "vision") {
+                    tags.push("vision".to_string());
+                }
+                let scope = agent_scope(args);
+                let node = brain
+                    .remember(caption.text.clone(), Some(memory_type), Some(tags), None, scope)
+                    .await?;
+                Some(node.id.0)
+            } else {
+                None
+            };
+
+            Ok(json!({
+                "caption":   caption.text,
+                "backend":   caption.backend,
+                "model":     caption.model,
+                "source":    if path.is_some() { "path" } else { "b64" },
+                "memory_id": memory_id,
+            }))
+        }
+
+        // Deferred Tier-7 tools (ingest_file, search_vision) and any unknown
+        // name. C-RS-007: these are still advertised in tools/list (surface
+        // parity with Python's 66) but must NOT return a success payload — that
+        // reads as "it worked." Return an honest not-implemented error so
         // callers can branch on it.
         _ => Err(anyhow::anyhow!("tool not implemented: {name}")),
     }
@@ -1700,6 +1748,21 @@ mod tests {
         assert!(resp["result"].is_null(), "deferred tool must not return a success result");
         assert_eq!(resp["error"]["code"], -32601,
             "deferred tool should map to method-not-found, got {}", resp["error"]);
+    }
+
+    #[tokio::test]
+    async fn dispatch_describe_image_requires_an_image() {
+        let (brain, _dir) = make_brain().await;
+        // describe_image is now implemented (not a deferred stub): with neither
+        // path nor b64 it must be Invalid params (-32602), NOT method-not-found.
+        let msg = json!({
+            "jsonrpc":"2.0","id":13,"method":"tools/call",
+            "params":{"name":"describe_image","arguments":{}}
+        });
+        let resp = dispatch_tool(msg, brain).await;
+        assert!(resp["result"].is_null());
+        assert_eq!(resp["error"]["code"], -32602,
+            "missing image should be Invalid params, got {}", resp["error"]);
     }
 
     #[test]

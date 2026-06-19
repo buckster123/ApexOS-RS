@@ -843,9 +843,28 @@ fn tool_schema(name: &str) -> Value {
             }
         }),
 
-        // Deferred Tier-7 tools (ingest_file, describe_image, search_vision).
-        // Advertised for surface parity with Python, but calling them returns an
-        // honest "not implemented" error (see dispatch, C-RS-007).
+        "describe_image" => json!({
+            "name": "describe_image",
+            "description": "Caption an image with a vision model and (optionally) store the caption as a memory — closing the vision→memory loop. Backend is tiered: a local/LAN Ollama VLM, falling back to an external API. Pass a workspace `path` OR inline `b64` (+ `media_type`).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path":        { "type": "string", "description": "Path to an image file (e.g. a screenshot_mirror / camera_capture / sketch_snapshot output)" },
+                    "b64":         { "type": "string", "description": "Base64-encoded image data (alternative to path; for images not on disk)" },
+                    "media_type":  { "type": "string", "description": "MIME type for b64 input (image/png|jpeg|gif|webp); sniffed from the data when omitted" },
+                    "prompt":      { "type": "string", "description": "What to focus on; defaults to a general detailed caption for search" },
+                    "remember":    { "type": "boolean", "description": "If true, store the caption as a memory (tagged `vision`) and return its memory_id. Default false" },
+                    "memory_type": { "type": "string", "description": "Memory type when remember=true (episodic|semantic|…); default episodic" },
+                    "tags":        { "type": "array", "items": { "type": "string" }, "description": "Extra tags for the stored memory (when remember=true)" },
+                    "agent_id":    { "type": "string", "description": "Scope the stored memory to this agent" }
+                },
+                "required": []
+            }
+        }),
+
+        // Deferred Tier-7 tools (ingest_file, search_vision). Advertised for
+        // surface parity with Python, but calling them returns an honest "not
+        // implemented" error (see dispatch, C-RS-007).
         _ => json!({
             "name": name,
             "description": format!("(not yet implemented) {name}"),

@@ -220,9 +220,10 @@ counterpart to CLAUDE.md (static blueprint) and git (code truth).
 - **Recall reinforcement is wired.** `recall()` records an access on the returned memories so
   ACT-R base-level activation rises ("recall sharpens memory"). FSRS *grading* still happens
   only via `record_procedure_outcome`, not on ordinary reads.
-- **`ingest_file` / `describe_image` / `search_vision` are unimplemented** — they return an
-  honest `-32601` not-implemented error (C-RS-007), and their advertised schemas are still
-  placeholders (Step 9 schema work). (Spreading activation **does** enforce scope as of
+- **`ingest_file` / `search_vision` are unimplemented** — they return an honest `-32601`
+  not-implemented error (C-RS-007), and their advertised schemas are still placeholders
+  (Step 9 schema work). (`describe_image` is now implemented — `cerebro::vision`, a tiered
+  Ollama→Anthropic VLM caption tool.) (Spreading activation **does** enforce scope as of
   C-RS-003 — the earlier "ignores scope" claim is no longer true.)
 
 See [symbiosis.md](symbiosis.md) for the full loop and the Sleep-loop gap.
