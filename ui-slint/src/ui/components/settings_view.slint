@@ -19,10 +19,16 @@ export component SettingsView {
     in property <string>         current-model: "";
     in property <bool>           api-key-set: false;
     in property <[ModelItem]>    models;
+    // Prompt-cache policy (Anthropic), live-tuned via /api/cache.
+    in property <bool>           cache-enabled: true;
+    in property <bool>           cache-conversation: true;
+    in property <string>         cache-ttl: "5m";
 
     callback save-soul(string);
     callback set-policy(string);
     callback set-model(string);
+    // (enabled, cache_conversation, ttl) — full desired state each tap.
+    callback set-cache(bool, bool, string);
     callback refresh();
 
     VerticalLayout {
@@ -254,6 +260,118 @@ export component SettingsView {
                                 vertical-alignment: center;
                             }
                         }
+                    }
+                }
+
+                // ── Prompt cache (Anthropic) ───────────────────────────────
+                VerticalLayout {
+                    spacing: 12px;
+                    alignment: start;
+
+                    Text {
+                        text: "PROMPT CACHE";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 2px;
+                    }
+
+                    // Master on/off.
+                    VerticalLayout {
+                        spacing: 6px;
+                        Text { text: "Caching"; color: Palette.text-dim; font-size: 10px; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            for opt in ["on", "off"]: Rectangle {
+                                width: 70px;
+                                height: 32px;
+                                border-radius: Palette.radius;
+                                background: (root.cache-enabled ? "on" : "off") == opt ? Palette.primary-dim : Palette.surface;
+                                border-width: 1px;
+                                border-color: (root.cache-enabled ? "on" : "off") == opt ? Palette.primary : Palette.border;
+                                animate background   { duration: 150ms; }
+                                animate border-color { duration: 150ms; }
+                                TouchArea {
+                                    clicked => { root.set-cache(opt == "on", root.cache-conversation, root.cache-ttl); }
+                                }
+                                Text {
+                                    text: opt;
+                                    color: (root.cache-enabled ? "on" : "off") == opt ? Palette.primary : Palette.text-dim;
+                                    font-size: 10px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    // Cache the growing conversation too (the long-session win).
+                    VerticalLayout {
+                        spacing: 6px;
+                        opacity: root.cache-enabled ? 1.0 : 0.4;
+                        Text { text: "Cache conversation"; color: Palette.text-dim; font-size: 10px; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            for opt in ["on", "off"]: Rectangle {
+                                width: 70px;
+                                height: 32px;
+                                border-radius: Palette.radius;
+                                background: (root.cache-conversation ? "on" : "off") == opt ? Palette.primary-dim : Palette.surface;
+                                border-width: 1px;
+                                border-color: (root.cache-conversation ? "on" : "off") == opt ? Palette.primary : Palette.border;
+                                animate background   { duration: 150ms; }
+                                animate border-color { duration: 150ms; }
+                                TouchArea {
+                                    clicked => { root.set-cache(root.cache-enabled, opt == "on", root.cache-ttl); }
+                                }
+                                Text {
+                                    text: opt;
+                                    color: (root.cache-conversation ? "on" : "off") == opt ? Palette.primary : Palette.text-dim;
+                                    font-size: 10px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    // TTL — 1h survives >5min pauses without re-writing the prefix.
+                    VerticalLayout {
+                        spacing: 6px;
+                        opacity: root.cache-enabled ? 1.0 : 0.4;
+                        Text { text: "TTL"; color: Palette.text-dim; font-size: 10px; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            for opt in ["5m", "1h"]: Rectangle {
+                                width: 70px;
+                                height: 32px;
+                                border-radius: Palette.radius;
+                                background: root.cache-ttl == opt ? Palette.primary-dim : Palette.surface;
+                                border-width: 1px;
+                                border-color: root.cache-ttl == opt ? Palette.primary : Palette.border;
+                                animate background   { duration: 150ms; }
+                                animate border-color { duration: 150ms; }
+                                TouchArea {
+                                    clicked => { root.set-cache(root.cache-enabled, root.cache-conversation, opt); }
+                                }
+                                Text {
+                                    text: opt;
+                                    color: root.cache-ttl == opt ? Palette.primary : Palette.text-dim;
+                                    font-size: 10px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "Caches the soul + tools + conversation prefix (Anthropic only). Conversation caching is the big win on long sessions; 1h TTL survives pauses without re-writing.";
+                        color: Palette.text-dim;
+                        font-size: 10px;
+                        wrap: word-wrap;
                     }
                 }
 

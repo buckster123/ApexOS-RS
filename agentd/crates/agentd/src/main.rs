@@ -232,6 +232,13 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(RwLock::new(ids))
     };
 
+    // Prompt-cache config (Anthropic): env-tunable defaults (AGENTD_CACHE*), held in a
+    // shared arc so the Settings UI (/api/cache) AND the turn engine both see live edits.
+    // Created here (before the gateway) so GatewayState, the engine, and the self-update
+    // reviewer all share the one arc. See apexos_agent::cache.
+    let cache_arc = Arc::new(RwLock::new(apexos_agent::CacheConfig::from_env()));
+    eprintln!("[agentd] prompt cache: {}", cache_arc.try_read().map(|c| c.summary()).unwrap_or_default());
+
     eprintln!("[agentd] serving UI from {}", ui_dir.display());
     let gw_state = GatewayState {
         bus:                  handle.clone(),
@@ -239,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         api_key:              Arc::clone(&api_key_arc),
         oai_api_key:          Arc::clone(&oai_api_key_arc),
         model:                Arc::clone(&model_arc),
+        cache:                Arc::clone(&cache_arc),
         backend:              Arc::clone(&backend_arc),
         oai_base_url:         Arc::clone(&oai_base_url_arc),
         policy_mode:          Arc::clone(&policy_mode_arc),
@@ -335,12 +343,6 @@ async fn main() -> anyhow::Result<()> {
         .map(|p| PluginId(p.id.clone()))
         .collect();
     tokio::spawn(supervisor.run(plugin_configs, bcast.subscribe()));
-
-    // Prompt-cache config (Anthropic): env-tunable defaults (AGENTD_CACHE*), held in a
-    // shared arc so the settings layer can retune TTL / toggle conversation caching at
-    // runtime. See apexos_agent::cache. OpenAI/Ollama auto-cache, so this is a no-op there.
-    let cache_arc = Arc::new(RwLock::new(apexos_agent::CacheConfig::from_env()));
-    eprintln!("[agentd] prompt cache: {}", cache_arc.try_read().map(|c| c.summary()).unwrap_or_default());
 
     // Agent turn engine — RoutingProvider dispatches per-call based on backend_arc
     let engine: Arc<TurnEngine> = Arc::new(TurnEngine::new(

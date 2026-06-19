@@ -41,6 +41,10 @@ export component AppWindow inherits Window {
     in-out property <string>         settings-policy: "suggest";
     in-out property <string>         settings-model: "";
     in-out property <bool>           settings-api-key-set: false;
+    // Prompt-cache policy (Anthropic), surfaced in Settings + tuned via /api/cache.
+    in-out property <bool>           settings-cache-enabled: true;
+    in-out property <bool>           settings-cache-conversation: true;
+    in-out property <string>         settings-cache-ttl: "5m";
     in-out property <[ModelItem]>    available-models;
     in-out property <bool>           power-modal-open: false;
     // Terminal app (G3d) — Rust owns the /terminal-ws PTY; output streams here.
@@ -169,6 +173,7 @@ export component AppWindow inherits Window {
     callback save-soul(string);
     callback set-policy(string);
     callback set-model(string);
+    callback set-cache(bool, bool, string);
     callback power-action(string);
     callback terminal-send(string);          // a submitted terminal command line
     // Tier-A parity apps
@@ -546,9 +551,13 @@ export component AppWindow inherits Window {
                         current-model: root.settings-model;
                         api-key-set: root.settings-api-key-set;
                         models: root.available-models;
+                        cache-enabled: root.settings-cache-enabled;
+                        cache-conversation: root.settings-cache-conversation;
+                        cache-ttl: root.settings-cache-ttl;
                         save-soul(text) => { root.save-soul(text); }
                         set-policy(mode) => { root.set-policy(mode); }
                         set-model(id) => { root.set-model(id); }
+                        set-cache(e, c, t) => { root.set-cache(e, c, t); }
                         refresh => { root.refresh-settings(); }
                     }
 
@@ -655,6 +664,9 @@ export component AppWindow inherits Window {
                         current-model: root.settings-model;
                         api-key-set: root.settings-api-key-set;
                         models: root.available-models;
+                        cache-enabled: root.settings-cache-enabled;
+                        cache-conversation: root.settings-cache-conversation;
+                        cache-ttl: root.settings-cache-ttl;
                         terminal-text: root.terminal-text;
                         terminal-scroll-tick: root.terminal-scroll-tick;
                         council-agents: root.council-agents;
@@ -733,6 +745,7 @@ export component AppWindow inherits Window {
                         save-soul(t) => { root.save-soul(t); }
                         set-policy(m) => { root.set-policy(m); }
                         set-model(id) => { root.set-model(id); }
+                        set-cache(e, c, t) => { root.set-cache(e, c, t); }
                         refresh-settings => { root.refresh-settings(); }
                         refresh-events => { root.refresh-events(); }
                         refresh-mesh => { root.refresh-mesh(); }

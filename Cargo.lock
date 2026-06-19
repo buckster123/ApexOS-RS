@@ -337,6 +337,7 @@ name = "apexos-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apexos-agent",
  "apexos-core",
  "apexos-plugins",
  "axum",

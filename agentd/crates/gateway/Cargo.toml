@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 apexos-core    = { path = "../core" }
 apexos-plugins = { path = "../plugins" }
+apexos-agent   = { path = "../agent" }   # CacheConfig (prompt-cache settings)
 axum         = { version = "0.8", features = ["ws"] }
 tokio        = { workspace = true }
 serde        = { workspace = true }

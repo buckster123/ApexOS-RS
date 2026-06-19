@@ -2004,14 +2004,18 @@ struct SettingsData {
     current_model: String,
     api_key_set:   bool,
     models:        Vec<ModelItem>,
+    cache_enabled:      bool,
+    cache_conversation: bool,
+    cache_ttl:          String,
 }
 
-// Fetch /api/status, /api/soul, and /api/models in parallel.
+// Fetch /api/status, /api/soul, /api/models, and /api/cache in parallel.
 async fn fetch_settings(client: &reqwest::Client, base_url: &str) -> SettingsData {
-    let (status, soul, models_resp) = tokio::join!(
+    let (status, soul, models_resp, cache) = tokio::join!(
         json_get(client, format!("{base_url}/api/status")),
         json_get(client, format!("{base_url}/api/soul")),
         json_get(client, format!("{base_url}/api/models")),
+        json_get(client, format!("{base_url}/api/cache")),
     );
     let models: Vec<ModelItem> = models_resp["models"]
         .as_array()
@@ -2028,6 +2032,10 @@ async fn fetch_settings(client: &reqwest::Client, base_url: &str) -> SettingsDat
         current_model: status["model"].as_str().unwrap_or("").to_string(),
         api_key_set:   status["api_key_set"].as_bool().unwrap_or(false),
         models,
+        // Defaults (caching on, 5m) if agentd predates /api/cache.
+        cache_enabled:      cache["enabled"].as_bool().unwrap_or(true),
+        cache_conversation: cache["cache_conversation"].as_bool().unwrap_or(true),
+        cache_ttl:          cache["ttl"].as_str().unwrap_or("5m").to_string(),
     }
 }
 
@@ -3487,6 +3495,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_settings_policy(data.policy_mode.into());
                     ui.set_settings_model(data.current_model.into());
                     ui.set_settings_api_key_set(data.api_key_set);
+                    ui.set_settings_cache_enabled(data.cache_enabled);
+                    ui.set_settings_cache_conversation(data.cache_conversation);
+                    ui.set_settings_cache_ttl(data.cache_ttl.into());
                     replace_models(data.models);
                 }
             }).ok();
@@ -4174,6 +4185,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(false);
             if ok { notify(ToastKind::Info, "Model switched"); }
             else  { notify(ToastKind::Error, "Failed to switch model"); }
+        });
+    });
+
+    // ── set-cache callback ────────────────────────────────────────────────────
+    // (enabled, cache_conversation, ttl) → POST /api/cache. Takes effect next turn.
+    let rt_h_cache    = rt.handle().clone();
+    let client_cache  = Arc::clone(&http_client);
+    let base_cache    = http_base.clone();
+    let ui_weak_cache = ui.as_weak();
+    ui.on_set_cache(move |enabled, conversation, ttl| {
+        let ttl_s = ttl.to_string();
+        // Optimistic: reflect the new state immediately.
+        if let Some(ui) = ui_weak_cache.upgrade() {
+            ui.set_settings_cache_enabled(enabled);
+            ui.set_settings_cache_conversation(conversation);
+            ui.set_settings_cache_ttl(ttl_s.clone().into());
+        }
+        let client = Arc::clone(&client_cache);
+        let base   = base_cache.clone();
+        rt_h_cache.spawn(async move {
+            let ok = client.post(format!("{base}/api/cache"))
+                .json(&serde_json::json!({
+                    "enabled": enabled,
+                    "cache_conversation": conversation,
+                    "ttl": ttl_s,
+                }))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok { notify(ToastKind::Info, "Cache settings updated"); }
+            else  { notify(ToastKind::Error, "Failed to update cache settings"); }
         });
     });
 
