@@ -1,6 +1,6 @@
 # Daemon self-update loop — design (mk3)
 
-> **Status: DESIGN locked; implementation underway — slices 1 (health marker + commit embed), 2 (watchdog + units + rollback), & 3 (`apply_daemon_update` tool + gates) LANDED.** Remaining: slices 4 (adversarial review) & 5 (probation). Rollback is hardware-proven on apex2.
+> **Status: DESIGN locked; implementation underway — slices 1–3 LANDED + slice 3.1 tool-deployability LANDED.** Rollback is hardware-proven on apex2. Remaining: 3.1 toolchain provisioning + the first real on-apex2 self-update; then slices 4 (adversarial review) & 5 (probation).
 > The one self-modification that *leaves the process model* — so it carries the
 > most safety machinery. Seeded by APEX's own wishlist proposal (`apex-forge-wishlist.md`,
 > item 2); refined here against the real systemd/agentd constraints.
@@ -215,7 +215,8 @@ agent continuity across reboots gives the *updater* its result channel.
    dedicated mpsc (like `propose_evolution`). Gates 0–2 + 4 (review = slice 4).
    **v1 build mechanism:** the requested `commit` must equal the repo's current HEAD
    and the tree must be clean — agentd then builds it *in place* (`cargo build
-   --release -p agentd` in `AGENTD_SELF_UPDATE_REPO`, default `/opt/ApexOS-RS`),
+   --release -p agentd` in `AGENTD_SELF_UPDATE_REPO`, default the agentd-owned
+   `/var/lib/agentd/self-update/ApexOS-RS`; see Deployability below),
    reusing the repo's incremental target cache. (Arbitrary-commit worktree builds
    are a future enhancement.) On success it stages the binary (+x), sha256s it,
    `session_save`s + drops a resume intention, and writes `request.json`. Gate
@@ -253,9 +254,12 @@ outcome marker. All flat JSON in `/var/lib/agentd/update/`:
 ```
 
 Tool-side env (agentd): `AGENTD_SELF_UPDATE_REPO` (build checkout, default
-`/opt/ApexOS-RS`) · `AGENTD_SELF_UPDATE_BUILD_TIMEOUT` (build+test ceiling, default
-1800s) · `AGENTD_SELF_UPDATE_TIMEOUT` (health-probe seconds written into the
-request, default 120).
+`/var/lib/agentd/self-update/ApexOS-RS` — APEX's own clone) · `AGENTD_CARGO`
+(cargo binary the agentd user can run; default `cargo` on PATH) ·
+`AGENTD_SELF_UPDATE_TARGET` (optional `CARGO_TARGET_DIR`) ·
+`AGENTD_SELF_UPDATE_BUILD_TIMEOUT` (build+test ceiling, default 1800s) ·
+`AGENTD_SELF_UPDATE_TIMEOUT` (health-probe seconds written into the request,
+default 120).
 
 The watchdog keeps a phase file (`state` = `BACKED_UP`|`SWAPPED`) so it is
 **idempotent + power-loss safe**: a reboot mid-swap re-enters at the recorded
@@ -263,6 +267,40 @@ phase and never overwrites the good `agentd.prev` backup. All paths + the
 `systemctl` binary are env-overridable (`AGENTD_UPDATE_DIR`,
 `APEXOS_SELF_UPDATE_{BIN,SYSTEMCTL,POLL}`) **for the drills only** — the systemd
 oneshot runs with a clean env, so production always uses the hard-coded defaults.
+
+## Deployability — making it buildable by `agentd` (slice 3.1)
+
+The tool runs as the sandboxed **non-root `agentd` user**, but a standard deploy
+puts the build toolchain + repo out of its reach (discovered live on apex2,
+2026-06-19): the rustup toolchain lives in the *human* dev user's home, the
+`apexos-update` clone (`/opt/ApexOS-RS`) is owned by that user (so `agentd` hits
+git `dubious ownership` + can't write `target/`), and `cargo` isn't on the agentd
+service PATH. So `apply_daemon_update`'s gates fail *safe* ("cargo not runnable")
+but it can't actually self-build until the node is **provisioned** for it.
+
+Three things `agentd` needs, and how this slice makes them configurable:
+
+| Need | Mechanism (slice 3.1, `self_update.rs`) |
+|------|------------------------------------------|
+| A repo it can read + commit + build | **agentd-owned clone**, default `AGENTD_SELF_UPDATE_REPO=/var/lib/agentd/self-update/ApexOS-RS` — APEX's *own* evolution repo, in its sandbox, distinct from the operator's `/opt` clone so the two never fight over git ownership. Add it to `AGENTD_GIT_ROOTS` so the git tools can commit to it. |
+| A cargo it can run | `AGENTD_CARGO` → a cargo binary the agentd user can execute (else `cargo` on PATH). |
+| A writable build target | `AGENTD_SELF_UPDATE_TARGET` → `CARGO_TARGET_DIR` (else `<repo>/target`). |
+
+**Open fork — where the toolchain lives** (the heavy part, validate on apex2 before
+baking into `install.sh`):
+- **(A) shared system toolchain** (`/opt/rust`, world-readable, used by *both* the
+  operator deploy and self-update) — one toolchain, but re-architects how
+  `install.sh` provisions Rust (today it uses the invoking user's rustup).
+- **(B) agentd's own toolchain** under `/var/lib/agentd` — clean to provision (no
+  shared-perms / home-dir coupling) and keeps `agentd` fully sealed, at the cost of
+  a second ~1.5 GB toolchain on disk.
+
+Implementation reality nudges toward **B (or a hybrid)** for provisioning cleanliness;
+the tool is agnostic (`AGENTD_CARGO` points at whichever). Self-update is an
+advanced, **opt-in** capability — the toolchain shouldn't land on every node by
+default. Provisioning (clone the agentd repo, install/expose a toolchain, wire the
+env, `git config --add safe.directory`) will be an explicit step (installer flag or
+a `provision-self-update` helper), validated on apex2 first.
 
 ## Bootstrapping
 
@@ -333,11 +371,14 @@ Each slice is independently shippable + testable; build in order, and **prove sl
    agent involvement yet — drive it by hand-writing a `request.json`. The full state
    machine is proven locally by `deploy/apexos-self-update-drill.sh` (24 assertions:
    confirm · timeout-rollback · crash-rollback · sha-reject · both power-loss paths ·
-   jq + sed parsing). *Still TODO: the on-hardware forced-rollback + power-loss drills
-   on the rig (apex2 .146) once deployed.*
+   jq + sed parsing). **Forced-rollback drill PASSED on apex2 hardware** (2026-06-19):
+   broken binary swapped in → health timeout → `agentd.prev` restored, node kept
+   serving. *Power-loss drill (cut power mid-swap) still TODO — needs physical access.*
 3. **`apply_daemon_update` tool + gates + Cerebro wiring** (agentd). **← ✅ LANDED.**
-   On apex2 after deploy: run `dry_run=true` first (gates 0–2, no swap), then a real
-   trivial update to watch the full file → watchdog → confirm path end-to-end.
+3.1. **Deployability + provisioning.** Tool made build-flexible (`AGENTD_CARGO` /
+   `AGENTD_SELF_UPDATE_TARGET` / agentd-owned-repo default) **← ✅ LANDED**. Toolchain
+   provisioning (A/B fork above) + the on-apex2 first real self-update (dry-run →
+   real) **← next**, validated on the rig before baking into `install.sh`.
 4. **Adversarial LLM review gate** (sub-agent).
 5. **Probation crash-loop guard** (`StartLimit` + conditional `OnFailure`).
 
