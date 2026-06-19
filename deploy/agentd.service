@@ -2,6 +2,14 @@
 Description=Agent OS daemon (agentd)
 After=network-online.target
 Wants=network-online.target
+# Self-update probation (slice 5): if agentd crash-loops (5 restarts within 5 min),
+# systemd stops thrashing + enters failed → OnFailure fires the probation rollback,
+# which restores agentd.prev ONLY if a recent self-update confirmed (else it no-ops
+# and leaves the failure to a human). Catches a LATENT crash the in-window watchdog
+# can't (boots healthy → confirmed → dies minutes later).
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=apexos-rollback.service
 
 [Service]
 Type=simple

@@ -1,6 +1,11 @@
 # Daemon self-update loop — design (mk3)
 
-> **Status: DESIGN locked; slices 1–3 + 3.1 + 3.2 + 3.3 (first real self-update CONFIRMED on apex2) + 4 (adversarial review gate) LANDED.** Rollback hardware-proven on apex2 (including a real live auto-rollback) and a real self-update has CONFIRMED end-to-end. Remaining: slice 5 (probation crash-loop guard).
+> **Status: IMPLEMENTED — all slices (1–5 + 3.1/3.2/3.3) LANDED.** The loop is complete:
+> build → test → review → swap → health → confirm/rollback, plus probation for latent
+> crashes. Hardware-proven on apex2: a real self-update CONFIRMED end-to-end, and a real
+> live auto-rollback recovered cleanly. Local drill (`apexos-self-update-drill.sh`) green
+> across 34 assertions (watchdog state machine + probation). Remaining = on-rig drills
+> (power-loss; latent-crash) + the live LLM-review path, validated opportunistically.
 > The one self-modification that *leaves the process model* — so it carries the
 > most safety machinery. Seeded by APEX's own wishlist proposal (`apex-forge-wishlist.md`,
 > item 2); refined here against the real systemd/agentd constraints.
@@ -91,7 +96,7 @@ The edit/commit of the *source* is the existing git layer (PR #117 tools, with
 | 4 | **Pre-swap commit** (tool) | `session_save()` + `store_intention("resuming after self-update: <reason>")`; write `request.json` (staged path, sha256, target/prev commit, deadline) | if the write fails, abort → **untouched** |
 | 5 | **Swap** (watchdog, root) | verify staged sha256; `cp agentd → agentd.prev`; **atomic** `mv staged → /usr/local/bin/agentd`; `systemctl restart agentd` | mv/restart fails → restore `agentd.prev` → **known-good** |
 | 6 | **Health probe** (watchdog) | poll `health.json` ≤ `TIMEOUT`: `status=healthy ∧ commit=target ∧ booted_at≥swap_ts` | timeout / agentd inactive → **rollback to `agentd.prev`** → known-good |
-| 7 | **Probation** (systemd) | `StartLimit` + conditional `OnFailure` rollback for a latent crash *after* a passing probe | crash-loop in window → **rollback** → known-good |
+| 7 | **Probation** (✅ slice 5) | `agentd.service` `StartLimitIntervalSec=300`/`Burst=5` → on a post-confirm crash-loop, `OnFailure=apexos-rollback.service` restores `agentd.prev` — but ONLY if a `confirmed.json` is recent (≤ `APEXOS_PROBATION_WINDOW`, 600s) + `agentd.prev` exists; else no-op (not our regression). Anti-loop: the confirm marker is consumed, so one probation rollback per update max | crash-loop in window → **rollback** → known-good |
 
 **Stages 0–4 cannot harm the running daemon** — they're all pre-swap, so the vast
 majority of bad changes die here while agentd keeps serving. Only a change that
@@ -231,7 +236,9 @@ agent continuity across reboots gives the *updater* its result channel.
    `deploy/apexos-self-update.sh` (the watchdog). `install.sh` installs the script to
    `/usr/local/lib/apexos/self-update.sh`, arms the `.path`, adds `jq`, creates
    `/var/lib/agentd/update`. The `agentd.service` probation additions
-   (`StartLimitIntervalSec`/`Burst` + conditional `OnFailure`) are **slice 5**.
+   (`StartLimitIntervalSec`/`Burst` + conditional `OnFailure`) are **✅ slice 5**:
+   `deploy/apexos-rollback.{sh,service}` + the `agentd.service` additions, installed by
+   `install.sh`. The guard (recent-confirm + prev-exists + consume-marker) is in the sh.
 
 ### The request + outcome contract (slice 2 ↔ slice 3)
 
@@ -348,7 +355,9 @@ On-hardware drills (apex2), driven by hand-writing a `request.json` — no agent
 - **Dry-run mode** — `apply_daemon_update(..., dry_run=true)` runs gates 0–3 and
   reports, without writing a request.
 - **Latent-crash drill** — a binary that boots healthy then exits after 60 s;
-  assert the `StartLimit`/`OnFailure` probation rollback fires.
+  assert the `StartLimit`/`OnFailure` probation rollback fires. *(Probation logic is
+  drill-covered locally — `apexos-self-update-drill.sh` P1/P1b/P2/P3; the on-rig
+  systemd `StartLimit→OnFailure` wiring is the remaining live check.)*
 
 Each gate is also tested to **fail closed** (a failure leaves the daemon untouched
 or rolled back, never half-swapped).
@@ -394,7 +403,12 @@ Each slice is independently shippable + testable; build in order, and **prove sl
    fresh-context `RoutingProvider` reviews the swap-in diff → `VERDICT: SAFE|BLOCK`,
    fail-closed, empty-diff-safe, `AGENTD_SELF_UPDATE_REVIEW=0` opt-out. Single
    reviewer (v1); `review_diff` is the seam for an N-way refute panel.
-5. **Probation crash-loop guard** (`StartLimit` + conditional `OnFailure`).
+5. **Probation crash-loop guard.** **← ✅ LANDED.** `agentd.service`
+   `StartLimitIntervalSec`/`Burst` + `OnFailure=apexos-rollback.service`
+   (`deploy/apexos-rollback.sh`): restores `agentd.prev` on a *post-confirm*
+   crash-loop, guarded to a recent confirm + anti-loop (consumes the marker). Drill
+   scenarios P1/P1b/P2/P3 in `apexos-self-update-drill.sh` (fires / anti-loop /
+   no-confirm-noop / stale-confirm-noop). On-rig latent-crash drill still pending.
 
 ## Resolved decisions (locked with André, 2026-06-19)
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=agentd probation rollback (latent self-update crash-loop guard)
+Documentation=https://github.com/buckster123/ApexOS-RS/blob/main/docs/self-update.md
+# Triggered by agentd.service's OnFailure= when its StartLimit trips. Decoupled from
+# agentd's lifecycle (no Requires/PartOf) — it supervises agentd, like the watchdog.
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/lib/apexos/rollback.sh
+TimeoutStartSec=120
