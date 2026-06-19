@@ -439,7 +439,16 @@ async fn main() -> anyhow::Result<()> {
     if sv_cmd_tx.send(SupervisorCmd::SetSelfUpdateTx { tx: self_update_tx }).await.is_err() {
         eprintln!("[agentd] warning: failed to wire self-update channel");
     }
-    self_update::spawn_self_update_handler(self_update_rx, handle.clone(), self_update_proxy);
+    // Fresh-context reviewer for the self-update stage-3 gate (its own RoutingProvider
+    // off the same live arcs — reads the current backend/model/key like the turn engine).
+    let self_update_reviewer = Arc::new(RoutingProvider::new(
+        Arc::clone(&backend_arc),
+        Arc::clone(&oai_base_url_arc),
+        Arc::clone(&api_key_arc),
+        Arc::clone(&oai_api_key_arc),
+        Arc::clone(&model_arc),
+    ));
+    self_update::spawn_self_update_handler(self_update_rx, handle.clone(), self_update_proxy, self_update_reviewer);
 
     // Live embodiment refresher — regenerates the "## Current embodiment" block the
     // engine appends after soul.md (node/senses/mesh/uptime + the LIVE tool list, so
