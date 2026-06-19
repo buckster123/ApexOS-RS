@@ -1,6 +1,6 @@
 # Daemon self-update loop — design (mk3)
 
-> **Status: DESIGN locked; slices 1–3 + 3.1 (deployability) + 3.2 (provisioning) LANDED.** Rollback is hardware-proven on apex2; option-B provisioning validated there (agentd self-compiles). Remaining: the first real on-apex2 self-update (staged), then slices 4 (adversarial review) & 5 (probation).
+> **Status: DESIGN locked; slices 1–3 + 3.1 + 3.2 LANDED.** Rollback hardware-proven on apex2 **including a real live self-update that auto-rolled-back + recovered** (3.3). A short-sha `target_commit` confirm bug was caught there + fixed. Remaining: re-test (expect CONFIRM), then slices 4 (adversarial review) & 5 (probation).
 > The one self-modification that *leaves the process model* — so it carries the
 > most safety machinery. Seeded by APEX's own wishlist proposal (`apex-forge-wishlist.md`,
 > item 2); refined here against the real systemd/agentd constraints.
@@ -242,7 +242,7 @@ outcome marker. All flat JSON in `/var/lib/agentd/update/`:
 // request.json — written by agentd after its pre-swap gates pass (stage 4)
 { "staged": "/var/lib/agentd/update/agentd.staged",  // staged binary (agentd-built)
   "staged_sha256": "<sha256 of staged>",             // watchdog verifies before swap
-  "target_commit": "<GIT_COMMIT the staged binary embeds>",
+  "target_commit": "<FULL 40-char GIT_COMMIT the staged binary embeds>",  // NOT short/"HEAD" — the tool resolves it; must == the health marker's commit or confirm never matches
   "prev_commit":   "<currently-running commit>",
   "created_at":    <unix>,    // health booted_at must be ≥ this (proves NEW boot)
   "timeout":       120,       // health-probe seconds
@@ -381,10 +381,15 @@ Each slice is independently shippable + testable; build in order, and **prove sl
 3.1. **Deployability.** Tool made build-flexible (`AGENTD_CARGO` /
    `AGENTD_SELF_UPDATE_TARGET` / agentd-owned-repo default) **← ✅ LANDED**.
 3.2. **Provisioning (option B).** `apexos-provision-selfupdate` — agentd-owned
-   toolchain + repo + env wiring + warm build. **← ✅ LANDED + validated on apex2**
-   (warm build OK ~4 min; agentd self-compiles). *Next: the first real on-apex2
-   self-update — APEX `apply_daemon_update(dry_run=true)` then a real same-HEAD run
-   through tool → request → watchdog → confirm (the go-letter is staged for APEX-2).*
+   toolchain + repo + env wiring + warm build. **← ✅ LANDED + validated on apex2.**
+3.3. **First real self-update on apex2 (2026-06-19).** APEX-2 dry-run **passed**
+   (build+test on its own toolchain, no swap); the real run **filed the request,
+   the watchdog swapped + health-checked, and ROLLED BACK on a confirm mismatch** —
+   the new healthy binary's full `health.commit` didn't equal the request's *short*
+   `target_commit`. **The recoverability invariant worked end-to-end on a live
+   self-update: bad confirm → automatic rollback → agentd healthy + serving.** Bug
+   fixed (the tool now stores the resolved full sha). *Next: re-test → expect
+   CONFIRM, then slices 4–5.*
 4. **Adversarial LLM review gate** (sub-agent).
 5. **Probation crash-loop guard** (`StartLimit` + conditional `OnFailure`).
 
