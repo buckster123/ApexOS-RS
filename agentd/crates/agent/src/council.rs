@@ -105,7 +105,10 @@ fn make_provider(
         }
         _ => {
             let key = Arc::new(RwLock::new(anthropic_key.to_owned()));
-            Box::new(AnthropicProvider::new_shared(key, model))
+            // Council members cache with node defaults (each persona's prefix caches
+            // independently); a per-member retune isn't worth a shared arc here.
+            let cache = Arc::new(RwLock::new(crate::cache::CacheConfig::default()));
+            Box::new(AnthropicProvider::new_shared(key, model, cache))
         }
     }
 }

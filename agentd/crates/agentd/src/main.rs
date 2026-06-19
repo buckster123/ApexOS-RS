@@ -336,6 +336,12 @@ async fn main() -> anyhow::Result<()> {
         .collect();
     tokio::spawn(supervisor.run(plugin_configs, bcast.subscribe()));
 
+    // Prompt-cache config (Anthropic): env-tunable defaults (AGENTD_CACHE*), held in a
+    // shared arc so the settings layer can retune TTL / toggle conversation caching at
+    // runtime. See apexos_agent::cache. OpenAI/Ollama auto-cache, so this is a no-op there.
+    let cache_arc = Arc::new(RwLock::new(apexos_agent::CacheConfig::from_env()));
+    eprintln!("[agentd] prompt cache: {}", cache_arc.try_read().map(|c| c.summary()).unwrap_or_default());
+
     // Agent turn engine — RoutingProvider dispatches per-call based on backend_arc
     let engine: Arc<TurnEngine> = Arc::new(TurnEngine::new(
         RoutingProvider::new(
@@ -344,6 +350,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&api_key_arc),
             Arc::clone(&oai_api_key_arc),
             Arc::clone(&model_arc),
+            Arc::clone(&cache_arc),
         ),
         16,
         Some(soul_content),
@@ -448,6 +455,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&api_key_arc),
         Arc::clone(&oai_api_key_arc),
         Arc::clone(&model_arc),
+        Arc::clone(&cache_arc),
     ));
     self_update::spawn_self_update_handler(self_update_rx, handle.clone(), self_update_proxy, self_update_reviewer);
 
