@@ -1,0 +1,17 @@
+[Unit]
+Description=Watch for an agentd self-update request
+Documentation=https://github.com/buckster123/ApexOS-RS/blob/main/docs/self-update.md
+# Ordered after agentd so a request still present at boot (power-loss reconcile)
+# is handled once the daemon unit exists.
+After=agentd.service
+
+[Path]
+# Fires apexos-self-update.service whenever request.json appears — written by
+# agentd (as the non-root agentd user) when an update passes its pre-swap gates,
+# or present at boot after a power loss mid-update. agentd never spawns a
+# privileged process; it only drops this file, and systemd (root) picks it up.
+PathExists=/var/lib/agentd/update/request.json
+Unit=apexos-self-update.service
+
+[Install]
+WantedBy=multi-user.target
