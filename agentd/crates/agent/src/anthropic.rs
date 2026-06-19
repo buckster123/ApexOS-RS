@@ -88,11 +88,28 @@ fn build_body(model: &str, history: &[Message], tools: &[ToolSpec], system: Opti
     });
 
     if let Some(sys) = system {
-        body["system"] = Value::String(sys.to_string());
+        // Prompt caching: one `cache_control` breakpoint on the system block. Render
+        // order is tools → system → messages, so this single marker caches BOTH the
+        // tool definitions and the system prompt (soul + embodiment + priming) — the
+        // large, stable prefix we resend every turn. The live clock is injected into
+        // the messages (see turn.rs::inject_ambient), so this prefix stays byte-stable
+        // and reads from cache (~0.1× input price) on every turn after the first;
+        // writes cost 1.25× on the default 5-minute TTL. Verify with the response's
+        // `usage.cache_read_input_tokens` (zero across turns ⇒ a silent invalidator).
+        body["system"] = serde_json::json!([
+            { "type": "text", "text": sys, "cache_control": { "type": "ephemeral" } }
+        ]);
     }
 
     if !tools.is_empty() {
-        body["tools"] = Value::Array(tools.iter().map(tool_to_json).collect());
+        // Sort by name so the tools block is byte-identical every turn. gather_tools()
+        // flattens a HashMap whose order shifts when a plugin registers at runtime
+        // (register_mcp_server); an unsorted reorder would sit at render position 0 and
+        // invalidate the whole cached prefix. Order is functionally irrelevant to the
+        // model, so a stable sort is free insurance for the cache.
+        let mut sorted: Vec<&ToolSpec> = tools.iter().collect();
+        sorted.sort_by(|a, b| a.name.cmp(&b.name));
+        body["tools"] = Value::Array(sorted.into_iter().map(tool_to_json).collect());
     }
 
     body
@@ -297,6 +314,34 @@ fn sse_to_chunks(
 mod tests {
     use super::*;
     use futures_util::StreamExt;
+
+    #[test]
+    fn build_body_system_carries_cache_control() {
+        let body = build_body("claude-opus-4-8", &[], &[], Some("soul + embodiment"));
+        let sys = &body["system"];
+        assert!(sys.is_array(), "system is a block array (not a bare string) for cache_control");
+        assert_eq!(sys[0]["type"], "text");
+        assert_eq!(sys[0]["text"], "soul + embodiment");
+        assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn build_body_sorts_tools_by_name_for_stable_cache_prefix() {
+        let mk = |n: &str| ToolSpec {
+            name: n.into(), description: String::new(), input_schema: serde_json::json!({}),
+        };
+        let tools = vec![mk("zebra"), mk("alpha"), mk("mike")];
+        let body = build_body("claude-opus-4-8", &[], &tools, None);
+        let names: Vec<&str> = body["tools"].as_array().unwrap()
+            .iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["alpha", "mike", "zebra"], "tools sorted by name regardless of input order");
+    }
+
+    #[test]
+    fn build_body_no_system_omits_field() {
+        let body = build_body("claude-opus-4-8", &[], &[], None);
+        assert!(body.get("system").is_none(), "no system → no system field");
+    }
 
     #[test]
     fn tool_result_with_image_array_passes_through() {
