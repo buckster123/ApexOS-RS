@@ -1207,6 +1207,15 @@ fn spawn_agent_router(
             .ok().and_then(|s| s.parse().ok()).unwrap_or(85.0);
         let thermal_threshold: f32 = std::env::var("SENSOR_THERMAL_THRESHOLD")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(45.0);
+        // MLX90640 saturation ceiling: a stuck/dead pixel pins at the sensor's ~300°C
+        // hard range ceiling, which a real monitored surface never reaches. A frame whose
+        // max is at/above this is a defective reading — suppress the (autonomous, fires-
+        // unsupervised) hotspot alert instead of raising a false one. Default 150°C: far
+        // above any plausible room/device temp, far below the 300°C saturation value.
+        // (True per-pixel masking/interpolation belongs upstream in the SensorHead service,
+        // which owns the 32×24 grid; the bridge forwards only scalar min/max/mean.)
+        let thermal_sat_ceiling: f32 = std::env::var("SENSOR_THERMAL_MAX_VALID")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(150.0);
         let alert_cooldown_secs: u64 = std::env::var("SENSOR_ALERT_COOLDOWN_SECS")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(1800);
         // Per-session history window (rough tokens). The always-on root session
@@ -1362,6 +1371,16 @@ fn spawn_agent_router(
                                 format!("{node_id}:air_quality"),
                                 format!("[sensor alert] {node_id}/{sensor_id} air quality degraded: IAQ {iaq:.0} (threshold {iaq_threshold:.0}, accuracy {accuracy}/3) — consider ventilating"),
                             ))
+                        }
+                        // Saturated/stuck pixel (max pinned at the sensor's range ceiling):
+                        // defective, not a real hotspot — log and suppress the autonomous
+                        // alert. Ordered before the hotspot arm so it wins for max ≥ ceiling.
+                        SensorReading::ThermalFrame { max_c, mean_c, sensor_id, .. }
+                            if *max_c >= thermal_sat_ceiling => {
+                            eprintln!(
+                                "[sensor] {node_id}/{sensor_id} thermal max {max_c:.1}°C ≥ saturation ceiling {thermal_sat_ceiling:.0}°C (mean {mean_c:.1}°C) — likely stuck pixel; hotspot alert suppressed"
+                            );
+                            None
                         }
                         SensorReading::ThermalFrame { max_c, mean_c, sensor_id, .. }
                             if *max_c > thermal_threshold => {
