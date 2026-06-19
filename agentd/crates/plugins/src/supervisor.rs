@@ -56,6 +56,8 @@ pub enum SupervisorCmd {
     SetCouncilTx  { tx: mpsc::Sender<(SessionId, ActionId, serde_json::Value)> },
     /// Wire the VastState Arc so vast_* virtual tools can read/write instance state.
     SetVastState  { state: VastState },
+    /// Wire the self-update channel so apply_daemon_update routes to its handler.
+    SetSelfUpdateTx { tx: mpsc::Sender<(SessionId, ActionId, serde_json::Value)> },
 }
 
 /// Thin handle for calling plugin tools directly from non-agent code (e.g. the
@@ -147,6 +149,11 @@ pub struct Supervisor {
     /// tool-result ack — emitted by the applier once the apply truly lands — can't
     /// be lag-dropped on a busy turn. `None` until wired.
     propose_tx:        Option<mpsc::Sender<(SessionId, ActionId, EvolutionId, EvolutionProposal)>>,
+    /// Dedicated channel to the self-update handler for `apply_daemon_update`
+    /// (docs/self-update.md slice 3) — forwards `(session, call_id, args)` to the
+    /// handler in main.rs, which runs the build/test gates and files the swap
+    /// request. `None` until wired.
+    self_update_tx:    Option<mpsc::Sender<(SessionId, ActionId, serde_json::Value)>>,
 }
 
 impl Supervisor {
@@ -174,6 +181,7 @@ impl Supervisor {
             session_bindings,
             identities:        None,
             propose_tx:        None,
+            self_update_tx:    None,
         }
     }
 
@@ -191,6 +199,11 @@ impl Supervisor {
     /// applier over a guaranteed-delivery mpsc (deferred tool-result ack).
     pub fn set_propose_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, EvolutionId, EvolutionProposal)>) {
         self.propose_tx = Some(tx);
+    }
+
+    /// Wires the self-update channel so `apply_daemon_update` reaches its handler.
+    pub fn set_self_update_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, serde_json::Value)>) {
+        self.self_update_tx = Some(tx);
     }
 
     /// Wires the scheduler channel so schedule_* tools route to the scheduler task.
@@ -360,6 +373,9 @@ impl Supervisor {
                         }
                         SupervisorCmd::SetVastState { state } => {
                             self.vast_state = Some(state);
+                        }
+                        SupervisorCmd::SetSelfUpdateTx { tx } => {
+                            self.self_update_tx = Some(tx);
                         }
                         SupervisorCmd::DirectCall { tool, args, reply } => {
                             if let Some(pid) = self.tool_registry.get(&tool).cloned() {
@@ -613,6 +629,37 @@ impl Supervisor {
                             session,
                             call: call_id,
                             output: ToolOutput { ok: false, content: serde_json::json!("council not initialized") },
+                        }).await;
+                    });
+                }
+            }
+            return;
+        }
+
+        // Virtual tool: apply_daemon_update — routes to the self-update handler
+        // (docs/self-update.md slice 3). The handler runs the pre-swap build/test
+        // gates and, on success, files the swap request the root watchdog consumes.
+        if call.tool == "apply_daemon_update" {
+            let call_id = call.id;
+            let args    = call.args.clone();
+            let bus     = self.bus.clone();
+            match &self.self_update_tx {
+                Some(tx) => {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        if tx.send((session, call_id, args)).await.is_err() {
+                            bus.emit(Event::ToolResult {
+                                session, call: call_id,
+                                output: ToolOutput { ok: false, content: serde_json::json!("self-update handler not available") },
+                            }).await;
+                        }
+                    });
+                }
+                None => {
+                    tokio::spawn(async move {
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!("self-update handler not wired") },
                         }).await;
                     });
                 }

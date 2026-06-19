@@ -1,6 +1,6 @@
 # Daemon self-update loop — design (mk3)
 
-> **Status: DESIGN locked; implementation underway — slices 1 (health marker + commit embed) & 2 (watchdog + units + rollback) LANDED.** Remaining: slices 3–5 (bottom of doc).
+> **Status: DESIGN locked; implementation underway — slices 1 (health marker + commit embed), 2 (watchdog + units + rollback), & 3 (`apply_daemon_update` tool + gates) LANDED.** Remaining: slices 4 (adversarial review) & 5 (probation). Rollback is hardware-proven on apex2.
 > The one self-modification that *leaves the process model* — so it carries the
 > most safety machinery. Seeded by APEX's own wishlist proposal (`apex-forge-wishlist.md`,
 > item 2); refined here against the real systemd/agentd constraints.
@@ -210,12 +210,21 @@ agent continuity across reboots gives the *updater* its result channel.
    `git rev-parse HEAD` → `cargo:rustc-env=GIT_COMMIT`; the marker reports
    `health::build_commit()`. Re-runs on `.git/logs/HEAD` change (catches new commits
    on the same branch, which the staging build relies on).
-3. **`apply_daemon_update` tool** (agentd, not a plugin — it needs the bus +
-   sub-agent + session APIs): the stage 0–4 gates, then write `request.json`.
-   Policy: `ask` in suggest, autonomous in yolo (the gates/rollback are identical
-   either way — see autonomy ladder).
-4. **Read-root** for `/var/lib/agentd/update` so the agent can read its outcome markers.
-   (slice 3 — the tool's read-root config.)
+3. **`apply_daemon_update` tool** — ✅ IMPLEMENTED (slice 3, `agentd/src/self_update.rs`):
+   a virtual tool dispatched by the supervisor to a handler in main.rs over a
+   dedicated mpsc (like `propose_evolution`). Gates 0–2 + 4 (review = slice 4).
+   **v1 build mechanism:** the requested `commit` must equal the repo's current HEAD
+   and the tree must be clean — agentd then builds it *in place* (`cargo build
+   --release -p agentd` in `AGENTD_SELF_UPDATE_REPO`, default `/opt/ApexOS-RS`),
+   reusing the repo's incremental target cache. (Arbitrary-commit worktree builds
+   are a future enhancement.) On success it stages the binary (+x), sha256s it,
+   `session_save`s + drops a resume intention, and writes `request.json`. Gate
+   failures + `dry_run` return a normal tool result; success returns a best-effort
+   "filed" ack (the process is replaced — real outcome via the marker). Policy:
+   `ask` in suggest, autonomous in yolo.
+4. **Read-root** for `/var/lib/agentd/update` — ✅ IMPLEMENTED (slice 3): added to
+   `apexos-tools` `read_roots()`, so `read_file` can reach the outcome markers
+   (still write-blocked — only agentd + the watchdog write there).
 5. **systemd units** — ✅ IMPLEMENTED (slice 2): `deploy/apexos-self-update.path`
    (watches `request.json`) + `deploy/apexos-self-update.service` (oneshot, root) +
    `deploy/apexos-self-update.sh` (the watchdog). `install.sh` installs the script to
@@ -242,6 +251,11 @@ outcome marker. All flat JSON in `/var/lib/agentd/update/`:
 { "outcome": "confirmed", "reason": "...", "target_commit": "...",
   "prev_commit": "...", "ts": <unix> }
 ```
+
+Tool-side env (agentd): `AGENTD_SELF_UPDATE_REPO` (build checkout, default
+`/opt/ApexOS-RS`) · `AGENTD_SELF_UPDATE_BUILD_TIMEOUT` (build+test ceiling, default
+1800s) · `AGENTD_SELF_UPDATE_TIMEOUT` (health-probe seconds written into the
+request, default 120).
 
 The watchdog keeps a phase file (`state` = `BACKED_UP`|`SWAPPED`) so it is
 **idempotent + power-loss safe**: a reboot mid-swap re-enters at the recorded
@@ -321,8 +335,9 @@ Each slice is independently shippable + testable; build in order, and **prove sl
    confirm · timeout-rollback · crash-rollback · sha-reject · both power-loss paths ·
    jq + sed parsing). *Still TODO: the on-hardware forced-rollback + power-loss drills
    on the rig (apex2 .146) once deployed.*
-3. **`apply_daemon_update` tool + gates + Cerebro wiring** (agentd). Now the agent
-   can trigger it. Dry-run first.
+3. **`apply_daemon_update` tool + gates + Cerebro wiring** (agentd). **← ✅ LANDED.**
+   On apex2 after deploy: run `dry_run=true` first (gates 0–2, no swap), then a real
+   trivial update to watch the full file → watchdog → confirm path end-to-end.
 4. **Adversarial LLM review gate** (sub-agent).
 5. **Probation crash-loop guard** (`StartLimit` + conditional `OnFailure`).
 
