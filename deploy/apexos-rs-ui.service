@@ -1,7 +1,12 @@
 [Unit]
 Description=ApexOS-RS Native UI (Slint/KMS)
+# Wants (NOT Requires) agentd: the UI rides through an agentd restart via its WS
+# reconnect loop, so it must NOT be lifecycle-coupled. Requires= cascade-STOPS the UI
+# whenever agentd stops — e.g. the self-update watchdog's `systemctl stop agentd`
+# during a binary swap — and does NOT bring it back, leaving the kiosk dark until a
+# manual restart. Wants keeps the boot ordering (After) without the teardown coupling.
 After=agentd.service network.target
-Requires=agentd.service
+Wants=agentd.service
 
 [Service]
 User=root
