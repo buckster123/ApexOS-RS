@@ -24,10 +24,13 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use apexos_core::{ActionId, BusHandle, Event, SessionId, ToolOutput, ToolSpec};
+use apexos_agent::{Chunk, Provider, RoutingProvider};
+use apexos_core::{ActionId, BusHandle, ContentBlock, Event, Message, SessionId, ToolOutput, ToolSpec};
 use apexos_plugins::ToolProxy;
+use futures_util::StreamExt;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
@@ -103,7 +106,8 @@ pub fn apply_daemon_update_spec() -> ToolSpec {
              ref, guarded by the self-update watchdog. PRE-SWAP gates run while the daemon keeps \
              serving: clean-tree/HEAD-match preconditions, a staging `cargo build --release -p \
              agentd` (never over the live binary), then `cargo test -p agentd` plus any caller \
-             `test_cmd`. Only if all pass is a swap request filed; a root watchdog then backs up \
+             `test_cmd`, then a fresh-context adversarial review of the diff being swapped in. \
+             Only if all pass is a swap request filed; a root watchdog then backs up \
              the current binary, swaps, restarts, and health-checks — rolling back automatically \
              to the known-good binary if the new one doesn't come up healthy. The `commit` must \
              be the repo's current HEAD (commit your source first). SUCCESS RETURNS NOTHING \
@@ -198,16 +202,132 @@ fn in_flight() -> bool {
     d.join("request.json").exists() || d.join("update.lock").exists()
 }
 
+// ── stage 3: adversarial review ────────────────────────────────────────────────
+
+/// Stage-3 review toggle. ON by default; `AGENTD_SELF_UPDATE_REVIEW=0` skips it
+/// (a fully-trusted pipeline, or a node with no model configured).
+fn review_enabled() -> bool {
+    !matches!(
+        std::env::var("AGENTD_SELF_UPDATE_REVIEW").ok().as_deref(),
+        Some("0") | Some("false") | Some("no")
+    )
+}
+
+enum ReviewVerdict {
+    Safe(String),
+    Block(String),
+}
+
+/// Keep the first `max` chars (diff header + changed files matter most).
+fn head(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut end = max;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}\n…(diff truncated at {max} chars)…", &s[..end])
+    }
+}
+
+/// The diff being swapped in: `git diff <prev>..<target>`. Falls back to the target
+/// commit alone if `prev` isn't reachable here (divergent history). Bounded.
+async fn collect_diff(repo: &PathBuf, prev: &str, target: &str) -> String {
+    let range = format!("{prev}..{target}");
+    let d = match git(repo, &["rev-parse", "--verify", &format!("{prev}^{{commit}}")]).await {
+        Ok(_) => git(repo, &["diff", "--no-color", &range]).await,
+        Err(_) => git(repo, &["show", "--no-color", target]).await, // prev not in this repo
+    };
+    match d {
+        Ok(s) => head(&s, 12_000),
+        Err(e) => format!("(could not compute diff: {e})"),
+    }
+}
+
+const REVIEW_SYSTEM: &str = "You are a strict release reviewer for agentd's SELF-UPDATE. agentd is a \
+long-running daemon about to REPLACE ITS OWN BINARY with one built from the diff below. A change that \
+boots-but-is-subtly-broken, or that damages the self-update machinery itself (the health marker, the \
+request.json the watchdog reads, or rollback), is dangerous — though a root watchdog will auto-roll-back \
+a binary that doesn't come up healthy. Review the diff for: could it break boot / listener bind / the \
+health marker / rollback? Is it reversible? Does it touch the self-update / watchdog / health code in a \
+risky way? Be conservative but not paranoid — ordinary feature changes that build and test clean are \
+fine. Give one short paragraph of reasoning, then a FINAL line that is EXACTLY one of:\n\
+VERDICT: SAFE\nVERDICT: BLOCK — <one-line reason>";
+
+/// Collect a one-shot completion's text from the provider stream (fresh context).
+async fn collect_completion(provider: &RoutingProvider, history: &[Message], system: &str) -> Result<String, String> {
+    let mut stream = provider.messages_stream(history, &[], Some(system)).await.map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(Chunk::TextDelta(t)) => text.push_str(&t),
+            Ok(Chunk::TextBlock(t)) => { text = t; break; }
+            Ok(Chunk::Done) => break,
+            Err(e) => return Err(e.to_string()),
+            _ => {}
+        }
+    }
+    Ok(text)
+}
+
+/// Single fresh-context review (v1). Empty diff → trivially safe (no LLM call).
+/// FAIL-CLOSED: any provider error / unparseable verdict → Block. The seam for an
+/// N-way refute panel later: call this N times + require unanimity/majority Safe.
+async fn review_diff(reviewer: &RoutingProvider, target: &str, reason: &str, diff: &str) -> ReviewVerdict {
+    if diff.trim().is_empty() {
+        return ReviewVerdict::Safe("empty diff (same-commit rebuild) — nothing to review".into());
+    }
+    let user = format!(
+        "Reason for this self-update: {reason}\nTarget commit: {target}\n\nDiff being swapped in:\n```diff\n{diff}\n```"
+    );
+    let history = vec![Message::User { content: vec![ContentBlock::Text { text: user }] }];
+    match collect_completion(reviewer, &history, REVIEW_SYSTEM).await {
+        Ok(t) => parse_verdict(&t),
+        Err(e) => ReviewVerdict::Block(format!("reviewer unavailable — failing closed: {e}")),
+    }
+}
+
+/// Parse the reviewer's final `VERDICT:` line. Fail-closed if absent/garbled.
+fn parse_verdict(text: &str) -> ReviewVerdict {
+    for line in text.lines().rev() {
+        let l = line.trim().trim_start_matches(['*', '#', '>', ' ']);
+        if let Some(idx) = l.to_uppercase().find("VERDICT:") {
+            let rest = l[idx + "VERDICT:".len()..].trim();
+            let rest_up = rest.to_uppercase();
+            if rest_up.starts_with("SAFE") {
+                return ReviewVerdict::Safe(rest.to_string());
+            }
+            if rest_up.starts_with("BLOCK") {
+                let why = rest
+                    .trim_start_matches(|c: char| c.is_alphabetic())
+                    .trim_start_matches(['—', '-', ':', ' '])
+                    .trim();
+                return ReviewVerdict::Block(if why.is_empty() {
+                    "reviewer blocked the change".into()
+                } else {
+                    why.to_string()
+                });
+            }
+        }
+    }
+    ReviewVerdict::Block(format!(
+        "reviewer produced no parseable VERDICT line — failing closed. Tail: {}",
+        head(text.trim(), 300)
+    ))
+}
+
 /// The handler task: serializes updates (one at a time) and runs the full gate
 /// pipeline for each `apply_daemon_update` call forwarded by the supervisor.
 pub fn spawn_self_update_handler(
     mut rx: mpsc::Receiver<(SessionId, ActionId, serde_json::Value)>,
     bus: BusHandle,
     proxy: ToolProxy,
+    reviewer: Arc<RoutingProvider>,
 ) {
     tokio::spawn(async move {
         while let Some((session, call_id, args)) = rx.recv().await {
-            run_update(&bus, session, call_id, &args, &proxy).await;
+            run_update(&bus, session, call_id, &args, &proxy, reviewer.as_ref()).await;
         }
     });
 }
@@ -218,6 +338,7 @@ async fn run_update(
     call_id: ActionId,
     args: &serde_json::Value,
     proxy: &ToolProxy,
+    reviewer: &RoutingProvider,
 ) {
     let commit = args.get("commit").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
@@ -309,13 +430,32 @@ async fn run_update(
         }
     }
 
-    // (stage 3 adversarial review — slice 4)
+    // ── stage 3: adversarial review (slice 4) ───────────────────────────────────
+    // A fresh-context LLM reviews the diff being swapped in for brick/rollback risk
+    // before any request is filed. FAIL-CLOSED: an unparseable verdict or a review
+    // it couldn't run blocks the swap (don't replace a binary you couldn't vet) —
+    // an empty diff (same-commit rebuild) is trivially safe, no LLM call. Disable
+    // with AGENTD_SELF_UPDATE_REVIEW=0. Single reviewer for v1; review_diff is the
+    // seam for an N-way refute panel later.
+    if review_enabled() {
+        let diff = collect_diff(&repo, build_commit(), &resolved).await;
+        match review_diff(reviewer, &resolved, &reason, &diff).await {
+            ReviewVerdict::Safe(note) => eprintln!("[self-update] review SAFE: {note}"),
+            ReviewVerdict::Block(why) => {
+                clear_lock();
+                emit(bus, session, call_id, false,
+                    format!("STAGE 3 review BLOCKED (daemon untouched): {why}")).await;
+                return;
+            }
+        }
+    }
 
     // ── dry-run: report without filing a swap ───────────────────────────────────
     if dry_run {
         clear_lock();
         emit(bus, session, call_id, true,
-            format!("DRY RUN ok — build + tests passed for {commit}. No swap requested.")).await;
+            format!("DRY RUN ok — build + tests{} passed for {commit}. No swap requested.",
+                if review_enabled() { " + review" } else { "" })).await;
         return;
     }
 
@@ -497,5 +637,46 @@ mod tests {
         std::env::set_var("AGENTD_SELF_UPDATE_TARGET", "/var/lib/agentd/self-update/target");
         assert_eq!(cargo_target_dir().as_deref(), Some("/var/lib/agentd/self-update/target"));
         std::env::remove_var("AGENTD_SELF_UPDATE_TARGET");
+    }
+
+    fn is_block(v: &ReviewVerdict) -> bool { matches!(v, ReviewVerdict::Block(_)) }
+    fn block_reason(v: &ReviewVerdict) -> String {
+        match v { ReviewVerdict::Block(r) => r.clone(), ReviewVerdict::Safe(_) => String::new() }
+    }
+
+    #[test]
+    fn parse_verdict_safe_block_and_failclosed() {
+        assert!(matches!(parse_verdict("looks fine\nVERDICT: SAFE"), ReviewVerdict::Safe(_)));
+        // markdown wrapping + reasoning above the verdict
+        assert!(matches!(parse_verdict("reasons\n**VERDICT: SAFE**"), ReviewVerdict::Safe(_)));
+        let b = parse_verdict("this rewrites the watchdog\nVERDICT: BLOCK — touches rollback path");
+        assert!(is_block(&b));
+        assert_eq!(block_reason(&b), "touches rollback path");
+        // no verdict at all → fail-closed
+        assert!(is_block(&parse_verdict("I think it is probably fine but I won't say.")));
+        // empty → fail-closed
+        assert!(is_block(&parse_verdict("")));
+        // last verdict line wins (in case the model restates)
+        assert!(is_block(&parse_verdict("VERDICT: SAFE\n...on reflection\nVERDICT: BLOCK — risky")));
+    }
+
+    #[test]
+    fn review_enabled_default_and_optout() {
+        std::env::remove_var("AGENTD_SELF_UPDATE_REVIEW");
+        assert!(review_enabled());
+        std::env::set_var("AGENTD_SELF_UPDATE_REVIEW", "0");
+        assert!(!review_enabled());
+        std::env::set_var("AGENTD_SELF_UPDATE_REVIEW", "1");
+        assert!(review_enabled());
+        std::env::remove_var("AGENTD_SELF_UPDATE_REVIEW");
+    }
+
+    #[test]
+    fn head_truncates() {
+        assert_eq!(head("short", 100), "short");
+        let big = "x".repeat(20_000);
+        let h = head(&big, 12_000);
+        assert!(h.starts_with("xxxx"));
+        assert!(h.contains("truncated"));
     }
 }

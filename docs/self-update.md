@@ -1,6 +1,6 @@
 # Daemon self-update loop — design (mk3)
 
-> **Status: DESIGN locked; slices 1–3 + 3.1 + 3.2 LANDED.** Rollback hardware-proven on apex2 **including a real live self-update that auto-rolled-back + recovered** (3.3). A short-sha `target_commit` confirm bug was caught there + fixed. Remaining: re-test (expect CONFIRM), then slices 4 (adversarial review) & 5 (probation).
+> **Status: DESIGN locked; slices 1–3 + 3.1 + 3.2 + 3.3 (first real self-update CONFIRMED on apex2) + 4 (adversarial review gate) LANDED.** Rollback hardware-proven on apex2 (including a real live auto-rollback) and a real self-update has CONFIRMED end-to-end. Remaining: slice 5 (probation crash-loop guard).
 > The one self-modification that *leaves the process model* — so it carries the
 > most safety machinery. Seeded by APEX's own wishlist proposal (`apex-forge-wishlist.md`,
 > item 2); refined here against the real systemd/agentd constraints.
@@ -87,7 +87,7 @@ The edit/commit of the *source* is the existing git layer (PR #117 tools, with
 | 0 | **Preconditions** (tool) | clean git tree at `commit`; no update already in flight (lockfile); disk + toolchain ok | abort, plain tool error → **live daemon untouched** |
 | 1 | **Staging build** (tool) | `cargo build --release -p agentd` into a *staging* path — **never over the live binary** | build error returned to APEX → **untouched** |
 | 2 | **Tests** (tool) | `cargo test -p agentd` (+ workspace smoke) **and** the caller's `test_cmd` | test failure returned → **untouched** |
-| 3 | **Adversarial review** (sub-agent) | a fresh-context LLM reviews the diff: "could this brick boot / health / rollback? is it reversible? does it touch the update machinery itself?" Majority-refute → block | review veto returned → **untouched** |
+| 3 | **Adversarial review** (✅ slice 4) | a fresh-context LLM (own `RoutingProvider`) reviews the diff being swapped in: "could this brick boot / health / rollback? is it reversible? does it touch the update machinery itself?" → final `VERDICT: SAFE\|BLOCK`. **Fail-closed** (unparseable/unavailable → block); empty diff → trivially safe (no call); `AGENTD_SELF_UPDATE_REVIEW=0` to skip. Single reviewer v1, `review_diff` is the N-way-panel seam | review veto returned → **untouched** |
 | 4 | **Pre-swap commit** (tool) | `session_save()` + `store_intention("resuming after self-update: <reason>")`; write `request.json` (staged path, sha256, target/prev commit, deadline) | if the write fails, abort → **untouched** |
 | 5 | **Swap** (watchdog, root) | verify staged sha256; `cp agentd → agentd.prev`; **atomic** `mv staged → /usr/local/bin/agentd`; `systemctl restart agentd` | mv/restart fails → restore `agentd.prev` → **known-good** |
 | 6 | **Health probe** (watchdog) | poll `health.json` ≤ `TIMEOUT`: `status=healthy ∧ commit=target ∧ booted_at≥swap_ts` | timeout / agentd inactive → **rollback to `agentd.prev`** → known-good |
@@ -259,7 +259,7 @@ Tool-side env (agentd): `AGENTD_SELF_UPDATE_REPO` (build checkout, default
 `AGENTD_SELF_UPDATE_TARGET` (optional `CARGO_TARGET_DIR`) ·
 `AGENTD_SELF_UPDATE_BUILD_TIMEOUT` (build+test ceiling, default 1800s) ·
 `AGENTD_SELF_UPDATE_TIMEOUT` (health-probe seconds written into the request,
-default 120).
+default 120) · `AGENTD_SELF_UPDATE_REVIEW` (`0` skips the stage-3 review; default on).
 
 The watchdog keeps a phase file (`state` = `BACKED_UP`|`SWAPPED`) so it is
 **idempotent + power-loss safe**: a reboot mid-swap re-enters at the recorded
@@ -390,7 +390,10 @@ Each slice is independently shippable + testable; build in order, and **prove sl
    self-update: bad confirm → automatic rollback → agentd healthy + serving.** Bug
    fixed (the tool now stores the resolved full sha). *Next: re-test → expect
    CONFIRM, then slices 4–5.*
-4. **Adversarial LLM review gate** (sub-agent).
+4. **Adversarial LLM review gate.** **← ✅ LANDED.** Stage 3 in `self_update.rs`: a
+   fresh-context `RoutingProvider` reviews the swap-in diff → `VERDICT: SAFE|BLOCK`,
+   fail-closed, empty-diff-safe, `AGENTD_SELF_UPDATE_REVIEW=0` opt-out. Single
+   reviewer (v1); `review_diff` is the seam for an N-way refute panel.
 5. **Probation crash-loop guard** (`StartLimit` + conditional `OnFailure`).
 
 ## Resolved decisions (locked with André, 2026-06-19)

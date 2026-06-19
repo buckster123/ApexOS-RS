@@ -20,3 +20,4 @@ serde          = { workspace = true }
 toml_edit      = "0.22"
 cron           = "0.12"
 chrono         = "0.4"
+futures-util   = { workspace = true }   # StreamExt for the self-update review gate's LLM call
