@@ -17,11 +17,21 @@ agentd; ApexOS reads the result off the `tool_result` event and switches on `kin
 
 ## 1. Registering the MCP server (9a)
 
-`occipital-mcp` is a separate binary, so `cargo build --release --workspace` does **not** produce it
-— the `config/plugins.toml` entry ships **commented** (like Sonus), and the binary is built + deployed
-on the node before activation.
+`occipital-mcp` is a separate binary from a **sibling repo** (not a workspace member), so
+`cargo build --release --workspace` does **not** produce it. **install.sh now provisions it
+automatically** — a fresh install (and every `apexos-update`) clones/pulls `Occipital-RS`, builds
+`occipital-mcp`, installs it to `/usr/local/bin/`, creates `/var/lib/agentd/occipital`, and appends the
+plugin block to `/etc/agentd/plugins.toml` (the `config/plugins.toml` entry stays **commented** — the
+template never points agentd at a binary that may not exist; the live block is appended only on a
+successful build). **Default ON**; skip with `--no-occipital` (or `APEXOS_NO_OCCIPITAL=1`), persisted
+in `install.conf`. The repos stay separate — Occipital is cloned, not vendored into the workspace.
 
-### Build + deploy on a node
+**Tier split** (mirrors cerebro's embed ladder): Micro/Standard/Pro build `--features embeddings` →
+bge-small **semantic recall**; Nano builds without it → **FTS5 keyword recall** (no ONNX). Best-effort:
+a clone/build failure warns and continues (agentd runs fine without the web cortex); the next
+`apexos-update` retries.
+
+### Manual build + deploy (dev, or a node where you skipped auto-provisioning)
 
 ```bash
 # Nano/FTS5 default — no ONNX, keyword recall only (~small binary):
@@ -42,8 +52,8 @@ still works, just lexically. Match the build to the node's tier (see the CLAUDE.
 
 | Node state | How to activate |
 |------------|-----------------|
-| **Fresh install** | install.sh seeds `config/plugins.toml` → uncomment the `occipital` block before first boot. |
-| **Already deployed** | `/etc/agentd/plugins.toml` is *seed-if-absent*, so the repo change won't reach it. Either **(a)** APEX self-evolves it via the `register_mcp_server` tool, or **(b)** edit the live file by hand and restart agentd. |
+| **Fresh install** | Automatic — install.sh clones + builds Occipital-RS and registers `occipital-mcp` (default ON; `--no-occipital` to skip). Tier picks FTS5 vs `--features embeddings`. |
+| **Already deployed** | `apexos-update` now provisions it: pulls/builds Occipital-RS, reinstalls the binary, and **appends** the plugin block to `/etc/agentd/plugins.toml` *if absent* (the grep is anchored to an uncommented `id = "occipital"`, so it's idempotent and won't duplicate an APEX `register_mcp_server` entry). The manual path above still works. |
 
 Manual activation on a live node:
 

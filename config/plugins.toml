@@ -29,16 +29,13 @@ restart = "always"
 
 # Occipital — the agent's reading cortex: web_search / web_fetch / web_recall / web_save / web_forget.
 # Standalone sibling repo (github.com/buckster123/Occipital-RS) — NOT a workspace member, so
-# `cargo build --release --workspace` does NOT produce this binary. Build + deploy it separately,
-# then uncomment. The ui-slint follow-along reader window renders web_fetch/web_search results live.
-# See docs/occipital.md for the full deploy + integration story.
+# `cargo build --release --workspace` does NOT produce this binary.
 #
-#   # on the node — Nano/FTS5 default (no ONNX, keyword recall only):
-#   git clone https://github.com/buckster123/Occipital-RS && cd Occipital-RS
-#   cargo build --release -p occipital-mcp
-#   sudo cp target/release/occipital-mcp /usr/local/bin/
-#   sudo install -d -o agentd -g agentd /var/lib/agentd/occipital
-#   # Micro+ semantic recall: build `-p occipital-mcp --features embeddings` and set OCCIPITAL_EMBED_MODEL.
+# install.sh AUTO-PROVISIONS it (default ON; --no-occipital to skip): it clones/builds Occipital-RS,
+# installs occipital-mcp, and APPENDS the live [[plugin]] block to /etc/agentd/plugins.toml on a
+# successful build. This template block stays COMMENTED on purpose — so agentd is never pointed at a
+# binary that didn't build. Micro+ gets `--features embeddings` (semantic recall); Nano → FTS5.
+# Uncomment below only for a manual (non-install.sh) deploy. See docs/occipital.md.
 #
 # [[plugin]]
 # id      = "occipital"
