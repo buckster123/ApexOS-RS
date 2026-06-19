@@ -1000,10 +1000,14 @@ install -d /usr/local/lib/apexos
 install -m 755 "$REPO_DIR/deploy/apexos-self-update.sh"      /usr/local/lib/apexos/self-update.sh
 install -m 644 "$REPO_DIR/deploy/apexos-self-update.service" /etc/systemd/system/apexos-self-update.service
 install -m 644 "$REPO_DIR/deploy/apexos-self-update.path"    /etc/systemd/system/apexos-self-update.path
+# Probation crash-loop guard (slice 5): agentd.service OnFailure → this rollback,
+# fired when systemd's StartLimit trips on a latent post-confirm crash-loop.
+install -m 755 "$REPO_DIR/deploy/apexos-rollback.sh"         /usr/local/lib/apexos/rollback.sh
+install -m 644 "$REPO_DIR/deploy/apexos-rollback.service"    /etc/systemd/system/apexos-rollback.service
 systemctl daemon-reload
 # enable --now arms the .path watcher immediately (and idempotently on re-runs).
 systemctl enable --now apexos-self-update.path >/dev/null 2>&1 || true
-ok "Self-update watchdog installed (apexos-self-update.path armed)"
+ok "Self-update watchdog + probation rollback installed"
 
 # The opt-in provisioning command (option B — agentd-owned toolchain + repo). NOT
 # run automatically: it installs ~1.5 GB of Rust toolchain and is Standard+ only.

@@ -3,6 +3,7 @@
 # watchdog state machine with a fake systemctl that simulates agentd's boot.
 set -u
 WD="$(cd "$(dirname "$0")" && pwd)/apexos-self-update.sh"
+RB="$(cd "$(dirname "$0")" && pwd)/apexos-rollback.sh"
 ROOT=/tmp/wd-drill
 PASS=0; FAIL=0
 say()  { printf '%s\n' "$*"; }
@@ -137,6 +138,46 @@ PATH="$sedbin" sh "$WD" >"$ROOT/wd-sed.log" 2>&1
 check "confirm works without jq (sed fallback)" "$(exists "$ROOT/update/confirmed.json")" yes
 check "binary swapped (sed fallback)"           "$(cat "$ROOT/bin/agentd")" "GOOD:newcommit"
 rm -rf "$sedbin"
+
+say ""
+say "########  PROBATION crash-loop guard (apexos-rollback.sh, slice 5)  ########"
+write_confirmed(){ # $1=ts
+  cat > "$ROOT/update/confirmed.json" <<EOF
+{ "outcome":"confirmed","reason":"test","target_commit":"newcommit","prev_commit":"oldcommit","ts":$1 }
+EOF
+}
+run_rb(){ # $1=probation_window(optional)
+  AGENTD_UPDATE_DIR="$ROOT/update" APEXOS_SELF_UPDATE_BIN="$ROOT/bin/agentd" \
+  APEXOS_SELF_UPDATE_SYSTEMCTL="$ROOT/fake-systemctl" APEXOS_PROBATION_WINDOW="${1:-600}" \
+  FAKE_BIN="$ROOT/bin/agentd" FAKE_HEALTH="$ROOT/update/health.json" FAKE_STATEFILE="$ROOT/state-active" \
+  sh "$RB" >"$ROOT/rb.log" 2>&1
+}
+
+say "=== P1: latent crash within probation + recent confirm → ROLLBACK ==="
+reset; printf 'STUCK' > "$ROOT/bin/agentd"; printf 'GOOD:oldcommit' > "$ROOT/bin/agentd.prev"
+write_confirmed "$(date +%s)"; run_rb 600
+check "rolled-back.json written"        "$(exists "$ROOT/update/rolled-back.json")" yes
+check "binary restored to agentd.prev"  "$(cat "$ROOT/bin/agentd")" "GOOD:oldcommit"
+check "confirm marker consumed"         "$(exists "$ROOT/update/confirmed.json")" no
+check "confirm superseded (audit kept)" "$(exists "$ROOT/update/confirmed.superseded.json")" yes
+
+say "=== P1b: anti-loop — second crash-loop with consumed marker → NO rollback ==="
+rm -f "$ROOT/update/rolled-back.json"; printf 'STUCK' > "$ROOT/bin/agentd"
+run_rb 600
+check "no second rollback (marker gone)" "$(exists "$ROOT/update/rolled-back.json")" no
+check "binary left as-is for a human"     "$(cat "$ROOT/bin/agentd")" "STUCK"
+
+say "=== P2: crash-loop with NO confirmed self-update → NO rollback (not our regression) ==="
+reset; printf 'STUCK' > "$ROOT/bin/agentd"; printf 'GOOD:oldcommit' > "$ROOT/bin/agentd.prev"
+run_rb 600
+check "no rollback (no confirm marker)" "$(exists "$ROOT/update/rolled-back.json")" no
+check "binary untouched"                "$(cat "$ROOT/bin/agentd")" "STUCK"
+
+say "=== P3: crash-loop but confirm is STALE (> probation window) → NO rollback ==="
+reset; printf 'STUCK' > "$ROOT/bin/agentd"; printf 'GOOD:oldcommit' > "$ROOT/bin/agentd.prev"
+write_confirmed "$(( $(date +%s) - 9999 ))"; run_rb 600
+check "no rollback (confirm too old)"   "$(exists "$ROOT/update/rolled-back.json")" no
+check "binary untouched"                "$(cat "$ROOT/bin/agentd")" "STUCK"
 
 say ""
 say "================  $PASS passed, $FAIL failed  ================"
