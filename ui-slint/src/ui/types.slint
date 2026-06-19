@@ -162,6 +162,18 @@ export struct ModelItem {
     model-name: string,   // e.g. "Sonnet 4.6"
 }
 
+// Tokenomics / cache-bank readout for the ⚡ Inference view. Rust formats every
+// field into a display string from GET /api/usage (cumulative since daemon boot).
+export struct Usage {
+    turns:    string,   // "142"
+    hit-rate: string,   // "98.2%"  — share of input served from cache
+    banked:   string,   // "2.5M"   — net tokens kept off the bill (the cache bank)
+    saved:    string,   // "$7.95"  — vs the no-cache baseline (current model price)
+    spent:    string,   // "$1.79"
+    detail:   string,   // "2.77M cached · 31K fresh · 84K out"
+    model:    string,   // "claude-sonnet-4-6" (the price basis)
+}
+
 // ── Feedback subsystem ──────────────────────────────────────────────────
 // Transient toast notifications. Severity drives accent colour + icon.
 export enum ToastKind { info, success, warn, error }

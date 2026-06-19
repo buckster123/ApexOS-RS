@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, ReaderBlock, ReaderLink } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, ReaderBlock, ReaderLink } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -123,6 +123,7 @@ export component AppWindowFrame inherits Rectangle {
     in property <string>         inference-backend;
     in property <string>         inference-base-url;
     in property <[ModelItem]>    inference-models;
+    in property <Usage>          inference-usage;
     in property <[AudioFileItem]> audio-files;
     in property <string>         audio-selected-path;
     in property <string>         audio-selected-name;
@@ -525,6 +526,7 @@ export component AppWindowFrame inherits Rectangle {
             base-url: root.inference-base-url;
             models: root.inference-models;
             current-model: root.current-model;
+            usage: root.inference-usage;
             refresh => { root.refresh-inference(); }
             set-model(id) => { root.set-model(id); }
         }

@@ -1,6 +1,6 @@
 import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
-import { ModelItem } from "../types.slint";
+import { ModelItem, Usage } from "../types.slint";
 
 // ── InferenceView (⚡) ─────────────────────────────────────────────────────────
 //
@@ -19,6 +19,7 @@ export component InferenceView {
     in property <string>      base-url: "";
     in property <[ModelItem]> models;
     in property <string>      current-model;
+    in property <Usage>       usage;
 
     callback refresh();
     callback set-model(string);
@@ -108,6 +109,92 @@ export component InferenceView {
                         overflow: elide;
                         vertical-alignment: center;
                     }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Cache bank / tokenomics ──────────────────────────────────────────
+        // Fed by GET /api/usage (cumulative since daemon boot). The headline is the
+        // hit rate + dollars the prompt cache has banked vs re-sending every prefix.
+        Rectangle {
+            height: bank.preferred-height + 24px;
+            background: Palette.bg;
+
+            bank := VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    Text {
+                        text: "CACHE BANK";
+                        color: Palette.text-dim;
+                        font-size: 8px;
+                        letter-spacing: 1.5px;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.usage.turns == "" ? "—" : root.usage.turns + " turns";
+                        color: Palette.text-dim;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Three headline tiles: hit rate · saved · spent.
+                HorizontalLayout {
+                    spacing: 10px;
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 58px;
+                        border-radius: Palette.radius;
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        VerticalLayout {
+                            padding: 8px; spacing: 2px; alignment: center;
+                            Text { text: root.usage.hit-rate == "" ? "—" : root.usage.hit-rate; color: Palette.primary; font-size: 18px; font-weight: 700; horizontal-alignment: center; }
+                            Text { text: "from cache"; color: Palette.text-dim; font-size: 8px; horizontal-alignment: center; }
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 58px;
+                        border-radius: Palette.radius;
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        VerticalLayout {
+                            padding: 8px; spacing: 2px; alignment: center;
+                            Text { text: root.usage.saved == "" ? "—" : root.usage.saved; color: #34d399; font-size: 18px; font-weight: 700; horizontal-alignment: center; }
+                            Text { text: "saved"; color: Palette.text-dim; font-size: 8px; horizontal-alignment: center; }
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 58px;
+                        border-radius: Palette.radius;
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        VerticalLayout {
+                            padding: 8px; spacing: 2px; alignment: center;
+                            Text { text: root.usage.spent == "" ? "—" : root.usage.spent; color: Palette.text; font-size: 18px; font-weight: 700; horizontal-alignment: center; }
+                            Text { text: "spent"; color: Palette.text-dim; font-size: 8px; horizontal-alignment: center; }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.usage.banked == "" ? "Tokenomics populate after the first turn." : root.usage.banked + " tokens banked  ·  " + root.usage.detail;
+                    color: Palette.text-dim;
+                    font-size: 10px;
+                    wrap: word-wrap;
                 }
             }
         }

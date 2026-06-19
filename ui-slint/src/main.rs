@@ -2237,13 +2237,15 @@ struct InferenceData {
     backend:  String,
     base_url: String,
     models:   Vec<ModelItem>,
+    usage:    Usage,
 }
 
-// GET /api/backend + /api/models → current backend + the model list.
+// GET /api/backend + /api/models + /api/usage → backend + model list + cache-bank stats.
 async fn fetch_inference(client: &reqwest::Client, base_url: &str) -> InferenceData {
-    let (backend_resp, models_resp) = tokio::join!(
+    let (backend_resp, models_resp, usage_resp) = tokio::join!(
         json_get(client, format!("{base_url}/api/backend")),
         json_get(client, format!("{base_url}/api/models")),
+        json_get(client, format!("{base_url}/api/usage")),
     );
     let models: Vec<ModelItem> = models_resp["models"]
         .as_array()
@@ -2258,6 +2260,47 @@ async fn fetch_inference(client: &reqwest::Client, base_url: &str) -> InferenceD
         backend:  backend_resp["backend"].as_str().unwrap_or("—").to_string(),
         base_url: backend_resp["oai_base_url"].as_str().unwrap_or("").to_string(),
         models,
+        usage:    build_usage(&usage_resp),
+    }
+}
+
+/// Humanize a token count: 2_770_000 → "2.8M", 31_200 → "31K", 412 → "412". Negative-safe.
+fn humanize_tokens(n: i64) -> String {
+    let a = n.unsigned_abs() as f64;
+    let s = if a >= 1e6 { format!("{:.1}M", a / 1e6) }
+            else if a >= 1e3 { format!("{:.0}K", a / 1e3) }
+            else { format!("{}", a as u64) };
+    if n < 0 { format!("-{s}") } else { s }
+}
+
+/// Format a USD estimate: ≥1¢ → "$1.79"/"$0.05"; sub-cent → "$0.0021"; ≤0 → "$0.00".
+fn fmt_money(x: f64) -> String {
+    if x <= 0.0 { "$0.00".to_string() }
+    else if x >= 0.01 { format!("${x:.2}") }
+    else { format!("${x:.4}") }
+}
+
+/// Build the Inference view's cache-bank readout from a GET /api/usage body. Returns the
+/// all-empty default before any turn has run (the view renders an empty-state for that).
+fn build_usage(r: &serde_json::Value) -> Usage {
+    let turns = r["turns"].as_u64().unwrap_or(0);
+    if turns == 0 { return Usage::default(); }
+    let hit        = r["cache_hit_rate"].as_f64().unwrap_or(0.0);
+    let banked     = r["banked_tokens"].as_i64().unwrap_or(0);
+    let saved      = r["cost_usd"]["saved"].as_f64().unwrap_or(0.0);
+    let spent      = r["cost_usd"]["spent"].as_f64().unwrap_or(0.0);
+    let cache_read = r["tokens"]["cache_read"].as_u64().unwrap_or(0) as i64;
+    let input      = r["tokens"]["input"].as_u64().unwrap_or(0) as i64;
+    let output     = r["tokens"]["output"].as_u64().unwrap_or(0) as i64;
+    Usage {
+        turns:    turns.to_string().into(),
+        hit_rate: format!("{:.1}%", hit * 100.0).into(),
+        banked:   humanize_tokens(banked).into(),
+        saved:    fmt_money(saved).into(),
+        spent:    fmt_money(spent).into(),
+        detail:   format!("{} cached · {} fresh · {} out",
+                      humanize_tokens(cache_read), humanize_tokens(input), humanize_tokens(output)).into(),
+        model:    r["model"].as_str().unwrap_or("").into(),
     }
 }
 
@@ -3660,6 +3703,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(ui) = ui_w.upgrade() {
                     ui.set_inference_backend(data.backend.into());
                     ui.set_inference_base_url(data.base_url.into());
+                    ui.set_inference_usage(data.usage);
                     replace_infer_models(data.models);
                 }
             }).ok();
