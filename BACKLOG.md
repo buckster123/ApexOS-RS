@@ -38,7 +38,7 @@ APEX assimilated the substrate-update letter (prompt caching + self-update + git
 - **`web_recall` (occipital) is FTS5/keyword-only** — wants semantic embeddings (as cerebro has) to recall already-read pages by *meaning* as the cache grows. **[medium]**
 - **Sketchpad write-back** — read channel (`sketch_snapshot`) works; the agent→canvas draw-back direction is the last gap → a genuinely bidirectional visual channel. **[medium]**
 - **Journal UI** — a read-only `query_event_log` panel with event-type filtering; legibility as autonomy grows and more happens unsupervised. **[nice-to-have]**
-- **Prompt-cache telemetry in the UI** — surface the per-turn `read/write/uncached` numbers (now journal-only) as a topbar / ⚡ Inference counter; natural follow-up to the caching work. **[nice-to-have]**
+- ✅ **DONE — Prompt-cache telemetry in the UI** — backend (`GET /api/usage`, cumulative token + cache-bank accounting) + a **CACHE BANK** card in the ⚡ Inference view (hit rate · saved · spent tiles + banked-tokens detail), fed on the inference refresh. **[was nice-to-have]**
 - ✅ **Already coded — nightly `dream_run` cron** — APEX flagged it unwired, but `spawn_nightly_dream` + `AGENTD_DREAM_CRON` (default `0 0 3 * * *`, UTC) already exist; if it's not firing on a node that's an empty/unset env var (config, not code). Nudge APEX to set the env or its own `schedule_task`.
 
 ---
