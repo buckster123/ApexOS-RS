@@ -2560,6 +2560,11 @@ fn ensure_mono_emoji_fontconfig() {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Capture Slint/femtovg/linuxkms backend `log` output (default warn) so a GL/DRM
+    // fault is recorded in the journal instead of vanishing into a silent exit-1.
+    // Bump with RUST_LOG (e.g. `RUST_LOG=i_slint_backend_linuxkms=debug,femtovg=debug`).
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+
     // Steer this process's emoji fallback to a monochrome font before any font
     // is loaded (femtovg can't draw colour emoji). See the fn doc.
     ensure_mono_emoji_fontconfig();
@@ -4346,7 +4351,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    ui.run()?;
+    // Don't swallow the event-loop error. On linuxkms a GL/DRM fault can make
+    // `run()` return Err — previously `?` propagated it as a bare exit-1 with no
+    // message (the "render gremlin"), dropping the kiosk with zero diagnostics.
+    // Log the full error so the cause is captured; systemd still restarts us.
+    if let Err(e) = ui.run() {
+        eprintln!("[ui-slint] FATAL: Slint event loop exited with error: {e:?}");
+        return Err(e.into());
+    }
     Ok(())
 }
 
