@@ -81,3 +81,8 @@ mode = "suggest"
 "read_soul_md"       = "allow"
 "propose_evolution"  = "ask"
 "rollback_evolution" = "ask"
+# Daemon self-update (docs/self-update.md): rebuilds + swaps agentd's own binary.
+# The highest-stakes self-modify → ask in suggest (André countersigns the whole
+# update before the swap); autonomous in yolo. The build/test/health/rollback
+# gates are identical either way — autonomy only changes the human pre-approval.
+"apply_daemon_update" = "ask"

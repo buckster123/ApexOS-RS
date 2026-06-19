@@ -751,6 +751,7 @@ fn read_roots() -> Vec<PathBuf> {
         PathBuf::from("/sys"),              // thermal / board diagnostics
         PathBuf::from("/proc/cpuinfo"),     // board model / core count
         PathBuf::from("/proc/meminfo"),     // memory diagnostics
+        PathBuf::from("/var/lib/agentd/update"), // self-update outcome markers (confirmed/rolled-back.json)
     ];
     if let Ok(extra) = std::env::var("AGENTD_READ_ROOTS") {
         roots.extend(extra.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));

@@ -5,6 +5,7 @@ use scheduler::{load_schedules, run_scheduler, spawn_scheduler_handler, Schedule
 mod council_handler;
 use council_handler::spawn_council_handler;
 mod health;
+mod self_update;
 
 use apexos_core::{
     ActionId, Bus, ContentBlock, Event, EvolutionId, EvolutionProposal, ImageSource, Message,
@@ -365,6 +366,7 @@ async fn main() -> anyhow::Result<()> {
     let router_proxy  = tool_proxy.clone();   // CCBS boot-priming (cognitive_bootstrap)
     let dream_proxy   = tool_proxy.clone();   // nightly autonomous dream_run
     let health_proxy  = tool_proxy.clone();   // boot-health Cerebro reachability probe
+    let self_update_proxy = tool_proxy.clone(); // apply_daemon_update: session_save + resume intention
 
     // Restore rollback snapshots from Cerebro evolution episodes on startup (best-effort).
     // CerebroCortex needs a moment to start; we wait then populate rollback_store from episodes.
@@ -427,6 +429,17 @@ async fn main() -> anyhow::Result<()> {
         log_dir.join("council"),
         council_proxy,
     );
+
+    // Self-update handler — apply_daemon_update routes here (docs/self-update.md
+    // slice 3). Runs the pre-swap build/test gates, then files request.json the
+    // root watchdog consumes. Dedicated mpsc like council/propose so the agent's
+    // tool result isn't lag-dropped on a busy turn.
+    let (self_update_tx, self_update_rx) =
+        mpsc::channel::<(SessionId, ActionId, serde_json::Value)>(8);
+    if sv_cmd_tx.send(SupervisorCmd::SetSelfUpdateTx { tx: self_update_tx }).await.is_err() {
+        eprintln!("[agentd] warning: failed to wire self-update channel");
+    }
+    self_update::spawn_self_update_handler(self_update_rx, handle.clone(), self_update_proxy);
 
     // Live embodiment refresher — regenerates the "## Current embodiment" block the
     // engine appends after soul.md (node/senses/mesh/uptime + the LIVE tool list, so
@@ -1674,6 +1687,7 @@ async fn gather_tools(
     tools.push(read_soul_md_spec());
     tools.push(propose_evolution_spec());
     tools.push(rollback_evolution_spec());
+    tools.push(self_update::apply_daemon_update_spec());
     tools.push(schedule_task_spec());
     tools.push(list_schedules_spec());
     tools.push(cancel_schedule_spec());
