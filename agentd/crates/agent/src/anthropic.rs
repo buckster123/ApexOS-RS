@@ -220,6 +220,23 @@ fn sse_to_chunks(
                 };
 
                 match val["type"].as_str().unwrap_or("") {
+                    // Prompt-cache telemetry: the usage block rides on message_start.
+                    // Log read/write/uncached so cache hits are visible in the journal
+                    // (`journalctl -u agentd`) — read climbing across turns = caching
+                    // is working; read stuck at 0 = a silent invalidator in the prefix.
+                    "message_start" => {
+                        let u   = &val["message"]["usage"];
+                        let inp = u["input_tokens"].as_u64().unwrap_or(0);
+                        let cr  = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                        let cw  = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                        let total = inp + cr + cw;
+                        let pct = (cr * 100).checked_div(total).unwrap_or(0);
+                        eprintln!(
+                            "[anthropic] prompt cache: read={cr} write={cw} uncached={inp} \
+                             ({pct}% of input from cache)"
+                        );
+                    }
+
                     "content_block_start" => {
                         let idx = val["index"].as_u64().unwrap_or(0) as usize;
                         let cb  = &val["content_block"];
@@ -408,6 +425,35 @@ mod tests {
 
         assert!(chunks.iter().any(|c| matches!(c, Chunk::TextDelta(t) if t == "hi")));
         assert!(chunks.iter().any(|c| matches!(c, Chunk::TextBlock(t) if t == "hi")));
+        assert!(chunks.iter().any(|c| matches!(c, Chunk::Done)));
+    }
+
+    #[tokio::test]
+    async fn message_start_usage_does_not_disrupt_parsing() {
+        // A real stream opens with message_start carrying the usage block (where the
+        // cache_read/creation counts live). The new telemetry arm must read it without
+        // disturbing content parsing.
+        let sse = make_sse(&[
+            "event: message_start",
+            r#"data: {"type":"message_start","message":{"id":"m1","usage":{"input_tokens":12,"cache_read_input_tokens":3400,"cache_creation_input_tokens":0}}}"#,
+            "",
+            "event: content_block_start",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            "",
+            "event: content_block_delta",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}"#,
+            "",
+            "event: content_block_stop",
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            "",
+            "event: message_stop",
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]);
+
+        let chunks: Vec<_> = sse_to_chunks(sse).collect::<Vec<_>>().await
+            .into_iter().map(|r| r.unwrap()).collect();
+        assert!(chunks.iter().any(|c| matches!(c, Chunk::TextBlock(t) if t == "ok")));
         assert!(chunks.iter().any(|c| matches!(c, Chunk::Done)));
     }
 
