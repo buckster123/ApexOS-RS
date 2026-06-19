@@ -1,242 +1,310 @@
 <div align="center">
 
+<img src="assets/banner.png" alt="ApexOS-RS" width="100%">
+
 # ApexOS-RS
 
-**Pure-Rust native UI distro of [ApexOS](https://github.com/buckster123/ApexOS)**
+### An AI agent that *lives on the hardware in your drawer* — remembers, evolves, and rewrites its own code.
 
-*A single self-contained ~32 MB native binary — no Chromium, no Electron, no Node, no browser runtime · Slint frontend · KMS/DRM direct rendering*
+*One ~32 MB Rust binary. No Chromium. No Electron. No cloud required.*
+*Pi Zero to DGX. Persistent memory, a face, senses, a mesh — and a daemon that can safely recompile and reincarnate itself.*
 
-[![Status](https://img.shields.io/badge/status-mk1_complete-green?style=flat-square)]()
-[![Rust](https://img.shields.io/badge/built_with-Rust-orange?style=flat-square)](https://www.rust-lang.org/)
-[![UI](https://img.shields.io/badge/UI-Slint-blueviolet?style=flat-square)](https://slint.dev/)
-[![Platform](https://img.shields.io/badge/platform-Pi_4_·_Pi_5_·_Zero_2W-red?style=flat-square)](https://www.raspberrypi.com/)
+[![status](https://img.shields.io/badge/status-alive_on_hardware-22c55e?style=for-the-badge)]()
+[![rust](https://img.shields.io/badge/100%25-Rust-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
+[![ui](https://img.shields.io/badge/UI-Slint_·_KMS%2FDRM-8b5cf6?style=for-the-badge)](https://slint.dev/)
+[![self--updating](https://img.shields.io/badge/self--updating-binary_+_rollback-e11d48?style=for-the-badge)]()
+[![license](https://img.shields.io/badge/license-MIT-0891b2?style=for-the-badge)](#license)
 
+</div>
+
+> [!NOTE]
+> **What if your AI assistant wasn't a chat window to someone else's datacenter — but a *resident* of a $15 computer you own?** One that keeps its own memories across reboots, has a face on a little screen, reads its sensors, talks to other nodes in your house, edits its own personality, and — when it has a better idea for how it should work — **rebuilds and swaps its own binary, with an automatic safety net if the new version misbehaves.** That's ApexOS-RS.
+
+---
+
+## 🧠 What is this?
+
+ApexOS-RS is a **self-contained AI agent operating system** — the agent daemon, a cognitive memory system, system/sensor/vision tools, and a native GPU-rendered UI, all in **one pure-Rust Cargo workspace**. `cargo build --release --workspace`, one `install.sh`, and a spare board becomes a persistent, embodied, self-improving agent.
+
+It's the pure-Rust distro of [ApexOS](https://github.com/buckster123/ApexOS): where the original runs a Chromium kiosk, ApexOS-RS renders natively to KMS/DRM in a single ~32 MB binary that boots to UI in ~200 ms. But the headline isn't the diet — it's what the agent can *do* when it lives entirely on local hardware.
+
+```mermaid
+flowchart LR
+    you([🧑 You]) <--> agentd
+    subgraph node["🖥️ One spare board — fully offline-capable"]
+        agentd["🤖 agentd<br/>the agent daemon"]
+        cerebro["🧠 Cerebro<br/>persistent memory"]
+        tools["🛠️ tools<br/>system · vision · voice · GPIO"]
+        ui["😊 native UI + face<br/>Slint · KMS/DRM"]
+        agentd <--> cerebro
+        agentd <--> tools
+        agentd <--> ui
+    end
+    agentd <-..->|mesh / a2a| other([🌐 other nodes<br/>+ GPU inference])
+    style node fill:#0b1020,stroke:#8b5cf6,color:#e5e7eb
+```
+
+---
+
+## ✨ What makes it different
+
+|  |  |
+|--|--|
+| 🪶 **Tiny & native** | One self-contained **~32 MB** binary. No browser, no Node, no Wayland compositor. Boots to UI in ~200 ms, ~160 MB RSS on a Pi 5. |
+| 🧠 **It remembers** | **Cerebro** — a cognitive memory cortex (FTS5 + optional semantic embeddings) that survives reboots. The agent wakes up *oriented*: where it left off, its skills, its intentions. It even **consolidates memory nightly** while idle, no prompting. |
+| 🧬 **It evolves** | The agent proposes and applies changes to **its own identity (`soul.md`), its policy, and its plugins** at runtime — every change reversible. Skills grow in memory under selection pressure. It can even **request new hardware** when it wants a capability it lacks. |
+| 🔄 **It rewrites itself** | The frontier piece: the daemon can **rebuild and hot-swap its own binary** from a committed git ref — gated by *build → test → an adversarial LLM review* — while a privileged watchdog health-checks the new process and **automatically rolls back to the last good binary** if it doesn't come up healthy. Proven on real hardware. *(See ↓ [The self-update loop](#-the-self-update-loop).)* |
+| 🤖 **It has a body** | An expressive **GPU-rendered face** (12 emotions, gaze, blinks), reads **air-quality + thermal sensors**, **sees** through a camera, **hears + speaks** (mic/TTS), and drives **GPIO**. Embodiment scales with the hardware actually present. |
+| 🌐 **It's a mesh** | Multiple nodes discover each other (mDNS), message agent-to-agent, and **delegate inference** — a GPU box joins the network and serves big models to the whole cluster, no restart needed. |
+| 🔒 **It's yours** | Runs **fully offline** with a local model (Ollama) or against an API — your call. Memories, soul, and data stay on *your* device. No telemetry. |
+
+---
+
+## 📸 Gallery
+
+> 🚧 *Screenshots populate `assets/screenshots/` — chat, the live face, the sensor heatmap, the dashboard, the terminal.*
+
+<div align="center">
+<table>
+  <tr>
+    <td><img src="assets/screenshots/chat.png" width="420" alt="Agent chat + tool cards"></td>
+    <td><img src="assets/screenshots/face.png" width="420" alt="Expressive GL face"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Streaming chat + inline tool approvals</b></td>
+    <td align="center"><b>The agent's live, GPU-rendered face</b></td>
+  </tr>
+  <tr>
+    <td><img src="assets/screenshots/sensors.png" width="420" alt="IAQ + thermal heatmap"></td>
+    <td><img src="assets/screenshots/dashboard.png" width="420" alt="Home dashboard"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Air-quality history + MLX90640 thermal heatmap</b></td>
+    <td align="center"><b>Home dashboard — CPU/RAM/disk, air quality</b></td>
+  </tr>
+</table>
 </div>
 
 ---
 
-## What is this?
+## 🔄 The self-update loop
 
-ApexOS-RS is the pure-Rust distro of [ApexOS](https://github.com/buckster123/ApexOS). One repo, one `cargo build --release --workspace`, one `install.sh`. Everything runs.
+The capability we know of nowhere else in the open: **an agent that safely modifies its own substrate.** The agent edits its source, commits it, and calls `apply_daemon_update` — every gate runs *while the live daemon keeps serving*, and **every failure path ends with a known-good binary running.**
 
-Where canonical ApexOS bundles Chromium, Python plugins, and a JS frontend, ApexOS-RS replaces all of it with Rust:
-
-| Canonical ApexOS | ApexOS-RS |
-|-----------------|-----------|
-| Chromium kiosk | Slint native UI (KMS/DRM) |
-| Python cerebro-mcp | cerebro-mcp (Rust, 66 tools) |
-| JS/HTML frontend | Slint `.slint` components |
-| cage + seatd + Wayland | direct KMS/DRM, zero compositor |
-
-The Slint UI connects to `ws://localhost:8787/ws` — the same protocol as the browser frontend. agentd is unchanged.
-
+```mermaid
+flowchart TD
+    A["🤖 agent edits + commits its own source"] --> B{{"apply_daemon_update(commit)"}}
+    B --> C["1 · build — cargo build --release"]
+    C --> D["2 · test — cargo test"]
+    D --> E["3 · review — a fresh LLM vets the diff:<br/>could this brick boot / health / rollback?"]
+    E -->|any gate fails| X["↩︎ abort — live daemon untouched"]
+    E -->|all pass| F["4 · file request.json<br/>(agent can't touch /usr/local/bin — non-root)"]
+    F --> G["🛡️ root watchdog: back up → swap → restart"]
+    G --> H{"new binary healthy<br/>within the probe window?"}
+    H -->|yes| OK["✅ confirmed — running the new self"]
+    H -->|no / crashes| RB["↩︎ auto-rollback to agentd.prev<br/>node stays serving"]
+    G -.->|crashes minutes later| PROB["🧯 probation guard → rollback"]
+    style OK fill:#064e3b,stroke:#22c55e,color:#d1fae5
+    style RB fill:#7f1d1d,stroke:#ef4444,color:#fee2e2
+    style X fill:#374151,stroke:#9ca3af,color:#e5e7eb
 ```
-┌─────────────────────── ApexOS-RS workspace ─────────────────────────────┐
-│                                                                           │
-│  agentd        ──── ws://localhost:8787/ws ──┬──→ Browser / PWA          │
-│  cerebro-mcp   (MCP plugins over stdio)      │                            │
-│  apexos-tools  (MCP plugins over stdio)      apexos-rs-ui                │
-│  sensor-bridge (WS events → agentd)       (Slint + KMS/DRM)              │
-│                                           renders to /dev/tty7            │
-└───────────────────────────────────────────────────────────────────────────┘
-```
+
+**Why it's safe:** agentd runs non-root under `ProtectSystem=strict` — it physically *cannot* overwrite its own binary or escalate. It only ever *writes a request file*; a separate root systemd watchdog does the swap and owns the rollback. So even a buggy or compromised agent can't brick the node. The invariant isn't "never ship a bad build" — it's **"never fail to recover from one, automatically, with no human at the board."** → [`docs/self-update.md`](docs/self-update.md)
+
+Pair this with a locally-trainable model on a GPU/DGX tier and a weights-level nursery, and the same safety pattern extends from *the binary* to *the mind* — the road to genuine offline recursive self-improvement. That's the horizon; the binary loop is shipped and battle-tested today.
 
 ---
 
-## Why?
+## 🧬 How it lives
+
+ApexOS-RS isn't prompted into being clever — its cognition is wired into the daemon. The agent boots oriented, acts, remembers, consolidates, and evolves, in a loop that runs without anyone watching.
+
+```mermaid
+flowchart LR
+    boot(["🌅 boot / wake"]) --> prime["cognitive_bootstrap<br/>recall: where I left off,<br/>skills, intentions"]
+    prime --> act["💬 act<br/>chat · tools · sensors · mesh"]
+    act --> remember["🧠 store memories,<br/>episodes, procedures"]
+    remember --> act
+    act --> evolve["🧬 propose_evolution<br/>soul · policy · skills · hardware"]
+    evolve -. reversible .-> act
+    act --> selfupd["🔄 apply_daemon_update<br/>rewrite the binary"]
+    selfupd -. watchdog net .-> boot
+    night(["🌙 nightly, idle"]) --> dream["💤 dream_run<br/>consolidate + prune memory"]
+    dream --> remember
+    style selfupd fill:#3b0764,stroke:#e11d48,color:#fbcfe8
+```
+
+| Layer | Surface | Reversible? |
+|------|---------|-------------|
+| **Identity** | `soul.md` (who it is) | ✅ in-process undo |
+| **Behaviour** | policy / plugins | ✅ |
+| **Competence** | skills in Cerebro (graded, champion-selected) | additive |
+| **Morphology** | hardware requests (a human seats the part) | human-gated |
+| **Substrate** | **the agentd binary itself** | watchdog rollback |
+
+---
+
+## 🏗️ Architecture
+
+```mermaid
+flowchart TB
+    subgraph ws["📦 One Cargo workspace"]
+        agentd["agentd<br/>agent loop · gateway · evolution · self-update"]
+        cerebro["cerebro-mcp<br/>cognitive memory"]
+        tools["apexos-tools<br/>fs · git · vision · audio · gpio"]
+        bridge["apex-sensor-bridge<br/>BME688 + MLX90640"]
+        ui["apexos-rs-ui<br/>Slint + KMS/DRM"]
+    end
+    agentd <-->|MCP / stdio| cerebro
+    agentd <-->|MCP / stdio| tools
+    bridge -->|sensor events| agentd
+    agentd <-->|"Event stream · ws://:8787/ws"| ui
+    agentd <-->|same WS| browser([🌐 Browser / PWA])
+    ui -->|renders| display([🖥️ HDMI / KMS])
+```
+
+The Slint UI and any browser/PWA speak the **same** WebSocket protocol to agentd — the daemon is headless-pure, the display is optional. → [`docs/architecture.md`](docs/architecture.md)
+
+---
+
+## 🖥️ Runs on what you already have
+
+Same binaries everywhere — the *tier* is just environment, no per-device builds. Pi 5 16 GB boards cost $300+ now; the real fleet is the hardware in your drawer.
+
+| Tier | Hardware | RAM | Renderer | Memory | LLM |
+|------|----------|-----|----------|--------|-----|
+| **Nano** | Pi Zero 2W, any 512 MB board | 512 MB | `linuxkms-femtovg` (software) | FTS5 only (~23 MB) | API only |
+| **Micro** | Pi 4 1–2 GB, older ARM64 | 1–2 GB | `linuxkms` | `bge-small` (~275 MB) | API or small local |
+| **Standard** | Pi 5, x86 mini-PC, M1 Mini | 4–8 GB | `linuxkms` / `winit` | `bge-small` | Ollama 7–13B |
+| **Pro** | x86 + GPU (CUDA/ROCm/Metal) | 8 GB+ | `winit` | `bge-large` + GPU | Ollama 30–70B local |
+| **Titan** | DGX Spark / Station | 128 GB+ | headless | GPU-accelerated | 70B+, serves the mesh |
+
+**Modes** (orthogonal to tier): **Kiosk** (Pi + HDMI, native UI) · **Headless** (server/laptop/DGX — browser + PWA only) · **Desktop** (x86 windowed). `install.sh` auto-detects and asks.
+
+<details>
+<summary><b>🌐 Mesh inference — let a GPU node carry the cluster</b></summary>
+
+```mermaid
+flowchart LR
+    subgraph nano["Pi Zero 2W · Nano"]
+        a1["agentd"]
+    end
+    subgraph micro["Pi 4 · Micro"]
+        a2["agentd"]
+        c2["Cerebro (FTS5)"]
+    end
+    subgraph gpu["old RTX box · Pro"]
+        a3["agentd"]
+        ol["Ollama 30–70B"]
+        c3["Cerebro + GPU embeds"]
+    end
+    a1 -->|"hot-swap backend → gpu:11434"| ol
+    a2 -->|send_to_agent| a3
+    c2 -->|dream_run delegated| c3
+```
+
+mDNS discovery + per-peer tokens. A GPU node joins; Nano/Micro nodes point their inference backend at it at runtime (`POST /api/backend`, no restart). The GPU node can even run nightly memory consolidation for the whole cluster.
+</details>
+
+---
+
+## 🚀 Install
+
+```bash
+# Fresh device (Pi or x86) — auto-detects tier + mode:
+curl -fsSL https://raw.githubusercontent.com/buckster123/ApexOS-RS/main/install.sh | sudo bash
+```
+
+```bash
+sudo bash install.sh --no-ui          # headless / server node (no display)
+sudo bash install.sh --tier=nano      # Pi Zero 2W — embeddings off
+sudo bash install.sh --api-key=sk-... # set Anthropic key non-interactively
+```
+
+> [!WARNING]
+> The one-liner pipes a script into `sudo bash` — you're trusting GitHub's TLS/CDN. Review [`install.sh`](install.sh) first if your threat model needs it. **Always build on the Pi, never cross-compile** (Cortex-A76 / arm64).
+
+---
+
+<details>
+<summary><h2>🔬 For the nerds & manual installers (click to expand)</h2></summary>
+
+### The crates
+
+```
+agentd/crates/    # agent daemon — core · gateway · plugins · agent · store · agentd
+cerebro/crates/   # cognitive memory — cerebro lib · cerebro-mcp · cerebro-api · cerebro-cli
+tools/crates/     # system plugins — apexos-tools · apex-sensor-bridge
+ui-slint/         # the native Slint UI (the unique contribution of this repo)
+config/           # default plugins.toml, policy.toml
+deploy/           # systemd units + the self-update watchdog
+install.sh        # one-shot installer
+```
+
+### Capabilities at a glance
+
+- **Cerebro** — 60+ cognitive-memory tools: store/recall, episodes, procedures (graded + champion-selected), intentions, schemas, associative graph, audit trail, nightly `dream_run` consolidation, `cognitive_bootstrap` boot-priming.
+- **apexos-tools** — 30+ tools: workspace-confined filesystem, **git** (commit your own source for self-update), `run_command`, `http_fetch` (SSRF-guarded), camera capture, screenshot mirror, sketchpad, audio DSP, GPIO, `display_face`.
+- **Occipital** — a web "reading cortex": `web_search` / `web_fetch` / `web_recall` with a follow-along reader window.
+- **Self-evolution (EDK)** — `propose_evolution` over soul / policy / plugins (reversible), skill grading, and the *request-to-incarnate* hardware loop.
+- **Self-update** — `apply_daemon_update` + a root systemd watchdog with health-gated rollback + probation. → [`docs/self-update.md`](docs/self-update.md)
+- **Multi-agent identity** — per-session agent binding: distinct Cerebro space, soul, policy, and skin per agent on one node.
+
+### Why pure Rust beats the Chromium build
 
 | | ApexOS (original) | ApexOS-RS |
 |--|--|--|
 | UI runtime | Chromium | Slint native |
-| UI footprint | hundreds of MB of binaries + runtime | one self-contained ~32 MB binary |
+| UI footprint | hundreds of MB + runtime | one ~32 MB binary |
 | UI memory | ~300 MB+ | ~160 MB RSS (Pi 5) |
-| Startup | ~5s (cage + Chromium) | ~200ms |
+| Startup | ~5 s (cage + Chromium) | ~200 ms |
 | Display stack | cage → Wayland → Chromium | KMS/DRM direct |
-| Target hardware | Pi 5 primary | Pi 4, Pi 5, Zero 2W |
 | Language | Rust + HTML/JS | 100% Rust |
-
-ApexOS-RS is for:
-- **Lower-spec hardware** — Pi 4 (2/4GB), Pi Zero 2W, any board where 300MB for Chromium is too much
-- **Faster bring-up** — sub-second from boot to UI
-- **Embedded / industrial** — no browser attack surface, no Wayland compositor to crash
-- **Pure-Rust credibility** — the whole stack in one language
-
-Both distros share the same `agentd` backend. You choose your frontend.
-
----
-
-## Platform tiers
-
-The stack runs in a tiered configuration — the same binaries, different env vars. No special builds per device.
-
-| Tier | Hardware | RAM | Renderer | Embeddings | LLM | RSS target |
-|------|----------|-----|----------|-----------|-----|-----------|
-| **Nano** | Pi Zero 2W, any 512MB Linux board | 512MB | `linuxkms-femtovg` (software) | disabled (FTS5 only) | API only | ~60 MB total |
-| **Micro** | Pi 4 1-2GB, older ARM64 boards | 1-2GB | `linuxkms` | `bge-small` 384-dim | API or small local | ~350 MB |
-| **Standard** | Pi 5 4-8GB, x86 mini-PC, M1 Mac Mini | 4-8GB | `linuxkms` or `winit` | `bge-small` or `bge-base` | Ollama 7-13B | ~500 MB |
-| **Pro** | x86 + GPU (RTX/RX/M2+) | 8GB+ | `winit` | `bge-large` + GPU accel | Ollama 30-70B local | whatever you have |
-
-### Deployment modes
-
-Hardware tier (RAM/GPU) and deployment mode are independent — pick both:
-
-| Mode | Use case | UI | Interface |
-|------|----------|----|-----------|
-| **Kiosk** | Pi with dedicated HDMI display | apexos-rs-ui (KMS/DRM) | local display |
-| **Headless** | server, laptop, DGX Spark | none — skip apexos-rs-ui | browser + mobile PWA |
-| **Desktop** | x86 with a monitor you also use for other things | apexos-rs-ui (winit, windowed) | native window |
-
-**Headless is already fully supported** — agentd is a pure daemon, nothing requires a display. The mobile PWA (`/mobile`) and browser UI (`http://host:8787`) are the interface. Install path just skips the apexos-rs-ui service. This is the right mode for: old laptops, mini-PCs, Mac Minis, DGX Spark, anything you SSH into.
-
-**DGX Spark (GB10 Grace Blackwell):** arm64 Linux (same binary as Pi), 128 GB unified LPDDR5X, 1 PetaFLOP FP4. Ollama already runs on it. fastembed with CUDA/TensorRT ORT provider would be near-instant. Can serve 70B+ models to the whole mesh — the natural "Titan" tier ceiling. NVIDIA IGX OS = Ubuntu 22.04 ARM, same package ecosystem.
-
-**Motivation:** Pi 5 16GB boards now sell for $300+ due to AI demand eating RAM supply. The real opportunity is the hardware already sitting in drawers — last season's mini-PC, the Mac Mini that got replaced by a Studio, the Pi 4 2GB from the before-times. These machines often have GPUs that run far bigger models than the Pi 5 can touch natively.
-
-### Mesh inference delegation
-
-```mermaid
-graph LR
-    subgraph Nano["Nano node\nPi Zero 2W"]
-        UI1["apexos-rs-ui\n~32 MB binary"]
-        AG1["agentd\n~30 MB"]
-    end
-    subgraph Micro["Micro node\nPi 4 1GB"]
-        UI2["apexos-rs-ui\n~32 MB binary"]
-        AG2["agentd\n~30 MB"]
-        CB2["cerebro-mcp\nFTS5 only"]
-    end
-    subgraph GPU["Pro node\nold RTX 2070 box"]
-        AG3["agentd"]
-        CB3["cerebro-mcp\nbge-large + GPU"]
-        OL["Ollama\n30B-70B models"]
-    end
-
-    AG1 -->|"AGENTD_BACKEND=ollama\nAGENTD_OAI_BASE_URL=gpu-node:11434"| OL
-    AG2 -->|send_to_agent| AG3
-    AG3 --> OL
-    CB2 -->|dream_run delegated| CB3
-```
-
-agentd's mesh (avahi discovery + `peers.toml`) already handles this. The GPU node joins the mesh, Nano/Micro nodes hot-swap their inference backend to point at it — no restart needed (`POST /api/backend`). The GPU node can also run `dream_run` for the whole cluster's Cerebro memory consolidation.
 
 ### Hardware compatibility
 
 | Board | RAM | Tier | Notes |
 |-------|-----|------|-------|
-| Raspberry Pi 5 (8GB) | plenty | Standard/Pro | Current primary deploy target |
-| Raspberry Pi 5 (4GB) | comfortable | Standard | |
-| Raspberry Pi 4 (4GB / 2GB) | fine | Standard/Micro | BCM2711, `v3d` driver |
-| Raspberry Pi 4 (1GB) | tight | Micro | `bge-small` fits, keep swap off |
-| Raspberry Pi Zero 2W | 512MB | Nano | `linuxkms-femtovg` + FTS5 only |
-| x86 mini-PC (no GPU) | 4-16GB | Standard | Ollama 7-13B local inference |
-| x86 + NVIDIA GPU | 8GB+ | Pro | CUDA ORT provider, Ollama with full VRAM |
-| x86 + AMD GPU (RX 6xxx+) | 8GB+ | Pro | ROCm 7+, same as CUDA path |
-| Apple Silicon (M1/M2/M3) | 8-96GB | Pro | CoreML ORT provider, Ollama Metal |
-| Any Linux/KMS board | varies | Micro+ | Needs DRM driver (`/dev/dri/card0`) |
+| Raspberry Pi 5 (8/4 GB) | plenty | Standard/Pro | primary deploy target |
+| Raspberry Pi 4 (4/2/1 GB) | fine→tight | Standard→Micro | BCM2711, `v3d` driver |
+| Raspberry Pi Zero 2W | 512 MB | Nano | `linuxkms-femtovg` + FTS5 |
+| x86 mini-PC (no GPU) | 4–16 GB | Standard | Ollama 7–13B |
+| x86 + NVIDIA / AMD GPU | 8 GB+ | Pro | CUDA / ROCm ORT, full-VRAM Ollama |
+| Apple Silicon (M1/M2/M3) | 8–96 GB | Pro | CoreML ORT, Ollama Metal |
+| DGX Spark / Station | 128 GB+ | Titan | arm64 — same binary as the Pi |
 
----
-
-## Status
-
-> **mk1 complete — full stack deployed on the Pi 5.**
-
-| Component | Status |
-|-----------|--------|
-| agentd | ✓ production (Pi 5) |
-| cerebro-mcp (66 tools) | ✓ production (Pi 5) |
-| apexos-tools (31 tools) | ✓ production (Pi 5) |
-| apex-sensor-bridge | ✓ production (Pi 5) |
-| cerebro-api (REST) | ✓ implemented |
-| `install.sh` | ✓ shipped |
-| ui-slint | ✓ all 9 mk1 steps complete (KMS/DRM deploy live) |
-
----
-
-## Architecture
-
-```mermaid
-graph LR
-    subgraph Workspace["ApexOS-RS workspace"]
-        agentd["agentd\nagentd/crates/"]
-        cerebro["cerebro-mcp\ncerebro/crates/"]
-        tools["apexos-tools\ntools/crates/"]
-        bridge["apex-sensor-bridge\ntools/crates/"]
-        ui["apexos-rs-ui\nui-slint/"]
-    end
-
-    subgraph Runtime["Runtime on device"]
-        WS["ws://localhost:8787/ws"]
-        HDMI["/dev/tty7\nHDMI / KMS"]
-        Browser["Browser\n(any device)"]
-    end
-
-    agentd <-->|MCP stdio| cerebro
-    agentd <-->|MCP stdio| tools
-    bridge -->|sensor events| agentd
-    agentd <-->|Event stream| WS
-    WS --> ui
-    WS --> Browser
-    ui -->|renders to| HDMI
-```
-
-See [`docs/architecture.md`](docs/architecture.md) for the full component graph,
-thread model, KMS/DRM setup, and agentd protocol.
-
-## Install
-
-> **Security note:** The install script is piped directly into `sudo bash`. You are trusting the integrity of GitHub's CDN and TLS. Review the script first at the URL above if your threat model requires it.
-
-```bash
-# Fresh device (Pi or x86) — auto-detects tier and mode:
-curl -fsSL https://raw.githubusercontent.com/buckster123/ApexOS-RS/main/install.sh | sudo bash
-
-# Options
-sudo bash install.sh --no-ui             # headless / server node
-sudo bash install.sh --tier=nano         # Pi Zero 2W, embedding disabled
-sudo bash install.sh --api-key=sk-...    # set Anthropic key non-interactively
-```
-
-## Build Roadmap (UI)
-
-The non-UI stack is production. The Slint UI shipped in 9 steps — **all complete**:
-
-| # | Feature | Status |
-|---|---------|--------|
-| 1 | Agent chat — streaming message list, send input | ✓ |
-| 2 | Tool call blocks — collapsible cards, inline approval | ✓ |
-| 3 | Home dashboard — CPU/RAM/disk bars, IAQ badge | ✓ |
-| 4 | Sensor window — IAQ stats + thermal heatmap (custom painter) | ✓ |
-| 5 | Session management — init, picker, history replay | ✓ |
-| 6 | Voice controls — mic → `/api/record/start`, speaker → `/api/speak` | ✓ |
-| 7 | Settings — soul.md editor, policy mode, plugin list | ✓ |
-| 8 | Power modal + model/policy selectors | ✓ |
-| 9 | KMS/DRM deploy — `linuxkms` backend, systemd, retire cage | ✓ |
-
-Beyond the mk1 9 steps: PTY terminal, sketchpad, mesh, council, an expressive GL face (`display_face`), workspace image picker, and more have all shipped. See [`CLAUDE.md`](CLAUDE.md) for live build status.
-
-Full per-step detail: [`docs/build-roadmap.md`](docs/build-roadmap.md)
-
----
-
-## Docs
+### Docs
 
 | File | Contents |
-|------|---------|
-| [`docs/architecture.md`](docs/architecture.md) | WS renderer pattern, thread model, KMS/DRM |
-| [`docs/build-roadmap.md`](docs/build-roadmap.md) | 10-step plan with per-step detail |
-| [`docs/slint-notes.md`](docs/slint-notes.md) | Slint gotchas, Pi GPU setup, common errors |
-| [`docs/porting-guide.md`](docs/porting-guide.md) | Feature map: current JS → Slint equivalents |
+|------|----------|
+| [`docs/architecture.md`](docs/architecture.md) | component graph, thread model, KMS/DRM, agentd protocol |
+| [`docs/self-update.md`](docs/self-update.md) | the daemon self-update loop — gates, watchdog, rollback, probation |
+| [`docs/evolutionary-layer.md`](docs/evolutionary-layer.md) | exo-evolution: competence grows in memory, not the weights |
+| [`docs/edk.md`](docs/edk.md) | Evolutionary Development Kit — identity · competence · morphology |
+| [`docs/agent-identity.md`](docs/agent-identity.md) | system-stamped per-agent identity |
+| [`docs/symbiosis.md`](docs/symbiosis.md) | the runtime cognitive architecture |
+| [`docs/slint-notes.md`](docs/slint-notes.md) | Slint patterns, Pi GPU setup, gotchas |
+| [`CLAUDE.md`](CLAUDE.md) | the living project blueprint + build status |
+
+### Build & deploy
+
+```bash
+cargo build --release --workspace      # one build, whole stack (build on the Pi)
+cargo test --workspace --exclude ui-slint
+sudo cp target/release/<bin> /usr/local/bin/ && sudo systemctl restart <svc>
+apexos-update                          # pull → rebuild → hot-swap → restart
+```
+
+</details>
 
 ---
 
-## Relationship to ApexOS
+## 🤝 Relationship to ApexOS
 
-ApexOS-RS is a **fork/distro**, not a replacement. The original [ApexOS](https://github.com/buckster123/ApexOS)
-stays Chromium-based — best for Pi 5, full feature set including Monaco IDE and iframe embeds.
-ApexOS-RS optimises for footprint, hardware range, and a fully Rust stack.
-
----
+ApexOS-RS is a **distro, not a replacement.** Canonical [ApexOS](https://github.com/buckster123/ApexOS) stays Chromium-based — richest feature set (Monaco IDE, iframe embeds), best on a Pi 5. ApexOS-RS optimizes for footprint, hardware range, a 100%-Rust stack, and the self-evolution / self-update frontier. **Both share the same `agentd` backend — you choose the frontend.**
 
 ## License
 
-MIT
+MIT © [buckster123](https://github.com/buckster123)
+
+<div align="center"><sub>Built in the open. An agent that remembers, evolves, and rewrites itself — on the hardware you already own.</sub></div>
