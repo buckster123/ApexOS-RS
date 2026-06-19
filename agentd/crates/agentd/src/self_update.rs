@@ -51,15 +51,36 @@ fn probe_timeout() -> u64 {
         .unwrap_or(120)
 }
 
-/// The git checkout agentd self-builds from. The agent edits + commits source here
-/// (git tools, #117) before calling this tool. Default matches the design's
-/// `AGENTD_GIT_ROOTS=/opt/ApexOS-RS`.
+/// The git checkout agentd self-builds from — APEX's own evolution repo. The agent
+/// edits + commits source here (git tools, #117) before calling this tool. Default
+/// is an `agentd`-owned clone in its sandbox (`install.sh` provisions it, slice 3.1),
+/// distinct from the operator's `apexos-update` clone so the two never fight over
+/// git ownership. Override with `AGENTD_SELF_UPDATE_REPO`.
 fn self_update_repo() -> PathBuf {
     std::env::var("AGENTD_SELF_UPDATE_REPO")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/opt/ApexOS-RS"))
+        .unwrap_or_else(|| PathBuf::from("/var/lib/agentd/self-update/ApexOS-RS"))
+}
+
+/// The cargo binary to build with. The `agentd` user typically has no rustup in its
+/// own PATH, so the deploy points `AGENTD_CARGO` at a shared toolchain it can read
+/// (slice 3.1). Falls back to `cargo` on PATH (dev / when already on PATH).
+fn cargo_bin() -> String {
+    std::env::var("AGENTD_CARGO")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "cargo".to_string())
+}
+
+/// Optional explicit `CARGO_TARGET_DIR` for the staging build — set it when the repo
+/// dir isn't where the build output should land (e.g. a read-only source or a
+/// shared cache). Unset → cargo's default (`<repo>/target`).
+fn cargo_target_dir() -> Option<String> {
+    std::env::var("AGENTD_SELF_UPDATE_TARGET")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
 }
 
 /// The request the watchdog consumes (flat JSON — see docs/self-update.md).
@@ -119,13 +140,16 @@ async fn emit(bus: &BusHandle, session: SessionId, call_id: ActionId, ok: bool, 
 
 /// Run a command in `dir`, bounded by `timeout`. Returns combined stdout+stderr on
 /// success; `Err(message)` on non-zero exit, timeout, or spawn failure.
-async fn run_cmd(dir: &PathBuf, program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
+async fn run_cmd(dir: &PathBuf, program: &str, args: &[&str], timeout: Duration, envs: &[(&str, String)]) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
     let child = cmd.spawn().map_err(|e| format!("spawn `{program}` failed: {e}"))?;
     let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(o)) => o,
@@ -153,7 +177,18 @@ fn tail(s: &str, max: usize) -> String {
 }
 
 async fn git(dir: &PathBuf, args: &[&str]) -> Result<String, String> {
-    run_cmd(dir, "git", args, Duration::from_secs(30)).await.map(|s| s.trim().to_string())
+    run_cmd(dir, "git", args, Duration::from_secs(30), &[]).await.map(|s| s.trim().to_string())
+}
+
+/// Run cargo (`AGENTD_CARGO` or `cargo`) in `dir` with the optional shared
+/// `CARGO_TARGET_DIR`. Inherits the agentd process env (so a deploy-set
+/// `CARGO_HOME`/`RUSTUP_HOME`/`PATH` reach the build).
+async fn run_cargo(dir: &PathBuf, args: &[&str], timeout: Duration) -> Result<String, String> {
+    let envs: Vec<(&str, String)> = match cargo_target_dir() {
+        Some(t) => vec![("CARGO_TARGET_DIR", t)],
+        None => vec![],
+    };
+    run_cmd(dir, &cargo_bin(), args, timeout, &envs).await
 }
 
 /// Whether an update is already in flight: a `request.json` (watchdog will pick it
@@ -230,8 +265,11 @@ async fn run_update(
             format!("commit {commit} ({resolved}) is not the repo HEAD ({head}); check it out first (v1 builds HEAD in place)")).await;
         return;
     }
-    if run_cmd(&repo, "cargo", &["--version"], Duration::from_secs(30)).await.is_err() {
-        emit(bus, session, call_id, false, "cargo not available on PATH — cannot build").await;
+    if run_cargo(&repo, &["--version"], Duration::from_secs(30)).await.is_err() {
+        emit(bus, session, call_id, false, format!(
+            "cargo not runnable (tried `{}`) — the agentd user needs a build toolchain. \
+             Set AGENTD_CARGO to a shared cargo it can read, or provision one (see \
+             docs/self-update.md slice 3.1).", cargo_bin())).await;
         return;
     }
 
@@ -243,12 +281,14 @@ async fn run_update(
     let clear_lock = || { let _ = std::fs::remove_file(update_dir().join("update.lock")); };
 
     // ── stage 1: staging build (never over the live binary) ─────────────────────
-    if let Err(e) = run_cmd(&repo, "cargo", &["build", "--release", "-p", "agentd"], build_timeout()).await {
+    if let Err(e) = run_cargo(&repo, &["build", "--release", "-p", "agentd"], build_timeout()).await {
         clear_lock();
         emit(bus, session, call_id, false, format!("STAGE 1 build failed (daemon untouched):\n{e}")).await;
         return;
     }
-    let built = repo.join("target/release/agentd");
+    // Built binary lives under CARGO_TARGET_DIR (if set) else <repo>/target.
+    let target_root = cargo_target_dir().map(PathBuf::from).unwrap_or_else(|| repo.join("target"));
+    let built = target_root.join("release/agentd");
     if !built.exists() {
         clear_lock();
         emit(bus, session, call_id, false, format!("build reported success but {} is missing", built.display())).await;
@@ -256,13 +296,13 @@ async fn run_update(
     }
 
     // ── stage 2: tests ──────────────────────────────────────────────────────────
-    if let Err(e) = run_cmd(&repo, "cargo", &["test", "-p", "agentd"], build_timeout()).await {
+    if let Err(e) = run_cargo(&repo, &["test", "-p", "agentd"], build_timeout()).await {
         clear_lock();
         emit(bus, session, call_id, false, format!("STAGE 2 `cargo test -p agentd` failed (daemon untouched):\n{e}")).await;
         return;
     }
     if let Some(tc) = &test_cmd {
-        if let Err(e) = run_cmd(&repo, "sh", &["-c", tc], build_timeout()).await {
+        if let Err(e) = run_cmd(&repo, "sh", &["-c", tc], build_timeout(), &[]).await {
             clear_lock();
             emit(bus, session, call_id, false, format!("STAGE 2 test_cmd failed (daemon untouched):\n{e}")).await;
             return;
@@ -427,9 +467,29 @@ mod tests {
     #[test]
     fn repo_default_and_override() {
         std::env::remove_var("AGENTD_SELF_UPDATE_REPO");
-        assert_eq!(self_update_repo(), PathBuf::from("/opt/ApexOS-RS"));
+        assert_eq!(self_update_repo(), PathBuf::from("/var/lib/agentd/self-update/ApexOS-RS"));
         std::env::set_var("AGENTD_SELF_UPDATE_REPO", "/tmp/x");
         assert_eq!(self_update_repo(), PathBuf::from("/tmp/x"));
         std::env::remove_var("AGENTD_SELF_UPDATE_REPO");
+    }
+
+    #[test]
+    fn cargo_bin_default_and_override() {
+        std::env::remove_var("AGENTD_CARGO");
+        assert_eq!(cargo_bin(), "cargo");
+        std::env::set_var("AGENTD_CARGO", "/opt/rust/bin/cargo");
+        assert_eq!(cargo_bin(), "/opt/rust/bin/cargo");
+        std::env::set_var("AGENTD_CARGO", "  ");
+        assert_eq!(cargo_bin(), "cargo"); // blank → default
+        std::env::remove_var("AGENTD_CARGO");
+    }
+
+    #[test]
+    fn cargo_target_dir_opt() {
+        std::env::remove_var("AGENTD_SELF_UPDATE_TARGET");
+        assert_eq!(cargo_target_dir(), None);
+        std::env::set_var("AGENTD_SELF_UPDATE_TARGET", "/var/lib/agentd/self-update/target");
+        assert_eq!(cargo_target_dir().as_deref(), Some("/var/lib/agentd/self-update/target"));
+        std::env::remove_var("AGENTD_SELF_UPDATE_TARGET");
     }
 }
