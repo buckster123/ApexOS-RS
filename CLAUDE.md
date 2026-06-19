@@ -416,6 +416,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 | `docs/app-parity.md` | Bringing original ApexOS apps to -RS — parity matrix, build tiers, AI⇄app symbiosis contract, and the "how to add an app" recipe |
 | `docs/agent-identity.md` | Agent Identity charter — identity is system-**stamped** not agent-supplied: enforced per-session `agent_id` (Cerebro space + soul + policy + skin), the user↔agent↔skin boot flow, the auth-weight open decision, the 3-slice arc |
 | `docs/occipital.md` | Occipital integration — the agent's reading cortex (standalone sibling repo): registering `occipital-mcp` (web_search/fetch/recall), the deploy + activation paths, and the ui-slint follow-along reader window |
+| `docs/self-update.md` | Daemon self-update loop (mk3) — DESIGN: the agent rewriting its own core binary safely. The recoverability invariant, the privilege-boundary watchdog, the health contract, Cerebro-as-recovery, the failure-mode table, and the implementation slices |
 
 ---
 
