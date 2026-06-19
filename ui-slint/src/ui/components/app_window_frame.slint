@@ -101,6 +101,9 @@ export component AppWindowFrame inherits Rectangle {
     in property <string>         policy-mode;
     in property <string>         current-model;
     in property <bool>           api-key-set;
+    in property <bool>           cache-enabled: true;
+    in property <bool>           cache-conversation: true;
+    in property <string>         cache-ttl: "5m";
     in property <[ModelItem]>    models;
     in property <string>         terminal-text;
     in property <int>            terminal-scroll-tick;
@@ -184,6 +187,7 @@ export component AppWindowFrame inherits Rectangle {
     callback save-soul(string);
     callback set-policy(string);
     callback set-model(string);
+    callback set-cache(bool, bool, string);
     callback refresh-settings();
     callback terminal-send(string);
     // Tier-A parity apps.
@@ -468,9 +472,13 @@ export component AppWindowFrame inherits Rectangle {
             current-model: root.current-model;
             api-key-set: root.api-key-set;
             models: root.models;
+            cache-enabled: root.cache-enabled;
+            cache-conversation: root.cache-conversation;
+            cache-ttl: root.cache-ttl;
             save-soul(text) => { root.save-soul(text); }
             set-policy(mode) => { root.set-policy(mode); }
             set-model(id) => { root.set-model(id); }
+            set-cache(e, c, t) => { root.set-cache(e, c, t); }
             refresh => { root.refresh-settings(); }
         }
 

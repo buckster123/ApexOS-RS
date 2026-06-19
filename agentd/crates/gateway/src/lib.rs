@@ -47,6 +47,8 @@ pub struct GatewayState {
     /// OAI-compatible key (OpenRouter / Together / etc.) — separate from Anthropic key
     pub oai_api_key:           Arc<RwLock<String>>,
     pub model:                 Arc<RwLock<String>>,
+    /// Prompt-cache policy (Anthropic) — live-tunable from the Settings UI via /api/cache.
+    pub cache:                 Arc<RwLock<apexos_agent::CacheConfig>>,
     /// Active inference backend — live-swappable: "anthropic" | "ollama" | "vllm" | "openrouter"
     pub backend:               Arc<RwLock<String>>,
     /// Base URL for OAI-compatible backends — live-swappable
@@ -185,6 +187,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/keys",        get(get_keys_handler).post(set_keys_handler))
         .route("/api/model",       get(get_model_handler).post(set_model_handler))
         .route("/api/models",      get(get_models_handler))
+        .route("/api/cache",       get(get_cache_handler).post(set_cache_handler))
         .route("/api/thermal/frame", get(thermal_frame_handler))
         .route("/api/backend",     get(get_backend_handler).post(set_backend_handler))
         .route("/api/policy",         post(set_policy_handler))
@@ -782,6 +785,46 @@ async fn set_model_handler(
     }
     *state.model.write().await = model;
     Json(serde_json::json!({ "ok": true }))
+}
+
+/// Current prompt-cache policy (Anthropic). `ttl` is "5m" | "1h".
+async fn get_cache_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let c = state.cache.read().await;
+    Json(serde_json::json!({
+        "enabled":            c.enabled,
+        "cache_conversation": c.cache_conversation,
+        "ttl":                c.ttl.label(),
+        "summary":            c.summary(),
+    }))
+}
+
+/// Live-tune the prompt-cache policy. Any subset of `enabled` / `cache_conversation`
+/// (bools) and `ttl` ("5m"|"1h") may be present; absent fields keep their value. Takes
+/// effect on the very next turn — the engine reads this arc per request.
+async fn set_cache_handler(
+    State(state): State<GatewayState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let mut c = state.cache.write().await;
+    if let Some(b) = body["enabled"].as_bool() {
+        c.enabled = b;
+    }
+    if let Some(b) = body["cache_conversation"].as_bool() {
+        c.cache_conversation = b;
+    }
+    if let Some(t) = body["ttl"].as_str() {
+        c.ttl = match t.trim().to_ascii_lowercase().as_str() {
+            "1h" | "1hr" | "hour" | "3600" => apexos_agent::CacheTtl::OneHour,
+            _ => apexos_agent::CacheTtl::FiveMin,
+        };
+    }
+    Json(serde_json::json!({
+        "ok":                 true,
+        "enabled":            c.enabled,
+        "cache_conversation": c.cache_conversation,
+        "ttl":                c.ttl.label(),
+        "summary":            c.summary(),
+    }))
 }
 
 async fn power_handler(
