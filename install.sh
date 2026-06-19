@@ -650,7 +650,9 @@ hdr "System dependencies"
 # node's _apexos._tcp service (see the service file dropped below) and avahi-utils
 # provides avahi-browse, which agentd's discovery loop + /api/mesh/nodes shell out to.
 # Both halves are mode-independent — a headless inference node still joins the mesh.
-PKGS=(curl git pkg-config build-essential libssl-dev whiptail ffmpeg avahi-daemon avahi-utils)
+# jq: the self-update watchdog parses request.json/health.json with it (sed fallback
+# exists, but jq makes the recovery path robust — see docs/self-update.md).
+PKGS=(curl git pkg-config build-essential libssl-dev whiptail ffmpeg avahi-daemon avahi-utils jq)
 if ! $NO_UI; then
   PKGS+=(libfontconfig1-dev libgbm-dev libegl-dev libudev-dev libinput-dev libxkbcommon-dev)
 fi
@@ -760,7 +762,7 @@ if ! $NO_UI; then
   done
 fi
 
-mkdir -p /etc/agentd /var/lib/agentd/{workspace,events,ui,cerebro/models}
+mkdir -p /etc/agentd /var/lib/agentd/{workspace,events,ui,cerebro/models,update}
 chown -R agentd:agentd /var/lib/agentd
 chmod 750 /var/lib/agentd
 ok "User and directories ready"
@@ -987,6 +989,21 @@ systemctl enable agentd apex-sensor-bridge
 ! $NO_UI          && systemctl enable apexos-rs-ui || true
 
 ok "Services enabled"
+
+# ── Self-update watchdog ────────────────────────────────────────────────────────
+# The privileged (root) half of the daemon self-update loop (docs/self-update.md).
+# agentd (non-root) can only WRITE /var/lib/agentd/update/request.json; the .path
+# unit notices it and runs the watchdog as root to do the binary swap + rollback.
+# Pre-installed + fixed here so the privileged code is auditable, never agent-authored.
+hdr "Self-update watchdog"
+install -d /usr/local/lib/apexos
+install -m 755 "$REPO_DIR/deploy/apexos-self-update.sh"      /usr/local/lib/apexos/self-update.sh
+install -m 644 "$REPO_DIR/deploy/apexos-self-update.service" /etc/systemd/system/apexos-self-update.service
+install -m 644 "$REPO_DIR/deploy/apexos-self-update.path"    /etc/systemd/system/apexos-self-update.path
+systemctl daemon-reload
+# enable --now arms the .path watcher immediately (and idempotently on re-runs).
+systemctl enable --now apexos-self-update.path >/dev/null 2>&1 || true
+ok "Self-update watchdog installed (apexos-self-update.path armed)"
 
 # ── Self-update command ────────────────────────────────────────────────────────
 # Drop an `apexos-update` so updates need zero cargo/git knowledge: it just re-runs

@@ -1,0 +1,16 @@
+[Unit]
+Description=agentd self-update watchdog (privileged binary swap + health-gated rollback)
+Documentation=https://github.com/buckster123/ApexOS-RS/blob/main/docs/self-update.md
+# Deliberately NOT bound to agentd's lifecycle (no Requires/BindsTo/PartOf): the
+# watchdog SUPERVISES agentd and must survive stopping/restarting it. It is the
+# survivor — it cannot itself be taken down by the thing it is swapping.
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/lib/apexos/self-update.sh
+# Generous ceiling: the script's own health probe is bounded (default 120s) plus
+# slow Nano-tier boot; this is only a backstop against a wedged run.
+TimeoutStartSec=600
+# Triggered by apexos-self-update.path; never auto-restart (the script is
+# idempotent and the .path re-fires if a request remains).

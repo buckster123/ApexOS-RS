@@ -1,6 +1,6 @@
 # Daemon self-update loop — design (mk3)
 
-> **Status: DESIGN locked; implementation underway — slice 1 (health marker + commit embed) LANDED.** Implement the rest in slices (bottom of doc).
+> **Status: DESIGN locked; implementation underway — slices 1 (health marker + commit embed) & 2 (watchdog + units + rollback) LANDED.** Remaining: slices 3–5 (bottom of doc).
 > The one self-modification that *leaves the process model* — so it carries the
 > most safety machinery. Seeded by APEX's own wishlist proposal (`apex-forge-wishlist.md`,
 > item 2); refined here against the real systemd/agentd constraints.
@@ -215,9 +215,40 @@ agent continuity across reboots gives the *updater* its result channel.
    Policy: `ask` in suggest, autonomous in yolo (the gates/rollback are identical
    either way — see autonomy ladder).
 4. **Read-root** for `/var/lib/agentd/update` so the agent can read its outcome markers.
-5. **systemd units** (in `deploy/`, installed by `install.sh`): `apexos-self-update.path`
-   (+ `.service`), and `agentd.service` additions: `StartLimitIntervalSec` /
-   `StartLimitBurst` + `OnFailure=apexos-rollback.service` (conditional rollback).
+   (slice 3 — the tool's read-root config.)
+5. **systemd units** — ✅ IMPLEMENTED (slice 2): `deploy/apexos-self-update.path`
+   (watches `request.json`) + `deploy/apexos-self-update.service` (oneshot, root) +
+   `deploy/apexos-self-update.sh` (the watchdog). `install.sh` installs the script to
+   `/usr/local/lib/apexos/self-update.sh`, arms the `.path`, adds `jq`, creates
+   `/var/lib/agentd/update`. The `agentd.service` probation additions
+   (`StartLimitIntervalSec`/`Burst` + conditional `OnFailure`) are **slice 5**.
+
+### The request + outcome contract (slice 2 ↔ slice 3)
+
+agentd (slice 3) writes `request.json`; the watchdog consumes it and writes one
+outcome marker. All flat JSON in `/var/lib/agentd/update/`:
+
+```jsonc
+// request.json — written by agentd after its pre-swap gates pass (stage 4)
+{ "staged": "/var/lib/agentd/update/agentd.staged",  // staged binary (agentd-built)
+  "staged_sha256": "<sha256 of staged>",             // watchdog verifies before swap
+  "target_commit": "<GIT_COMMIT the staged binary embeds>",
+  "prev_commit":   "<currently-running commit>",
+  "created_at":    <unix>,    // health booted_at must be ≥ this (proves NEW boot)
+  "timeout":       120,       // health-probe seconds
+  "reason":        "<why>" }
+
+// confirmed.json | rolled-back.json | rejected.json — written by the watchdog
+{ "outcome": "confirmed", "reason": "...", "target_commit": "...",
+  "prev_commit": "...", "ts": <unix> }
+```
+
+The watchdog keeps a phase file (`state` = `BACKED_UP`|`SWAPPED`) so it is
+**idempotent + power-loss safe**: a reboot mid-swap re-enters at the recorded
+phase and never overwrites the good `agentd.prev` backup. All paths + the
+`systemctl` binary are env-overridable (`AGENTD_UPDATE_DIR`,
+`APEXOS_SELF_UPDATE_{BIN,SYSTEMCTL,POLL}`) **for the drills only** — the systemd
+oneshot runs with a clean env, so production always uses the hard-coded defaults.
 
 ## Bootstrapping
 
@@ -230,14 +261,35 @@ running* (old) watchdog supervises the swap-in of the new one.
 ## Testing — never on apex1 first
 
 apex1 is APEX's permanent brain. The self-update machinery is validated on the
-**test-rig Pi** (a separate board for clean slates / risky drills) before apex1:
+**test rig (apex2, .146)** before apex1.
 
-- **Forced-rollback drill** — deploy a deliberately-broken agentd (e.g. `panic!()`
-  at boot) via the loop and assert the watchdog restores `agentd.prev` within
-  `TIMEOUT` and the node stays serving. This is the single most important test:
-  *prove rollback works before trusting the loop.*
+**Logic proven locally first.** `deploy/apexos-self-update-drill.sh` runs the
+watchdog against a fake `systemctl` through all six state-machine paths (24
+assertions, all green): confirm, health-timeout rollback, crash-fast rollback,
+sha-mismatch reject (daemon untouched), power-loss reconcile, power-loss
+resume-rollback — plus both the jq and sed-fallback JSON parsers. Run it anywhere:
+`bash deploy/apexos-self-update-drill.sh`.
+
+On-hardware drills (apex2), driven by hand-writing a `request.json` — no agent yet:
+
+- **Forced-rollback drill** *(the single most important test)* — stage a
+  deliberately-broken agentd (`panic!()` at boot), write `request.json`, and assert
+  the watchdog restores `agentd.prev` within `TIMEOUT` and the node stays serving:
+  ```sh
+  # on apex2, as root:
+  sudo install -m755 /path/to/broken-agentd /var/lib/agentd/update/agentd.staged
+  sha=$(sha256sum /var/lib/agentd/update/agentd.staged | cut -d' ' -f1)
+  cur=$(jq -r .commit /var/lib/agentd/update/health.json)
+  cat >/var/lib/agentd/update/request.json <<EOF
+  { "staged":"/var/lib/agentd/update/agentd.staged","staged_sha256":"$sha",
+    "target_commit":"BROKEN","prev_commit":"$cur","created_at":$(date +%s),
+    "timeout":120,"reason":"forced-rollback drill" }
+  EOF
+  journalctl -u apexos-self-update -f         # watch the swap → timeout → rollback
+  cat /var/lib/agentd/update/rolled-back.json # assert rollback, node still serving
+  ```
 - **Power-loss drill** — kill power mid-swap; assert next boot reconciles via the
-  orphaned `request.json`.
+  orphaned `request.json` (the `.path` unit re-fires; phase file resumes correctly).
 - **Dry-run mode** — `apply_daemon_update(..., dry_run=true)` runs gates 0–3 and
   reports, without writing a request.
 - **Latent-crash drill** — a binary that boots healthy then exits after 60 s;
@@ -263,9 +315,12 @@ Each slice is independently shippable + testable; build in order, and **prove sl
 (rollback) on the test rig before wiring slice 3.**
 
 1. **Health marker + commit embed** (agentd). Additive, deploys normally. Foundation. **← ✅ LANDED.**
-2. **Watchdog + units + rollback** (`deploy/` + `install.sh`). *Test the forced-
-   rollback + power-loss drills hard on the rig (apex2 .146).* No agent involvement yet
-   — drive it by hand-writing a `request.json`.
+2. **Watchdog + units + rollback** (`deploy/` + `install.sh`). **← ✅ LANDED.** No
+   agent involvement yet — drive it by hand-writing a `request.json`. The full state
+   machine is proven locally by `deploy/apexos-self-update-drill.sh` (24 assertions:
+   confirm · timeout-rollback · crash-rollback · sha-reject · both power-loss paths ·
+   jq + sed parsing). *Still TODO: the on-hardware forced-rollback + power-loss drills
+   on the rig (apex2 .146) once deployed.*
 3. **`apply_daemon_update` tool + gates + Cerebro wiring** (agentd). Now the agent
    can trigger it. Dry-run first.
 4. **Adversarial LLM review gate** (sub-agent).
