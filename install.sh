@@ -1054,6 +1054,21 @@ if ! grep -q "^AGENTD_TOKEN=" "$ENV_FILE" 2>/dev/null; then
   ok "AGENTD_TOKEN generated (bearer auth enabled)"
 fi
 
+# AGENTD_BIND — default the gateway to the LAN (0.0.0.0) so mesh peers can reach
+# this node. A mesh listener on loopback is never useful for multi-node operation
+# (it silently breaks inbound a2a / pairing — the peer connects out but nothing
+# routes back). Safe here because a token is ALWAYS generated above: every /api +
+# /ws route is bearer-gated, and agentd's F036 gate refuses a non-loopback bind
+# without a token. The agentd *code* default stays loopback (protects a token-less
+# raw `cargo run`); install.sh is the layer that guarantees a token, so it's where
+# the LAN default belongs. Seed-if-absent: an operator who pinned 127.0.0.1 for a
+# deliberately-private node is preserved, and an already-deployed loopback-only
+# node gains LAN reach on its next `apexos-update`.
+if ! grep -q "^AGENTD_BIND=" "$ENV_FILE" 2>/dev/null; then
+  write_env_key "AGENTD_BIND" "0.0.0.0:8787"
+  ok "AGENTD_BIND=0.0.0.0:8787 (mesh-reachable; token-gated)"
+fi
+
 write_env_key "ANTHROPIC_API_KEY"  "$API_KEY"
 write_env_key "OPENROUTER_API_KEY" "$OPENROUTER_KEY"
 
