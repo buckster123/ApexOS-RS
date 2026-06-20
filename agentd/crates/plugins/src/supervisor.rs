@@ -771,9 +771,16 @@ impl Supervisor {
                             // header rather than argv — never visible in `ps`. The peer's
                             // /api/sessions/{id}/message is token-gated; without the credential
                             // this 401s (the whole reason cross-node a2a needs the per-peer token).
+                            // Stamp our node_id as `from` so the receiver can route
+                            // this into our own per-peer thread on its side (not its
+                            // root session 0) and surface the provenance. Absent on a
+                            // generic external POST → the receiver falls back to s0.
                             let mut req = reqwest::Client::new()
                                 .post(&url)
-                                .json(&serde_json::json!({ "message": body }))
+                                .json(&serde_json::json!({
+                                    "message": body,
+                                    "from":    apexos_core::node_id(),
+                                }))
                                 .timeout(std::time::Duration::from_secs(15));
                             if let Some(tok) = token.as_deref() {
                                 req = req.bearer_auth(tok);

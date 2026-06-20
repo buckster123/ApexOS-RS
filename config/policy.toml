@@ -40,6 +40,16 @@ mode = "suggest"
 "gpio_pwm"           = "ask"
 "gpio_servo"         = "ask"
 
+# Mesh a2a (send_to_agent) — allow, bounded by the trusted peer registry. A send
+# can only reach a node already paired into peers.toml (with a stored bearer token),
+# and a2a is non-destructive: it just starts a turn on a peer you deliberately
+# trust. Gating it as the suggest-mode "unknown -> ask" fallthrough stalls every
+# autonomous mesh reply on an approval no one is watching (the reply runs in the
+# peer's own session, not the operator's chat) — a dead end for colony comms.
+# list_mesh_peers is a read. bootstrap_node (SSH + remote install) stays ask.
+"send_to_agent"   = "allow"
+"list_mesh_peers" = "allow"
+
 # Git tools (apexos-tools) — confined by the tool to the workspace + AGENTD_GIT_ROOTS.
 # Read-only verbs + init/branch/commit are allow (self-confined, like read_file:
 # with no AGENTD_GIT_ROOTS the only git root is the workspace, so an allow commit

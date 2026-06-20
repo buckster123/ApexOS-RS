@@ -83,6 +83,15 @@ pub struct GatewayState {
     pub pairing:           Arc<std::sync::Mutex<Option<mesh::Pairing>>>,
     /// Own node_id (hostname) — used by discovery loop to avoid self-bootstrap
     pub node_id:           Arc<String>,
+    /// Mesh a2a routing: peer node_id → the session on THIS node that holds that
+    /// peer's conversation thread. Allocated once (from `next_session_id`) on a
+    /// peer's first inbound message so each peer's a2a stays in its own session
+    /// instead of flooding root session 0 / the user's active chat. Persisted to
+    /// `mesh_sessions_path` so the thread survives a restart. See
+    /// `session_message_handler` + `mesh_session_for`.
+    pub mesh_sessions:      Arc<std::sync::Mutex<HashMap<String, SessionId>>>,
+    /// On-disk JSON backing for `mesh_sessions` (`<log_dir>/mesh_sessions.json`).
+    pub mesh_sessions_path: PathBuf,
     /// Vast.ai instance + tunnel state — shared with supervisor for virtual tools
     pub vast_state:        VastState,
     /// Per-session agent bindings (multi-agent runtime). A `hello` frame may bind
@@ -1016,9 +1025,61 @@ async fn active_sessions_handler(State(state): State<GatewayState>) -> impl Into
     Json(serde_json::json!(sessions))
 }
 
+/// Resolve (allocate-once) the session that holds `peer`'s a2a thread on this node.
+/// Maps `peer node_id → SessionId` so every message from a given peer lands in the
+/// same session — its own thread, kept out of root session 0 and the user's active
+/// chat. The id is drawn from the shared `next_session_id` atomic (so it can never
+/// collide with a socket-allocated session), recorded in `mesh_sessions`, and the
+/// map is persisted best-effort. A restart reloads the map (and bumps the counter
+/// past any loaded id in `main.rs`), so the thread is continuous across restarts.
+/// Pure allocate-or-lookup: returns `peer`'s existing session, or a freshly
+/// allocated one drawn from `counter`. The bool is `true` only when a NEW id was
+/// allocated (the caller persists then). Ids come from the SAME atomic the gateway
+/// uses for socket sessions, so a mesh session can never collide with a socket one.
+fn mesh_session_alloc(
+    map: &mut HashMap<String, SessionId>,
+    counter: &AtomicU64,
+    peer: &str,
+) -> (SessionId, bool) {
+    if let Some(s) = map.get(peer) {
+        return (*s, false);
+    }
+    let sid = SessionId(counter.fetch_add(1, Ordering::SeqCst));
+    map.insert(peer.to_string(), sid);
+    (sid, true)
+}
+
+fn mesh_session_for(state: &GatewayState, peer: &str) -> SessionId {
+    let (sid, snapshot) = {
+        let mut map = state.mesh_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let (sid, fresh) = mesh_session_alloc(&mut map, &state.next_session_id, peer);
+        if !fresh {
+            return sid;
+        }
+        (sid, map.clone())
+    };
+    // Persist outside the lock (small map, infrequent — only on a peer's first message).
+    if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
+        if let Err(e) = std::fs::write(&state.mesh_sessions_path, json) {
+            eprintln!("[mesh] could not persist mesh_sessions: {e}");
+        }
+    }
+    sid
+}
+
 /// POST /api/sessions/:id/message — inject a message into an agent session from
-/// external code (scripts, other services, the desktop UI). Same path as A2A:
-/// emits UserPrompt on the bus so the target session starts a new turn.
+/// external code (scripts, other services, the desktop UI) or a mesh peer (a2a).
+/// Emits UserPrompt on the bus so the target session starts a new turn.
+///
+/// Routing: a body `from` field (the sending peer's node_id, stamped by the
+/// cross-node `send_to_agent` sender) carries provenance. When `from` names a
+/// **registered** peer AND no explicit target session was given (`:id` == 0, the
+/// a2a default), the message is routed to that peer's own thread via
+/// [`mesh_session_for`] and a global `MeshMessage` notification is broadcast to
+/// every client — so a user watching any session sees the mesh traffic arrive.
+/// An explicit non-zero `:id` is always honored; a missing/unknown `from` falls
+/// back to `:id` (session 0) — byte-identical to the pre-mesh-routing behaviour
+/// for generic external injectors (scripts, the desktop UI).
 async fn session_message_handler(
     State(state): State<GatewayState>,
     Path(id):     Path<u64>,
@@ -1028,8 +1089,37 @@ async fn session_message_handler(
         Some(s) if !s.trim().is_empty() => s.to_string(),
         _ => return Json(serde_json::json!({ "ok": false, "error": "missing message" })),
     };
-    state.bus.emit(Event::UserPrompt { session: SessionId(id), text: message, images: vec![] }).await;
-    Json(serde_json::json!({ "ok": true, "session_id": id }))
+    // Provenance: only honour `from` when it names a peer we've actually paired with
+    // (bounds session allocation to the trusted registry — a tokened-but-buggy caller
+    // can't spam new sessions with arbitrary labels).
+    let from = match body["from"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(f) if state.peer_registry.read().await.contains(f) => Some(f.to_string()),
+        _ => None,
+    };
+
+    // Decide the landing session.
+    let session = match (&from, id) {
+        // Mesh a2a with no explicit target → the peer's own thread.
+        (Some(peer), 0) => mesh_session_for(&state, peer),
+        // Explicit target, or a generic external POST without a known peer.
+        _ => SessionId(id),
+    };
+
+    // Bake the peer into the prompt so the agent (and the replayed thread) sees who
+    // is speaking — mirrors local a2a's `[Agent N]:` provenance prefix.
+    let text = match &from {
+        Some(peer) => format!("[from {peer}]: {message}"),
+        None       => message.clone(),
+    };
+    state.bus.emit(Event::UserPrompt { session, text, images: vec![] }).await;
+
+    // Global notification so it surfaces regardless of the user's active session.
+    if let Some(peer) = from {
+        let preview: String = message.chars().take(140).collect();
+        state.bus.emit(Event::MeshMessage { from_node: peer, session, preview }).await;
+    }
+
+    Json(serde_json::json!({ "ok": true, "session_id": session.0 }))
 }
 
 /// Resolve a user-supplied workspace path. Relative paths join `AGENTD_WORKSPACE`;
@@ -3415,6 +3505,34 @@ mod ws_filter_tests {
         assert_eq!(event_session(&Event::PeerLost { node_id: "n1".into() }), None);
         assert_eq!(event_session(&Event::PeerSeen { node_id: "n1".into(), ip: "10.0.0.2".into() }), None);
         assert_eq!(event_session(&Event::VastTunnelLost { instance_id: "i1".into() }), None);
+        // A mesh a2a notification is GLOBAL despite carrying a `session` field — the
+        // session there is informational (where it landed), not a delivery scope, so
+        // a user watching any session sees that mesh traffic arrived.
+        assert_eq!(
+            event_session(&Event::MeshMessage { from_node: "ApexOS-RS".into(), session: SessionId(23), preview: "hi".into() }),
+            None
+        );
+    }
+
+    #[test]
+    fn mesh_session_alloc_is_stable_and_collision_free() {
+        let mut map: HashMap<String, SessionId> = HashMap::new();
+        let counter = AtomicU64::new(23);
+
+        // First contact allocates a fresh id; the same peer is then stable.
+        let (a1, fresh1) = mesh_session_alloc(&mut map, &counter, "ApexOS-RS");
+        assert_eq!((a1, fresh1), (SessionId(23), true));
+        let (a2, fresh2) = mesh_session_alloc(&mut map, &counter, "ApexOS-RS");
+        assert_eq!((a2, fresh2), (SessionId(23), false), "same peer → same session, no re-alloc");
+
+        // A different peer gets its own distinct id from the same counter.
+        let (b1, freshb) = mesh_session_alloc(&mut map, &counter, "apex3-radxa");
+        assert_eq!((b1, freshb), (SessionId(24), true));
+        assert_ne!(a1, b1, "distinct peers never share a thread");
+
+        // The counter is shared with socket-session allocation, so the next socket
+        // id is strictly above every mesh id — they can never collide.
+        assert_eq!(counter.fetch_add(1, Ordering::SeqCst), 25);
     }
 }
 
