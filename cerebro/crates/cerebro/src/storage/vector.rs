@@ -78,13 +78,10 @@ impl VectorStore {
             params![blob, memory_id.0],
         )?;
 
-        // Insert into vec0 index using the memories table's integer rowid
+        // Upsert into the vec0 index, keyed by the memories table's integer rowid
+        // (vec0 rejects INSERT OR REPLACE — see upsert_memory_vector).
         if self.vec_available {
-            conn.execute(
-                "INSERT OR REPLACE INTO memory_vectors(rowid, embedding)
-                 SELECT rowid, ?1 FROM memories WHERE id = ?2",
-                params![blob, memory_id.0],
-            )?;
+            upsert_memory_vector(&conn, memory_id, &blob)?;
         }
 
         Ok(embedding)
@@ -99,11 +96,7 @@ impl VectorStore {
             params![blob, memory_id.0],
         )?;
         if self.vec_available {
-            conn.execute(
-                "INSERT OR REPLACE INTO memory_vectors(rowid, embedding)
-                 SELECT rowid, ?1 FROM memories WHERE id = ?2",
-                params![blob, memory_id.0],
-            )?;
+            upsert_memory_vector(&conn, memory_id, &blob)?;
         }
         Ok(())
     }
@@ -252,6 +245,33 @@ pub fn blob_to_vec(blob: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Upsert a memory's row in the vec0 index, keyed by its integer rowid.
+///
+/// sqlite-vec's vec0 virtual table does **not** honor `INSERT OR REPLACE` — it
+/// raises "UNIQUE constraint failed on memory_vectors primary key" when the rowid
+/// already holds a vector (i.e. re-embedding an existing memory via update_memory).
+/// So delete the stale row then insert — the same convention `insert_memory` /
+/// `purge_memory` already use (CB-005). No-op if the memory row is gone (the
+/// SELECT yields no rowid). Caller holds the connection lock, so the pair is
+/// effectively atomic against other writers.
+fn upsert_memory_vector(
+    conn:      &rusqlite::Connection,
+    memory_id: &MemoryId,
+    blob:      &[u8],
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM memory_vectors WHERE rowid IN \
+         (SELECT rowid FROM memories WHERE id = ?1)",
+        params![memory_id.0],
+    )?;
+    conn.execute(
+        "INSERT INTO memory_vectors(rowid, embedding) \
+         SELECT rowid, ?1 FROM memories WHERE id = ?2",
+        params![blob, memory_id.0],
+    )?;
+    Ok(())
+}
+
 fn init_fastembed(model_name: &str) -> Result<fastembed::TextEmbedding> {
     use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
     // Only bge-small is wired through (384-dim — what the vector store assumes). An
@@ -269,4 +289,39 @@ fn init_fastembed(model_name: &str) -> Result<fastembed::TextEmbedding> {
         }
     };
     TextEmbedding::try_new(InitOptions::new(model))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::MemoryNode;
+    use crate::types::MemoryType;
+
+    async fn fresh_store() -> (SqliteStore, VectorStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let sqlite = SqliteStore::open(&dir.path().join("t.db")).await.unwrap();
+        let vector = VectorStore::new(&sqlite, "").await.unwrap(); // "" → no embedder
+        (sqlite, vector, dir)
+    }
+
+    /// Regression (reported by APEX, 2026-06-20): re-embedding an existing memory
+    /// must not fail. sqlite-vec's vec0 table rejects `INSERT OR REPLACE` (raises
+    /// "UNIQUE constraint failed on memory_vectors primary key" on an existing
+    /// rowid), which is exactly what `update_memory`'s re-embed hit. `store_raw_
+    /// embedding` shares the vec-upsert path with `embed_and_store`, so this covers
+    /// both without needing the ONNX model.
+    #[tokio::test]
+    async fn reembedding_an_existing_memory_succeeds() {
+        let (sqlite, vector, _dir) = fresh_store().await;
+        assert!(vector.vec_available, "vec0 must be available for this regression test");
+
+        let node = MemoryNode::new("a thermal frame caption", MemoryType::Episodic);
+        sqlite.insert_memory(&node).await.unwrap();
+
+        vector.store_raw_embedding(&node.id, &vec![0.1f32; 384]).await
+            .expect("first embed");
+        // The bug: this second write hit `UNIQUE constraint failed on memory_vectors`.
+        vector.store_raw_embedding(&node.id, &vec![0.9f32; 384]).await
+            .expect("re-embed of the same memory must succeed");
+    }
 }
