@@ -208,7 +208,10 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/evolution/stats",    get(evolution_stats_handler))
         .route("/api/sessions",           get(sessions_handler))
         .route("/api/sessions/active",    get(active_sessions_handler))
+        .route("/api/sessions/export",    post(session_export_handler))
         .route("/api/events/recent",      get(events_recent_handler))
+        .route("/api/sessions/{id}",         delete(session_delete_handler))
+        .route("/api/sessions/{id}/archive", post(session_archive_handler))
         .route("/api/sessions/{id}/message", post(session_message_handler))
         .route("/api/sessions/{id}/image",   post(session_image_handler))
         .route("/api/workspace/images",      get(workspace_images_handler))
@@ -1270,6 +1273,164 @@ async fn sessions_handler(State(state): State<GatewayState>) -> impl IntoRespons
     });
 
     Json(serde_json::json!(sessions))
+}
+
+// ── session management: delete / archive / export ──────────────────────────────
+
+/// The path to session `id`'s JSONL transcript (filename = id, one Message per line).
+fn session_file(sessions_dir: &std::path::Path, id: u64) -> PathBuf {
+    sessions_dir.join(format!("{id}.jsonl"))
+}
+
+/// DELETE /api/sessions/:id — remove a session's transcript and drop its in-memory
+/// history. Irreversible (the UI confirms first); the cerebro-consolidate step
+/// — extract useful info before deletion — is the safety net (next slice). The
+/// root session 0 is refused: it's the always-on funnel for sensor alerts +
+/// scheduled tasks, so deleting it is never what the user means.
+async fn session_delete_handler(
+    State(state): State<GatewayState>,
+    Path(id):     Path<u64>,
+) -> impl IntoResponse {
+    if id == 0 {
+        return Json(serde_json::json!({ "ok": false, "error": "the root session (0) cannot be deleted" }));
+    }
+    let removed = tokio::fs::remove_file(session_file(&state.sessions_dir, id)).await.is_ok();
+    state.histories.lock().await.remove(&SessionId(id));
+    Json(serde_json::json!({ "ok": removed, "session_id": id, "deleted": removed }))
+}
+
+/// POST /api/sessions/:id/archive — move the transcript into `sessions/archive/`
+/// (out of the active list — `sessions_handler` reads the top level only) and drop
+/// the in-memory history. Recoverable: the file is preserved, just hidden.
+async fn session_archive_handler(
+    State(state): State<GatewayState>,
+    Path(id):     Path<u64>,
+) -> impl IntoResponse {
+    if id == 0 {
+        return Json(serde_json::json!({ "ok": false, "error": "the root session (0) cannot be archived" }));
+    }
+    let archive_dir = state.sessions_dir.join("archive");
+    if let Err(e) = tokio::fs::create_dir_all(&archive_dir).await {
+        return Json(serde_json::json!({ "ok": false, "error": format!("archive dir: {e}") }));
+    }
+    let moved = tokio::fs::rename(
+        session_file(&state.sessions_dir, id),
+        archive_dir.join(format!("{id}.jsonl")),
+    ).await.is_ok();
+    if moved {
+        state.histories.lock().await.remove(&SessionId(id));
+    }
+    Json(serde_json::json!({ "ok": moved, "session_id": id, "archived": moved }))
+}
+
+/// Compact a tool-call/result JSON value to a short single-line string for the
+/// markdown transcript (full payloads bloat the export; the raw `jsonl` format
+/// keeps everything for machine use).
+fn compact_json(v: &serde_json::Value) -> String {
+    let s = match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let s = s.replace('\n', " ");
+    if s.chars().count() > 200 {
+        format!("{}…", s.chars().take(200).collect::<String>())
+    } else {
+        s
+    }
+}
+
+/// Render a session's JSONL transcript to a readable markdown document.
+fn render_session_markdown(id: u64, jsonl: &str) -> String {
+    use apexos_core::{ContentBlock, Message};
+    let mut out = format!("# Session {id}\n\n");
+    for line in jsonl.lines().filter(|l| !l.trim().is_empty()) {
+        let msg: Message = match serde_json::from_str(line) { Ok(m) => m, Err(_) => continue };
+        let (label, content) = match &msg {
+            Message::User      { content } => ("You",  content),
+            Message::Assistant { content } => ("APEX", content),
+        };
+        let mut parts: Vec<String> = Vec::new();
+        for b in content {
+            match b {
+                ContentBlock::Text { text } if !text.trim().is_empty() => parts.push(text.clone()),
+                ContentBlock::ToolUse { name, input, .. } =>
+                    parts.push(format!("🔧 `{name}`({})", compact_json(input))),
+                ContentBlock::ToolResult { content, is_error, .. } =>
+                    parts.push(format!("{} {}", if *is_error { "⚠ tool error:" } else { "↳" }, compact_json(content))),
+                ContentBlock::Image { .. } => parts.push("🖼 [image]".into()),
+                _ => {} // thinking blocks are omitted from the transcript
+            }
+        }
+        if !parts.is_empty() {
+            out.push_str(&format!("**{label}:** {}\n\n", parts.join("\n\n")));
+        }
+    }
+    out
+}
+
+/// List every active (non-archived) session id under `sessions_dir`.
+async fn list_session_ids(sessions_dir: &std::path::Path) -> Vec<u64> {
+    let mut ids = Vec::new();
+    if let Ok(mut rd) = tokio::fs::read_dir(sessions_dir).await {
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
+            if let Some(id) = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.parse().ok()) {
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort_unstable();
+    ids
+}
+
+/// POST /api/sessions/export — export one/some/all sessions into the workspace.
+/// Body: `{ ids?: [u64], all?: bool, format?: "md" | "jsonl" }`. `all:true` exports
+/// every active session; otherwise `ids` selects them. Each session is written to
+/// `<workspace>/exports/session-<id>.<ext>` — a markdown transcript by default (or
+/// the raw jsonl for machine use). Writing into the workspace works on every
+/// surface (kiosk has no browser download; the PWA / file browser / scp can read it).
+async fn session_export_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let format = match body["format"].as_str() { Some("jsonl") => "jsonl", _ => "md" };
+    let ids: Vec<u64> = if body["all"].as_bool().unwrap_or(false) {
+        list_session_ids(&state.sessions_dir).await
+    } else {
+        body["ids"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
+            .unwrap_or_default()
+    };
+    if ids.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "no sessions selected" }));
+    }
+
+    let ws = std::env::var("AGENTD_WORKSPACE").ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    let export_dir = PathBuf::from(ws).join("exports");
+    if let Err(e) = tokio::fs::create_dir_all(&export_dir).await {
+        return Json(serde_json::json!({ "ok": false, "error": format!("exports dir: {e}") }));
+    }
+
+    let mut files = Vec::new();
+    for id in ids {
+        let jsonl = match tokio::fs::read_to_string(session_file(&state.sessions_dir, id)).await {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let content = if format == "jsonl" { jsonl } else { render_session_markdown(id, &jsonl) };
+        let fname = format!("session-{id}.{format}");
+        if tokio::fs::write(export_dir.join(&fname), content).await.is_ok() {
+            files.push(fname);
+        }
+    }
+    Json(serde_json::json!({
+        "ok":    !files.is_empty(),
+        "count": files.len(),
+        "dir":   "exports",
+        "files": files,
+    }))
 }
 
 // ── event log ─────────────────────────────────────────────────────────────────
@@ -3512,6 +3673,41 @@ mod ws_filter_tests {
             event_session(&Event::MeshMessage { from_node: "ApexOS-RS".into(), session: SessionId(23), preview: "hi".into() }),
             None
         );
+    }
+
+    #[test]
+    fn session_markdown_renders_roles_tools_and_skips_thinking() {
+        use apexos_core::{ContentBlock, Message};
+        let lines = [
+            Message::User { content: vec![ContentBlock::Text { text: "hello there".into() }] },
+            Message::Assistant { content: vec![
+                ContentBlock::Thinking { thinking: "secret".into(), signature: "s".into() },
+                ContentBlock::ToolUse { id: "t1".into(), name: "read_file".into(),
+                    input: serde_json::json!({"path": "x.rs"}) },
+            ] },
+            Message::User { content: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(), content: serde_json::json!("file body"), is_error: false }] },
+        ];
+        let jsonl: String = lines.iter()
+            .map(|m| serde_json::to_string(m).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let md = render_session_markdown(42, &jsonl);
+        assert!(md.starts_with("# Session 42"));
+        assert!(md.contains("**You:** hello there"), "user text rendered");
+        assert!(md.contains("🔧 `read_file`"), "tool call rendered");
+        assert!(md.contains("↳"), "tool result rendered");
+        assert!(!md.contains("secret"), "thinking blocks are omitted");
+    }
+
+    #[test]
+    fn compact_json_truncates_and_flattens() {
+        let long = serde_json::Value::String("x".repeat(500));
+        let out = compact_json(&long);
+        assert!(out.chars().count() <= 201, "truncated to ~200 chars + ellipsis");
+        assert!(out.ends_with('…'));
+        assert_eq!(compact_json(&serde_json::json!("a\nb")), "a b", "newlines flattened");
     }
 
     #[test]

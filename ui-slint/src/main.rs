@@ -1355,6 +1355,33 @@ fn replace_sessions(items: Vec<SessionItem>) {
     });
 }
 
+/// Session ids currently checked in the SESSIONS model. Slint-thread only
+/// (reads the SESSIONS thread-local) — call from a callback handler.
+fn selected_session_ids() -> Vec<u64> {
+    SESSIONS.with(|s| {
+        s.borrow().as_ref().map(|m| {
+            (0..m.row_count())
+                .filter_map(|i| m.row_data(i))
+                .filter(|it| it.selected)
+                .map(|it| it.session_id as u64)
+                .collect()
+        }).unwrap_or_default()
+    })
+}
+
+/// Uncheck every session row. Slint-thread only.
+fn clear_session_selection() {
+    SESSIONS.with(|s| {
+        if let Some(m) = s.borrow().as_ref() {
+            for i in 0..m.row_count() {
+                if let Some(mut it) = m.row_data(i) {
+                    if it.selected { it.selected = false; m.set_row_data(i, it); }
+                }
+            }
+        }
+    });
+}
+
 fn replace_models(items: Vec<ModelItem>) {
     MODELS.with(|m| {
         if let Some(model) = m.borrow().as_ref() {
@@ -1971,7 +1998,32 @@ async fn fetch_sessions(client: &reqwest::Client, base_url: &str) -> Vec<Session
         time_ago:      format_time_ago(item["last_active"].as_u64().unwrap_or(0)).into(),
         message_count: item["message_count"].as_u64().unwrap_or(0) as i32,
         preview:       item["preview"].as_str().unwrap_or("").into(),
+        selected:      false,
     }).collect()
+}
+
+// POST /api/sessions/export — export sessions to workspace/exports/, then toast.
+// `body` is `{ids:[…]}` (selected) or `{all:true}`; format defaults to markdown.
+async fn export_sessions(client: &reqwest::Client, base_url: &str, body: Value) {
+    match client
+        .post(format!("{base_url}/api/sessions/export"))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+    {
+        Ok(r) => {
+            let v: Value = r.json().await.unwrap_or_default();
+            if v["ok"].as_bool().unwrap_or(false) {
+                let n = v["count"].as_u64().unwrap_or(0);
+                notify(ToastKind::Success, format!("Exported {n} session(s) → workspace/exports/"));
+            } else {
+                notify(ToastKind::Warn,
+                    format!("Export failed: {}", v["error"].as_str().unwrap_or("nothing exported")));
+            }
+        }
+        Err(e) => notify(ToastKind::Error, format!("Export error: {e}")),
+    }
 }
 
 // POST /api/record/stop → run whisper → return transcribed text (or empty on error).
@@ -3293,6 +3345,113 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
         tx_restore.send(payload).ok();
     });
+
+    // ── Session management: select / export / archive / delete ────────────────
+    {
+        let uw = ui.as_weak();
+        ui.on_sessions_toggle_select(move |id| {
+            SESSIONS.with(|s| {
+                if let Some(m) = s.borrow().as_ref() {
+                    for i in 0..m.row_count() {
+                        if let Some(mut it) = m.row_data(i) {
+                            if it.session_id == id {
+                                it.selected = !it.selected;
+                                m.set_row_data(i, it);
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            if let Some(ui) = uw.upgrade() {
+                ui.set_sessions_selected_count(selected_session_ids().len() as i32);
+            }
+        });
+    }
+    {
+        let uw = ui.as_weak();
+        ui.on_sessions_clear_selection(move || {
+            clear_session_selection();
+            if let Some(ui) = uw.upgrade() { ui.set_sessions_selected_count(0); }
+        });
+    }
+    {
+        let base = http_base.clone();
+        let client = Arc::clone(&http_client);
+        let h = rt.handle().clone();
+        ui.on_sessions_export_selected(move || {
+            let ids = selected_session_ids();
+            if ids.is_empty() { return; }
+            let (base, client) = (base.clone(), Arc::clone(&client));
+            h.spawn(async move {
+                export_sessions(&client, &base, serde_json::json!({ "ids": ids, "format": "md" })).await;
+            });
+        });
+    }
+    {
+        let base = http_base.clone();
+        let client = Arc::clone(&http_client);
+        let h = rt.handle().clone();
+        ui.on_sessions_export_all(move || {
+            let (base, client) = (base.clone(), Arc::clone(&client));
+            h.spawn(async move {
+                export_sessions(&client, &base, serde_json::json!({ "all": true, "format": "md" })).await;
+            });
+        });
+    }
+    {
+        let base = http_base.clone();
+        let client = Arc::clone(&http_client);
+        let h = rt.handle().clone();
+        let uw = ui.as_weak();
+        ui.on_sessions_archive_selected(move || {
+            let ids = selected_session_ids();
+            if ids.is_empty() { return; }
+            let (base, client, uw) = (base.clone(), Arc::clone(&client), uw.clone());
+            h.spawn(async move {
+                let mut n = 0;
+                for id in &ids {
+                    if client.post(format!("{base}/api/sessions/{id}/archive"))
+                        .timeout(std::time::Duration::from_secs(8)).send().await
+                        .map(|r| r.status().is_success()).unwrap_or(false) { n += 1; }
+                }
+                let items = fetch_sessions(&client, &base).await;
+                slint::invoke_from_event_loop(move || {
+                    replace_sessions(items);
+                    clear_session_selection();
+                    if let Some(ui) = uw.upgrade() { ui.set_sessions_selected_count(0); }
+                }).ok();
+                notify(ToastKind::Info, format!("Archived {n} session(s)"));
+            });
+        });
+    }
+    {
+        let base = http_base.clone();
+        let client = Arc::clone(&http_client);
+        let h = rt.handle().clone();
+        let uw = ui.as_weak();
+        ui.on_sessions_delete_selected(move || {
+            let ids = selected_session_ids();
+            if ids.is_empty() { return; }
+            let (base, client, uw) = (base.clone(), Arc::clone(&client), uw.clone());
+            h.spawn(async move {
+                let mut n = 0;
+                for id in &ids {
+                    if client.delete(format!("{base}/api/sessions/{id}"))
+                        .timeout(std::time::Duration::from_secs(8)).send().await
+                        .ok()
+                        .map(|r| r.status().is_success()).unwrap_or(false) { n += 1; }
+                }
+                let items = fetch_sessions(&client, &base).await;
+                slint::invoke_from_event_loop(move || {
+                    replace_sessions(items);
+                    clear_session_selection();
+                    if let Some(ui) = uw.upgrade() { ui.set_sessions_selected_count(0); }
+                }).ok();
+                notify(ToastKind::Warn, format!("Deleted {n} session(s)"));
+            });
+        });
+    }
 
     // ── Identity boot wizard (agent-identity.md slice 3d) ─────────────────────
     // Fetch the identity registry; show the wizard only when there's a real
