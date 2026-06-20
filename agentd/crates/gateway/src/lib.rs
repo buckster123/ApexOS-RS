@@ -106,6 +106,10 @@ pub struct GatewayState {
     /// The handler sends a `ConsolidateReq` and awaits its oneshot reply. See
     /// `session_consolidate_handler` + `consolidate::run` (agentd).
     pub consolidate_tx:     tokio::sync::mpsc::Sender<ConsolidateReq>,
+    /// This node's structured capability snapshot (senses/tools/tier), refreshed by
+    /// agentd's embodiment loop and served at `GET /api/capabilities` for mesh
+    /// capability discovery (colony-mesh Slice 2).
+    pub capabilities:       Arc<RwLock<serde_json::Value>>,
     /// Vast.ai instance + tunnel state — shared with supervisor for virtual tools
     pub vast_state:        VastState,
     /// Per-session agent bindings (multi-agent runtime). A `hello` frame may bind
@@ -246,6 +250,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/council",               get(council_list_handler).post(council_start_handler))
         .route("/api/council/{id}",          get(council_detail_handler))
         .route("/api/council/{id}/butt-in",  post(council_butt_in_handler))
+        .route("/api/capabilities",       get(capabilities_handler))
         .route("/api/mesh/file",          post(mesh_file_handler).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/api/mesh/nodes",         get(mesh_nodes_handler))
         .route("/api/mesh/peers",         get(mesh_peers_get_handler).post(mesh_peers_post_handler))
@@ -2293,6 +2298,14 @@ async fn council_butt_in_handler(
 }
 
 // ── Mesh ──────────────────────────────────────────────────────────────────────
+
+/// GET /api/capabilities — this node's structured capability snapshot (senses,
+/// tools, tier, memory mode, peer count), refreshed by agentd's embodiment loop.
+/// Token-gated; mesh peers query it via the `mesh_capabilities` tool to route by
+/// capability. Null until the first embodiment refresh (~2s after boot).
+async fn capabilities_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    Json(state.capabilities.read().await.clone())
+}
 
 /// Confine a peer-supplied destination to THIS node's workspace. Rejects `..` and
 /// absolute paths; the result is `<workspace>/<dest>` (a relative subpath under the

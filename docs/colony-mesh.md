@@ -55,7 +55,7 @@ Grounding for the plan — several roadmap items are closer than the agents assu
 
 Cheap → foundational → keystone. Each slice ships as its own PR; each unlocks the next.
 
-### Slice 1 — Mesh file relay  ·  *quick win* (roadmap #7)
+### Slice 1 — Mesh file relay  ·  *quick win* (roadmap #7)  ·  ✅ shipped (#147)
 
 The agents hit this wall writing their own roadmap doc — it lived in apex2's workspace and André had
 to courier it. Remove the human from agent↔agent artifact exchange.
@@ -73,7 +73,7 @@ to courier it. Remove the human from agent↔agent artifact exchange.
 - **Effort:** Low. **Acceptance:** `mesh_file_send(node="ApexOS-2", path="notes/x.md")` lands the file
   in apex2's workspace; the agents share docs unaided.
 
-### Slice 2 — Capability advertisement  ·  *foundation* (roadmap #3, AMCP-validated)
+### Slice 2 — Capability advertisement  ·  *foundation* (roadmap #3, AMCP-validated)  ·  ✅ shipped
 
 ~70% built — `build_embodiment` already knows each node's senses + tools. Expose + query it.
 
