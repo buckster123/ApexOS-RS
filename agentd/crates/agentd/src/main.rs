@@ -12,7 +12,7 @@ use apexos_core::{
     ActionId, Bus, ContentBlock, Event, EvolutionId, EvolutionProposal, ImageSource, Message,
     PluginId, PolicyMode, SessionId, SensorReading, Subsystem, SystemState, ToolOutput, ToolSpec,
 };
-use apexos_gateway::{serve, ConsolidateReq, GatewayState, PeerRegistry};
+use apexos_gateway::{serve, ConsolidateReq, GatewayState, PeerRegistry, SpawnReq};
 use apexos_plugins::{
     load as load_plugins, PluginConfig, PolicyConfig, PolicyEngine, RestartPolicy,
     Supervisor, SupervisorCmd, ToolProxy, VastState,
@@ -257,6 +257,11 @@ async fn main() -> anyhow::Result<()> {
     // at GET /api/capabilities so peers can ask "which node has thermal/GPU?".
     let capabilities_arc = Arc::new(RwLock::new(serde_json::Value::Null));
 
+    // Blocking cross-node spawn (colony-mesh Slice 3): /api/spawn sends a SpawnReq
+    // to the worker inside spawn_agent_router (which owns the turn engine + child-id
+    // counter) and awaits its oneshot reply.
+    let (spawn_tx, spawn_rx) = tokio::sync::mpsc::channel::<SpawnReq>(16);
+
     eprintln!("[agentd] serving UI from {}", ui_dir.display());
     let gw_state = GatewayState {
         bus:                  handle.clone(),
@@ -288,6 +293,7 @@ async fn main() -> anyhow::Result<()> {
         mesh_sessions:        Arc::clone(&mesh_sessions),
         mesh_sessions_path:   mesh_sessions_path.clone(),
         consolidate_tx:       consolidate_tx.clone(),
+        spawn_tx:             spawn_tx.clone(),
         capabilities:         Arc::clone(&capabilities_arc),
         vast_state:           vast_state.clone(),
         session_bindings:     Arc::clone(&session_bindings),
@@ -525,7 +531,7 @@ async fn main() -> anyhow::Result<()> {
     // PluginUp events that populate tool_reg are captured (see the comment there).
     spawn_agent_router(agent_rx, bcast.clone(), handle.clone(),
                        tool_reg, histories, engine, max_depth, session_store, router_proxy,
-                       Arc::clone(&session_bindings), Arc::clone(&identities));
+                       Arc::clone(&session_bindings), Arc::clone(&identities), spawn_rx);
 
     // Vast.ai backend hot-swap — listens for VastInstanceReady / VastInstanceDestroyed
     {
@@ -1217,6 +1223,7 @@ fn spawn_agent_router(
     tool_proxy:    ToolProxy,
     session_bindings: apexos_core::SessionBindings,
     identities:    Arc<RwLock<apexos_core::Identities>>,
+    spawn_rx:      tokio::sync::mpsc::Receiver<SpawnReq>,
 ) {
     // Per-session abort handles and parent-child tree for cascade cancellation.
     // Handles carry a generation so a turn that finishes late doesn't evict the
@@ -1238,6 +1245,42 @@ fn spawn_agent_router(
     // CCBS boot-priming cache: one cognitive_bootstrap per session (first turn),
     // reused on later turns so orientation stays in the system prompt all session.
     let boot_primings    = Arc::new(Mutex::new(HashMap::<SessionId, String>::new()));
+
+    // Cross-node spawn worker (colony-mesh Slice 3): drains /api/spawn requests and
+    // runs an EPHEMERAL one-shot sub-agent — shares this router's child-id counter
+    // (no collision), runs run_turn directly (bounded by timeout_s), returns the
+    // final text via the oneshot. The child id is in the persist-skip range, so the
+    // remote sub-agent leaves no trace beyond its returned output.
+    {
+        let next_child_id = Arc::clone(&next_child_id);
+        let engine        = Arc::clone(&engine);
+        let tool_reg      = Arc::clone(&tool_reg);
+        let bus           = bus.clone();
+        let bcast         = bcast.clone();
+        let mut spawn_rx  = spawn_rx;
+        tokio::spawn(async move {
+            while let Some(req) = spawn_rx.recv().await {
+                let child_id = SessionId(next_child_id.fetch_add(1, Ordering::SeqCst));
+                let history  = vec![Message::User {
+                    content: vec![ContentBlock::Text { text: req.prompt }],
+                }];
+                let child_engine = Arc::new(engine.with_system(req.system));
+                let tools = gather_tools(&tool_reg).await;
+                let fut = run_turn(child_id, history, bus.clone(), bcast.clone(), tools, child_engine);
+                let result = match tokio::time::timeout(
+                    std::time::Duration::from_secs(req.timeout_s), fut).await
+                {
+                    Ok(Ok(updated)) =>
+                        serde_json::json!({ "ok": true, "output": extract_final_text(&updated) }),
+                    Ok(Err(e)) =>
+                        serde_json::json!({ "ok": false, "error": e.to_string() }),
+                    Err(_) =>
+                        serde_json::json!({ "ok": false, "error": format!("sub-agent timed out after {}s", req.timeout_s) }),
+                };
+                let _ = req.reply.send(result);
+            }
+        });
+    }
 
     tokio::spawn(async move {
         // Per-alert-key cooldown to prevent turn storms when a condition persists.
@@ -2079,8 +2122,11 @@ fn capability_present(unlocks: &[String], has_cam: bool, has_sensors: bool) -> O
 fn agent_spawn_spec() -> ToolSpec {
     ToolSpec {
         name:        "agent_spawn".into(),
-        description: "Spawn a focused sub-agent to handle a sub-task. \
-                      Returns the sub-agent's final text output.".into(),
+        description: "Spawn a focused sub-agent to handle a sub-task and return its \
+                      final text output. Add `node` to run the sub-agent on a mesh \
+                      PEER (delegation across the colony — e.g. send a research or \
+                      compute task to a node with the right senses/tier) and get the \
+                      result back; without `node` it runs locally.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -2091,6 +2137,15 @@ fn agent_spawn_spec() -> ToolSpec {
                 "system": {
                     "type":        "string",
                     "description": "Optional system prompt override for the sub-agent."
+                },
+                "node": {
+                    "type":        "string",
+                    "description": "Optional mesh peer node_id to run the sub-agent on (cross-node \
+                                    delegation). Omit to run locally."
+                },
+                "timeout_s": {
+                    "type":        "integer",
+                    "description": "Max seconds to wait for a cross-node sub-agent (default 30, 5–300)."
                 }
             },
             "required": ["prompt"]
