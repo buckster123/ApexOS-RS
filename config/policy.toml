@@ -47,8 +47,12 @@ mode = "suggest"
 # autonomous mesh reply on an approval no one is watching (the reply runs in the
 # peer's own session, not the operator's chat) — a dead end for colony comms.
 # list_mesh_peers is a read. bootstrap_node (SSH + remote install) stays ask.
+# mesh_file_send copies a workspace file to a peer's workspace — same trust basis
+# (registered peer + bearer token) and double workspace-confinement (source + dest),
+# so allow. The agents share docs node-to-node without a human courier.
 "send_to_agent"   = "allow"
 "list_mesh_peers" = "allow"
+"mesh_file_send"  = "allow"
 
 # Git tools (apexos-tools) — confined by the tool to the workspace + AGENTD_GIT_ROOTS.
 # Read-only verbs + init/branch/commit are allow (self-confined, like read_file:
