@@ -54,6 +54,12 @@ mode = "suggest"
 "list_mesh_peers"  = "allow"
 "mesh_file_send"   = "allow"
 "mesh_capabilities" = "allow"   # read-only peer capability query
+# agent_spawn: delegate a sub-task to a focused sub-agent (local) or a mesh PEER
+# (cross-node, blocking). Bounded — local by max sub-agent depth, cross-node by a
+# per-peer timeout + circuit breaker + hop guard, and a peer send only reaches the
+# trusted registry. allow so the colony can delegate autonomously (was unknown->ask,
+# which only worked under yolo).
+"agent_spawn"      = "allow"
 
 # Git tools (apexos-tools) — confined by the tool to the workspace + AGENTD_GIT_ROOTS.
 # Read-only verbs + init/branch/commit are allow (self-confined, like read_file:

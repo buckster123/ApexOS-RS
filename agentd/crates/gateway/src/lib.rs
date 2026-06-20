@@ -47,6 +47,16 @@ pub struct ConsolidateReq {
     pub reply:      tokio::sync::oneshot::Sender<serde_json::Value>,
 }
 
+/// A blocking cross-node sub-agent spawn (colony-mesh Slice 3). The gateway's
+/// `/api/spawn` handler sends this to the agentd spawn worker (which owns the turn
+/// engine); `reply` carries the result JSON (`{ok, output}` or `{ok:false, error}`).
+pub struct SpawnReq {
+    pub prompt:    String,
+    pub system:    Option<String>,
+    pub timeout_s: u64,
+    pub reply:     tokio::sync::oneshot::Sender<serde_json::Value>,
+}
+
 #[derive(Clone)]
 pub struct GatewayState {
     pub bus:                   BusHandle,
@@ -106,6 +116,10 @@ pub struct GatewayState {
     /// The handler sends a `ConsolidateReq` and awaits its oneshot reply. See
     /// `session_consolidate_handler` + `consolidate::run` (agentd).
     pub consolidate_tx:     tokio::sync::mpsc::Sender<ConsolidateReq>,
+    /// Blocking cross-node spawn requests → the agentd spawn worker (which owns the
+    /// turn engine). The `/api/spawn` handler sends a `SpawnReq` and awaits its
+    /// oneshot reply. See `spawn_handler` + the worker in `spawn_agent_router`.
+    pub spawn_tx:           tokio::sync::mpsc::Sender<SpawnReq>,
     /// This node's structured capability snapshot (senses/tools/tier), refreshed by
     /// agentd's embodiment loop and served at `GET /api/capabilities` for mesh
     /// capability discovery (colony-mesh Slice 2).
@@ -251,6 +265,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/council/{id}",          get(council_detail_handler))
         .route("/api/council/{id}/butt-in",  post(council_butt_in_handler))
         .route("/api/capabilities",       get(capabilities_handler))
+        .route("/api/spawn",              post(spawn_handler))
         .route("/api/mesh/file",          post(mesh_file_handler).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/api/mesh/nodes",         get(mesh_nodes_handler))
         .route("/api/mesh/peers",         get(mesh_peers_get_handler).post(mesh_peers_post_handler))
@@ -2298,6 +2313,41 @@ async fn council_butt_in_handler(
 }
 
 // ── Mesh ──────────────────────────────────────────────────────────────────────
+
+/// POST /api/spawn — run a one-shot sub-agent on THIS node for a mesh peer and
+/// return its final output (the blocking-`agent_spawn` keystone). Body:
+/// `{prompt, system?, timeout_s?}`. The turn runs in the agentd spawn worker (it
+/// owns the engine); we await its oneshot reply. Loop guard: the `x-mesh-hops`
+/// header (set by the caller's `mesh_agent_spawn`) is refused past a small cap so a
+/// remote spawn can't recurse across nodes unboundedly.
+async fn spawn_handler(
+    State(state): State<GatewayState>,
+    headers:      axum::http::HeaderMap,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let prompt = match body["prompt"].as_str() {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => return Json(serde_json::json!({ "ok": false, "error": "missing prompt" })),
+    };
+    let hops = headers.get("x-mesh-hops").and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    if hops >= 3 {
+        return Json(serde_json::json!({ "ok": false, "error": "mesh hop limit reached (loop guard)" }));
+    }
+    let system = body["system"].as_str().filter(|s| !s.trim().is_empty()).map(str::to_string);
+    let timeout_s = body["timeout_s"].as_u64().unwrap_or(30).clamp(5, 300);
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if state.spawn_tx.send(SpawnReq { prompt, system, timeout_s, reply: reply_tx }).await.is_err() {
+        return Json(serde_json::json!({ "ok": false, "error": "spawn worker unavailable" }));
+    }
+    // The worker already bounds the turn by timeout_s; add slack for the round-trip.
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_s + 15), reply_rx).await {
+        Ok(Ok(v))  => Json(v),
+        Ok(Err(_)) => Json(serde_json::json!({ "ok": false, "error": "spawn worker dropped the request" })),
+        Err(_)     => Json(serde_json::json!({ "ok": false, "error": "spawn timed out" })),
+    }
+}
 
 /// GET /api/capabilities — this node's structured capability snapshot (senses,
 /// tools, tier, memory mode, peer count), refreshed by agentd's embodiment loop.

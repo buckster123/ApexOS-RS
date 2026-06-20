@@ -1603,11 +1603,26 @@ impl Supervisor {
         if call.tool == "agent_spawn" {
             let prompt  = call.args["prompt"].as_str().unwrap_or("").to_owned();
             let system  = call.args["system"].as_str().map(str::to_owned);
+            let node    = call.args["node"].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+            let timeout_s = call.args["timeout_s"].as_u64().unwrap_or(30).clamp(5, 300);
             let bus     = self.bus.clone();
             let call_id = call.id;
-            tokio::spawn(async move {
-                bus.emit(Event::SpawnAgent { parent: session, call_id, prompt, system }).await;
-            });
+            match node {
+                // Cross-node: BLOCKING spawn on the peer (colony-mesh keystone). Run a
+                // sub-agent there, get its output back over HTTP (timeout + breaker).
+                Some(node_id) => {
+                    tokio::spawn(async move {
+                        let output = mesh_agent_spawn(&node_id, &prompt, system.as_deref(), timeout_s).await;
+                        bus.emit(Event::ToolResult { session, call: call_id, output }).await;
+                    });
+                }
+                // Local: the existing sub-agent flow (SpawnAgent → child_turn).
+                None => {
+                    tokio::spawn(async move {
+                        bus.emit(Event::SpawnAgent { parent: session, call_id, prompt, system }).await;
+                    });
+                }
+            }
             return;
         }
 
@@ -2042,10 +2057,116 @@ async fn mesh_capabilities(node: Option<&str>) -> ToolOutput {
     }
 }
 
+// ── cross-node agent_spawn: blocking remote sub-agent (colony-mesh keystone) ─────
+
+/// Per-peer circuit breaker for cross-node spawn: after `BREAKER_TRIP` consecutive
+/// failures a peer is "open" (short-circuited) for `BREAKER_COOLDOWN`, so repeated
+/// calls to a dead/slow peer fail fast instead of each waiting the full timeout.
+struct Breaker { consecutive_failures: u32, open_until: Option<std::time::Instant> }
+const BREAKER_TRIP: u32 = 3;
+const BREAKER_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn breakers() -> &'static std::sync::Mutex<std::collections::HashMap<String, Breaker>> {
+    static B: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Breaker>>> =
+        std::sync::OnceLock::new();
+    B.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Is the peer's breaker currently open (within its cooldown)?
+fn breaker_open(node: &str, now: std::time::Instant) -> bool {
+    let map = breakers().lock().unwrap_or_else(|e| e.into_inner());
+    map.get(node).and_then(|b| b.open_until).map(|t| t > now).unwrap_or(false)
+}
+
+/// Record a spawn outcome: success resets the breaker; the `BREAKER_TRIP`-th
+/// consecutive failure opens it for `BREAKER_COOLDOWN`.
+fn breaker_record(node: &str, ok: bool, now: std::time::Instant) {
+    let mut map = breakers().lock().unwrap_or_else(|e| e.into_inner());
+    let b = map.entry(node.to_string()).or_insert(Breaker { consecutive_failures: 0, open_until: None });
+    if ok {
+        b.consecutive_failures = 0;
+        b.open_until = None;
+    } else {
+        b.consecutive_failures += 1;
+        if b.consecutive_failures >= BREAKER_TRIP {
+            b.open_until = Some(now + BREAKER_COOLDOWN);
+            b.consecutive_failures = 0;
+        }
+    }
+}
+
+/// Blocking cross-node spawn: run `prompt` as a sub-agent on `node` and return its
+/// output. Bounded by the peer's own `timeout_s` plus HTTP slack; a per-peer circuit
+/// breaker fails fast when a peer is repeatedly unreachable. `x-mesh-hops: 1` lets
+/// the receiver refuse a runaway cross-node recursion.
+async fn mesh_agent_spawn(node: &str, prompt: &str, system: Option<&str>, timeout_s: u64) -> ToolOutput {
+    let err = |m: String| ToolOutput { ok: false, content: serde_json::json!(m) };
+    let now = std::time::Instant::now();
+    if breaker_open(node, now) {
+        return err(format!("agent_spawn: peer '{node}' circuit open (recent failures) — retry shortly"));
+    }
+    let (ws_url, token) = match find_peer(node).await {
+        Some(p) => p,
+        None    => return err(format!("agent_spawn: peer '{node}' not found in peers.toml")),
+    };
+    let http_base = ws_url.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1);
+    let mut body = serde_json::json!({ "prompt": prompt, "timeout_s": timeout_s });
+    if let Some(s) = system { body["system"] = serde_json::json!(s); }
+    let mut req = reqwest::Client::new()
+        .post(format!("{http_base}/api/spawn"))
+        .header("x-mesh-hops", "1")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(timeout_s + 20));
+    if let Some(t) = token.as_deref() {
+        req = req.bearer_auth(t);
+    }
+    match req.send().await {
+        Ok(r) => {
+            let status = r.status();
+            let v = r.json::<serde_json::Value>().await.ok();
+            let ok = status.is_success() && v.as_ref().and_then(|b| b["ok"].as_bool()) == Some(true);
+            breaker_record(node, ok, std::time::Instant::now());
+            if ok {
+                let out = v.as_ref().and_then(|b| b["output"].as_str()).unwrap_or("");
+                ToolOutput { ok: true, content: serde_json::json!({ "node": node, "output": out }) }
+            } else {
+                let detail = v.as_ref().and_then(|b| b["error"].as_str())
+                    .unwrap_or(if token.is_none() { "no token stored for peer" } else { "spawn failed" });
+                err(format!("agent_spawn: {detail} (status {status})"))
+            }
+        }
+        Err(e) => {
+            breaker_record(node, false, std::time::Instant::now());
+            err(format!("agent_spawn: {e}"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn circuit_breaker_trips_after_3_failures_and_resets_on_success() {
+        let node = "test-breaker-node-xyz"; // unique key in the global map
+        let t0 = std::time::Instant::now();
+        assert!(!breaker_open(node, t0), "starts closed");
+        // Two failures: still closed (trip is the 3rd).
+        breaker_record(node, false, t0);
+        breaker_record(node, false, t0);
+        assert!(!breaker_open(node, t0), "2 failures < trip");
+        // Third consecutive failure opens the breaker for the cooldown.
+        breaker_record(node, false, t0);
+        assert!(breaker_open(node, t0 + std::time::Duration::from_secs(30)), "open within cooldown");
+        assert!(!breaker_open(node, t0 + std::time::Duration::from_secs(61)), "closed after cooldown");
+        // A success clears it.
+        let t1 = t0 + std::time::Duration::from_secs(5);
+        breaker_record(node, false, t1);
+        breaker_record(node, false, t1);
+        breaker_record(node, true, t1);
+        assert!(!breaker_open(node, t1), "success resets the failure streak");
+    }
 
     #[test]
     fn mesh_source_rejects_traversal() {

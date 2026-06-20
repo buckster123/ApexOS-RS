@@ -86,7 +86,7 @@ to courier it. Remove the human from agent↔agent artifact exchange.
 - **Effort:** Low–Medium. **Acceptance:** a node can answer "which peer has capability X?" without a
   central registry. Prerequisite for smart routing, sensor fusion, procedure replication.
 
-### Slice 3 — Blocking `agent_spawn`  ·  *the keystone* (roadmap #4)
+### Slice 3 — Blocking `agent_spawn`  ·  *the keystone* (roadmap #4)  ·  ✅ shipped
 
 The delegation primitive: "give me a result from another node." Unlocks the cloud bridge, compute
 delegation, cross-node task decomposition.
