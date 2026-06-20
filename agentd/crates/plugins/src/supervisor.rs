@@ -875,6 +875,19 @@ impl Supervisor {
             return;
         }
 
+        // Virtual tool: mesh_capabilities — query a peer's (or all peers') live
+        // senses/tools/tier via their GET /api/capabilities. Capability discovery.
+        if call.tool == "mesh_capabilities" {
+            let node    = call.args["node"].as_str().map(str::to_owned);
+            let call_id = call.id;
+            let bus     = self.bus.clone();
+            tokio::spawn(async move {
+                let output = mesh_capabilities(node.as_deref()).await;
+                bus.emit(Event::ToolResult { session, call: call_id, output }).await;
+            });
+            return;
+        }
+
         // Virtual tool: list_mesh_peers — returns current peers.toml as JSON.
         if call.tool == "list_mesh_peers" {
             let call_id = call.id;
@@ -1976,6 +1989,56 @@ async fn mesh_file_send(node: Option<&str>, agent_id: &str, path: &str, dest: Op
             }
         }
         Err(e) => err(format!("mesh_file_send: {e}")),
+    }
+}
+
+/// All peer node_ids in peers.toml (for an all-peers capability sweep).
+async fn list_peer_ids() -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct PeersFile { #[serde(default)] peer: Vec<PeerEntry> }
+    #[derive(serde::Deserialize)]
+    struct PeerEntry { node_id: String }
+    let path = std::env::var("PEERS_TOML").unwrap_or_else(|_| "/etc/agentd/peers.toml".into());
+    tokio::fs::read_to_string(&path).await.ok()
+        .and_then(|raw| toml::from_str::<PeersFile>(&raw).ok())
+        .map(|f| f.peer.into_iter().map(|p| p.node_id).collect())
+        .unwrap_or_default()
+}
+
+/// Fetch one peer's `GET /api/capabilities` (token-gated). Never errors hard — a
+/// failure becomes `{node, error}` so an all-peers sweep returns partial results.
+async fn fetch_peer_capabilities(node: &str) -> serde_json::Value {
+    let (ws_url, token) = match find_peer(node).await {
+        Some(p) => p,
+        None    => return serde_json::json!({ "node": node, "error": "not in peers.toml" }),
+    };
+    let http_base = ws_url.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1);
+    let mut req = reqwest::Client::new()
+        .get(format!("{http_base}/api/capabilities"))
+        .timeout(std::time::Duration::from_secs(10));
+    if let Some(t) = token.as_deref() {
+        req = req.bearer_auth(t);
+    }
+    match req.send().await {
+        Ok(r) if r.status().is_success() =>
+            r.json::<serde_json::Value>().await
+                .unwrap_or_else(|_| serde_json::json!({ "node": node, "error": "unparseable response" })),
+        Ok(r)  => serde_json::json!({ "node": node, "error": format!("status {}", r.status()) }),
+        Err(e) => serde_json::json!({ "node": node, "error": e.to_string() }),
+    }
+}
+
+/// `mesh_capabilities(node?)`: one peer's capabilities, or an array over all peers.
+async fn mesh_capabilities(node: Option<&str>) -> ToolOutput {
+    match node {
+        Some(n) if !n.is_empty() => ToolOutput { ok: true, content: fetch_peer_capabilities(n).await },
+        _ => {
+            let mut out = Vec::new();
+            for id in list_peer_ids().await {
+                out.push(fetch_peer_capabilities(&id).await);
+            }
+            ToolOutput { ok: true, content: serde_json::json!(out) }
+        }
     }
 }
 

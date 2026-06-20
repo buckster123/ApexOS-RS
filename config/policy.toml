@@ -50,9 +50,10 @@ mode = "suggest"
 # mesh_file_send copies a workspace file to a peer's workspace — same trust basis
 # (registered peer + bearer token) and double workspace-confinement (source + dest),
 # so allow. The agents share docs node-to-node without a human courier.
-"send_to_agent"   = "allow"
-"list_mesh_peers" = "allow"
-"mesh_file_send"  = "allow"
+"send_to_agent"    = "allow"
+"list_mesh_peers"  = "allow"
+"mesh_file_send"   = "allow"
+"mesh_capabilities" = "allow"   # read-only peer capability query
 
 # Git tools (apexos-tools) — confined by the tool to the workspace + AGENTD_GIT_ROOTS.
 # Read-only verbs + init/branch/commit are allow (self-confined, like read_file:

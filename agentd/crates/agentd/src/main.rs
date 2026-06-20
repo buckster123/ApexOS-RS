@@ -252,6 +252,11 @@ async fn main() -> anyhow::Result<()> {
     let (consolidate_tx, mut consolidate_rx) =
         tokio::sync::mpsc::channel::<ConsolidateReq>(8);
 
+    // Capability advertisement (colony-mesh Slice 2): a structured snapshot of this
+    // node's senses/tools/tier, refreshed by spawn_embodiment_refresher and served
+    // at GET /api/capabilities so peers can ask "which node has thermal/GPU?".
+    let capabilities_arc = Arc::new(RwLock::new(serde_json::Value::Null));
+
     eprintln!("[agentd] serving UI from {}", ui_dir.display());
     let gw_state = GatewayState {
         bus:                  handle.clone(),
@@ -283,6 +288,7 @@ async fn main() -> anyhow::Result<()> {
         mesh_sessions:        Arc::clone(&mesh_sessions),
         mesh_sessions_path:   mesh_sessions_path.clone(),
         consolidate_tx:       consolidate_tx.clone(),
+        capabilities:         Arc::clone(&capabilities_arc),
         vast_state:           vast_state.clone(),
         session_bindings:     Arc::clone(&session_bindings),
         identities:           Arc::clone(&identities),
@@ -501,6 +507,7 @@ async fn main() -> anyhow::Result<()> {
     spawn_embodiment_refresher(
         embodiment_arc,
         ambient_arc,
+        Arc::clone(&capabilities_arc),
         Arc::clone(&tool_reg),
         Arc::clone(&backend_arc),
         Arc::clone(&model_arc),
@@ -1754,6 +1761,7 @@ async fn gather_tools(
     tools.push(convene_council_spec());
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());
+    tools.push(mesh_capabilities_spec());
     tools.push(query_event_log_spec());
     tools.push(list_mesh_peers_spec());
     tools.push(bootstrap_node_spec());
@@ -1785,6 +1793,7 @@ fn build_ambient_clock() -> String {
 fn spawn_embodiment_refresher(
     embodiment:    Arc<RwLock<String>>,
     ambient:       Arc<RwLock<String>>,
+    capabilities:  Arc<RwLock<serde_json::Value>>,
     tool_reg:      Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
     backend_arc:   Arc<RwLock<String>>,
     model_arc:     Arc<RwLock<String>>,
@@ -1801,10 +1810,59 @@ fn spawn_embodiment_refresher(
             let block = build_embodiment(&tool_reg, &backend_arc, &model_arc,
                                          &peer_registry, &node_id, &cerebro_embed).await;
             *embodiment.write().await = block;
+            *capabilities.write().await = gather_capabilities(&tool_reg, &backend_arc, &model_arc,
+                                         &peer_registry, &node_id, &cerebro_embed).await;
             *ambient.write().await    = build_ambient_clock();
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }
     });
+}
+
+/// Structured capability snapshot for the mesh (colony Slice 2) — the same live
+/// probes `build_embodiment` uses, emitted as JSON for `GET /api/capabilities` so
+/// peers can route by capability ("which node has thermal? a GPU?"). Kept separate
+/// from the prompt-cache-sensitive embodiment STRING so this can't perturb the cache.
+async fn gather_capabilities(
+    tool_reg:      &Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
+    backend_arc:   &Arc<RwLock<String>>,
+    model_arc:     &Arc<RwLock<String>>,
+    peer_registry: &Arc<RwLock<PeerRegistry>>,
+    node_id:       &str,
+    cerebro_embed: &Option<String>,
+) -> serde_json::Value {
+    let full = gather_tools(tool_reg).await;
+    let reg  = tool_reg.read().await;
+    let plugin_names: std::collections::HashSet<&str> =
+        reg.values().flatten().map(|t| t.name.as_str()).collect();
+    let has_sensors = plugin_names.contains("get_iaq")
+        || plugin_names.contains("thermal_frame")
+        || plugin_names.iter().any(|n| n.starts_with("get_temp"));
+    let has_cam = has_camera();
+    let ram = read_ram_mb();
+    let tools: Vec<&str> = full.iter().map(|t| t.name.as_str()).collect();
+    let peer_count = peer_registry.read().await.peers.len();
+    let mut model = model_arc.read().await.clone();
+    if model.trim().is_empty() { model = "(provider default)".into(); }
+
+    serde_json::json!({
+        "node_id": node_id,
+        "arch":    std::env::consts::ARCH,
+        "ram_mb":  ram,
+        "tier":    tier_from_ram(ram),
+        "backend": *backend_arc.read().await,
+        "model":   model,
+        "senses": {
+            "camera":      has_cam,
+            "thermal_iaq": has_sensors,
+            "gpio":        is_raspberry_pi(),
+        },
+        "memory": {
+            "mode":        if cerebro_embed.is_some() { "semantic" } else { "fts5" },
+            "embed_model": cerebro_embed,
+        },
+        "mesh_peers": peer_count,
+        "tools":      tools,
+    })
 }
 
 /// Build the "## Current embodiment" block from this node's ACTUAL state: the live
@@ -2350,6 +2408,26 @@ fn mesh_file_send_spec() -> ToolSpec {
                 }
             },
             "required": ["node", "path"]
+        }),
+    }
+}
+
+fn mesh_capabilities_spec() -> ToolSpec {
+    ToolSpec {
+        name:        "mesh_capabilities".into(),
+        description: "Discover what a mesh peer can do — its live senses (camera, \
+                      thermal/IAQ, GPIO), tools, hardware tier, and memory mode. Use it \
+                      to route work to the right node (\"which peer has thermal?\", \
+                      \"who has a GPU?\"). Omit `node` to sweep all peers.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "node": {
+                    "type":        "string",
+                    "description": "A registered peer node_id to query. Omit to query every peer."
+                }
+            },
+            "required": []
         }),
     }
 }
