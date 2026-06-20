@@ -7,8 +7,36 @@ import { SessionItem } from "../types.slint";
 // Scrollable list of past sessions. Tapping a row restores it (replays history
 // via the hello/resume_session WS frame). Active session highlighted in primary.
 //
+// SELECT mode (header toggle) turns the rows into a multi-select: tapping a row
+// checks/unchecks it instead of restoring, and the header exposes bulk
+// Export / Archive / Delete over the selection (one row = a selection of one;
+// EXPORT ALL is always available). Delete routes through a confirm overlay.
+//
 // preferred-height / min-height declared at 0 so parent VerticalLayout does not
 // derive its layoutinfo from our content — we fill via vertical-stretch.
+
+// A small text button matching the header's REFRESH style.
+component BarButton inherits Rectangle {
+    in property <string> label;
+    in property <color> accent: Palette.text-dim;
+    in property <bool> strong: false;
+    callback clicked();
+    width: txt.preferred-width + 22px;
+    height: 28px;
+    border-radius: Palette.radius;
+    background: touch.has-hover || strong ? Palette.surface-hi : transparent;
+    border-width: 1px;
+    border-color: strong ? root.accent : Palette.border;
+    touch := TouchArea { clicked => { root.clicked(); } }
+    txt := Text {
+        text: root.label;
+        color: root.accent;
+        font-size: 9px;
+        letter-spacing: 1px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
 
 export component SessionView {
     preferred-height: 0px;
@@ -16,9 +44,19 @@ export component SessionView {
 
     in property <[SessionItem]> sessions;
     in property <int>           active-session-id: 0;
+    in-out property <bool>      select-mode: false;
+    in property <int>           selected-count: 0;
 
     callback restore-session(int);
     callback refresh();
+    callback toggle-select(int);
+    callback clear-selection();
+    callback export-selected();
+    callback export-all();
+    callback archive-selected();
+    callback delete-selected();   // fired after the confirm overlay
+
+    property <bool> confirm-delete: false;
 
     VerticalLayout {
         // ── Header ────────────────────────────────────────────────────────
@@ -29,9 +67,10 @@ export component SessionView {
             HorizontalLayout {
                 padding-left: 20px;
                 padding-right: 14px;
+                spacing: 8px;
 
                 Text {
-                    text: "SESSIONS";
+                    text: root.select-mode ? "SELECTED " + root.selected-count : "SESSIONS";
                     color: Palette.text-dim;
                     font-size: 9px;
                     letter-spacing: 2px;
@@ -39,26 +78,45 @@ export component SessionView {
                     horizontal-stretch: 1;
                 }
 
-                // Refresh button
-                Rectangle {
-                    width: 72px;
-                    height: 28px;
-                    border-radius: Palette.radius;
-                    background: Palette.surface-hi;
-                    border-width: 1px;
-                    border-color: Palette.border;
+                if !root.select-mode: BarButton {
+                    label: "REFRESH";
                     y: (parent.height - self.height) / 2;
+                    clicked => { root.refresh(); }
+                }
+                if !root.select-mode: BarButton {
+                    label: "SELECT";
+                    y: (parent.height - self.height) / 2;
+                    clicked => { root.select-mode = true; }
+                }
+                if !root.select-mode: BarButton {
+                    label: "EXPORT ALL";
+                    y: (parent.height - self.height) / 2;
+                    clicked => { root.export-all(); }
+                }
 
-                    TouchArea { clicked => { root.refresh(); } }
-
-                    Text {
-                        text: "REFRESH";
-                        color: Palette.text-dim;
-                        font-size: 9px;
-                        letter-spacing: 1px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+                if root.select-mode: BarButton {
+                    label: "EXPORT";
+                    accent: Palette.primary;
+                    strong: root.selected-count > 0;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { if (root.selected-count > 0) { root.export-selected(); } }
+                }
+                if root.select-mode: BarButton {
+                    label: "ARCHIVE";
+                    y: (parent.height - self.height) / 2;
+                    clicked => { if (root.selected-count > 0) { root.archive-selected(); } }
+                }
+                if root.select-mode: BarButton {
+                    label: "DELETE";
+                    accent: #ef4444;
+                    strong: root.selected-count > 0;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { if (root.selected-count > 0) { root.confirm-delete = true; } }
+                }
+                if root.select-mode: BarButton {
+                    label: "DONE";
+                    y: (parent.height - self.height) / 2;
+                    clicked => { root.select-mode = false; root.clear-selection(); }
                 }
             }
         }
@@ -90,18 +148,24 @@ export component SessionView {
                 for item in root.sessions: Rectangle {
                     height: 66px;
                     border-radius: Palette.radius;
-                    background: item.session-id == root.active-session-id
+                    background: item.selected
                         ? Palette.surface-hi
-                        : Palette.surface;
+                        : (item.session-id == root.active-session-id
+                            ? Palette.surface-hi
+                            : Palette.surface);
                     border-width: 1px;
-                    border-color: item.session-id == root.active-session-id
+                    border-color: item.selected
                         ? Palette.primary
-                        : Palette.border;
+                        : (item.session-id == root.active-session-id
+                            ? Palette.primary
+                            : Palette.border);
                     animate border-color { duration: 200ms; }
 
                     TouchArea {
                         clicked => {
-                            if item.session-id != root.active-session-id {
+                            if (root.select-mode) {
+                                root.toggle-select(item.session-id);
+                            } else if (item.session-id != root.active-session-id) {
                                 root.restore-session(item.session-id);
                             }
                         }
@@ -120,8 +184,30 @@ export component SessionView {
                             animate background { duration: 200ms; }
                         }
 
+                        // Checkbox (select mode only)
+                        if root.select-mode: Rectangle {
+                            width: 34px;
+                            box := Rectangle {
+                                width: 16px;
+                                height: 16px;
+                                border-radius: 4px;
+                                border-width: 1.5px;
+                                border-color: item.selected ? Palette.primary : Palette.border-hi;
+                                background: item.selected ? Palette.primary : transparent;
+                                Text {
+                                    text: "✓";
+                                    visible: item.selected;
+                                    color: Palette.surface;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
                         VerticalLayout {
-                            padding-left: 12px;
+                            padding-left: root.select-mode ? 2px : 12px;
                             padding-right: 12px;
                             spacing: 6px;
                             alignment: center;
@@ -161,6 +247,60 @@ export component SessionView {
                                 font-size: 11px;
                                 overflow: elide;
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Delete confirm overlay ─────────────────────────────────────────────
+    if root.confirm-delete: Rectangle {
+        background: #000000bb;
+        TouchArea { clicked => { root.confirm-delete = false; } }  // backdrop dismiss
+
+        Rectangle {
+            width: 300px;
+            height: dlg.preferred-height + 32px;
+            background: Palette.surface;
+            border-radius: Palette.radius-lg;
+            border-width: 1px;
+            border-color: Palette.border-hi;
+            drop-shadow-blur: 32px;
+            drop-shadow-color: #000000aa;
+
+            dlg := VerticalLayout {
+                padding: 18px;
+                spacing: 14px;
+                Text {
+                    text: "Delete " + root.selected-count + " session" + (root.selected-count == 1 ? "" : "s") + "?";
+                    color: Palette.text-bright;
+                    font-size: 14px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "This permanently removes the transcript(s). Export or consolidate to cerebro first if you want to keep anything.";
+                    color: Palette.text-dim;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    BarButton {
+                        label: "CANCEL";
+                        horizontal-stretch: 1;
+                        clicked => { root.confirm-delete = false; }
+                    }
+                    BarButton {
+                        label: "DELETE";
+                        accent: #ef4444;
+                        strong: true;
+                        horizontal-stretch: 1;
+                        clicked => {
+                            root.confirm-delete = false;
+                            root.delete-selected();
                         }
                     }
                 }

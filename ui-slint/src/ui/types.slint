@@ -191,6 +191,7 @@ export struct SessionItem {
     time-ago:      string,   // "2 min ago", "3 hr ago", etc.
     message-count: int,
     preview:       string,   // first 80 chars of first user message
+    selected:      bool,     // multi-select state (session management)
 }
 
 // ── App-parity Tier A: read/light-action viewers over existing agentd routes ──

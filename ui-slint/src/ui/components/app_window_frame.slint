@@ -97,6 +97,7 @@ export component AppWindowFrame inherits Rectangle {
     in property <SysStats>       stats;
     in property <[SessionItem]>  sessions;
     in property <int>            active-session-id;
+    in property <int>            sessions-selected-count;
     in property <string>         soul-text;
     in property <string>         policy-mode;
     in property <string>         current-model;
@@ -185,6 +186,12 @@ export component AppWindowFrame inherits Rectangle {
     callback stop-turn();
     callback restore-session(int);
     callback refresh-sessions();
+    callback sessions-toggle-select(int);
+    callback sessions-clear-selection();
+    callback sessions-export-selected();
+    callback sessions-export-all();
+    callback sessions-archive-selected();
+    callback sessions-delete-selected();
     callback save-soul(string);
     callback set-policy(string);
     callback set-model(string);
@@ -462,8 +469,15 @@ export component AppWindowFrame inherits Rectangle {
             vertical-stretch: 1;
             sessions: root.sessions;
             active-session-id: root.active-session-id;
+            selected-count: root.sessions-selected-count;
             restore-session(id) => { root.restore-session(id); }
             refresh => { root.refresh-sessions(); }
+            toggle-select(id) => { root.sessions-toggle-select(id); }
+            clear-selection => { root.sessions-clear-selection(); }
+            export-selected => { root.sessions-export-selected(); }
+            export-all => { root.sessions-export-all(); }
+            archive-selected => { root.sessions-archive-selected(); }
+            delete-selected => { root.sessions-delete-selected(); }
         }
 
         if root.kind == AppKind.settings: SettingsView {

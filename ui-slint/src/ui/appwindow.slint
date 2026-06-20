@@ -32,6 +32,7 @@ export component AppWindow inherits Window {
     in-out property <SysStats>       sys-stats;
     in-out property <image>          thermal-image;   // MLX90640 ironbow heatmap (Rust-built)
     in-out property <[SessionItem]>  sessions;
+    in-out property <int>            sessions-selected-count: 0;
     in-out property <int>            current-session-id: 0;
     in-out property <int>            current-view: 0;   // 0=chat 1=system 2=sensor 3=sessions 4=settings (Focus mode)
     in-out property <ShellMode>      shell-mode: ShellMode.desktop;  // Desktop (windowed) ⇄ Focus (full-screen app)
@@ -168,6 +169,12 @@ export component AppWindow inherits Window {
     callback stop-turn();
     callback refresh-sessions();
     callback restore-session(int);
+    callback sessions-toggle-select(int);
+    callback sessions-clear-selection();
+    callback sessions-export-selected();
+    callback sessions-export-all();
+    callback sessions-archive-selected();
+    callback sessions-delete-selected();
     callback toggle-recording();
     callback toggle-tts();
     callback refresh-settings();
@@ -542,8 +549,15 @@ export component AppWindow inherits Window {
                         vertical-stretch: 1;
                         sessions: root.sessions;
                         active-session-id: root.current-session-id;
+                        selected-count: root.sessions-selected-count;
                         restore-session(id) => { root.restore-session(id); }
                         refresh => { root.refresh-sessions(); }
+                        toggle-select(id) => { root.sessions-toggle-select(id); }
+                        clear-selection => { root.sessions-clear-selection(); }
+                        export-selected => { root.sessions-export-selected(); }
+                        export-all => { root.sessions-export-all(); }
+                        archive-selected => { root.sessions-archive-selected(); }
+                        delete-selected => { root.sessions-delete-selected(); }
                     }
                     if root.current-view == 4: SettingsView {
                         vertical-stretch: 1;
@@ -660,6 +674,7 @@ export component AppWindow inherits Window {
                         stats: root.sys-stats;
                         sessions: root.sessions;
                         active-session-id: root.current-session-id;
+                        sessions-selected-count: root.sessions-selected-count;
                         soul-text: root.soul-text;
                         policy-mode: root.settings-policy;
                         current-model: root.settings-model;
@@ -744,6 +759,12 @@ export component AppWindow inherits Window {
                         toggle-recording => { root.toggle-recording(); }
                         restore-session(id) => { root.restore-session(id); }
                         refresh-sessions => { root.refresh-sessions(); }
+                        sessions-toggle-select(id) => { root.sessions-toggle-select(id); }
+                        sessions-clear-selection => { root.sessions-clear-selection(); }
+                        sessions-export-selected => { root.sessions-export-selected(); }
+                        sessions-export-all => { root.sessions-export-all(); }
+                        sessions-archive-selected => { root.sessions-archive-selected(); }
+                        sessions-delete-selected => { root.sessions-delete-selected(); }
                         save-soul(t) => { root.save-soul(t); }
                         set-policy(m) => { root.set-policy(m); }
                         set-model(id) => { root.set-model(id); }
