@@ -1201,21 +1201,25 @@ fn spawn_agent_router(
     tokio::spawn(async move {
         // Per-alert-key cooldown to prevent turn storms when a condition persists.
         let mut last_alert: HashMap<String, std::time::Instant> = HashMap::new();
+        // Per-alert-key elevation-streak start — drives the persistence gate (a
+        // condition must stay elevated >= alert_persist_secs before it fires).
+        let mut elevated_since: HashMap<String, std::time::Instant> = HashMap::new();
         let iaq_threshold: f32 = std::env::var("SENSOR_IAQ_THRESHOLD")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(150.0);
         let cpu_temp_threshold: f32 = std::env::var("SENSOR_CPU_TEMP_THRESHOLD")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(85.0);
         let thermal_threshold: f32 = std::env::var("SENSOR_THERMAL_THRESHOLD")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(45.0);
-        // MLX90640 saturation ceiling: a stuck/dead pixel pins at the sensor's ~300°C
-        // hard range ceiling, which a real monitored surface never reaches. A frame whose
-        // max is at/above this is a defective reading — suppress the (autonomous, fires-
-        // unsupervised) hotspot alert instead of raising a false one. Default 150°C: far
-        // above any plausible room/device temp, far below the 300°C saturation value.
-        // (True per-pixel masking/interpolation belongs upstream in the SensorHead service,
-        // which owns the 32×24 grid; the bridge forwards only scalar min/max/mean.)
-        let thermal_sat_ceiling: f32 = std::env::var("SENSOR_THERMAL_MAX_VALID")
-            .ok().and_then(|s| s.parse().ok()).unwrap_or(150.0);
+        // Persistence gate: a threshold-crossing fires only after the condition holds
+        // for >= this many seconds — so a brief transient (a 2–3 s lighter flame in view
+        // of the MLX90640, a cooking whiff past the BME688) never raises an autonomous
+        // alert, while a sustained hotspot / real air-quality problem does. Replaces the
+        // old SENSOR_THERMAL_MAX_VALID saturation guard, whose stuck-pixel premise was
+        // disproven on apex1 (the "300°C pixel" was a lighter held at the lens) and which
+        // also wrongly silenced a *real* sustained fire. 0 = fire immediately (old behaviour).
+        let alert_persist_secs: u64 = std::env::var("SENSOR_ALERT_PERSIST_SECS")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+        let persist_dur = std::time::Duration::from_secs(alert_persist_secs);
         let alert_cooldown_secs: u64 = std::env::var("SENSOR_ALERT_COOLDOWN_SECS")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(1800);
         // Per-session history window (rough tokens). The always-on root session
@@ -1232,6 +1236,12 @@ fn spawn_agent_router(
         // session each spawn a turn: the second's abort handle overwrites the first
         // (uncancellable), their history writes race (later wins, drops messages),
         // the disk JSONL diverges, and their ActionIds collide.
+        let thresholds = SensorThresholds {
+            iaq:      iaq_threshold,
+            cpu_temp: cpu_temp_threshold,
+            thermal:  thermal_threshold,
+        };
+
         let mut gate = TurnGate::default();
         let (turn_done_tx, mut turn_done_rx) = mpsc::unbounded_channel::<SessionId>();
 
@@ -1350,49 +1360,25 @@ fn spawn_agent_router(
 
                 // ── sensor events ────────────────────────────────────────────
                 Ok(Event::SensorReading { node_id, reading, timestamp: _ }) => {
-                    // (alert_key, prompt) — key is used for per-type cooldown dedup.
-                    let alert: Option<(String, String)> = match &reading {
-                        SensorReading::Temperature { celsius, sensor_id }
-                            if *celsius > cpu_temp_threshold => {
-                            Some((
-                                format!("{node_id}:cpu_temp"),
-                                format!("[sensor alert] {node_id}/{sensor_id} CPU temperature critical: {celsius:.1}°C (threshold {cpu_temp_threshold:.0}°C) — please investigate"),
-                            ))
+                    // Classify (pure) → persistence gate → cooldown. A transient
+                    // (lighter flame, cooking whiff) is elevated for one or two
+                    // readings but never ages past the persistence window, so it's
+                    // held back; a sustained condition fires once, then the per-key
+                    // cooldown silences re-fires while it persists.
+                    let now = std::time::Instant::now();
+                    let to_fire: Option<(String, String)> = match classify_reading(&reading, &node_id, &thresholds) {
+                        AlertEval::None => None,
+                        AlertEval::Clear { key } => { elevated_since.remove(&key); None }
+                        AlertEval::Candidate { key, prompt, persist: false } => Some((key, prompt)),
+                        AlertEval::Candidate { key, prompt, persist: true } => {
+                            if persistence_passed(&mut elevated_since, &key, now, persist_dur) {
+                                Some((key, prompt))
+                            } else {
+                                None // elevated but not yet sustained — likely a transient
+                            }
                         }
-                        SensorReading::Motion { detected: true, sensor_id } => {
-                            Some((
-                                format!("{node_id}:motion"),
-                                format!("[sensor alert] {node_id}/{sensor_id} motion detected"),
-                            ))
-                        }
-                        SensorReading::AirQuality { iaq, accuracy, sensor_id, .. }
-                            if *iaq > iaq_threshold && *accuracy >= 2 => {
-                            Some((
-                                format!("{node_id}:air_quality"),
-                                format!("[sensor alert] {node_id}/{sensor_id} air quality degraded: IAQ {iaq:.0} (threshold {iaq_threshold:.0}, accuracy {accuracy}/3) — consider ventilating"),
-                            ))
-                        }
-                        // Saturated/stuck pixel (max pinned at the sensor's range ceiling):
-                        // defective, not a real hotspot — log and suppress the autonomous
-                        // alert. Ordered before the hotspot arm so it wins for max ≥ ceiling.
-                        SensorReading::ThermalFrame { max_c, mean_c, sensor_id, .. }
-                            if *max_c >= thermal_sat_ceiling => {
-                            eprintln!(
-                                "[sensor] {node_id}/{sensor_id} thermal max {max_c:.1}°C ≥ saturation ceiling {thermal_sat_ceiling:.0}°C (mean {mean_c:.1}°C) — likely stuck pixel; hotspot alert suppressed"
-                            );
-                            None
-                        }
-                        SensorReading::ThermalFrame { max_c, mean_c, sensor_id, .. }
-                            if *max_c > thermal_threshold => {
-                            Some((
-                                format!("{node_id}:thermal_hotspot"),
-                                format!("[sensor alert] {node_id}/{sensor_id} thermal hotspot: {max_c:.1}°C max, {mean_c:.1}°C mean (threshold {thermal_threshold:.0}°C) — check for overheating devices"),
-                            ))
-                        }
-                        _ => None,
                     };
-                    if let Some((alert_key, prompt)) = alert {
-                        let now = std::time::Instant::now();
+                    if let Some((alert_key, prompt)) = to_fire {
                         let cooled_down = last_alert.get(&alert_key)
                             .map(|t| now.duration_since(*t).as_secs() >= alert_cooldown_secs)
                             .unwrap_or(true);
@@ -2654,12 +2640,173 @@ fn spawn_discovery_loop(
     });
 }
 
+// ── sensor-alert classification + persistence ──────────────────────────────────
+
+/// Thresholds for the autonomous sensor-alert loop (env-tunable where read).
+struct SensorThresholds {
+    iaq:      f32,
+    cpu_temp: f32,
+    thermal:  f32,
+}
+
+/// Outcome of evaluating one sensor reading.
+///
+/// `Candidate` is over-threshold and may fire (subject to persistence + cooldown);
+/// `persist` distinguishes threshold-continuous sensors (thermal / IAQ / CPU — a
+/// brief spike must NOT alert) from instantaneous ones (motion). `Clear` means a
+/// tracked condition is back to normal → reset its persistence streak. `None` =
+/// nothing to do (incl. an untrusted low-accuracy reading).
+enum AlertEval {
+    Candidate { key: String, prompt: String, persist: bool },
+    Clear { key: String },
+    None,
+}
+
+/// Pure classification of a sensor reading against thresholds — no I/O, no clock.
+/// The stateful persistence gate ([`persistence_passed`]) and cooldown live in the
+/// loop. NB: there's deliberately no thermal magnitude/saturation guard — the
+/// MLX90640 forwards only scalar min/max/mean here, and a transient flame-in-frame
+/// is rejected by *persistence*, so a sustained hotspot (a real fire) still alerts.
+fn classify_reading(reading: &SensorReading, node_id: &str, th: &SensorThresholds) -> AlertEval {
+    match reading {
+        SensorReading::Temperature { celsius, sensor_id } => {
+            let key = format!("{node_id}:cpu_temp");
+            if *celsius > th.cpu_temp {
+                AlertEval::Candidate {
+                    prompt: format!("[sensor alert] {node_id}/{sensor_id} CPU temperature critical: {celsius:.1}°C (threshold {:.0}°C, sustained) — please investigate", th.cpu_temp),
+                    key,
+                    persist: true,
+                }
+            } else {
+                AlertEval::Clear { key }
+            }
+        }
+        SensorReading::Motion { detected: true, sensor_id } => AlertEval::Candidate {
+            key: format!("{node_id}:motion"),
+            prompt: format!("[sensor alert] {node_id}/{sensor_id} motion detected"),
+            persist: false, // motion is inherently a single instant
+        },
+        // BME688 IAQ — only trust readings the sensor marks accuracy >= 2; an
+        // unreliable reading is neither an alert nor a "clear" (falls to None).
+        SensorReading::AirQuality { iaq, accuracy, sensor_id, .. } if *accuracy >= 2 => {
+            let key = format!("{node_id}:air_quality");
+            if *iaq > th.iaq {
+                AlertEval::Candidate {
+                    prompt: format!("[sensor alert] {node_id}/{sensor_id} air quality degraded: IAQ {iaq:.0} (threshold {:.0}, accuracy {accuracy}/3, sustained) — consider ventilating", th.iaq),
+                    key,
+                    persist: true,
+                }
+            } else {
+                AlertEval::Clear { key }
+            }
+        }
+        SensorReading::ThermalFrame { max_c, mean_c, sensor_id, .. } => {
+            let key = format!("{node_id}:thermal_hotspot");
+            if *max_c > th.thermal {
+                AlertEval::Candidate {
+                    prompt: format!("[sensor alert] {node_id}/{sensor_id} thermal hotspot: {max_c:.1}°C max, {mean_c:.1}°C mean (threshold {:.0}°C, sustained) — check for overheating devices", th.thermal),
+                    key,
+                    persist: true,
+                }
+            } else {
+                AlertEval::Clear { key }
+            }
+        }
+        _ => AlertEval::None,
+    }
+}
+
+/// Persistence gate for a `Candidate { persist: true }`: true once the condition
+/// has been continuously elevated for >= `persist`, tracking the streak start in
+/// `streaks`. A brief transient (a 2–3 s lighter flame in front of the MLX90640)
+/// is seen once, hasn't aged `persist`, and is held back; a sustained hotspot ages
+/// past it and fires. The caller removes the key on `Clear`, so the next elevation
+/// restarts the clock.
+fn persistence_passed(
+    streaks: &mut HashMap<String, std::time::Instant>,
+    key:     &str,
+    now:     std::time::Instant,
+    persist: std::time::Duration,
+) -> bool {
+    let since = *streaks.entry(key.to_string()).or_insert(now);
+    now.duration_since(since) >= persist
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use apexos_core::{ContentBlock, Message};
+
+    // ── sensor-alert classification + persistence ────────────────────────────
+    fn th() -> SensorThresholds { SensorThresholds { iaq: 150.0, cpu_temp: 85.0, thermal: 45.0 } }
+
+    fn air(iaq: f32, accuracy: u8) -> SensorReading {
+        SensorReading::AirQuality {
+            iaq, co2_eq_ppm: 0.0, voc_ppm: 0.0, accuracy,
+            temperature_c: 22.0, humidity_pct: 50.0, pressure_hpa: 1000.0,
+            sensor_id: "bme688".into(),
+        }
+    }
+
+    #[test]
+    fn classify_thermal_over_threshold_is_persist_candidate() {
+        // The lighter case: 100°C is over threshold but transient — classify says
+        // "candidate, must persist"; the gate (tested below) is what holds it back.
+        let r = SensorReading::ThermalFrame { min_c: 25.0, max_c: 100.0, mean_c: 27.0, sensor_id: "mlx".into() };
+        match classify_reading(&r, "n1", &th()) {
+            AlertEval::Candidate { key, persist, .. } => {
+                assert_eq!(key, "n1:thermal_hotspot");
+                assert!(persist, "thermal must require persistence");
+            }
+            _ => panic!("expected Candidate"),
+        }
+    }
+
+    #[test]
+    fn classify_thermal_under_threshold_is_clear() {
+        let r = SensorReading::ThermalFrame { min_c: 24.0, max_c: 30.0, mean_c: 26.0, sensor_id: "mlx".into() };
+        assert!(matches!(classify_reading(&r, "n1", &th()), AlertEval::Clear { .. }));
+    }
+
+    #[test]
+    fn classify_motion_is_instant_candidate() {
+        let r = SensorReading::Motion { detected: true, sensor_id: "pir".into() };
+        match classify_reading(&r, "n1", &th()) {
+            AlertEval::Candidate { persist, .. } => assert!(!persist, "motion must NOT require persistence"),
+            _ => panic!("expected Candidate"),
+        }
+    }
+
+    #[test]
+    fn classify_low_accuracy_iaq_is_none() {
+        // accuracy < 2 is untrusted — neither alert nor clear.
+        assert!(matches!(classify_reading(&air(300.0, 1), "n1", &th()), AlertEval::None));
+    }
+
+    #[test]
+    fn classify_iaq_high_accuracy_over_and_under() {
+        assert!(matches!(classify_reading(&air(200.0, 3), "n1", &th()), AlertEval::Candidate { persist: true, .. }));
+        assert!(matches!(classify_reading(&air(80.0, 3), "n1", &th()), AlertEval::Clear { .. }));
+    }
+
+    #[test]
+    fn persistence_holds_transient_then_fires_when_sustained() {
+        let mut streaks = HashMap::new();
+        let now = std::time::Instant::now();
+        let persist = std::time::Duration::from_secs(30);
+        let k = "n1:thermal_hotspot";
+        // First elevated reading: streak starts now → not yet sustained (the lighter).
+        assert!(!persistence_passed(&mut streaks, k, now, persist));
+        // A few seconds later, same streak: still inside the window.
+        assert!(!persistence_passed(&mut streaks, k, now + std::time::Duration::from_secs(5), persist));
+        // Sustained past the window → fires (a real hotspot).
+        assert!(persistence_passed(&mut streaks, k, now + std::time::Duration::from_secs(31), persist));
+        // Clearing resets the streak — a later re-elevation starts a fresh clock.
+        streaks.remove(k);
+        assert!(!persistence_passed(&mut streaks, k, now + std::time::Duration::from_secs(40), persist));
+    }
 
     // ── cancel marker: restore user/assistant alternation after a cancel ──────
     #[test]
