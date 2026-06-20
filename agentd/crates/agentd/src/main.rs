@@ -154,9 +154,23 @@ async fn main() -> anyhow::Result<()> {
     session_store.init().await?;
     let initial_histories = session_store.load_all().await;
 
-    // Server-issued session IDs — start above any IDs already loaded from disk.
-    let max_loaded_sid = initial_histories.keys().map(|s| s.0).max().unwrap_or(0);
+    // Mesh a2a per-peer session map (peer node_id → SessionId on this node).
+    // Loaded before next_session_id so we can start the counter past any session a
+    // peer thread already claims — a mesh session id must never be re-handed-out to
+    // a socket after a restart. See gateway::mesh_session_for.
+    let mesh_sessions_path = log_dir.join("mesh_sessions.json");
+    let mesh_sessions: HashMap<String, SessionId> = std::fs::read_to_string(&mesh_sessions_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let max_mesh_sid = mesh_sessions.values().map(|s| s.0).max().unwrap_or(0);
+
+    // Server-issued session IDs — start above any IDs already loaded from disk
+    // (history JSONL *and* the mesh per-peer map).
+    let max_loaded_sid = initial_histories.keys().map(|s| s.0).max().unwrap_or(0)
+        .max(max_mesh_sid);
     let next_session_id = Arc::new(AtomicU64::new(max_loaded_sid + 1));
+    let mesh_sessions = Arc::new(std::sync::Mutex::new(mesh_sessions));
 
     // Shared state for the agent router (created early — needed by GatewayState too).
     let tool_reg: Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>> =
@@ -199,17 +213,9 @@ async fn main() -> anyhow::Result<()> {
         let vs = vast_state.clone();
         tokio::spawn(async move { vs.try_restore().await; });
     }
-    let node_id = Arc::new(
-        std::env::var("APEX_NODE_ID").unwrap_or_else(|_| {
-            std::process::Command::new("hostname")
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "apexos".into())
-        })
-    );
+    // Single source of truth for the node's mesh identity (env APEX_NODE_ID or
+    // hostname) — shared with the cross-node a2a sender via apexos_core::node_id().
+    let node_id = Arc::new(apexos_core::node_id());
 
     // Per-session agent bindings (multi-agent runtime, docs/agent-identity.md 3b):
     // a `hello` frame may bind its session to an agent; the Cerebro stamp + CCBS
@@ -267,6 +273,8 @@ async fn main() -> anyhow::Result<()> {
         peer_registry:        Arc::clone(&peer_registry),
         pairing:              Arc::new(std::sync::Mutex::new(None)),
         node_id:              Arc::clone(&node_id),
+        mesh_sessions:        Arc::clone(&mesh_sessions),
+        mesh_sessions_path:   mesh_sessions_path.clone(),
         vast_state:           vast_state.clone(),
         session_bindings:     Arc::clone(&session_bindings),
         identities:           Arc::clone(&identities),
@@ -2261,14 +2269,19 @@ fn send_to_agent_spec() -> ToolSpec {
         name:        "send_to_agent".into(),
         description: "Send an asynchronous message to another agent session (fire-and-forget). \
                       Without node: routes locally on this machine. \
-                      With node: proxies to a registered mesh peer — session_id 0 = root session on that node. \
+                      With node: proxies to a registered mesh peer. Omit session_id (or use 0) \
+                      and the peer lands your message in its own dedicated thread for this node \
+                      (kept out of its root/active chat) and notifies its operator — the normal \
+                      way to reach a peer. \
                       Returns immediately — use agent_spawn if you need the result.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "session_id": {
                     "type":        "integer",
-                    "description": "Target session ID (use 0 for the remote node's root session)."
+                    "description": "Target session ID. Omit (or 0) to land in the peer's dedicated \
+                                    per-node mesh thread (recommended); set a specific id only to \
+                                    target an existing session you know."
                 },
                 "message": {
                     "type":        "string",

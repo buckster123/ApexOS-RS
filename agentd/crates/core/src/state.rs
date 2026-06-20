@@ -115,6 +115,7 @@ impl SystemState {
             Event::AgentMessageAck { .. } => {}
 
             // Mesh: peer registry managed by gateway; state is a no-op.
+            Event::MeshMessage    { .. } => {}
             Event::PeerSeen       { .. } => {}
             Event::PeerRegistered { .. } => {}
             Event::PeerLost       { .. } => {}

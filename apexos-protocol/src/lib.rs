@@ -271,6 +271,14 @@ pub enum Event {
     VastTunnelLost        { instance_id: String },
 
     // ── mesh ──────────────────────────────────────────────
+    /// A cross-node a2a message arrived from a mesh peer and was injected into a
+    /// session on this node. Session-LESS in `event_session` (the `session` field
+    /// is informational, not a scope), so the gateway broadcasts it to EVERY
+    /// client as a global notification — a user watching any session sees that
+    /// mesh traffic landed (the conversation stream itself stays scoped to
+    /// `session`). `from_node` = the sending peer's node_id; `session` = where it
+    /// landed (the peer's own thread); `preview` = a short body excerpt.
+    MeshMessage    { from_node: String, session: SessionId, preview: String },
     /// A new _apexos._tcp node seen via mDNS that isn't in peers.toml yet.
     PeerSeen       { node_id: String, ip: String },
     /// A peer was successfully added to peers.toml (bootstrap complete or manual add).

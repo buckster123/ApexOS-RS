@@ -26,6 +26,32 @@ pub fn node_agent_id() -> String {
         .unwrap_or_else(|| DEFAULT_AGENT_ID.to_string())
 }
 
+/// The node's mesh identity (the name peers know it by): `$APEX_NODE_ID`, else the
+/// system hostname, else `"apexos"`. This is the *node* id (e.g. `ApexOS-RS`) —
+/// distinct from [`node_agent_id`] (the *agent* identity, e.g. `APEX`). Cached: the
+/// hostname is resolved at most once per process (it never changes at runtime), so
+/// callers on the hot a2a-send path don't re-shell `hostname`. Single source of
+/// truth shared by `main.rs` (the `GatewayState.node_id` Arc) and the cross-node
+/// `send_to_agent` sender (which stamps it as `from` so the receiver can route the
+/// message to that peer's own session and surface its provenance).
+pub fn node_id() -> String {
+    static NODE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NODE_ID.get_or_init(|| {
+        std::env::var("APEX_NODE_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| {
+                std::process::Command::new("hostname")
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "apexos".into())
+            })
+    }).clone()
+}
+
 /// The node's workspace base: `$AGENTD_WORKSPACE`, else `/var/lib/agentd/workspace`.
 pub fn workspace_base() -> PathBuf {
     let base = std::env::var("AGENTD_WORKSPACE")
