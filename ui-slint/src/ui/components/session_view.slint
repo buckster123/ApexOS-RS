@@ -54,7 +54,9 @@ export component SessionView {
     callback export-selected();
     callback export-all();
     callback archive-selected();
-    callback delete-selected();   // fired after the confirm overlay
+    callback consolidate-selected();          // summarize selected → cerebro (no delete)
+    callback delete-selected();               // fired after the confirm overlay
+    callback consolidate-delete-selected();   // consolidate → cerebro, THEN delete
 
     property <bool> confirm-delete: false;
 
@@ -100,6 +102,11 @@ export component SessionView {
                     strong: root.selected-count > 0;
                     y: (parent.height - self.height) / 2;
                     clicked => { if (root.selected-count > 0) { root.export-selected(); } }
+                }
+                if root.select-mode: BarButton {
+                    label: "CEREBRO";
+                    y: (parent.height - self.height) / 2;
+                    clicked => { if (root.selected-count > 0) { root.consolidate-selected(); } }
                 }
                 if root.select-mode: BarButton {
                     label: "ARCHIVE";
@@ -280,11 +287,21 @@ export component SessionView {
                     horizontal-alignment: center;
                 }
                 Text {
-                    text: "This permanently removes the transcript(s). Export or consolidate to cerebro first if you want to keep anything.";
+                    text: "This permanently removes the transcript(s). Consolidate distils the useful parts into cerebro first, so the knowledge survives the delete.";
                     color: Palette.text-dim;
                     font-size: 11px;
                     wrap: word-wrap;
                     horizontal-alignment: center;
+                }
+                // Primary, recommended path: keep the knowledge, drop the transcript.
+                BarButton {
+                    label: "CONSOLIDATE → CEREBRO, THEN DELETE";
+                    accent: Palette.primary;
+                    strong: true;
+                    clicked => {
+                        root.confirm-delete = false;
+                        root.consolidate-delete-selected();
+                    }
                 }
                 HorizontalLayout {
                     spacing: 10px;
@@ -294,9 +311,8 @@ export component SessionView {
                         clicked => { root.confirm-delete = false; }
                     }
                     BarButton {
-                        label: "DELETE";
+                        label: "DELETE ANYWAY";
                         accent: #ef4444;
-                        strong: true;
                         horizontal-stretch: 1;
                         clicked => {
                             root.confirm-delete = false;

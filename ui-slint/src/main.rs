@@ -2026,6 +2026,35 @@ async fn export_sessions(client: &reqwest::Client, base_url: &str, body: Value) 
     }
 }
 
+// POST /api/sessions/{id}/consolidate — distil a session into cerebro. Returns
+// whether it succeeded (the endpoint replies 200 with {ok:bool}; the LLM summary
+// can take a while, hence the generous timeout).
+async fn consolidate_one(client: &reqwest::Client, base_url: &str, id: u64) -> bool {
+    match client
+        .post(format!("{base_url}/api/sessions/{id}/consolidate"))
+        .timeout(std::time::Duration::from_secs(130))
+        .send()
+        .await
+    {
+        Ok(r)  => r.json::<Value>().await.ok().and_then(|v| v["ok"].as_bool()).unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+// DELETE /api/sessions/{id} — returns whether the transcript was actually removed
+// (checks body `ok`, not just status — root 0 is refused with 200 + ok:false).
+async fn delete_one(client: &reqwest::Client, base_url: &str, id: u64) -> bool {
+    match client
+        .delete(format!("{base_url}/api/sessions/{id}"))
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await
+    {
+        Ok(r)  => r.json::<Value>().await.ok().and_then(|v| v["ok"].as_bool()).unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 // POST /api/record/stop → run whisper → return transcribed text (or empty on error).
 async fn stop_and_transcribe(client: &reqwest::Client, base_url: &str) -> String {
     match client
@@ -3449,6 +3478,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(ui) = uw.upgrade() { ui.set_sessions_selected_count(0); }
                 }).ok();
                 notify(ToastKind::Warn, format!("Deleted {n} session(s)"));
+            });
+        });
+    }
+    {
+        // Consolidate selected → cerebro (no delete). Sequential LLM calls; toasts
+        // bracket the run since it can take a few seconds per session.
+        let base = http_base.clone();
+        let client = Arc::clone(&http_client);
+        let h = rt.handle().clone();
+        let uw = ui.as_weak();
+        ui.on_sessions_consolidate_selected(move || {
+            let ids = selected_session_ids();
+            if ids.is_empty() { return; }
+            let (base, client, uw) = (base.clone(), Arc::clone(&client), uw.clone());
+            h.spawn(async move {
+                notify(ToastKind::Info, format!("Consolidating {} session(s) into cerebro…", ids.len()));
+                let mut ok = 0;
+                for id in &ids {
+                    if consolidate_one(&client, &base, *id).await { ok += 1; }
+                }
+                slint::invoke_from_event_loop(move || {
+                    clear_session_selection();
+                    if let Some(ui) = uw.upgrade() { ui.set_sessions_selected_count(0); }
+                }).ok();
+                notify(ToastKind::Success, format!("Consolidated {ok}/{} into cerebro", ids.len()));
+            });
+        });
+    }
+    {
+        // Consolidate selected → cerebro, THEN delete. A session whose consolidation
+        // FAILS is kept (never lose data to a failed extraction).
+        let base = http_base.clone();
+        let client = Arc::clone(&http_client);
+        let h = rt.handle().clone();
+        let uw = ui.as_weak();
+        ui.on_sessions_consolidate_delete_selected(move || {
+            let ids = selected_session_ids();
+            if ids.is_empty() { return; }
+            let (base, client, uw) = (base.clone(), Arc::clone(&client), uw.clone());
+            h.spawn(async move {
+                notify(ToastKind::Info, format!("Consolidating {} session(s) before delete…", ids.len()));
+                let (mut deleted, mut kept) = (0, 0);
+                for id in &ids {
+                    if consolidate_one(&client, &base, *id).await && delete_one(&client, &base, *id).await {
+                        deleted += 1;
+                    } else {
+                        kept += 1; // consolidation (or delete) failed → keep the session
+                    }
+                }
+                let items = fetch_sessions(&client, &base).await;
+                slint::invoke_from_event_loop(move || {
+                    replace_sessions(items);
+                    clear_session_selection();
+                    if let Some(ui) = uw.upgrade() { ui.set_sessions_selected_count(0); }
+                }).ok();
+                if kept > 0 {
+                    notify(ToastKind::Warn, format!("Saved + deleted {deleted}; kept {kept} (not consolidated)"));
+                } else {
+                    notify(ToastKind::Success, format!("Consolidated → cerebro + deleted {deleted}"));
+                }
             });
         });
     }

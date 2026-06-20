@@ -191,7 +191,9 @@ export component AppWindowFrame inherits Rectangle {
     callback sessions-export-selected();
     callback sessions-export-all();
     callback sessions-archive-selected();
+    callback sessions-consolidate-selected();
     callback sessions-delete-selected();
+    callback sessions-consolidate-delete-selected();
     callback save-soul(string);
     callback set-policy(string);
     callback set-model(string);
@@ -477,7 +479,9 @@ export component AppWindowFrame inherits Rectangle {
             export-selected => { root.sessions-export-selected(); }
             export-all => { root.sessions-export-all(); }
             archive-selected => { root.sessions-archive-selected(); }
+            consolidate-selected => { root.sessions-consolidate-selected(); }
             delete-selected => { root.sessions-delete-selected(); }
+            consolidate-delete-selected => { root.sessions-consolidate-delete-selected(); }
         }
 
         if root.kind == AppKind.settings: SettingsView {

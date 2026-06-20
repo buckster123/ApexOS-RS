@@ -38,6 +38,15 @@ pub type CouncilButtInMap  = Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>;
 /// Ordered list of all sessions (running + complete) for this daemon run.
 pub type CouncilSessionsMap = Arc<Mutex<Vec<CouncilRecord>>>;
 
+/// A request to consolidate a session into Cerebro (summary + key discoveries →
+/// `session_save`), sent from the gateway handler to the agentd-side worker that
+/// owns the LLM provider + Cerebro ToolProxy. `reply` carries the result JSON the
+/// HTTP handler returns (`{ok, memory_id?, summary?}` or `{ok:false, error}`).
+pub struct ConsolidateReq {
+    pub session_id: u64,
+    pub reply:      tokio::sync::oneshot::Sender<serde_json::Value>,
+}
+
 #[derive(Clone)]
 pub struct GatewayState {
     pub bus:                   BusHandle,
@@ -92,6 +101,11 @@ pub struct GatewayState {
     pub mesh_sessions:      Arc<std::sync::Mutex<HashMap<String, SessionId>>>,
     /// On-disk JSON backing for `mesh_sessions` (`<log_dir>/mesh_sessions.json`).
     pub mesh_sessions_path: PathBuf,
+    /// Session-consolidation requests → the agentd-side worker (which owns the LLM
+    /// provider + Cerebro ToolProxy, unavailable here at GatewayState build time).
+    /// The handler sends a `ConsolidateReq` and awaits its oneshot reply. See
+    /// `session_consolidate_handler` + `consolidate::run` (agentd).
+    pub consolidate_tx:     tokio::sync::mpsc::Sender<ConsolidateReq>,
     /// Vast.ai instance + tunnel state — shared with supervisor for virtual tools
     pub vast_state:        VastState,
     /// Per-session agent bindings (multi-agent runtime). A `hello` frame may bind
@@ -210,8 +224,9 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/sessions/active",    get(active_sessions_handler))
         .route("/api/sessions/export",    post(session_export_handler))
         .route("/api/events/recent",      get(events_recent_handler))
-        .route("/api/sessions/{id}",         delete(session_delete_handler))
-        .route("/api/sessions/{id}/archive", post(session_archive_handler))
+        .route("/api/sessions/{id}",            delete(session_delete_handler))
+        .route("/api/sessions/{id}/archive",     post(session_archive_handler))
+        .route("/api/sessions/{id}/consolidate", post(session_consolidate_handler))
         .route("/api/sessions/{id}/message", post(session_message_handler))
         .route("/api/sessions/{id}/image",   post(session_image_handler))
         .route("/api/workspace/images",      get(workspace_images_handler))
@@ -1323,10 +1338,31 @@ async fn session_archive_handler(
     Json(serde_json::json!({ "ok": moved, "session_id": id, "archived": moved }))
 }
 
+/// POST /api/sessions/:id/consolidate — distill the session into Cerebro: one LLM
+/// turn summarizes the transcript into a summary + key discoveries, stored via
+/// `session_save` (so useful info is preserved before an export/archive/delete).
+/// The actual work runs in the agentd consolidation worker (it owns the provider +
+/// ToolProxy); here we send a request and await its oneshot reply (bounded — an LLM
+/// call over a long transcript can take a while, but never hangs the socket).
+async fn session_consolidate_handler(
+    State(state): State<GatewayState>,
+    Path(id):     Path<u64>,
+) -> impl IntoResponse {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if state.consolidate_tx.send(ConsolidateReq { session_id: id, reply: reply_tx }).await.is_err() {
+        return Json(serde_json::json!({ "ok": false, "error": "consolidation worker unavailable" }));
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(120), reply_rx).await {
+        Ok(Ok(v))  => Json(v),
+        Ok(Err(_)) => Json(serde_json::json!({ "ok": false, "error": "consolidation worker dropped the request" })),
+        Err(_)     => Json(serde_json::json!({ "ok": false, "error": "consolidation timed out" })),
+    }
+}
+
 /// Compact a tool-call/result JSON value to a short single-line string for the
 /// markdown transcript (full payloads bloat the export; the raw `jsonl` format
 /// keeps everything for machine use).
-fn compact_json(v: &serde_json::Value) -> String {
+pub fn compact_json(v: &serde_json::Value) -> String {
     let s = match v {
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
@@ -1340,7 +1376,7 @@ fn compact_json(v: &serde_json::Value) -> String {
 }
 
 /// Render a session's JSONL transcript to a readable markdown document.
-fn render_session_markdown(id: u64, jsonl: &str) -> String {
+pub fn render_session_markdown(id: u64, jsonl: &str) -> String {
     use apexos_core::{ContentBlock, Message};
     let mut out = format!("# Session {id}\n\n");
     for line in jsonl.lines().filter(|l| !l.trim().is_empty()) {
