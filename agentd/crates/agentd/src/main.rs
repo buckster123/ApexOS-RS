@@ -262,6 +262,11 @@ async fn main() -> anyhow::Result<()> {
     // counter) and awaits its oneshot reply.
     let (spawn_tx, spawn_rx) = tokio::sync::mpsc::channel::<SpawnReq>(16);
 
+    // Sensor-head liveness: updated by the SensorReading handler in spawn_agent_router,
+    // read by build_embodiment / gather_capabilities so thermal/IAQ capability reflects
+    // the LIVE sensor-bridge stream (not plugin-tool names — see has_live_sensors).
+    let sensor_presence: SensorPresence = Arc::new(std::sync::Mutex::new(None));
+
     eprintln!("[agentd] serving UI from {}", ui_dir.display());
     let gw_state = GatewayState {
         bus:                  handle.clone(),
@@ -520,6 +525,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&peer_registry),
         Arc::clone(&node_id),
         cerebro_embed,
+        Arc::clone(&sensor_presence),
     );
 
     // Nightly autonomous memory consolidation: call dream_run directly via the
@@ -531,7 +537,8 @@ async fn main() -> anyhow::Result<()> {
     // PluginUp events that populate tool_reg are captured (see the comment there).
     spawn_agent_router(agent_rx, bcast.clone(), handle.clone(),
                        tool_reg, histories, engine, max_depth, session_store, router_proxy,
-                       Arc::clone(&session_bindings), Arc::clone(&identities), spawn_rx);
+                       Arc::clone(&session_bindings), Arc::clone(&identities), spawn_rx,
+                       Arc::clone(&sensor_presence));
 
     // Vast.ai backend hot-swap — listens for VastInstanceReady / VastInstanceDestroyed
     {
@@ -1224,6 +1231,7 @@ fn spawn_agent_router(
     session_bindings: apexos_core::SessionBindings,
     identities:    Arc<RwLock<apexos_core::Identities>>,
     spawn_rx:      tokio::sync::mpsc::Receiver<SpawnReq>,
+    sensor_presence: SensorPresence,
 ) {
     // Per-session abort handles and parent-child tree for cascade cancellation.
     // Handles carry a generation so a turn that finishes late doesn't evict the
@@ -1450,6 +1458,14 @@ fn spawn_agent_router(
                     // held back; a sustained condition fires once, then the per-key
                     // cooldown silences re-fires while it persists.
                     let now = std::time::Instant::now();
+                    // Mark the sensor head alive when a real air-quality / thermal-frame
+                    // reading lands — this is what build_embodiment/gather_capabilities
+                    // key thermal/IAQ capability off of (the stream, not plugin tools).
+                    if matches!(reading,
+                        SensorReading::AirQuality { .. } | SensorReading::ThermalFrame { .. })
+                    {
+                        if let Ok(mut g) = sensor_presence.lock() { *g = Some(now); }
+                    }
                     let to_fire: Option<(String, String)> = match classify_reading(&reading, &node_id, &thresholds) {
                         AlertEval::None => None,
                         AlertEval::Clear { key } => { elevated_since.remove(&key); None }
@@ -1834,15 +1850,16 @@ fn build_ambient_clock() -> String {
 
 #[allow(clippy::too_many_arguments)] // live-node wiring: each arc is a distinct source
 fn spawn_embodiment_refresher(
-    embodiment:    Arc<RwLock<String>>,
-    ambient:       Arc<RwLock<String>>,
-    capabilities:  Arc<RwLock<serde_json::Value>>,
-    tool_reg:      Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
-    backend_arc:   Arc<RwLock<String>>,
-    model_arc:     Arc<RwLock<String>>,
-    peer_registry: Arc<RwLock<PeerRegistry>>,
-    node_id:       Arc<String>,
-    cerebro_embed: Option<String>,
+    embodiment:      Arc<RwLock<String>>,
+    ambient:         Arc<RwLock<String>>,
+    capabilities:    Arc<RwLock<serde_json::Value>>,
+    tool_reg:        Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
+    backend_arc:     Arc<RwLock<String>>,
+    model_arc:       Arc<RwLock<String>>,
+    peer_registry:   Arc<RwLock<PeerRegistry>>,
+    node_id:         Arc<String>,
+    cerebro_embed:   Option<String>,
+    sensor_presence: SensorPresence,
 ) {
     tokio::spawn(async move {
         // Seed the clock immediately so the first turn (which can fire before the 2s
@@ -1851,10 +1868,10 @@ fn spawn_embodiment_refresher(
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         loop {
             let block = build_embodiment(&tool_reg, &backend_arc, &model_arc,
-                                         &peer_registry, &node_id, &cerebro_embed).await;
+                                         &peer_registry, &node_id, &cerebro_embed, &sensor_presence).await;
             *embodiment.write().await = block;
             *capabilities.write().await = gather_capabilities(&tool_reg, &backend_arc, &model_arc,
-                                         &peer_registry, &node_id, &cerebro_embed).await;
+                                         &peer_registry, &node_id, &cerebro_embed, &sensor_presence).await;
             *ambient.write().await    = build_ambient_clock();
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }
@@ -1866,18 +1883,20 @@ fn spawn_embodiment_refresher(
 /// peers can route by capability ("which node has thermal? a GPU?"). Kept separate
 /// from the prompt-cache-sensitive embodiment STRING so this can't perturb the cache.
 async fn gather_capabilities(
-    tool_reg:      &Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
-    backend_arc:   &Arc<RwLock<String>>,
-    model_arc:     &Arc<RwLock<String>>,
-    peer_registry: &Arc<RwLock<PeerRegistry>>,
-    node_id:       &str,
-    cerebro_embed: &Option<String>,
+    tool_reg:        &Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
+    backend_arc:     &Arc<RwLock<String>>,
+    model_arc:       &Arc<RwLock<String>>,
+    peer_registry:   &Arc<RwLock<PeerRegistry>>,
+    node_id:         &str,
+    cerebro_embed:   &Option<String>,
+    sensor_presence: &SensorPresence,
 ) -> serde_json::Value {
     let full = gather_tools(tool_reg).await;
     let reg  = tool_reg.read().await;
     let plugin_names: std::collections::HashSet<&str> =
         reg.values().flatten().map(|t| t.name.as_str()).collect();
-    let has_sensors = plugin_names.contains("get_iaq")
+    let has_sensors = has_live_sensors(sensor_presence, std::time::Instant::now())
+        || plugin_names.contains("get_iaq")
         || plugin_names.contains("thermal_frame")
         || plugin_names.iter().any(|n| n.starts_with("get_temp"));
     let has_cam = has_camera();
@@ -1909,15 +1928,36 @@ async fn gather_capabilities(
 }
 
 /// Build the "## Current embodiment" block from this node's ACTUAL state: the live
+/// Sensor-head liveness: the timestamp of the most recent external air-quality /
+/// thermal reading seen on the sensor-bridge stream (`None` = never). The sensor
+/// data arrives as `SensorReading` EVENTS (not plugin tools), so capability/
+/// embodiment must key off the live stream — the old plugin-tool-name probe always
+/// read ✗ on the real sensor architecture (a live BME688/MLX90640 node reported "no
+/// thermal/IAQ"; the colony caught this via `mesh_capabilities`).
+type SensorPresence = Arc<std::sync::Mutex<Option<std::time::Instant>>>;
+
+/// A node counts as thermal/IAQ-capable if its bridge emitted an AirQuality or
+/// ThermalFrame reading within this window. Readings stream ~1/s, so it's generous
+/// (no flicker → cache stays stable) yet flips to ✗ within ~3 min if the head dies.
+const SENSOR_FRESHNESS: std::time::Duration = std::time::Duration::from_secs(180);
+
+fn has_live_sensors(presence: &SensorPresence, now: std::time::Instant) -> bool {
+    presence.lock().ok()
+        .and_then(|g| *g)
+        .map(|t| now.duration_since(t) < SENSOR_FRESHNESS)
+        .unwrap_or(false)
+}
+
 /// tool registry (never stale — its absence caused a multi-hour debugging hunt),
 /// cheap hardware probes, mesh peers, and uptime.
 async fn build_embodiment(
-    tool_reg:      &Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
-    backend_arc:   &Arc<RwLock<String>>,
-    model_arc:     &Arc<RwLock<String>>,
-    peer_registry: &Arc<RwLock<PeerRegistry>>,
-    node_id:       &str,
-    cerebro_embed: &Option<String>,
+    tool_reg:        &Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
+    backend_arc:     &Arc<RwLock<String>>,
+    model_arc:       &Arc<RwLock<String>>,
+    peer_registry:   &Arc<RwLock<PeerRegistry>>,
+    node_id:         &str,
+    cerebro_embed:   &Option<String>,
+    sensor_presence: &SensorPresence,
 ) -> String {
     let full = gather_tools(tool_reg).await;            // plugin tools + virtual tools
     let reg  = tool_reg.read().await;
@@ -1928,7 +1968,10 @@ async fn build_embodiment(
     let mut model = model_arc.read().await.clone();
     if model.trim().is_empty() { model = "(provider default)".into(); }
 
-    let has_sensors = plugin_names.contains("get_iaq")
+    // Live sensor-bridge stream first (the real signal); the plugin-tool probe is a
+    // fallback for any node that exposes sensors as MCP tools instead.
+    let has_sensors = has_live_sensors(sensor_presence, std::time::Instant::now())
+        || plugin_names.contains("get_iaq")
         || plugin_names.contains("thermal_frame")
         || plugin_names.iter().any(|n| n.starts_with("get_temp"));
     let has_cam = has_camera();
@@ -3095,6 +3138,17 @@ mod tests {
         // a capability we can't cheaply probe → None (we never hint on it).
         assert_eq!(capability_present(&["gpio_write".into()], false, false), None);
         assert_eq!(capability_present(&[], true, true), None);
+    }
+
+    #[test]
+    fn has_live_sensors_respects_freshness() {
+        let now = std::time::Instant::now();
+        let p: SensorPresence = Arc::new(std::sync::Mutex::new(None));
+        assert!(!has_live_sensors(&p, now), "never seen → not present");
+        *p.lock().unwrap() = Some(now);
+        assert!(has_live_sensors(&p, now), "just seen → present");
+        let stale = now + SENSOR_FRESHNESS + std::time::Duration::from_secs(1);
+        assert!(!has_live_sensors(&p, stale), "past the freshness window → not present");
     }
 
     #[test]
