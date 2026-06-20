@@ -28,6 +28,11 @@ pub struct TurnEngine {
     // turn. Riding in messages (after the cached prefix) keeps that prefix byte-stable
     // and costs no cache breakpoint. See docs/self-update.md / prompt-caching notes.
     ambient:      Arc<RwLock<String>>,
+    // Per-session "last time the ambient clock was injected". The clock rides along
+    // only on a session's FIRST turn and then after a real idle gap — quiet during
+    // active conversation (per-message timestamps read as noise + pull focus; the
+    // colony asked for this). Shared across child engines so tracking is global.
+    ambient_seen: Arc<std::sync::Mutex<HashMap<SessionId, std::time::Instant>>>,
 }
 
 /// Compose the system prompt from identity (soul) + live embodiment + optional
@@ -53,7 +58,27 @@ impl TurnEngine {
             embodiment: Arc::new(RwLock::new(String::new())),
             priming:    Arc::new(RwLock::new(String::new())),
             ambient:    Arc::new(RwLock::new(String::new())),
+            ambient_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Should this turn carry the live ambient clock? True on a session's first turn
+    /// and after an idle gap (≥ `AGENTD_AMBIENT_GAP_SECS`, default 600s) — so temporal
+    /// grounding lands at session-open / on an autonomous wake after quiet, but NOT on
+    /// every message during active conversation (which read as noise). Records `now`
+    /// when it returns true. Pure-ish (takes `now`) for testing.
+    fn should_inject_ambient_at(&self, session: SessionId, now: std::time::Instant) -> bool {
+        let gap = std::time::Duration::from_secs(
+            std::env::var("AGENTD_AMBIENT_GAP_SECS").ok()
+                .and_then(|s| s.parse().ok()).unwrap_or(600),
+        );
+        let mut seen = self.ambient_seen.lock().unwrap_or_else(|e| e.into_inner());
+        let inject = match seen.get(&session) {
+            None       => true,                          // first turn → ground
+            Some(last) => now.duration_since(*last) >= gap,  // re-ground after a gap
+        };
+        if inject { seen.insert(session, now); }
+        inject
     }
 
     /// Returns the Arc so callers can hot-swap the system prompt (Phase 2).
@@ -85,6 +110,7 @@ impl TurnEngine {
             embodiment: Arc::clone(&self.embodiment),
             priming:    Arc::new(RwLock::new(String::new())),
             ambient:    Arc::clone(&self.ambient),
+            ambient_seen: Arc::clone(&self.ambient_seen),
         }
     }
 
@@ -99,6 +125,7 @@ impl TurnEngine {
             embodiment: Arc::clone(&self.embodiment),
             priming:    Arc::new(RwLock::new(priming)),
             ambient:    Arc::clone(&self.ambient),
+            ambient_seen: Arc::clone(&self.ambient_seen),
         }
     }
 }
@@ -146,6 +173,11 @@ pub async fn run_turn(
             .ok().and_then(|s| s.parse().ok()).unwrap_or(1800),
     );
 
+    // Decide ONCE per turn whether the live clock rides along (and only on the first
+    // provider call, not on each tool round). Quiet during active conversation —
+    // grounds on the session's first turn and after an idle gap. See should_inject_ambient_at.
+    let mut clock_pending = engine.should_inject_ambient_at(session, std::time::Instant::now());
+
     loop {
         let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
         let mut pending_tools:    Vec<ToolCall>     = Vec::new();
@@ -167,7 +199,12 @@ pub async fn run_turn(
             // The live clock rides in the messages (not `system`) so the cacheable
             // soul+embodiment+tools prefix stays byte-stable across turns. Ephemeral —
             // built from `history`, never written back, so it can't bloat the JSONL.
-            let ambient  = engine.ambient.read().await.clone();
+            let ambient = if clock_pending {
+                clock_pending = false;           // inject at most once, on this first call
+                engine.ambient.read().await.clone()
+            } else {
+                String::new()                    // tool rounds + gated-off turns stay quiet
+            };
             let outbound = inject_ambient(&history, &ambient);
             let mut stream = engine.provider
                 .messages_stream(&outbound, &tools, system_opt)
@@ -472,6 +509,21 @@ mod tests {
             let stream = futures_util::stream::iter(chunks.into_iter().map(Ok));
             Ok(Box::pin(stream))
         }
+    }
+
+    #[test]
+    fn ambient_clock_gates_first_turn_and_gap_only() {
+        // Default gap is 600s (AGENTD_AMBIENT_GAP_SECS unset).
+        let engine = TurnEngine::new(MockProvider::with_responses(vec![]), 1, None);
+        let s = SessionId(7);
+        let t0 = std::time::Instant::now();
+        assert!(engine.should_inject_ambient_at(s, t0), "first turn → inject (session-open grounding)");
+        assert!(!engine.should_inject_ambient_at(s, t0 + std::time::Duration::from_secs(60)),
+            "a reply 1 min later → quiet (active conversation, no per-message noise)");
+        assert!(engine.should_inject_ambient_at(s, t0 + std::time::Duration::from_secs(660)),
+            "11 min later → re-ground after the idle gap");
+        assert!(engine.should_inject_ambient_at(SessionId(8), t0 + std::time::Duration::from_secs(60)),
+            "a different session is independent → its own first-turn inject");
     }
 
     #[tokio::test]
