@@ -6,12 +6,13 @@ mod council_handler;
 use council_handler::spawn_council_handler;
 mod health;
 mod self_update;
+mod consolidate;
 
 use apexos_core::{
     ActionId, Bus, ContentBlock, Event, EvolutionId, EvolutionProposal, ImageSource, Message,
     PluginId, PolicyMode, SessionId, SensorReading, Subsystem, SystemState, ToolOutput, ToolSpec,
 };
-use apexos_gateway::{serve, GatewayState, PeerRegistry};
+use apexos_gateway::{serve, ConsolidateReq, GatewayState, PeerRegistry};
 use apexos_plugins::{
     load as load_plugins, PluginConfig, PolicyConfig, PolicyEngine, RestartPolicy,
     Supervisor, SupervisorCmd, ToolProxy, VastState,
@@ -245,6 +246,12 @@ async fn main() -> anyhow::Result<()> {
     let cache_arc = Arc::new(RwLock::new(apexos_agent::CacheConfig::from_env()));
     eprintln!("[agentd] prompt cache: {}", cache_arc.try_read().map(|c| c.summary()).unwrap_or_default());
 
+    // Session-consolidation channel: the gateway handler sends a request, an
+    // agentd worker (spawned below, once the engine + ToolProxy exist) does the
+    // LLM summary + Cerebro session_save and replies on the oneshot.
+    let (consolidate_tx, mut consolidate_rx) =
+        tokio::sync::mpsc::channel::<ConsolidateReq>(8);
+
     eprintln!("[agentd] serving UI from {}", ui_dir.display());
     let gw_state = GatewayState {
         bus:                  handle.clone(),
@@ -275,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
         node_id:              Arc::clone(&node_id),
         mesh_sessions:        Arc::clone(&mesh_sessions),
         mesh_sessions_path:   mesh_sessions_path.clone(),
+        consolidate_tx:       consolidate_tx.clone(),
         vast_state:           vast_state.clone(),
         session_bindings:     Arc::clone(&session_bindings),
         identities:           Arc::clone(&identities),
@@ -385,6 +393,24 @@ async fn main() -> anyhow::Result<()> {
     let dream_proxy   = tool_proxy.clone();   // nightly autonomous dream_run
     let health_proxy  = tool_proxy.clone();   // boot-health Cerebro reachability probe
     let self_update_proxy = tool_proxy.clone(); // apply_daemon_update: session_save + resume intention
+
+    // Session-consolidation worker — owns the provider + ToolProxy the gateway
+    // can't reach at build time. Drains consolidate_rx: LLM summary + Cerebro
+    // session_save per request, replying on the oneshot. See consolidate::run.
+    {
+        let provider     = engine.provider.clone();
+        let proxy        = tool_proxy.clone();
+        let sessions_dir = session_store.sessions_dir.clone();
+        let bindings     = Arc::clone(&session_bindings);
+        tokio::spawn(async move {
+            while let Some(req) = consolidate_rx.recv().await {
+                let result = consolidate::run(
+                    provider.clone(), &proxy, &sessions_dir, &bindings, req.session_id,
+                ).await;
+                let _ = req.reply.send(result);
+            }
+        });
+    }
 
     // Restore rollback snapshots from Cerebro evolution episodes on startup (best-effort).
     // CerebroCortex needs a moment to start; we wait then populate rollback_store from episodes.

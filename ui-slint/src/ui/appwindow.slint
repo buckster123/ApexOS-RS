@@ -174,7 +174,9 @@ export component AppWindow inherits Window {
     callback sessions-export-selected();
     callback sessions-export-all();
     callback sessions-archive-selected();
+    callback sessions-consolidate-selected();
     callback sessions-delete-selected();
+    callback sessions-consolidate-delete-selected();
     callback toggle-recording();
     callback toggle-tts();
     callback refresh-settings();
@@ -557,7 +559,9 @@ export component AppWindow inherits Window {
                         export-selected => { root.sessions-export-selected(); }
                         export-all => { root.sessions-export-all(); }
                         archive-selected => { root.sessions-archive-selected(); }
+                        consolidate-selected => { root.sessions-consolidate-selected(); }
                         delete-selected => { root.sessions-delete-selected(); }
+                        consolidate-delete-selected => { root.sessions-consolidate-delete-selected(); }
                     }
                     if root.current-view == 4: SettingsView {
                         vertical-stretch: 1;
@@ -764,7 +768,9 @@ export component AppWindow inherits Window {
                         sessions-export-selected => { root.sessions-export-selected(); }
                         sessions-export-all => { root.sessions-export-all(); }
                         sessions-archive-selected => { root.sessions-archive-selected(); }
+                        sessions-consolidate-selected => { root.sessions-consolidate-selected(); }
                         sessions-delete-selected => { root.sessions-delete-selected(); }
+                        sessions-consolidate-delete-selected => { root.sessions-consolidate-delete-selected(); }
                         save-soul(t) => { root.save-soul(t); }
                         set-policy(m) => { root.set-policy(m); }
                         set-model(id) => { root.set-model(id); }
