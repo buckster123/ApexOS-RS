@@ -856,6 +856,25 @@ impl Supervisor {
             return;
         }
 
+        // Virtual tool: mesh_file_send — copy a workspace file to a peer's workspace.
+        // Reads a workspace-confined source, POSTs the raw bytes to the peer's
+        // token-gated /api/mesh/file (x-dest header = remote relative path).
+        if call.tool == "mesh_file_send" {
+            let node    = call.args["node"].as_str().map(str::to_owned);
+            let path    = call.args["path"].as_str().unwrap_or("").to_owned();
+            let dest    = call.args["dest"].as_str().map(str::to_owned);
+            let call_id = call.id;
+            let bus     = self.bus.clone();
+            // Resolve the caller's workspace from its bound identity (system-stamped,
+            // not model-supplied) so the source read can't escape the agent's root.
+            let agent_id = apexos_core::resolve_agent_id(&self.session_bindings, session);
+            tokio::spawn(async move {
+                let output = mesh_file_send(node.as_deref(), &agent_id, &path, dest.as_deref()).await;
+                bus.emit(Event::ToolResult { session, call: call_id, output }).await;
+            });
+            return;
+        }
+
         // Virtual tool: list_mesh_peers — returns current peers.toml as JSON.
         if call.tool == "list_mesh_peers" {
             let call_id = call.id;
@@ -1883,10 +1902,97 @@ async fn find_peer(node_id: &str) -> Option<(String, Option<String>)> {
     file.peer.into_iter().find(|p| p.node_id == node_id).map(|p| (p.ws_url, p.token))
 }
 
+/// Confine a mesh-relay SOURCE path to `agent_id`'s workspace root. Rejects `..`
+/// and requires the canonical result to stay inside the workspace — the read can't
+/// escape the (system-stamped) per-agent root. Mirrors the FS-tool confine rule.
+fn confine_mesh_source(agent_id: &str, rel: &str) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(rel);
+    if p.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err("path traversal (..) is not allowed".to_string());
+    }
+    let root = apexos_core::agent_workspace_root(agent_id);
+    let joined = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
+    let canon = std::fs::canonicalize(&joined).map_err(|e| format!("{rel}: {e}"))?;
+    let root_canon = std::fs::canonicalize(&root).map_err(|e| format!("workspace: {e}"))?;
+    if !canon.starts_with(&root_canon) {
+        return Err(format!("{rel} escapes the workspace"));
+    }
+    Ok(canon)
+}
+
+/// Send a workspace file to a registered peer's token-gated `/api/mesh/file`.
+/// Raw bytes in the body (binary-safe), remote relative path in the `x-dest` header.
+/// 5 MB cap. Confinement at BOTH ends (source here, dest on the receiver).
+async fn mesh_file_send(node: Option<&str>, agent_id: &str, path: &str, dest: Option<&str>) -> ToolOutput {
+    let err = |m: String| ToolOutput { ok: false, content: serde_json::json!(m) };
+    let node = match node {
+        Some(n) if !n.is_empty() => n,
+        _ => return err("mesh_file_send: missing 'node'".into()),
+    };
+    if path.is_empty() {
+        return err("mesh_file_send: missing 'path'".into());
+    }
+    let abs = match confine_mesh_source(agent_id, path) {
+        Ok(p)  => p,
+        Err(e) => return err(format!("mesh_file_send: {e}")),
+    };
+    let bytes = match tokio::fs::read(&abs).await {
+        Ok(b)  => b,
+        Err(e) => return err(format!("mesh_file_send: read {path}: {e}")),
+    };
+    let n = bytes.len();
+    if n > 5 * 1024 * 1024 {
+        return err(format!("mesh_file_send: {path} is {n} bytes (> 5 MB cap)"));
+    }
+    let filename = abs.file_name().and_then(|f| f.to_str()).unwrap_or("file").to_string();
+    let remote = dest.filter(|d| !d.is_empty()).unwrap_or(&filename).to_string();
+
+    let (ws_url, token) = match find_peer(node).await {
+        Some(p) => p,
+        None    => return err(format!("mesh_file_send: peer '{node}' not found in peers.toml")),
+    };
+    let http_base = ws_url.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1);
+    let mut req = reqwest::Client::new()
+        .post(format!("{http_base}/api/mesh/file"))
+        .header("x-dest", &remote)
+        .body(bytes)
+        .timeout(std::time::Duration::from_secs(30));
+    if let Some(t) = token.as_deref() {
+        req = req.bearer_auth(t);
+    }
+    match req.send().await {
+        Ok(r) => {
+            let status = r.status();
+            let v = r.json::<serde_json::Value>().await.ok();
+            let ok = status.is_success() && v.as_ref().and_then(|b| b["ok"].as_bool()) == Some(true);
+            if ok {
+                ToolOutput { ok: true, content: serde_json::json!({
+                    "status": "sent", "node": node, "bytes": n, "remote_path": remote,
+                }) }
+            } else {
+                let detail = v.as_ref().and_then(|b| b["error"].as_str())
+                    .unwrap_or(if token.is_none() { "no token stored for peer" } else { "delivery failed" });
+                err(format!("mesh_file_send: {detail} (status {status})"))
+            }
+        }
+        Err(e) => err(format!("mesh_file_send: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn mesh_source_rejects_traversal() {
+        // The `..` guard short-circuits before any workspace canonicalize, so this
+        // is testable without a real workspace on disk.
+        let e = confine_mesh_source("APEX", "../../etc/passwd").unwrap_err();
+        assert!(e.contains("traversal"), "got: {e}");
+        let e = confine_mesh_source("APEX", "notes/../../x").unwrap_err();
+        assert!(e.contains("traversal"), "got: {e}");
+    }
 
     #[test]
     fn should_restart_honors_each_policy() {

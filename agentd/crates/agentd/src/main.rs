@@ -1753,6 +1753,7 @@ async fn gather_tools(
     tools.push(cancel_schedule_spec());
     tools.push(convene_council_spec());
     tools.push(send_to_agent_spec());
+    tools.push(mesh_file_send_spec());
     tools.push(query_event_log_spec());
     tools.push(list_mesh_peers_spec());
     tools.push(bootstrap_node_spec());
@@ -2320,6 +2321,35 @@ fn send_to_agent_spec() -> ToolSpec {
                 }
             },
             "required": ["session_id", "message"]
+        }),
+    }
+}
+
+fn mesh_file_send_spec() -> ToolSpec {
+    ToolSpec {
+        name:        "mesh_file_send".into(),
+        description: "Copy a file from your workspace to a mesh peer's workspace. \
+                      Use it to share docs, notes, or data with another node directly \
+                      (no human courier). Source is read from your workspace; the peer \
+                      writes it into theirs. 5 MB cap.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "node": {
+                    "type":        "string",
+                    "description": "Target mesh node_id (a registered peer, e.g. \"ApexOS-RS\")."
+                },
+                "path": {
+                    "type":        "string",
+                    "description": "Workspace-relative path of the source file to send."
+                },
+                "dest": {
+                    "type":        "string",
+                    "description": "Optional destination path (workspace-relative) on the peer. \
+                                    Defaults to the source filename."
+                }
+            },
+            "required": ["node", "path"]
         }),
     }
 }

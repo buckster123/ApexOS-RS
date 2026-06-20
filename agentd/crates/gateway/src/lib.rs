@@ -246,6 +246,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/council",               get(council_list_handler).post(council_start_handler))
         .route("/api/council/{id}",          get(council_detail_handler))
         .route("/api/council/{id}/butt-in",  post(council_butt_in_handler))
+        .route("/api/mesh/file",          post(mesh_file_handler).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/api/mesh/nodes",         get(mesh_nodes_handler))
         .route("/api/mesh/peers",         get(mesh_peers_get_handler).post(mesh_peers_post_handler))
         .route("/api/mesh/peers/{id}",    delete(mesh_peers_delete_handler))
@@ -2293,6 +2294,58 @@ async fn council_butt_in_handler(
 
 // ── Mesh ──────────────────────────────────────────────────────────────────────
 
+/// Confine a peer-supplied destination to THIS node's workspace. Rejects `..` and
+/// absolute paths; the result is `<workspace>/<dest>` (a relative subpath under the
+/// canonical workspace root). Parents are created on write. Mirrors the FS-confine
+/// rule (workspace-only for writes); the caller is already a token-authenticated peer.
+fn confine_mesh_dest(dest: &str) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(dest);
+    if p.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err("path traversal (..) is not allowed".to_string());
+    }
+    if p.is_absolute() {
+        return Err("dest must be workspace-relative".to_string());
+    }
+    if p.as_os_str().is_empty() {
+        return Err("empty dest".to_string());
+    }
+    let ws = std::env::var("AGENTD_WORKSPACE").ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    let ws_canon = std::fs::canonicalize(&ws).map_err(|e| format!("workspace {ws}: {e}"))?;
+    Ok(ws_canon.join(p))
+}
+
+/// POST /api/mesh/file — receive a file from a mesh peer (token-gated) and write it
+/// into THIS node's workspace. The raw file bytes are the request body (binary-safe,
+/// no base64); the destination relative path rides in the `x-dest` header. Confined
+/// to the workspace (rejects `..`); parents auto-created. Ends the agent↔agent
+/// "courier" problem — the sender is `mesh_file_send` (supervisor virtual tool).
+async fn mesh_file_handler(
+    headers: axum::http::HeaderMap,
+    body:    axum::body::Bytes,
+) -> impl IntoResponse {
+    let dest = headers.get("x-dest").and_then(|v| v.to_str().ok()).unwrap_or("").trim().to_string();
+    if dest.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "missing x-dest header" }));
+    }
+    if body.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "empty body" }));
+    }
+    let target = match confine_mesh_dest(&dest) {
+        Ok(p)  => p,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": format!("dest: {e}") })),
+    };
+    if let Some(parent) = target.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return Json(serde_json::json!({ "ok": false, "error": format!("mkdir: {e}") }));
+        }
+    }
+    match tokio::fs::write(&target, &body).await {
+        Ok(_)  => Json(serde_json::json!({ "ok": true, "path": dest, "bytes": body.len() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("write: {e}") })),
+    }
+}
+
 /// GET /api/mesh/nodes — run avahi-browse and return discovered _apexos._tcp nodes.
 /// Each entry includes whether the node is already in peers.toml ("known").
 async fn mesh_nodes_handler(State(state): State<GatewayState>) -> impl IntoResponse {
@@ -3735,6 +3788,16 @@ mod ws_filter_tests {
         assert!(md.contains("🔧 `read_file`"), "tool call rendered");
         assert!(md.contains("↳"), "tool result rendered");
         assert!(!md.contains("secret"), "thinking blocks are omitted");
+    }
+
+    #[test]
+    fn mesh_dest_rejects_traversal_and_absolute() {
+        assert!(confine_mesh_dest("../etc/passwd").is_err(), "reject ..");
+        assert!(confine_mesh_dest("a/../../b").is_err(), "reject .. mid-path");
+        assert!(confine_mesh_dest("/etc/passwd").is_err(), "reject absolute");
+        assert!(confine_mesh_dest("").is_err(), "reject empty");
+        // A plain relative dest reaches the canonicalize step (workspace-dependent);
+        // the guards above are the security-critical short-circuits.
     }
 
     #[test]
