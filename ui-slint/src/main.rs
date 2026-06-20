@@ -235,13 +235,21 @@ static TOAST_SEQ: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::n
 
 /// Push a toast. Must run on the Slint thread (touches the TOASTS thread-local).
 fn toast(kind: ToastKind, text: &str) {
+    toast_action(kind, text, -1);
+}
+
+/// Push a toast that, when `action_session >= 0`, opens that session on click
+/// (the transient toast AND its persisted notification-center copy both carry it).
+/// Used by the mesh-message notification so a peer's message is one click from its
+/// thread. Must run on the Slint thread.
+fn toast_action(kind: ToastKind, text: &str, action_session: i32) {
     let timeout_ms = match kind {
         ToastKind::Error => 7000,
         ToastKind::Warn  => 6000,
         _                => 4000,
     };
     let id = TOAST_SEQ.fetch_add(1, Ordering::SeqCst);
-    let item = ToastItem { id, kind, text: text.into(), timeout_ms };
+    let item = ToastItem { id, kind, text: text.into(), timeout_ms, action_session };
     TOASTS.with(|t| {
         if let Some(model) = t.borrow().as_ref() {
             model.push(item.clone());
@@ -279,6 +287,12 @@ fn dismiss_toast(id: i32) {
 fn notify(kind: ToastKind, text: impl Into<String>) {
     let text = text.into();
     slint::invoke_from_event_loop(move || toast(kind, &text)).ok();
+}
+
+/// Like `notify`, but the toast/notification opens `action_session` on click.
+fn notify_action(kind: ToastKind, text: impl Into<String>, action_session: i32) {
+    let text = text.into();
+    slint::invoke_from_event_loop(move || toast_action(kind, &text, action_session)).ok();
 }
 
 // ── Window manager (G2) ───────────────────────────────────────────────────────
@@ -2739,6 +2753,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ui) = uw.upgrade() { ui.set_notif_unread(0); }
         });
     }
+    // Click on an actionable toast / notification (mesh a2a) → open that session.
+    // Reuses the exact restore path (replay + switch to chat) and closes the notif
+    // center overlay if it was open.
+    {
+        let uw = ui.as_weak();
+        ui.global::<Notifications>().on_action(move |session_id| {
+            if let Some(ui) = uw.upgrade() {
+                ui.set_notif_center_open(false);
+                ui.invoke_restore_session(session_id);
+            }
+        });
+    }
 
     // Initial sys stats (all zeros, offline)
     ui.set_sys_stats(empty_sys_stats());
@@ -4509,6 +4535,22 @@ fn dispatch_event(
                 }
             })
             .ok();
+            return;
+        }
+
+        // A mesh peer messaged this node (a2a). It already landed in that peer's
+        // own session (agentd routes it there); surface a global, click-to-open
+        // notification so the user sees it from any active session.
+        "mesh_message" => {
+            let from    = ev["from_node"].as_str().unwrap_or("peer");
+            let session = ev["session"].as_u64().unwrap_or(0) as i32;
+            let preview = ev["preview"].as_str().unwrap_or("");
+            let body = if preview.is_empty() {
+                format!("✉ {from}")
+            } else {
+                format!("✉ {from}: {preview}")
+            };
+            notify_action(ToastKind::Info, body, session);
             return;
         }
 

@@ -183,6 +183,7 @@ export struct ToastItem {
     kind:       ToastKind,
     text:       string,
     timeout-ms: int,     // auto-dismiss after this many ms; 0 = sticky
+    action-session: int, // >=0: clicking opens this session (mesh a2a); -1 = none
 }
 
 export struct SessionItem {

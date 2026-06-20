@@ -56,6 +56,19 @@ component NotifRow inherits Rectangle {
             vertical-alignment: center;
             horizontal-stretch: 1;
         }
+        if item.action-session >= 0: Text {
+            text: "open ›";
+            color: accent;
+            font-size: 11px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+
+    // A linked notification (mesh a2a) opens its session on click; a plain one is inert.
+    if item.action-session >= 0: TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { Notifications.action(item.action-session); }
     }
 }
 
