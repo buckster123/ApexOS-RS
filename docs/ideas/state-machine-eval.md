@@ -173,7 +173,10 @@ existing stream, before any Goal-driver exists.
    Phase-2 board-state endpoint.
 2. **Phase 2 — the Goal/Run driver.** The orchestration object + driver task (scheduler-sibling) with
    step budget + termination guard + `GoalStateChanged` event + `goals.json` persistence. The real
-   autonomy upgrade. A handful of new files, zero rewrites.
+   autonomy upgrade. A handful of new files, zero rewrites. **Full design:
+   [`goal-driver-design.md`](goal-driver-design.md)** — code control-plane + two LLM hooks
+   (the work-turn + a `goal_step` tool), with the policy stance and failure-visibility lessons from
+   the first live multi-agent run baked in.
 3. **Phase 3 — interactive board + mesh lanes.** Drag a card = re-prioritize / pause / approve;
    cross-node lanes; rewind to a prior goal state (the event log already has the history).
 
