@@ -103,11 +103,12 @@ pub struct GatewayState {
     /// Per-peer active-liveness, written by the downtime beacon loop and folded into
     /// `GET /api/mesh/peers` so the UI shows each node alive/dark + last-seen.
     pub liveness:          LivenessMap,
-    /// Smoker-mode sensor sensitivity (shared with the agentd sensor-alert loop, which
-    /// reads it per reading). `POST /api/sensors/config` flips it + persists; agentd
-    /// seeds it from the same file at startup. See agentd `sensor_config.rs`.
-    pub smoker_mode:       Arc<std::sync::atomic::AtomicBool>,
-    /// Where the smoker-mode flag persists (`<log_dir>/sensor_config.json`).
+    /// Sensor-alert sensitivity PROFILE (standard / smoker / kitchen / workshop), shared
+    /// with the agentd sensor-alert loop, which reads it per reading. `POST
+    /// /api/sensors/config` sets it + persists; agentd seeds it from the same file at
+    /// startup. See agentd `sensor_config.rs`.
+    pub sensor_profile:    Arc<std::sync::RwLock<String>>,
+    /// Where the sensitivity profile persists (`<log_dir>/sensor_config.json`).
     pub sensor_config_path: PathBuf,
     /// Active mesh pairing offer (in-memory only, never persisted). See mesh::Pairing.
     pub pairing:           Arc<std::sync::Mutex<Option<mesh::Pairing>>>,
@@ -2369,27 +2370,36 @@ async fn capabilities_handler(State(state): State<GatewayState>) -> impl IntoRes
     Json(state.capabilities.read().await.clone())
 }
 
-/// GET /api/sensors/config — the current sensor-alert sensitivity mode (smoker on/off).
+/// The selectable sensor-alert sensitivity profiles (order = UI order). Canonical
+/// here (the gateway validates + advertises them); agentd's `sensor_config` references
+/// this same list so there's one source of truth. `standard` = non-smoker / clean-air
+/// default; the rest raise the alert floor for that environment's normal baseline.
+pub const SENSOR_PROFILES: [&str; 4] = ["standard", "smoker", "kitchen", "workshop"];
+
+/// GET /api/sensors/config — the active sensor-alert sensitivity profile + the
+/// selectable list (drives the Settings/Sensor selector).
 async fn sensor_config_get_handler(State(state): State<GatewayState>) -> impl IntoResponse {
-    let on = state.smoker_mode.load(std::sync::atomic::Ordering::Relaxed);
-    Json(serde_json::json!({ "smoker_mode": on }))
+    let profile = state.sensor_profile.read().map(|p| p.clone()).unwrap_or_else(|_| "standard".into());
+    Json(serde_json::json!({ "profile": profile, "available": SENSOR_PROFILES }))
 }
 
-/// POST /api/sensors/config — flip smoker mode `{smoker_mode: bool}`. Updates the
-/// shared flag (the agentd alert loop reads it per reading, so it's live) and persists
-/// it (format matches `agentd::sensor_config::load_smoker_mode`). When on, IAQ/thermal
-/// alert thresholds rise above the cigarette baseline so smoking doesn't autonomously
-/// alert (a sustained real fire still does).
+/// POST /api/sensors/config — set the sensitivity profile `{profile: "standard"|"smoker"
+/// |"kitchen"|"workshop"}`. Updates the shared value (the agentd alert loop reads it per
+/// reading, so it's live) and persists it (format matches `sensor_config::load_profile`).
+/// A non-standard profile raises IAQ/thermal thresholds above that environment's baseline
+/// so routine activity doesn't autonomously alert (a sustained real fire still does).
+/// An unknown profile falls back to "standard".
 async fn sensor_config_post_handler(
     State(state): State<GatewayState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let on = body["smoker_mode"].as_bool().unwrap_or(false);
-    state.smoker_mode.store(on, std::sync::atomic::Ordering::Relaxed);
+    let req = body["profile"].as_str().unwrap_or("standard");
+    let profile = if SENSOR_PROFILES.contains(&req) { req } else { "standard" };
+    if let Ok(mut p) = state.sensor_profile.write() { *p = profile.to_string(); }
     let path = &state.sensor_config_path;
     if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
-    let _ = std::fs::write(path, serde_json::json!({ "smoker_mode": on }).to_string());
-    Json(serde_json::json!({ "ok": true, "smoker_mode": on }))
+    let _ = std::fs::write(path, serde_json::json!({ "profile": profile }).to_string());
+    Json(serde_json::json!({ "ok": true, "profile": profile }))
 }
 
 /// Confine a peer-supplied destination to THIS node's workspace. Rejects `..` and

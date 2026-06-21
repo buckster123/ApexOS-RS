@@ -106,6 +106,7 @@ export component AppWindowFrame inherits Rectangle {
     in property <bool>           cache-enabled: true;
     in property <bool>           cache-conversation: true;
     in property <string>         cache-ttl: "5m";
+    in property <string>         sensor-profile: "standard";
     in property <[ModelItem]>    models;
     in property <string>         terminal-text;
     in property <int>            terminal-scroll-tick;
@@ -205,6 +206,7 @@ export component AppWindowFrame inherits Rectangle {
     callback set-policy(string);
     callback set-model(string);
     callback set-cache(bool, bool, string);
+    callback set-sensor-profile(string);
     callback refresh-settings();
     callback terminal-send(string);
     // Tier-A parity apps.
@@ -501,10 +503,12 @@ export component AppWindowFrame inherits Rectangle {
             cache-enabled: root.cache-enabled;
             cache-conversation: root.cache-conversation;
             cache-ttl: root.cache-ttl;
+            sensor-profile: root.sensor-profile;
             save-soul(text) => { root.save-soul(text); }
             set-policy(mode) => { root.set-policy(mode); }
             set-model(id) => { root.set-model(id); }
             set-cache(e, c, t) => { root.set-cache(e, c, t); }
+            set-sensor-profile(p) => { root.set-sensor-profile(p); }
             refresh => { root.refresh-settings(); }
         }
 

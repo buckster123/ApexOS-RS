@@ -2194,15 +2194,17 @@ struct SettingsData {
     cache_enabled:      bool,
     cache_conversation: bool,
     cache_ttl:          String,
+    sensor_profile:     String,
 }
 
-// Fetch /api/status, /api/soul, /api/models, and /api/cache in parallel.
+// Fetch /api/status, /api/soul, /api/models, /api/cache, /api/sensors/config in parallel.
 async fn fetch_settings(client: &reqwest::Client, base_url: &str) -> SettingsData {
-    let (status, soul, models_resp, cache) = tokio::join!(
+    let (status, soul, models_resp, cache, sensors) = tokio::join!(
         json_get(client, format!("{base_url}/api/status")),
         json_get(client, format!("{base_url}/api/soul")),
         json_get(client, format!("{base_url}/api/models")),
         json_get(client, format!("{base_url}/api/cache")),
+        json_get(client, format!("{base_url}/api/sensors/config")),
     );
     let models: Vec<ModelItem> = models_resp["models"]
         .as_array()
@@ -2223,6 +2225,7 @@ async fn fetch_settings(client: &reqwest::Client, base_url: &str) -> SettingsDat
         cache_enabled:      cache["enabled"].as_bool().unwrap_or(true),
         cache_conversation: cache["cache_conversation"].as_bool().unwrap_or(true),
         cache_ttl:          cache["ttl"].as_str().unwrap_or("5m").to_string(),
+        sensor_profile:     sensors["profile"].as_str().unwrap_or("standard").to_string(),
     }
 }
 
@@ -3924,6 +3927,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_settings_cache_enabled(data.cache_enabled);
                     ui.set_settings_cache_conversation(data.cache_conversation);
                     ui.set_settings_cache_ttl(data.cache_ttl.into());
+                    ui.set_settings_sensor_profile(data.sensor_profile.into());
                     replace_models(data.models);
                 }
             }).ok();
@@ -4644,6 +4648,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(false);
             if ok { notify(ToastKind::Info, "Cache settings updated"); }
             else  { notify(ToastKind::Error, "Failed to update cache settings"); }
+        });
+    });
+
+    let rt_h_sensor    = rt.handle().clone();
+    let client_sensor  = Arc::clone(&http_client);
+    let base_sensor    = http_base.clone();
+    let ui_weak_sensor = ui.as_weak();
+    ui.on_set_sensor_profile(move |profile| {
+        let p = profile.to_string();
+        // Optimistic: reflect the selection immediately.
+        if let Some(ui) = ui_weak_sensor.upgrade() {
+            ui.set_settings_sensor_profile(p.clone().into());
+        }
+        let client = Arc::clone(&client_sensor);
+        let base   = base_sensor.clone();
+        rt_h_sensor.spawn(async move {
+            let ok = client.post(format!("{base}/api/sensors/config"))
+                .json(&serde_json::json!({ "profile": p }))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok { notify(ToastKind::Info, "Sensor profile updated"); }
+            else  { notify(ToastKind::Error, "Failed to update sensor profile"); }
         });
     });
 
