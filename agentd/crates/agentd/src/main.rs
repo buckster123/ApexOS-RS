@@ -9,6 +9,7 @@ mod self_update;
 mod consolidate;
 mod evolution;
 mod goal;
+mod sensor_config;
 
 use apexos_core::{
     ActionId, Bus, ContentBlock, Event, EvolutionId, EvolutionProposal, ImageSource, Message,
@@ -224,6 +225,14 @@ async fn main() -> anyhow::Result<()> {
     // Downtime beacon (colony-mesh spine): per-peer active liveness, shared
     // gateway (serves it in /api/mesh/peers) ↔ the beacon loop (writes it).
     let mesh_liveness = apexos_gateway::new_liveness_map();
+    // Smoker-mode sensor sensitivity (runtime toggle, persisted). When on, IAQ +
+    // thermal alert thresholds rise above the cigarette baseline so smoking doesn't
+    // trip an autonomous alert (a sustained real fire still does). Shared so the
+    // sensor-alert loop reads it and the gateway (Settings toggle) flips it.
+    let sensor_config_path = log_dir.join("sensor_config.json");
+    let smoker_mode = Arc::new(std::sync::atomic::AtomicBool::new(
+        sensor_config::load_smoker_mode(&sensor_config_path),
+    ));
     let vast_state = VastState::new();
     {
         let vs = vast_state.clone();
@@ -309,6 +318,8 @@ async fn main() -> anyhow::Result<()> {
         council_next_id:      Arc::clone(&council_next_id),
         peer_registry:        Arc::clone(&peer_registry),
         liveness:             Arc::clone(&mesh_liveness),
+        smoker_mode:          Arc::clone(&smoker_mode),
+        sensor_config_path:   sensor_config_path.clone(),
         pairing:              Arc::new(std::sync::Mutex::new(None)),
         node_id:              Arc::clone(&node_id),
         mesh_sessions:        Arc::clone(&mesh_sessions),
@@ -563,7 +574,7 @@ async fn main() -> anyhow::Result<()> {
     spawn_agent_router(agent_rx, bcast.clone(), handle.clone(),
                        tool_reg, histories, engine, max_depth, session_store, router_proxy,
                        Arc::clone(&session_bindings), Arc::clone(&identities), spawn_rx,
-                       Arc::clone(&sensor_presence));
+                       Arc::clone(&sensor_presence), Arc::clone(&smoker_mode));
 
     // Vast.ai backend hot-swap — listens for VastInstanceReady / VastInstanceDestroyed
     {
@@ -1161,6 +1172,7 @@ fn spawn_agent_router(
     identities:    Arc<RwLock<apexos_core::Identities>>,
     spawn_rx:      tokio::sync::mpsc::Receiver<SpawnReq>,
     sensor_presence: SensorPresence,
+    smoker_mode:   Arc<std::sync::atomic::AtomicBool>,
 ) {
     // Per-session abort handles and parent-child tree for cascade cancellation.
     // Handles carry a generation so a turn that finishes late doesn't evict the
@@ -1262,6 +1274,21 @@ fn spawn_agent_router(
             cpu_temp: cpu_temp_threshold,
             thermal:  thermal_threshold,
         };
+        // Smoker-mode thresholds (used when `smoker_mode` is on): IAQ + thermal raised
+        // above the cigarette baseline (IAQ 170–250 / 50–80 °C) so a cig/whiff doesn't
+        // alert, while a sustained hotter event still does. CPU temp is unchanged
+        // (smoking doesn't touch it). The persistence window is also lengthened beyond
+        // a cigarette's ~5 min. All env-tunable. See sensor_config.rs.
+        let smoker_thresholds = SensorThresholds {
+            iaq:      std::env::var("SENSOR_SMOKER_IAQ_THRESHOLD")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(250.0),
+            cpu_temp: cpu_temp_threshold,
+            thermal:  std::env::var("SENSOR_SMOKER_THERMAL_THRESHOLD")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(85.0),
+        };
+        let smoker_persist_dur = std::time::Duration::from_secs(
+            std::env::var("SENSOR_SMOKER_PERSIST_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120),
+        );
 
         let mut gate = TurnGate::default();
         let (turn_done_tx, mut turn_done_rx) = mpsc::unbounded_channel::<SessionId>();
@@ -1395,12 +1422,21 @@ fn spawn_agent_router(
                     {
                         if let Ok(mut g) = sensor_presence.lock() { *g = Some(now); }
                     }
-                    let to_fire: Option<(String, String)> = match classify_reading(&reading, &node_id, &thresholds) {
+                    // Smoker mode swaps in the raised thresholds + longer persistence
+                    // so a cigarette doesn't trip an autonomous alert (read per reading
+                    // so a live Settings toggle takes effect immediately).
+                    let smoking = smoker_mode.load(std::sync::atomic::Ordering::Relaxed);
+                    let (active_th, active_persist) = if smoking {
+                        (&smoker_thresholds, smoker_persist_dur)
+                    } else {
+                        (&thresholds, persist_dur)
+                    };
+                    let to_fire: Option<(String, String)> = match classify_reading(&reading, &node_id, active_th) {
                         AlertEval::None => None,
                         AlertEval::Clear { key } => { elevated_since.remove(&key); None }
                         AlertEval::Candidate { key, prompt, persist: false } => Some((key, prompt)),
                         AlertEval::Candidate { key, prompt, persist: true } => {
-                            if persistence_passed(&mut elevated_since, &key, now, persist_dur) {
+                            if persistence_passed(&mut elevated_since, &key, now, active_persist) {
                                 Some((key, prompt))
                             } else {
                                 None // elevated but not yet sustained — likely a transient
@@ -2934,6 +2970,32 @@ mod tests {
             temperature_c: 22.0, humidity_pct: 50.0, pressure_hpa: 1000.0,
             sensor_id: "bme688".into(),
         }
+    }
+
+    // Smoker baseline (the defaults of smoker mode): IAQ + thermal raised above a cig.
+    fn smoker_th() -> SensorThresholds { SensorThresholds { iaq: 250.0, cpu_temp: 85.0, thermal: 85.0 } }
+
+    #[test]
+    fn smoker_mode_quiets_the_cigarette_baseline() {
+        // A cigarette reads IAQ ~170–250 / thermal 50–80 °C. Under normal thresholds
+        // that's an alert candidate (André's "a whiff triggers it"); smoker thresholds
+        // treat the same readings as Clear — no autonomous alert.
+        let cig_air = air(200.0, 3);
+        let cig_heat = SensorReading::ThermalFrame { min_c: 24.0, max_c: 70.0, mean_c: 30.0, sensor_id: "mlx".into() };
+        assert!(matches!(classify_reading(&cig_air, "n1", &th()), AlertEval::Candidate { .. }));
+        assert!(matches!(classify_reading(&cig_air, "n1", &smoker_th()), AlertEval::Clear { .. }));
+        assert!(matches!(classify_reading(&cig_heat, "n1", &th()), AlertEval::Candidate { .. }));
+        assert!(matches!(classify_reading(&cig_heat, "n1", &smoker_th()), AlertEval::Clear { .. }));
+    }
+
+    #[test]
+    fn smoker_mode_still_alerts_a_real_event() {
+        // A genuinely worse event (IAQ 320 / a 120 °C hotspot) is still a candidate
+        // even in smoker mode — raising the floor doesn't blind it to a real problem.
+        let bad_air = air(320.0, 3);
+        let fire = SensorReading::ThermalFrame { min_c: 30.0, max_c: 120.0, mean_c: 60.0, sensor_id: "mlx".into() };
+        assert!(matches!(classify_reading(&bad_air, "n1", &smoker_th()), AlertEval::Candidate { .. }));
+        assert!(matches!(classify_reading(&fire, "n1", &smoker_th()), AlertEval::Candidate { .. }));
     }
 
     #[test]
