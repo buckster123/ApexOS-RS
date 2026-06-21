@@ -69,6 +69,9 @@ mode = "suggest"
 "goal_step"        = "allow"
 "list_goals"       = "allow"
 "goal_resume"      = "allow"
+# goal_cancel: operator-stop a running/blocked goal (terminal, not resumable). allow —
+# strictly de-escalating: it only halts one of the agent's own goals, never acts outward.
+"goal_cancel"      = "allow"
 
 # Git tools (apexos-tools) — confined by the tool to the workspace + AGENTD_GIT_ROOTS.
 # Read-only verbs + init/branch/commit are allow (self-confined, like read_file:

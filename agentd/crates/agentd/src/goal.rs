@@ -159,9 +159,38 @@ pub fn goal_resume_spec() -> ToolSpec {
     }
 }
 
+/// Execution discipline woven into every step directive. Without it a goal step
+/// reflexively reaches for inspection tools (screenshot_mirror, camera_capture, …)
+/// *before* doing the work — and under approval-gating (yolo off) each ask-gated
+/// call parks the goal Blocked, so the real task never runs (APEX, 2026-06-21 field
+/// test). The fix is at the point of authoring: tell the step to go straight to the
+/// objective with the minimum tools. (docs/ideas/goal-driver-design.md, refinement #1)
+const EXECUTION_DISCIPLINE: &str =
+    "Execute the objective DIRECTLY with the minimum tools required. Don't reach for \
+     inspection tools (screenshot_mirror, camera_capture, take_snapshot, cognitive_bootstrap, \
+     list_goals, …) unless the objective explicitly needs them — with approval-gating on, each \
+     needless ask-gated call parks the goal waiting for a human and the task never runs.";
+
+pub fn goal_cancel_spec() -> ToolSpec {
+    ToolSpec {
+        name: "goal_cancel".into(),
+        description: "Stop a running or blocked GOAL by id — terminal, intentional, NOT resumable \
+                      (use goal_resume for a goal you mean to continue). Aborts any in-flight step on \
+                      the goal's session and marks it Cancelled on the Work Board. The recovery hatch \
+                      for a goal that's stuck or no longer wanted, without restarting the daemon. Use \
+                      list_goals to find the id.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": { "goal_id": { "type": "integer", "description": "The goal to cancel." } },
+            "required": ["goal_id"]
+        }),
+    }
+}
+
 fn directive_first(objective: &str, max_steps: u32) -> String {
     format!(
         "You are running an autonomous GOAL (step 1/{max_steps}).\n\nOBJECTIVE:\n{objective}\n\n\
+         {EXECUTION_DISCIPLINE}\n\n\
          Make concrete progress now. When the objective is FULLY met, call \
          `goal_step{{status:\"done\"}}` to finish early — don't burn the rest of the budget. If you \
          hit an unresolvable blocker, call `goal_step{{status:\"blocked\", reason:\"…\"}}`. Otherwise \
@@ -172,8 +201,8 @@ fn directive_first(objective: &str, max_steps: u32) -> String {
 fn directive_continue(objective: &str, step: u32, max_steps: u32, steer: Option<&str>) -> String {
     let head = format!("Continue the GOAL (step {step}/{max_steps}). OBJECTIVE: {objective}");
     match steer {
-        Some(s) => format!("{head}\n\nFocus this step on: {s}\n\nCall `goal_step{{status:\"done\"}}` when fully complete."),
-        None    => format!("{head}\n\nKeep making concrete progress. Call `goal_step{{status:\"done\"}}` when fully complete."),
+        Some(s) => format!("{head}\n\n{EXECUTION_DISCIPLINE}\n\nFocus this step on: {s}\n\nCall `goal_step{{status:\"done\"}}` when fully complete."),
+        None    => format!("{head}\n\n{EXECUTION_DISCIPLINE}\n\nKeep making concrete progress. Call `goal_step{{status:\"done\"}}` when fully complete."),
     }
 }
 
@@ -207,6 +236,7 @@ pub fn spawn_goal_driver(
     tokio::spawn(async move {
         let goals: Goals = Arc::new(Mutex::new(HashMap::new()));
         reload_goals(&goals, &bus, &next_goal_id, &goals_path).await;
+        let step_timeout = step_timeout_from_env();
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
@@ -215,6 +245,7 @@ pub fn spawn_goal_driver(
                         "goal_create" => { create_goal(&goals, &bus, &proxy, &next_session_id, &next_goal_id, session, call_id, args).await; save_goals(&goals, &goals_path).await; }
                         "goal_step"   => record_step(&goals, &bus, session, call_id, args).await,
                         "goal_resume" => { resume_goal(&goals, &bus, session, call_id, args).await; save_goals(&goals, &goals_path).await; }
+                        "goal_cancel" => { cancel_goal(&goals, &bus, &proxy, session, call_id, args).await; save_goals(&goals, &goals_path).await; }
                         "list_goals"  => handle_list_goals(&goals, &bus, session, call_id).await,
                         _ => {}
                     }
@@ -234,7 +265,7 @@ pub fn spawn_goal_driver(
                     }
                 }
                 _ = tick.tick() => {
-                    if fail_stalled(&goals, &bus, &proxy).await { save_goals(&goals, &goals_path).await; }
+                    if fail_stalled(&goals, &bus, &proxy, step_timeout).await { save_goals(&goals, &goals_path).await; }
                 }
             }
         }
@@ -300,6 +331,39 @@ async fn resume_goal(goals: &Goals, bus: &BusHandle, call_session: SessionId, ca
         None => {
             bus.emit(Event::ToolResult { session: call_session, call: call_id,
                 output: ToolOutput { ok: false, content: serde_json::json!("no resumable (blocked/failed) goal with that id") } }).await;
+        }
+    }
+}
+
+/// goal_cancel{goal_id}: operator-stop a live (Acting/Blocked) goal — terminal,
+/// not resumable. Aborts any in-flight turn on the goal's session (so it stops
+/// burning tokens), marks it Cancelled, and closes its Cerebro episode (neutral).
+async fn cancel_goal(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, call_session: SessionId, call_id: ActionId, args: serde_json::Value) {
+    let cancelled = {
+        let mut g = goals.lock().await;
+        match args["goal_id"].as_u64().and_then(|id| g.get_mut(&id).map(|go| (id, go))) {
+            Some((id, go)) if matches!(go.state, GoalState::Acting | GoalState::Blocked) => {
+                go.state = GoalState::Cancelled;
+                go.pending = None;
+                Some((id, go.session, go.objective.clone(), go.step, go.max_steps, go.episode.take()))
+            }
+            _ => None,
+        }
+    };
+    match cancelled {
+        Some((id, session, objective, step, max_steps, episode)) => {
+            // Stop the in-flight turn (if any) — cascade_cancel aborts it and emits no
+            // TurnComplete, so advance() won't fire for a goal that no longer exists.
+            bus.emit(Event::UserCancel { session: SessionId(session) }).await;
+            emit_state(bus, id, &objective, GoalState::Cancelled, step, max_steps, "cancelled").await;
+            if let Some(ep) = episode { episode_end_goal(proxy, &ep, GoalState::Cancelled, step, max_steps, &objective).await; }
+            bus.emit(Event::ToolResult { session: call_session, call: call_id,
+                output: ToolOutput { ok: true, content: serde_json::json!({ "goal_id": id, "status": "cancelled", "step": step }) } }).await;
+            eprintln!("[goal] {id} cancelled at step {step}");
+        }
+        None => {
+            bus.emit(Event::ToolResult { session: call_session, call: call_id,
+                output: ToolOutput { ok: false, content: serde_json::json!("no active/blocked goal with that id to cancel") } }).await;
         }
     }
 }
@@ -438,19 +502,36 @@ async fn advance(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, session: u64
     changed
 }
 
-/// Fail any Acting goal whose current step has stalled past STEP_TIMEOUT.
-async fn fail_stalled(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy) -> bool {
+/// The per-step stall window, overridable via `GOAL_STEP_TIMEOUT_SECS` (clamped to a
+/// 30s floor so a typo can't insta-fail every goal). Default = `STEP_TIMEOUT` (900s).
+/// Lowering it is handy for live testing (e.g. 120s); raising it suits slow Nano-tier
+/// steps. (refinement #4 — the "don't hang forever" backstop, now tunable.)
+fn step_timeout_from_env() -> Duration {
+    parse_step_timeout(std::env::var("GOAL_STEP_TIMEOUT_SECS").ok().as_deref())
+}
+
+/// Pure timeout resolver (unit-tested): a valid ≥30s value wins; anything else
+/// (absent, unparseable, or below the 30s floor) falls back to the default.
+fn parse_step_timeout(raw: Option<&str>) -> Duration {
+    raw.and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n >= 30)
+        .map(Duration::from_secs)
+        .unwrap_or(STEP_TIMEOUT)
+}
+
+/// Fail any Acting goal whose current step has stalled past the step timeout.
+async fn fail_stalled(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, step_timeout: Duration) -> bool {
     let failed: Vec<(u64, String, u32, u32, Option<String>)> = {
         let mut g = goals.lock().await;
         g.iter_mut()
-            .filter(|(_, go)| go.state == GoalState::Acting && go.step_started.elapsed() > STEP_TIMEOUT)
+            .filter(|(_, go)| go.state == GoalState::Acting && go.step_started.elapsed() > step_timeout)
             .map(|(gid, go)| { go.state = GoalState::Failed; (*gid, go.objective.clone(), go.step, go.max_steps, go.episode.clone()) })
             .collect()
     };
     let changed = !failed.is_empty();
     for (gid, objective, step, max_steps, episode) in failed {
         emit_state(bus, gid, &objective, GoalState::Failed, step, max_steps, "step stalled — no completion").await;
-        eprintln!("[goal] {gid} failed (step {step} stalled > {}s)", STEP_TIMEOUT.as_secs());
+        eprintln!("[goal] {gid} failed (step {step} stalled > {}s)", step_timeout.as_secs());
         if let Some(ep) = episode { episode_end_goal(proxy, &ep, GoalState::Failed, step, max_steps, &objective).await; }
     }
     changed
@@ -472,9 +553,10 @@ async fn episode_start_goal(proxy: &ToolProxy, gid: u64, objective: &str) -> Opt
 /// recallable, dream-able memory, closing the goal→cognition loop.
 async fn episode_end_goal(proxy: &ToolProxy, episode_id: &str, state: GoalState, step: u32, max_steps: u32, objective: &str) {
     let (outcome, valence) = match state {
-        GoalState::Done   => ("completed", "positive"),
-        GoalState::Failed => ("failed",    "negative"),
-        _                 => ("ended",     "neutral"),
+        GoalState::Done      => ("completed", "positive"),
+        GoalState::Failed    => ("failed",    "negative"),
+        GoalState::Cancelled => ("cancelled", "neutral"),
+        _                    => ("ended",     "neutral"),
     };
     let summary = format!("goal {outcome} at step {step}/{max_steps}: {objective}");
     if let Err(e) = proxy.call("episode_end", serde_json::json!({
@@ -486,16 +568,23 @@ async fn episode_end_goal(proxy: &ToolProxy, episode_id: &str, state: GoalState,
 
 /// A goal step requested an `ask`-gated tool → ApprovalPending in the goal's own
 /// (unwatched) session. Park the goal Blocked rather than letting it stall silently;
-/// a human approves + goal_resume to continue.
+/// a human approves nothing here — they goal_resume to retry the step (which, with the
+/// execution-discipline directive, won't re-reach for the inspection tool). We also
+/// abort the now-pointless suspended turn so it doesn't hang holding the session
+/// (refinement #4: "rather than hanging forever") — the approval it was waiting on can
+/// never resolve into useful work once the goal is Blocked.
 async fn block_on_approval(goals: &Goals, bus: &BusHandle, session: u64, tool: &str) -> bool {
     let blocked = {
         let mut g = goals.lock().await;
         match g.iter_mut().find(|(_, go)| go.session == session && go.state == GoalState::Acting) {
-            Some((gid, go)) => { go.state = GoalState::Blocked; Some((*gid, go.objective.clone(), go.step, go.max_steps)) }
+            Some((gid, go)) => { go.state = GoalState::Blocked; go.pending = None; Some((*gid, go.objective.clone(), go.step, go.max_steps)) }
             None => None,
         }
     };
     if let Some((gid, objective, step, max_steps)) = blocked {
+        // Free the suspended turn (it's waiting on an approval that won't come) so the
+        // goal's session isn't left pinned. goal_resume re-runs the step from scratch.
+        bus.emit(Event::UserCancel { session: SessionId(session) }).await;
         emit_state(bus, gid, &objective, GoalState::Blocked, step, max_steps, &format!("awaiting approval — {tool}")).await;
         eprintln!("[goal] {gid} blocked on approval for '{tool}' at step {step}");
         true
@@ -519,6 +608,26 @@ mod tests {
         let d = directive_continue("x", 3, 5, Some("write the tests"));
         assert!(d.contains("step 3/5"), "got: {d}");
         assert!(d.contains("write the tests"));
+    }
+
+    #[test]
+    fn directives_carry_execution_discipline() {
+        // Refinement #1: every step must tell the agent to go straight to the task and
+        // not reflexively call ask-gated inspection tools (the live yolo-off stall).
+        let first = directive_first("ship it", 5);
+        let cont  = directive_continue("ship it", 2, 5, None);
+        for d in [&first, &cont] {
+            assert!(d.contains("minimum tools"), "discipline missing: {d}");
+            assert!(d.contains("screenshot_mirror"), "named inspection tool missing: {d}");
+        }
+    }
+
+    #[test]
+    fn step_timeout_clamps_and_defaults() {
+        assert_eq!(parse_step_timeout(None), STEP_TIMEOUT);          // absent → default
+        assert_eq!(parse_step_timeout(Some("oops")), STEP_TIMEOUT);  // unparseable → default
+        assert_eq!(parse_step_timeout(Some("5")), STEP_TIMEOUT);     // below 30s floor → default
+        assert_eq!(parse_step_timeout(Some("120")), Duration::from_secs(120)); // valid override
     }
 
     #[test]

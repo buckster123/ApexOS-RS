@@ -611,8 +611,8 @@ impl Supervisor {
             return;
         }
 
-        // Virtual tools: goal_create / goal_step / list_goals / goal_resume — route to the goal driver (deferred ack).
-        if matches!(call.tool.as_str(), "goal_create" | "goal_step" | "list_goals" | "goal_resume") {
+        // Virtual tools: goal_create / goal_step / list_goals / goal_resume / goal_cancel — route to the goal driver (deferred ack).
+        if matches!(call.tool.as_str(), "goal_create" | "goal_step" | "list_goals" | "goal_resume" | "goal_cancel") {
             let call_id = call.id;
             let tool    = call.tool.clone();
             let args    = call.args.clone();
