@@ -316,6 +316,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "apexos-confine"
+version = "0.1.0"
+
+[[package]]
 name = "apexos-core"
 version = "0.1.0"
 dependencies = [
@@ -394,6 +398,7 @@ dependencies = [
 name = "apexos-tools"
 version = "0.1.0"
 dependencies = [
+ "apexos-confine",
  "reqwest",
  "serde",
  "serde_json",

@@ -95,13 +95,16 @@ delivered over a dedicated channel so a busy turn can't lag-drop it).
 · explained in [`docs/evolutionary-layer.md`](docs/evolutionary-layer.md), [`docs/edk.md`](docs/edk.md)
 · **Lift:** copy `evolution.rs` for the reversibility model (pure + tested); the apply IO is the recipe.
 
-**Tool confinement — the single-source-of-truth gate** 🟡
+**Tool confinement — the single-source-of-truth gate** ✅🟡
 For allow-listed (no-approval) tools, the *tool process* is the only gate, so confinement can't live
-in the approval layer. One `confine()` is the source of truth: writes → workspace only; reads → a
-small allowlist minus a secret denylist; canonical-path resolution + component-wise `..` rejection.
-· `confine()` in [`tools/crates/apexos-tools/`](tools/crates/apexos-tools/), mirrored by `policy.rs`
+in the approval layer. The **mechanism** — reject `..` (component-based), lenient-canonicalize
+(resolve symlinks, tolerate non-existent write targets), root containment, read/secret split — is now
+the std-only [`apexos-confine`](apexos-confine/) crate: pure, unit-tested incl. the symlink-escape
+(TOCTOU) case. `apexos-tools` supplies the *policy* (per-agent workspace, read roots, secret denylist)
+and renders the agent-facing strings.
+· [`apexos-confine/`](apexos-confine/) (the algorithm) ← `confine()` / `confine_git_repo()` in [`tools/crates/apexos-tools/`](tools/crates/apexos-tools/)
 · explained in the FS/git-confinement notes in [`CLAUDE.md`](CLAUDE.md)
-· **Lift:** the principle (gate in the tool, not the policy layer) + the canonicalize-then-reject-`..` core.
+· **Lift:** `cargo add apexos-confine` — std-only, no ApexOS deps. The sandbox algorithm on its own.
 
 **Self-update loop** 🟡
 A daemon that safely rewrites its own binary: a watchdog at the privilege boundary, a health
@@ -149,6 +152,12 @@ A lean, serde-only crate of the wire `Event`/message types, shared by the daemon
 depended on without dragging in the whole daemon. The model for every clean seam in the repo.
 · [`apexos-protocol/`](apexos-protocol/) · **Lift:** `cargo add`-grade. This is what "factored for theft" looks like in code.
 
+**`apexos-confine` — the FS-sandbox algorithm** ✅
+A std-only, zero-ApexOS-dep crate: reject `..`, lenient-canonicalize (resolve symlinks, tolerate
+non-existent write targets), root containment, read/secret split — the path-confinement mechanism on
+its own, unit-tested incl. the symlink-escape (TOCTOU) case. Born from this very smoothing pass.
+· [`apexos-confine/`](apexos-confine/) · **Lift:** `cargo add apexos-confine`; supply your own policy + messages.
+
 **Pure-core utilities** ✅
 Small pure functions that hold a tricky rule, with tests that document the rule:
 `render_session_markdown()` ([`agentd/crates/gateway/src/lib.rs`](agentd/crates/gateway/src/lib.rs)),
@@ -163,6 +172,7 @@ One Cargo workspace, one build, one installer:
 
 ```
 apexos-protocol/      # wire types (the shared seam)
+apexos-confine/       # path-confinement primitives (std-only, liftable)
 agentd/crates/        # the agent daemon — core · gateway · plugins · agent · store · agentd
 cerebro/crates/       # externalized cognitive memory — lib · mcp · api · cli
 tools/crates/         # system tool plugins — apexos-tools · apex-sensor-bridge
@@ -184,8 +194,8 @@ The ratings above are also our own TODO — the gap between "documented idea" an
 - ✅ **Self-evolution loop** — DONE: pure core (classify · invert · undo-snapshot codec · TOML edits +
   validate) extracted to `agentd/crates/agentd/src/evolution.rs`, unit-tested; the applier loop is now
   IO-thin glue. No more 🔴.
-- **Tool confinement** (🟡) — the `confine()` core could be a tiny standalone crate (it's already the
-  single source of truth; it just imports node specifics).
+- ✅ **Tool confinement** — DONE: the algorithm is now the std-only `apexos-confine` crate (pure,
+  unit-tested incl. symlink-escape); `apexos-tools` supplies the policy + the error strings.
 - General: every crate could carry a one-paragraph `README` stating *"this is X, depends on Y, lift
   via Z"* — the per-part version of this index.
 

@@ -11,3 +11,4 @@ path = "src/main.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
+apexos-confine = { path = "../../../apexos-confine" }

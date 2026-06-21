@@ -1,0 +1,8 @@
+[package]
+name = "apexos-confine"
+version = "0.1.0"
+edition = "2021"
+description = "Path-confinement primitives — reject `..` traversal, lenient canonicalize (resolve symlinks, tolerate non-existent write targets), and root containment. std only, no ApexOS deps: the FS-sandbox algorithm, liftable on its own."
+license = "MIT"
+
+[dependencies]
