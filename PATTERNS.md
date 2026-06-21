@@ -196,8 +196,12 @@ The ratings above are also our own TODO — the gap between "documented idea" an
   IO-thin glue. No more 🔴.
 - ✅ **Tool confinement** — DONE: the algorithm is now the std-only `apexos-confine` crate (pure,
   unit-tested incl. symlink-escape); `apexos-tools` supplies the policy + the error strings.
-- General: every crate could carry a one-paragraph `README` stating *"this is X, depends on Y, lift
-  via Z"* — the per-part version of this index.
+- ✅ **Per-crate READMEs** — DONE: every workspace crate now carries a one-paragraph README
+  (*this is X · deps Y · lift via Z*) — the per-part version of this index.
+
+**Worklist cleared.** Both hard extractions (the self-evolution safety net, the FS sandbox) are pure,
+tested, and liftable; the repo gained two std-only seam crates; every crate is self-describing. Future
+"factored for theft" PRs are still welcome — extract a pure core, add a pattern doc, tighten a seam.
 
 Pull requests that *extract a pure core* or *add a pattern doc* are the most welcome kind here:
 they make the next theft cleaner.
