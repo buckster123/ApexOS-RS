@@ -2175,11 +2175,14 @@ fn agent_spawn_spec() -> ToolSpec {
             "properties": {
                 "prompt": {
                     "type":        "string",
-                    "description": "The task for the sub-agent to perform."
+                    "description": "The task for the sub-agent to perform. Author it in PAC — the \
+                                    colony's compressed authoring dialect (docs/pac.md): token-lean, \
+                                    identity-coherent delegation. PAC is the colony default."
                 },
                 "system": {
                     "type":        "string",
-                    "description": "Optional system prompt override for the sub-agent."
+                    "description": "Optional system prompt override for the sub-agent. Author in PAC \
+                                    (docs/pac.md) — PAC operational scaffold + thin prose voice."
                 },
                 "node": {
                     "type":        "string",
@@ -2278,7 +2281,10 @@ fn propose_evolution_spec() -> ToolSpec {
                 "content": {
                     "type":        "string",
                     "description": "Full replacement text for /etc/agentd/soul.md (update_system_prompt). \
-                                    Call read_soul_md first to get the current content before editing."
+                                    Call read_soul_md first to get the current content before editing. \
+                                    Author it in PAC — the colony default (docs/pac.md): PAC operational \
+                                    scaffold + thin prose identity voice, every symbol grounded, glyph-lean \
+                                    (~40% fewer tokens, behaviourally lossless)."
                 },
                 "subsystem": {
                     "type":        "string",
