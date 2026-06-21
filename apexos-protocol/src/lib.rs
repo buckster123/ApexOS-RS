@@ -31,6 +31,8 @@ pub struct GoalId(pub u64);
 
 /// Lifecycle state of an autonomous Goal run (docs/ideas/goal-driver-design.md).
 /// P2a uses Acting / Done / Failed; the rest are reserved for later slices.
+/// `Cancelled` is terminal-by-operator (goal_cancel) — distinct from Failed (a
+/// stall/error) and not resumable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalState {
@@ -40,6 +42,7 @@ pub enum GoalState {
     Reflecting,
     Done,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

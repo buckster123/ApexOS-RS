@@ -5386,11 +5386,12 @@ fn dispatch_event(
         // Work Board: an autonomous goal advanced → upsert its card in the GOALS lane.
         Event::GoalStateChanged { goal, objective, state, step, max_steps, detail } => {
             let (badge, c) = match state {
-                GoalState::Acting  => ("RUN",   board_color(96, 165, 250)),
-                GoalState::Done    => ("DONE",  board_color(52, 211, 153)),
-                GoalState::Failed  => ("FAIL",  board_color(239, 68, 68)),
-                GoalState::Blocked => ("BLOCK", board_color(251, 191, 36)),
-                _                  => ("…",     board_color(148, 163, 184)),
+                GoalState::Acting    => ("RUN",   board_color(96, 165, 250)),
+                GoalState::Done      => ("DONE",  board_color(52, 211, 153)),
+                GoalState::Failed    => ("FAIL",  board_color(239, 68, 68)),
+                GoalState::Blocked   => ("BLOCK", board_color(251, 191, 36)),
+                GoalState::Cancelled => ("STOP",  board_color(148, 163, 184)),
+                _                    => ("…",     board_color(148, 163, 184)),
             };
             let gid = goal.0;
             let title: String = objective.chars().take(60).collect();

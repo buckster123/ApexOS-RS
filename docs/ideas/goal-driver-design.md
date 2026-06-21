@@ -231,3 +231,26 @@ core.
   goal on a suggest node) — needs per-session policy threading into the supervisor.
 
 Each slice is its own PR. P2a is the keystone; the rest layer on without rewrites.
+
+- **Field-test refinements (APEX, 2026-06-21, yolo OFF).** The first end-to-end run with global
+  yolo *off* validated the headline features (board live, approvals surface, episode wrap +
+  block-on-approval confirmed) but surfaced one real gap: **goal steps reflexively call ask-gated
+  inspection tools** (`screenshot_mirror`, …) *before* doing the work, and under approval-gating each
+  such call parked the goal — so trivial goals never ran. Three fixes:
+  - **#1 Execution discipline** — `directive_first`/`directive_continue` now carry a shared
+    `EXECUTION_DISCIPLINE` line: *go straight to the objective with the minimum tools; don't reach for
+    inspection tools unless the objective needs them.* The fix at the point of authoring (the per-step
+    prompt), so it can't be forgotten. This is the root-cause fix.
+  - **#2 `goal_cancel{goal_id}`** — operator-stop a running/blocked goal: aborts the in-flight turn
+    (`UserCancel` on the goal session), marks it the new **`GoalState::Cancelled`** (terminal, *not*
+    resumable — distinct from Failed), closes the episode neutral. The recovery hatch APEX asked for —
+    kill a stuck goal without a daemon restart. Policy `allow` (de-escalating: only halts the agent's
+    own goal).
+  - **#4 Don't-hang backstop** — `block_on_approval` now also `UserCancel`s the suspended turn (it was
+    waiting on an approval that can never resolve into work once the goal is Blocked), so the session
+    isn't left pinned; `goal_resume` re-runs the step cleanly (and, with #1, won't re-hit the
+    inspection tool). The existing 900s stall timeout is now tunable via **`GOAL_STEP_TIMEOUT_SECS`**
+    (≥30s floor) — handy to lower for live testing.
+  - *Still deferred:* **#3 goal-scoped Yolo** (per-goal auto-approve even when global yolo is off) —
+    the genuinely-needs-approval case. Its hard half is still per-session policy threading into the
+    supervisor; tracked as its own slice.
