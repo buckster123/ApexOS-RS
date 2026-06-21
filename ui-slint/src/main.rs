@@ -2394,7 +2394,9 @@ async fn fetch_mesh(client: &reqwest::Client, base_url: &str) -> Vec<MeshNode> {
                 node_id:   p["node_id"].as_str().unwrap_or("").into(),
                 detail:    p["ws_url"].as_str().unwrap_or("").into(),
                 role:      p["role"].as_str().unwrap_or("full").into(),
-                status:    p["status"].as_str().unwrap_or("online").into(),
+                // Prefer the downtime beacon's live status (alive/dark) over the
+                // static peers.toml status — it's the real-time truth.
+                status:    p["live"].as_str().or_else(|| p["status"].as_str()).unwrap_or("online").into(),
                 is_peer:   true,
                 has_token: p["has_token"].as_bool().unwrap_or(false),
             });
@@ -5381,6 +5383,15 @@ fn dispatch_event(
             slint::invoke_from_event_loop(move || {
                 board_push_recent(format!("Mesh ← {from}"), prev, "MESH", board_color(45, 212, 191));
             }).ok();
+        }
+
+        // Downtime beacon: a peer crossed the up↔down boundary → board notification.
+        Event::MeshNodeStatus { node_id, status, last_seen_secs } => {
+            let dark = status == "dark";
+            let title = format!("Node {} {}", node_id, if dark { "DARK" } else { "back online" });
+            let detail = if dark { format!("no heartbeat for ~{last_seen_secs}s") } else { "heartbeat restored".into() };
+            let (badge, c) = if dark { ("DARK", board_color(239, 68, 68)) } else { ("UP", board_color(52, 211, 153)) };
+            slint::invoke_from_event_loop(move || board_push_recent(title, detail, badge, c)).ok();
         }
 
         // Work Board: an autonomous goal advanced → upsert its card in the GOALS lane.

@@ -221,6 +221,9 @@ async fn main() -> anyhow::Result<()> {
         let _ = std::fs::write(&peers_path, "# ApexOS mesh peers\n");
     }
     let peer_registry = Arc::new(RwLock::new(PeerRegistry::load(&peers_path)));
+    // Downtime beacon (colony-mesh spine): per-peer active liveness, shared
+    // gateway (serves it in /api/mesh/peers) ↔ the beacon loop (writes it).
+    let mesh_liveness = apexos_gateway::new_liveness_map();
     let vast_state = VastState::new();
     {
         let vs = vast_state.clone();
@@ -305,6 +308,7 @@ async fn main() -> anyhow::Result<()> {
         council_sessions:     Arc::clone(&council_sessions),
         council_next_id:      Arc::clone(&council_next_id),
         peer_registry:        Arc::clone(&peer_registry),
+        liveness:             Arc::clone(&mesh_liveness),
         pairing:              Arc::new(std::sync::Mutex::new(None)),
         node_id:              Arc::clone(&node_id),
         mesh_sessions:        Arc::clone(&mesh_sessions),
@@ -598,6 +602,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Mesh discovery loop — mDNS poll, subnet guard, PeerSeen events
     spawn_discovery_loop(Arc::clone(&peer_registry), Arc::clone(&node_id), handle.clone());
+    // Mesh downtime beacon — active HTTP liveness on peers.toml; a node going dark
+    // emits MeshNodeStatus + (default) a root-session alert so silence ≠ "all fine".
+    apexos_gateway::spawn_beacon_loop(Arc::clone(&peer_registry), handle.clone(), Arc::clone(&mesh_liveness));
 
     // Event log
     tokio::spawn(run_log_writer(log_dir, bcast.subscribe()));

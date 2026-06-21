@@ -304,6 +304,13 @@ pub enum Event {
     PeerRegistered { node_id: String, ws_url: String, role: String },
     /// A known peer stopped advertising (3 missed mDNS polls).
     PeerLost       { node_id: String },
+    /// Active-liveness transition from the downtime beacon (colony-mesh spine): a
+    /// registered peer crossed the up↔down boundary as measured by periodic HTTP
+    /// heartbeat polls — distinct from `PeerLost` (mDNS *advertising* loss). Global
+    /// status event → every client gets the board notification. `status` = "dark"
+    /// (went silent) | "alive" (recovered); `last_seen_secs` = seconds since the
+    /// last successful contact (0 on recovery).
+    MeshNodeStatus { node_id: String, status: String, last_seen_secs: u64 },
 
     // self-evolution
     /// Agent has proposed a structural change. Routes through the policy engine

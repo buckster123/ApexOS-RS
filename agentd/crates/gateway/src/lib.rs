@@ -10,6 +10,8 @@ use axum::{
 };
 pub mod mesh;
 pub use mesh::{parse_avahi_output, PeerRecord, PeerRegistry, PeerRole};
+pub mod beacon;
+pub use beacon::{new_liveness_map, spawn_beacon_loop, LivenessMap};
 use serde::{Deserialize, Serialize};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -98,6 +100,9 @@ pub struct GatewayState {
     pub council_next_id:   Arc<std::sync::atomic::AtomicU64>,
     /// Mesh peer registry — peers.toml backed, hot-reloadable
     pub peer_registry:     Arc<RwLock<PeerRegistry>>,
+    /// Per-peer active-liveness, written by the downtime beacon loop and folded into
+    /// `GET /api/mesh/peers` so the UI shows each node alive/dark + last-seen.
+    pub liveness:          LivenessMap,
     /// Active mesh pairing offer (in-memory only, never persisted). See mesh::Pairing.
     pub pairing:           Arc<std::sync::Mutex<Option<mesh::Pairing>>>,
     /// Own node_id (hostname) — used by discovery loop to avoid self-bootstrap
@@ -2451,13 +2456,20 @@ async fn mesh_peers_get_handler(State(state): State<GatewayState>) -> impl IntoR
     let registry = state.peer_registry.read().await;
     // Never serialize the per-peer token: it's the peer's secret credential.
     // Clients only need to know whether one is set (drives the a2a-ready dot).
-    let peers: Vec<serde_json::Value> = registry.peers.iter().map(|p| serde_json::json!({
-        "node_id":   p.node_id,
-        "ws_url":    p.ws_url,
-        "role":      p.role.to_string(),
-        "status":    p.status,
-        "has_token": p.token.is_some(),
-    })).collect();
+    let mut peers: Vec<serde_json::Value> = Vec::with_capacity(registry.peers.len());
+    for p in &registry.peers {
+        // Fold in the beacon's active-liveness (alive/dark + seconds-since-seen).
+        let (live, last_seen_secs) = beacon::peer_liveness(&state.liveness, &p.node_id).await;
+        peers.push(serde_json::json!({
+            "node_id":        p.node_id,
+            "ws_url":         p.ws_url,
+            "role":           p.role.to_string(),
+            "status":         p.status,
+            "has_token":      p.token.is_some(),
+            "live":           live,
+            "last_seen_secs": last_seen_secs,
+        }));
+    }
     Json(serde_json::json!({ "peers": peers }))
 }
 

@@ -40,6 +40,7 @@ fn make_state(handle: apexos_core::BusHandle, bcast: tokio::sync::broadcast::Sen
         peer_registry:        Arc::new(tokio::sync::RwLock::new(
             apexos_gateway::PeerRegistry::load(std::path::Path::new("/dev/null"))
         )),
+        liveness:             apexos_gateway::new_liveness_map(),
         pairing:              Arc::new(std::sync::Mutex::new(None)),
         node_id:              Arc::new("test-node".into()),
         mesh_sessions:        Arc::new(std::sync::Mutex::new(HashMap::new())),
