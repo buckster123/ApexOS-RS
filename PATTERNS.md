@@ -85,13 +85,15 @@ guard that runs on completion, abort, *and* panic, so a crashed turn can't wedge
 · explained in the turn-serialization note in [`CLAUDE.md`](CLAUDE.md)
 · **Lift:** the RAII-guard-frees-the-slot shape is the reusable core.
 
-**Self-evolution loop** 🔴
+**Self-evolution loop** ✅🟡
 An agent proposes structural changes to itself — soul, policy rules, plugins, subsystem reloads —
 each with a rollback snapshot and a *deferred* ack (the tool result reflects the real apply outcome,
 delivered over a dedicated channel so a busy turn can't lag-drop it).
-· the evolution applier in `agentd/crates/agentd/src/main.rs` (welded into the daemon loop)
+· **pure core** (classify · invert · undo-snapshot codec · TOML edits + validate-before-persist) in
+  [`agentd/crates/agentd/src/evolution.rs`](agentd/crates/agentd/src/evolution.rs) — unit-tested; the
+  applier loop in `main.rs` is now IO-thin glue around it
 · explained in [`docs/evolutionary-layer.md`](docs/evolutionary-layer.md), [`docs/edk.md`](docs/edk.md)
-· **Lift:** reimplement from the doc; the contract (propose → snapshot → apply → deferred-ack → rollback) is clean even though the code isn't extracted.
+· **Lift:** copy `evolution.rs` for the reversibility model (pure + tested); the apply IO is the recipe.
 
 **Tool confinement — the single-source-of-truth gate** 🟡
 For allow-listed (no-approval) tools, the *tool process* is the only gate, so confinement can't live
@@ -179,8 +181,9 @@ The ratings above are also our own TODO — the gap between "documented idea" an
 
 - ✅ **Prompt-caching discipline** — DONE: extracted to [`docs/prompt-caching.md`](docs/prompt-caching.md)
   (contract-first, portable, with the tested spec mapped). The first gap closed.
-- **Self-evolution loop** (🔴) is welded into the daemon loop — extracting its pure core (the
-  propose→snapshot→apply→ack→rollback state machine) would make it copyable, not just re-implementable.
+- ✅ **Self-evolution loop** — DONE: pure core (classify · invert · undo-snapshot codec · TOML edits +
+  validate) extracted to `agentd/crates/agentd/src/evolution.rs`, unit-tested; the applier loop is now
+  IO-thin glue. No more 🔴.
 - **Tool confinement** (🟡) — the `confine()` core could be a tiny standalone crate (it's already the
   single source of truth; it just imports node specifics).
 - General: every crate could carry a one-paragraph `README` stating *"this is X, depends on Y, lift

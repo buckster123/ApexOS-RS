@@ -7,6 +7,7 @@ use council_handler::spawn_council_handler;
 mod health;
 mod self_update;
 mod consolidate;
+mod evolution;
 
 use apexos_core::{
     ActionId, Bus, ContentBlock, Event, EvolutionId, EvolutionProposal, ImageSource, Message,
@@ -668,7 +669,7 @@ fn spawn_evolution_applier(
                     }
 
                     // Best-effort bookkeeping (post-ack): rollback store + Cerebro episode + bus event.
-                    let kind = evo_kind(&proposal_copy);
+                    let kind = evolution::kind(&proposal_copy);
                     let episode_id = episode_start(&tool_proxy, id, &kind).await;
                     match result {
                         Ok(summary) => {
@@ -765,12 +766,6 @@ fn spawn_evolution_applier(
 
 // ── evolution episode helpers (Cerebro, best-effort) ─────────────────────────
 
-fn evo_kind(proposal: &EvolutionProposal) -> String {
-    serde_json::to_value(proposal).ok()
-        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(str::to_owned))
-        .unwrap_or_else(|| "unknown".into())
-}
-
 /// Extract the text string from an MCP ToolOutput (content is an array of typed blocks).
 fn mcp_text(output: &apexos_core::ToolOutput) -> Option<String> {
     match &output.content {
@@ -812,8 +807,7 @@ async fn episode_start(proxy: &ToolProxy, evo_id: EvolutionId, kind: &str) -> Op
 
 /// Store the undo snapshot as a memory, then link it to the episode as a step.
 async fn episode_add_step(proxy: &ToolProxy, episode_id: &str, undo: &EvolutionProposal, summary: &str) {
-    let undo_json = serde_json::to_string(undo).unwrap_or_default();
-    let content   = format!("evolution apply: {summary}\nundo_snapshot: {undo_json}");
+    let content = evolution::undo_step_line(summary, undo);
 
     // Step 1: store the undo snapshot as a memory to get its id. memory_store
     // returns the stored node, whose id field is `id` (NOT `memory_id`) — reading
@@ -884,7 +878,7 @@ async fn restore_rollback_store(
         let Some(title)      = ep["title"].as_str() else { continue };
         if !title.starts_with("evolution ") { continue; }
 
-        let evo_id = match parse_evolution_id_from_title(title) {
+        let evo_id = match evolution::parse_evolution_id_from_title(title) {
             Some(id) => id,
             None     => { eprintln!("[evolution] restore: can't parse id from '{title}'"); continue; }
         };
@@ -901,7 +895,7 @@ async fn restore_rollback_store(
             _ => continue,
         };
 
-        if let Some(proposal) = parse_undo_from_episode_memories(&mems_text) {
+        if let Some(proposal) = evolution::parse_undo_from_episode_memories(&mems_text) {
             rollback_store.lock().await.insert(evo_id, proposal);
             count += 1;
         }
@@ -917,38 +911,10 @@ async fn restore_rollback_store(
     eprintln!("[evolution] restore: loaded {count} rollback snapshot(s) from Cerebro (next id ≥ {})", max_id + 1);
 }
 
-fn parse_evolution_id_from_title(title: &str) -> Option<EvolutionId> {
-    // "evolution {N}: {kind}"
-    let rest  = title.strip_prefix("evolution ")?;
-    let colon = rest.find(':')?;
-    let n: u64 = rest[..colon].trim().parse().ok()?;
-    Some(EvolutionId(n))
-}
-
-/// Extract the undo snapshot from a `get_episode_memories` result — a JSON array
-/// of memory nodes. The marker lives inside each node's `content` string, NOT in
-/// the rendered array text (where the undo JSON is escaped-within-JSON and never
-/// parses — the bug behind the chronic "loaded 0 rollback snapshot(s)").
-fn parse_undo_from_episode_memories(mems_text: &str) -> Option<EvolutionProposal> {
-    serde_json::from_str::<serde_json::Value>(mems_text).ok()?
-        .as_array()?
-        .iter()
-        .filter_map(|n| n["content"].as_str())
-        .find_map(parse_undo_snapshot_from_text)
-}
-
-fn parse_undo_snapshot_from_text(text: &str) -> Option<EvolutionProposal> {
-    // Memory content: "evolution apply: {summary}\nundo_snapshot: {compact_json}"
-    // compact_json has no literal newlines (serde_json::to_string escapes them).
-    let marker = "undo_snapshot: ";
-    let start  = text.find(marker)? + marker.len();
-    let rest   = &text[start..];
-    let end    = rest.find('\n').unwrap_or(rest.len());
-    serde_json::from_str(&rest[..end]).ok()
-}
-
 /// Snapshot current state to produce an inverse proposal (for rollback).
-/// Returns None for proposals that have no meaningful undo (e.g. HotReload).
+/// Returns None for proposals that have no meaningful undo (e.g. HotReload). IO-thin:
+/// captures the prior on-disk state, then hands the pure inversion to
+/// `evolution::invert` (tested there).
 async fn compute_undo(
     proposal:     &EvolutionProposal,
     soul_arc:     &Arc<RwLock<String>>,
@@ -957,60 +923,33 @@ async fn compute_undo(
     plugins_path: &PathBuf,
     agent_soul:   Option<&PathBuf>,
 ) -> Option<EvolutionProposal> {
-    match proposal {
+    let prior = match proposal {
         EvolutionProposal::UpdateSystemPrompt { .. } => {
             // Snapshot the soul that WILL be overwritten: a bound agent's own
             // soul_file when set, else the global soul_arc. Unreadable per-agent
-            // file ⇒ no meaningful undo.
-            let old = match agent_soul {
-                Some(path) => tokio::fs::read_to_string(path).await.ok()?,
-                None       => soul_arc.read().await.clone(),
+            // file ⇒ no captured prior ⇒ no meaningful undo.
+            let old_soul = match agent_soul {
+                Some(path) => tokio::fs::read_to_string(path).await.ok(),
+                None       => Some(soul_arc.read().await.clone()),
             };
-            Some(EvolutionProposal::UpdateSystemPrompt {
-                content: old,
-                reason:  "rollback".into(),
-            })
+            evolution::Prior { old_soul, ..Default::default() }
         }
         EvolutionProposal::UpdatePolicyRule { tool_pattern, .. } => {
-            // Snapshot the prior rule value so rollback restores it exactly.
-            // If the rule didn't exist before (brand-new addition), there is no
-            // meaningful inverse (we have no "remove rule" variant) — return None.
-            let toml_text    = tokio::fs::read_to_string(policy_path).await.ok()?;
-            let doc          = toml_text.parse::<toml_edit::DocumentMut>().ok()?;
-            let old_rule_str = doc.get("rules")?.as_table()?.get(tool_pattern.as_str())?.as_str()?;
-            let old_rule     = apexos_core::PolicyRule::from_toml_str(old_rule_str)?;
-            Some(EvolutionProposal::UpdatePolicyRule {
-                tool_pattern: tool_pattern.clone(),
-                new_rule:     old_rule,
-                reason:       "rollback".into(),
-            })
-        }
-        EvolutionProposal::RegisterMcpServer { name, .. } => {
-            Some(EvolutionProposal::UnregisterMcpServer {
-                name:   name.clone(),
-                reason: "rollback".into(),
-            })
+            // Snapshot the prior rule value so rollback restores it exactly. A
+            // brand-new rule (no prior) ⇒ no inverse (no "remove rule" variant).
+            let old_policy_rule = tokio::fs::read_to_string(policy_path).await.ok()
+                .and_then(|t| evolution::policy_rule_from_toml(&t, tool_pattern));
+            evolution::Prior { old_policy_rule, ..Default::default() }
         }
         EvolutionProposal::UnregisterMcpServer { name, .. } => {
-            let toml_text = tokio::fs::read_to_string(plugins_path).await.ok()?;
-            let doc = toml_text.parse::<toml_edit::DocumentMut>().ok()?;
-            let arr = doc.get("plugin")?.as_array_of_tables()?;
-            let tbl = arr.iter().find(|t| {
-                t.get("id").and_then(|v| v.as_str()) == Some(name.as_str())
-            })?;
-            let cmd = tbl.get("cmd")?.as_str()?.to_string();
-            Some(EvolutionProposal::RegisterMcpServer {
-                name:    name.clone(),
-                command: cmd,
-                env:     std::collections::HashMap::new(),
-                reason:  "rollback".into(),
-            })
+            let old_plugin_cmd = tokio::fs::read_to_string(plugins_path).await.ok()
+                .and_then(|t| evolution::plugin_cmd_from_toml(&t, name));
+            evolution::Prior { old_plugin_cmd, ..Default::default() }
         }
-        EvolutionProposal::HotReloadSubsystem { .. } => None,
-
-        // A hardware request is a record, not a mutation — nothing to roll back.
-        EvolutionProposal::RequestHardware { .. } => None,
-    }
+        // Register (inverse needs no prior), HotReload / RequestHardware (no undo).
+        _ => evolution::Prior::default(),
+    };
+    evolution::invert(proposal, &prior)
 }
 
 /// Write bytes to `path` atomically: write a sibling temp file, then rename over
@@ -1088,49 +1027,23 @@ async fn apply_evolution(
         }
 
         EvolutionProposal::UpdatePolicyRule { tool_pattern, new_rule, reason: _ } => {
+            // Edit + validate-before-persist (pure, tested in `evolution`): a bad
+            // proposal is rejected before it can reach the live policy.toml. The
+            // [rules] table accepts allow/ask/workspace (PolicyRule), NOT mode names.
             let toml_text = tokio::fs::read_to_string(policy_path).await?;
-            let mut doc = toml_text.parse::<toml_edit::DocumentMut>()?;
-            // The [rules] table accepts allow/ask/workspace (PolicyRule), NOT the
-            // global mode names. Writing a mode name here makes policy.toml fail to
-            // deserialize on the next load and silently wipes every rule.
-            let rule_str = new_rule.as_toml_str();
-            // Ensure [rules] exists so brand-new rule additions don't silently no-op.
-            if doc.get("rules").is_none() {
-                doc["rules"] = toml_edit::Item::Table(toml_edit::Table::new());
-            }
-            if let Some(rules) = doc.get_mut("rules").and_then(|v| v.as_table_mut()) {
-                rules.insert(&tool_pattern, toml_edit::value(rule_str));
-            }
-            // Validate-before-persist: parse the candidate doc into a PolicyConfig
-            // BEFORE touching the live file, so a bad proposal can never corrupt it.
-            let new_toml = doc.to_string();
-            let new_config = PolicyConfig::parse(&new_toml)
-                .map_err(|e| anyhow::anyhow!("rejected policy edit (would corrupt policy.toml): {e}"))?;
+            let (new_toml, new_config) =
+                evolution::policy_toml_set_rule(&toml_text, &tool_pattern, new_rule)?;
             write_atomic(policy_path, new_toml.as_bytes()).await?;
             *policy_arc.write().await = PolicyEngine::new(new_config);
+            let rule_str = new_rule.as_toml_str();
             eprintln!("[evolution] policy rule '{tool_pattern}' = '{rule_str}'");
             Ok(format!("policy rule '{tool_pattern}' set to '{rule_str}'"))
         }
 
         EvolutionProposal::RegisterMcpServer { name, command, env, reason: _ } => {
             let toml_text = tokio::fs::read_to_string(plugins_path).await?;
-            let mut doc = toml_text.parse::<toml_edit::DocumentMut>()?;
-            if let Some(arr) = doc.get_mut("plugin").and_then(|v| v.as_array_of_tables_mut()) {
-                let mut tbl = toml_edit::Table::new();
-                tbl.insert("id",      toml_edit::value(name.as_str()));
-                tbl.insert("cmd",     toml_edit::value(command.as_str()));
-                tbl.insert("restart", toml_edit::value("always"));
-                if !env.is_empty() {
-                    let mut env_inline = toml_edit::InlineTable::new();
-                    for (k, v) in &env {
-                        env_inline.insert(k, toml_edit::Value::from(v.as_str()));
-                    }
-                    tbl.insert("env",
-                        toml_edit::Item::Value(toml_edit::Value::InlineTable(env_inline)));
-                }
-                arr.push(tbl);
-            }
-            tokio::fs::write(plugins_path, doc.to_string()).await?;
+            let new_toml = evolution::plugins_toml_add(&toml_text, &name, &command, &env)?;
+            tokio::fs::write(plugins_path, new_toml).await?;
             let config = PluginConfig {
                 id:      name.clone(),
                 cmd:     command,
@@ -1147,16 +1060,8 @@ async fn apply_evolution(
 
         EvolutionProposal::UnregisterMcpServer { name, reason: _ } => {
             let toml_text = tokio::fs::read_to_string(plugins_path).await?;
-            let mut doc = toml_text.parse::<toml_edit::DocumentMut>()?;
-            if let Some(arr) = doc.get_mut("plugin").and_then(|v| v.as_array_of_tables_mut()) {
-                let idx = (0..arr.len()).find(|&i| {
-                    arr.get(i)
-                        .and_then(|t| t.get("id"))
-                        .and_then(|v| v.as_str()) == Some(name.as_str())
-                });
-                if let Some(i) = idx { arr.remove(i); }
-            }
-            tokio::fs::write(plugins_path, doc.to_string()).await?;
+            let new_toml = evolution::plugins_toml_remove(&toml_text, &name)?;
+            tokio::fs::write(plugins_path, new_toml).await?;
             sv_cmd_tx.send(SupervisorCmd::KillPlugin { id: PluginId(name.clone()) }).await
                 .map_err(|_| anyhow::anyhow!("supervisor channel closed"))?;
             eprintln!("[evolution] unregistered MCP server '{name}'");
@@ -1194,19 +1099,10 @@ async fn apply_evolution(
             let path = std::env::var("AGENTD_HARDWARE_WISHLIST")
                 .unwrap_or_else(|_| "hardware-wishlist.md".into());
             let path_buf = PathBuf::from(&path);
-            let header = "# ApexOS hardware wishlist\n\n\
-                APEX's request-to-incarnate queue (EDK, docs/edk.md). Each entry is a part\n\
-                APEX asked for; a human seats it, reboots, and the embodiment probe confirms\n\
-                the new sense live. Remove an entry once it's installed.\n";
-            let mut doc = tokio::fs::read_to_string(&path_buf).await
-                .unwrap_or_else(|_| header.to_string());
-            let bus_line    = if bus.is_empty()    { String::new() } else { format!("- attaches: {bus}\n") };
-            let source_line = if source.is_empty() { String::new() } else { format!("- source: {source}\n") };
-            doc.push_str(&format!(
-                "\n## [#{}] {part} → {capability}\n{bus_line}{source_line}- why: {reason}\n\
-                 - status: REQUESTED — seat it, reboot; the embodiment probe confirms it live\n",
-                id.0,
-            ));
+            let existing = tokio::fs::read_to_string(&path_buf).await.ok();
+            let doc = evolution::wishlist_append(
+                existing.as_deref(), id.0, &part, &capability, &reason, &bus, &source,
+            );
             write_atomic(&path_buf, doc.as_bytes()).await?;
             eprintln!("[evolution] hardware request filed: {part} -> {capability}");
             Ok(format!("hardware request filed: {part} → {capability}. A human must seat it; \
@@ -3329,31 +3225,4 @@ status = "inferred"
         assert_eq!(soul_target_for(SessionId(9), &bindings, &identities).await, None);
     }
 
-    // Cold-start rollback restore: the undo snapshot must be recovered from inside a
-    // get_episode_memories JSON-array node's `content`, NOT by scraping the array text
-    // (the old path, where the undo JSON is escaped-within-JSON and never parsed).
-    #[test]
-    fn parse_undo_from_episode_memories_recovers_snapshot() {
-        let undo = EvolutionProposal::UpdateSystemPrompt {
-            content: "# APEX\nold soul".into(),
-            reason:  "rollback".into(),
-        };
-        let undo_json = serde_json::to_string(&undo).unwrap();
-        // Exactly what episode_add_step stores as the memory content.
-        let content = format!("evolution apply: system prompt updated (13 chars)\nundo_snapshot: {undo_json}");
-        // Exactly the JSON-array shape get_episode_memories returns.
-        let mems_text = serde_json::to_string(&serde_json::json!([
-            { "id": "mem_x", "content": content, "tags": ["evolution", "undo_snapshot"] }
-        ])).unwrap();
-
-        // New path recovers the snapshot…
-        match parse_undo_from_episode_memories(&mems_text) {
-            Some(EvolutionProposal::UpdateSystemPrompt { content, .. }) => {
-                assert_eq!(content, "# APEX\nold soul");
-            }
-            other => panic!("expected UpdateSystemPrompt undo, got {other:?}"),
-        }
-        // …while the old direct-scrape of the array text recovers nothing (the bug).
-        assert!(parse_undo_snapshot_from_text(&mems_text).is_none());
-    }
 }
