@@ -14,11 +14,13 @@
 //! (1/N … N/N → DONE), not the completed-count (the P2a off-by-one APEX caught live).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use apexos_core::{ActionId, BusHandle, Event, GoalId, GoalState, SessionId, ToolOutput, ToolSpec};
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 const DEFAULT_MAX_STEPS: u32 = 12;
@@ -46,6 +48,40 @@ struct Goal {
 }
 
 type Goals = Arc<Mutex<HashMap<u64, Goal>>>;
+
+/// The on-disk form of a goal (the transient `step_started`/`pending` are dropped).
+/// Persisted to `goals.json` so an in-flight goal survives a daemon restart — most
+/// importantly the nightly self-update binary swap, which would otherwise evaporate
+/// any running goal. (P2d, docs/ideas/goal-driver-design.md)
+#[derive(Serialize, Deserialize)]
+struct PersistedGoal {
+    id:        u64,
+    objective: String,
+    session:   u64,
+    state:     GoalState,
+    step:      u32,
+    max_steps: u32,
+}
+
+async fn save_goals(goals: &Goals, path: &PathBuf) {
+    let snapshot: Vec<PersistedGoal> = {
+        let g = goals.lock().await;
+        g.iter().map(|(id, go)| PersistedGoal {
+            id: *id, objective: go.objective.clone(), session: go.session,
+            state: go.state, step: go.step, max_steps: go.max_steps,
+        }).collect()
+    };
+    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+    if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn load_goals(path: &PathBuf) -> Vec<PersistedGoal> {
+    std::fs::read_to_string(path).ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
 
 /// What to do after a step resolves — computed under the lock, performed after release.
 enum Outcome {
@@ -104,6 +140,21 @@ pub fn list_goals_spec() -> ToolSpec {
     }
 }
 
+pub fn goal_resume_spec() -> ToolSpec {
+    ToolSpec {
+        name: "goal_resume".into(),
+        description: "Resume a Blocked or Failed goal by id — e.g. one interrupted by a daemon \
+                      restart (it reappears Blocked: 'interrupted by daemon restart'), or parked via \
+                      goal_step{blocked}. It re-enters Acting at its last step and picks the objective \
+                      back up. Use list_goals to find resumable goals.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": { "goal_id": { "type": "integer", "description": "The goal to resume." } },
+            "required": ["goal_id"]
+        }),
+    }
+}
+
 fn directive_first(objective: &str, max_steps: u32) -> String {
     format!(
         "You are running an autonomous GOAL (step 1/{max_steps}).\n\nOBJECTIVE:\n{objective}\n\n\
@@ -145,29 +196,96 @@ pub fn spawn_goal_driver(
     mut req_rx:      mpsc::Receiver<(SessionId, ActionId, String, serde_json::Value)>,
     next_session_id: Arc<AtomicU64>,
     next_goal_id:    Arc<AtomicU64>,
+    goals_path:      PathBuf,
 ) {
     tokio::spawn(async move {
         let goals: Goals = Arc::new(Mutex::new(HashMap::new()));
+        reload_goals(&goals, &bus, &next_goal_id, &goals_path).await;
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
                 Some((session, call_id, tool, args)) = req_rx.recv() => {
                     match tool.as_str() {
-                        "goal_create" => create_goal(&goals, &bus, &next_session_id, &next_goal_id, session, call_id, args).await,
+                        "goal_create" => { create_goal(&goals, &bus, &next_session_id, &next_goal_id, session, call_id, args).await; save_goals(&goals, &goals_path).await; }
                         "goal_step"   => record_step(&goals, &bus, session, call_id, args).await,
+                        "goal_resume" => { resume_goal(&goals, &bus, session, call_id, args).await; save_goals(&goals, &goals_path).await; }
                         "list_goals"  => handle_list_goals(&goals, &bus, session, call_id).await,
                         _ => {}
                     }
                 }
                 ev = bcast_rx.recv() => {
                     if let Ok(Event::TurnComplete { session }) = ev {
-                        advance(&goals, &bus, session.0).await;
+                        if advance(&goals, &bus, session.0).await { save_goals(&goals, &goals_path).await; }
                     }
                 }
-                _ = tick.tick() => { fail_stalled(&goals, &bus).await; }
+                _ = tick.tick() => {
+                    if fail_stalled(&goals, &bus).await { save_goals(&goals, &goals_path).await; }
+                }
             }
         }
     });
+}
+
+/// Boot: reload persisted goals. A goal that was mid-flight (Acting) when the daemon
+/// stopped is re-entered as Blocked ("interrupted by restart") — never silently lost
+/// — and resumes via goal_resume. Re-seeds the goal-id counter past every loaded id.
+async fn reload_goals(goals: &Goals, bus: &BusHandle, next_goal_id: &Arc<AtomicU64>, path: &PathBuf) {
+    let loaded = load_goals(path);
+    if loaded.is_empty() { return; }
+    let mut max_id = 0u64;
+    let mut announce: Vec<(u64, String, GoalState, u32, u32)> = Vec::new();
+    {
+        let mut g = goals.lock().await;
+        for pg in loaded {
+            max_id = max_id.max(pg.id);
+            let state = if pg.state == GoalState::Acting { GoalState::Blocked } else { pg.state };
+            g.insert(pg.id, Goal {
+                objective: pg.objective.clone(), session: pg.session, state,
+                step: pg.step, max_steps: pg.max_steps, step_started: Instant::now(), pending: None,
+            });
+            announce.push((pg.id, pg.objective, state, pg.step, pg.max_steps));
+        }
+    }
+    next_goal_id.fetch_max(max_id + 1, Ordering::SeqCst);
+    for (id, objective, state, step, max_steps) in announce {
+        let detail = if state == GoalState::Blocked { "interrupted by daemon restart — goal_resume to continue" } else { "" };
+        emit_state(bus, id, &objective, state, step, max_steps, detail).await;
+    }
+    eprintln!("[goal] reloaded goals from {} (in-flight ones marked blocked)", path.display());
+}
+
+/// goal_resume{goal_id}: re-activate a Blocked/Failed goal — back to Acting at its
+/// last step, re-emitting the continue directive so the agent picks the objective up.
+async fn resume_goal(goals: &Goals, bus: &BusHandle, call_session: SessionId, call_id: ActionId, args: serde_json::Value) {
+    let resumed = {
+        let mut g = goals.lock().await;
+        match args["goal_id"].as_u64().and_then(|id| g.get_mut(&id).map(|go| (id, go))) {
+            Some((id, go)) if matches!(go.state, GoalState::Blocked | GoalState::Failed) => {
+                go.state = GoalState::Acting;
+                go.step_started = Instant::now();
+                go.pending = None;
+                Some((id, go.objective.clone(), go.session, go.step, go.max_steps))
+            }
+            _ => None,
+        }
+    };
+    match resumed {
+        Some((id, objective, session, step, max_steps)) => {
+            emit_state(bus, id, &objective, GoalState::Acting, step, max_steps, "resumed").await;
+            bus.emit(Event::UserPrompt {
+                session: SessionId(session),
+                text: directive_continue(&objective, step, max_steps, None),
+                images: vec![],
+            }).await;
+            bus.emit(Event::ToolResult { session: call_session, call: call_id,
+                output: ToolOutput { ok: true, content: serde_json::json!({ "goal_id": id, "status": "resumed", "step": step }) } }).await;
+            eprintln!("[goal] {id} resumed at step {step}");
+        }
+        None => {
+            bus.emit(Event::ToolResult { session: call_session, call: call_id,
+                output: ToolOutput { ok: false, content: serde_json::json!("no resumable (blocked/failed) goal with that id") } }).await;
+        }
+    }
 }
 
 async fn create_goal(
@@ -245,7 +363,7 @@ async fn record_step(goals: &Goals, bus: &BusHandle, call_session: SessionId, ca
 
 /// A goal session's turn completed → apply the in-flight step's verdict: done (early),
 /// blocked (park), or continue (next step, or close at the budget ceiling).
-async fn advance(goals: &Goals, bus: &BusHandle, session: u64) {
+async fn advance(goals: &Goals, bus: &BusHandle, session: u64) -> bool {
     let outcome = {
         let mut g = goals.lock().await;
         match g.iter_mut().find(|(_, go)| go.session == session && go.state == GoalState::Acting) {
@@ -280,6 +398,7 @@ async fn advance(goals: &Goals, bus: &BusHandle, session: u64) {
             }
         }
     };
+    let changed = outcome.is_some();
     match outcome {
         Some(Outcome::Finished { gid, objective, state, step, max_steps, detail }) => {
             emit_state(bus, gid, &objective, state, step, max_steps, &detail).await;
@@ -291,10 +410,11 @@ async fn advance(goals: &Goals, bus: &BusHandle, session: u64) {
         }
         None => {}
     }
+    changed
 }
 
 /// Fail any Acting goal whose current step has stalled past STEP_TIMEOUT.
-async fn fail_stalled(goals: &Goals, bus: &BusHandle) {
+async fn fail_stalled(goals: &Goals, bus: &BusHandle) -> bool {
     let failed: Vec<(u64, String, u32, u32)> = {
         let mut g = goals.lock().await;
         g.iter_mut()
@@ -302,10 +422,12 @@ async fn fail_stalled(goals: &Goals, bus: &BusHandle) {
             .map(|(gid, go)| { go.state = GoalState::Failed; (*gid, go.objective.clone(), go.step, go.max_steps) })
             .collect()
     };
+    let changed = !failed.is_empty();
     for (gid, objective, step, max_steps) in failed {
         emit_state(bus, gid, &objective, GoalState::Failed, step, max_steps, "step stalled — no completion").await;
         eprintln!("[goal] {gid} failed (step {step} stalled > {}s)", STEP_TIMEOUT.as_secs());
     }
+    changed
 }
 
 #[cfg(test)]
@@ -325,6 +447,25 @@ mod tests {
         let d = directive_continue("x", 3, 5, Some("write the tests"));
         assert!(d.contains("step 3/5"), "got: {d}");
         assert!(d.contains("write the tests"));
+    }
+
+    #[test]
+    fn persisted_goal_round_trips_json() {
+        let pg = PersistedGoal {
+            id: 3, objective: "ship it".into(), session: 44,
+            state: GoalState::Acting, step: 2, max_steps: 5,
+        };
+        let back: PersistedGoal = serde_json::from_str(&serde_json::to_string(&pg).unwrap()).unwrap();
+        assert_eq!(back.id, 3);
+        assert_eq!(back.session, 44);
+        assert_eq!(back.step, 2);
+        assert_eq!(back.state, GoalState::Acting);
+        assert_eq!(back.objective, "ship it");
+    }
+
+    #[test]
+    fn load_goals_missing_file_is_empty() {
+        assert!(load_goals(&std::path::PathBuf::from("/nonexistent/apexos-goals-xyz.json")).is_empty());
     }
 
     #[test]

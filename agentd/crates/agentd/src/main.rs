@@ -207,6 +207,7 @@ async fn main() -> anyhow::Result<()> {
     // forwards here; the driver owns its goal map and drives each via the bus.
     let next_goal_id = Arc::new(AtomicU64::new(1));
     let (goal_tx, goal_rx) = mpsc::channel::<(SessionId, ActionId, String, serde_json::Value)>(8);
+    let goals_path = log_dir.join("goals.json"); // P2d: goals survive a daemon restart
 
     // Peer registry — /etc/agentd/peers.toml (created empty if missing)
     let peers_path = PathBuf::from(
@@ -483,7 +484,7 @@ async fn main() -> anyhow::Result<()> {
     // Autonomous goal driver — subscribes to the bus for goal sessions' TurnComplete.
     goal::spawn_goal_driver(
         handle.clone(), bcast.subscribe(), goal_rx,
-        Arc::clone(&next_session_id), Arc::clone(&next_goal_id),
+        Arc::clone(&next_session_id), Arc::clone(&next_goal_id), goals_path,
     );
 
     // Council handler — wire supervisor channel and spawn handler.
@@ -1736,6 +1737,7 @@ async fn gather_tools(
     tools.push(goal::goal_create_spec());
     tools.push(goal::goal_step_spec());
     tools.push(goal::list_goals_spec());
+    tools.push(goal::goal_resume_spec());
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());
     tools.push(mesh_capabilities_spec());
