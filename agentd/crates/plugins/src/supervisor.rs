@@ -129,6 +129,7 @@ pub struct Supervisor {
     schedule_tx:       Option<mpsc::Sender<(SessionId, ActionId, String, serde_json::Value)>>,
     /// Set by main.rs so convene_council routes to the council handler.
     council_tx:        Option<mpsc::Sender<(SessionId, ActionId, serde_json::Value)>>,
+    goal_tx:           Option<mpsc::Sender<(SessionId, ActionId, serde_json::Value)>>,
     /// Shared with engine so read_soul_md returns the live system prompt.
     soul_arc:          Option<Arc<RwLock<String>>>,
     /// Path to the events log directory so query_event_log can read JSONL files.
@@ -176,6 +177,7 @@ impl Supervisor {
             soul_arc:          None,
             schedule_tx:       None,
             council_tx:        None,
+            goal_tx:           None,
             events_dir:        None,
             vast_state:        None,
             session_bindings,
@@ -214,6 +216,10 @@ impl Supervisor {
     /// Wires the council channel so convene_council routes to the council handler.
     pub fn set_council_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, serde_json::Value)>) {
         self.council_tx = Some(tx);
+    }
+
+    pub fn set_goal_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, serde_json::Value)>) {
+        self.goal_tx = Some(tx);
     }
 
     /// Shares the live soul.md Arc so `read_soul_md` returns current content.
@@ -598,6 +604,35 @@ impl Supervisor {
                             session,
                             call: call_id,
                             output: ToolOutput { ok: false, content: serde_json::json!("scheduler not initialized") },
+                        }).await;
+                    });
+                }
+            }
+            return;
+        }
+
+        // Virtual tool: goal_create — routes to the autonomous goal driver (deferred ack).
+        if call.tool == "goal_create" {
+            let call_id = call.id;
+            let args    = call.args.clone();
+            let bus     = self.bus.clone();
+            match &self.goal_tx {
+                Some(tx) => {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        if tx.send((session, call_id, args)).await.is_err() {
+                            bus.emit(Event::ToolResult {
+                                session, call: call_id,
+                                output: ToolOutput { ok: false, content: serde_json::json!("goal driver not available") },
+                            }).await;
+                        }
+                    });
+                }
+                None => {
+                    tokio::spawn(async move {
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!("goal driver not initialized") },
                         }).await;
                     });
                 }

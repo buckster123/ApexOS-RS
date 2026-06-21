@@ -196,9 +196,11 @@ core.
 
 ## Build slices
 
-- **P2a — driver skeleton.** `Goal` + `GoalState`, the driver task, one goal end-to-end: `goal_create`
-  → steps via the gate → `max_steps`/failure-breaker guards → `Done`/`Failed`. `GoalStateChanged` →
-  a goal lane on the board. No `goal_step` yet (each step just re-prompts "continue the goal").
+- **P2a — driver skeleton.** ✅ **SHIPPED** — `agentd/src/goal.rs` (the driver) + `goal_create` virtual
+  tool + `Event::GoalStateChanged` (protocol) + a **GOALS lane** on the board. A goal runs in its own
+  session, driven step-by-step through the existing `TurnGate`; bounded by `max_steps` (Done) and a
+  per-step stall timeout (Failed). No `goal_step` yet — each step re-prompts "continue"; early
+  done/blocked is P2b.
 - **P2b — the `goal_step` hook.** The virtual tool + mpsc to the driver; LLM-driven `continue/done/
   blocked`; the advisory-done model.
 - **P2c — posture + failure-visibility.** `GoalPosture` (revive `inherit_mode`), `AskBlocks` →

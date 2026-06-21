@@ -136,6 +136,7 @@ export component WorkBoard {
     preferred-height: 0px;
     min-height: 0px;
 
+    in property <[BoardCard]> goals;
     in property <[BoardCard]> active;
     in property <[BoardCard]> blocked;
     in property <[BoardCard]> subagents;
@@ -168,6 +169,14 @@ export component WorkBoard {
 
         HorizontalLayout {
             vertical-stretch: 1;
+            BoardColumn {
+                label: "GOALS";
+                accent: #34d399;
+                cards: root.goals;
+                empty-hint: "no goals running";
+                horizontal-stretch: 1;
+            }
+            Rectangle { width: 1px; background: Palette.border; }
             BoardColumn {
                 label: "ACTIVE";
                 accent: #60a5fa;

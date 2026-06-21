@@ -63,7 +63,8 @@ export component AppWindow inherits Window {
     // Sub-agents currently running (SubAgentStarted − child turn_complete) → taskbar badge.
     in-out property <int>            subagent-count: 0;
 
-    // ── Work Board (🗂) — four live columns from the WS event stream ──────
+    // ── Work Board (🗂) — live columns from the WS event stream ──────────
+    in-out property <[BoardCard]> board-goals;
     in-out property <[BoardCard]> board-active;
     in-out property <[BoardCard]> board-blocked;
     in-out property <[BoardCard]> board-subagents;
@@ -703,6 +704,7 @@ export component AppWindow inherits Window {
                         council-status: root.council-status;
                         council-synthesis: root.council-synthesis;
                         council-scroll-tick: root.council-scroll-tick;
+                        board-goals: root.board-goals;
                         board-active: root.board-active;
                         board-blocked: root.board-blocked;
                         board-subagents: root.board-subagents;

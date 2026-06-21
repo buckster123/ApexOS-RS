@@ -110,6 +110,9 @@ impl SystemState {
             Event::EvolutionApplied  { .. }    => {}
             Event::EvolutionRolledBack { .. }  => {}
 
+            // Goal driver: state lives in the driver task; the event log is the audit.
+            Event::GoalStateChanged { .. } => {}
+
             // A2A: routing handled by the agent router; state is a no-op.
             Event::AgentMessage    { .. } => {}
             Event::AgentMessageAck { .. } => {}
