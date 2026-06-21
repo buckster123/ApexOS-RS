@@ -1,0 +1,204 @@
+import { ScrollView } from "std-widgets.slint";
+import { Palette } from "../palette.slint";
+import { BoardCard } from "../types.slint";
+
+// ── WorkBoard (🗂) ────────────────────────────────────────────────────────────
+//
+// A read-only kanban of live work, driven entirely off the WS event stream this
+// client already receives — its session's turn lifecycle (Active / Needs-approval)
+// plus the global sub-agent / mesh / evolution events. Four columns. Phase 1 of
+// docs/ideas/state-machine-eval.md: view only; the Goal/Run driver and the
+// god's-eye multi-session board come later.
+//
+// ScrollView per column (linuxkms has no scroll-wheel on the kiosk — drag the bar).
+
+component BoardColumn {
+    in property <string> label;
+    in property <color> accent;
+    in property <[BoardCard]> cards;
+    in property <string> empty-hint;
+
+    VerticalLayout {
+        Rectangle {
+            height: 34px;
+            background: Palette.surface;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 8px;
+                Text {
+                    text: root.label;
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 1.5px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Rectangle {
+                    width: count.preferred-width + 14px;
+                    height: 18px;
+                    border-radius: 9px;
+                    background: root.accent.with-alpha(0.18);
+                    y: (parent.height - self.height) / 2;
+                    count := Text {
+                        text: "\{root.cards.length}";
+                        color: root.accent;
+                        font-size: 10px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Palette.border; }
+
+        ScrollView {
+            vertical-stretch: 1;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            viewport-width: self.visible-width;
+            viewport-height: col.preferred-height;
+
+            col := VerticalLayout {
+                padding: 8px;
+                spacing: 6px;
+                alignment: start;
+
+                if root.cards.length == 0: Text {
+                    text: root.empty-hint;
+                    color: Palette.text-dim;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+
+                for card in root.cards: Rectangle {
+                    height: crow.preferred-height;
+                    border-radius: Palette.radius;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.border;
+
+                    Rectangle {
+                        x: 0;
+                        width: 3px;
+                        height: parent.height;
+                        background: card.accent;
+                    }
+
+                    crow := VerticalLayout {
+                        padding: 9px;
+                        padding-left: 12px;
+                        spacing: 3px;
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: card.title;
+                                color: Palette.text;
+                                font-size: 12px;
+                                font-weight: 600;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                width: bdg.preferred-width + 12px;
+                                height: 16px;
+                                border-radius: Palette.radius-sm;
+                                background: card.accent.with-alpha(0.18);
+                                y: 1px;
+                                bdg := Text {
+                                    text: card.badge;
+                                    color: card.accent;
+                                    font-size: 8px;
+                                    font-weight: 700;
+                                    letter-spacing: 0.5px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        if card.subtitle != "": Text {
+                            text: card.subtitle;
+                            color: Palette.text-dim;
+                            font-size: 10px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component WorkBoard {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    in property <[BoardCard]> active;
+    in property <[BoardCard]> blocked;
+    in property <[BoardCard]> subagents;
+    in property <[BoardCard]> recent;
+
+    VerticalLayout {
+        Rectangle {
+            height: 40px;
+            background: Palette.surface;
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 14px;
+                Text {
+                    text: "WORK BOARD";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 2px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: "live · read-only";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Palette.border; }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+            BoardColumn {
+                label: "ACTIVE";
+                accent: #60a5fa;
+                cards: root.active;
+                empty-hint: "idle";
+                horizontal-stretch: 1;
+            }
+            Rectangle { width: 1px; background: Palette.border; }
+            BoardColumn {
+                label: "NEEDS APPROVAL";
+                accent: #fbbf24;
+                cards: root.blocked;
+                empty-hint: "nothing waiting";
+                horizontal-stretch: 1;
+            }
+            Rectangle { width: 1px; background: Palette.border; }
+            BoardColumn {
+                label: "SUB-AGENTS";
+                accent: #a78bfa;
+                cards: root.subagents;
+                empty-hint: "none running";
+                horizontal-stretch: 1;
+            }
+            Rectangle { width: 1px; background: Palette.border; }
+            BoardColumn {
+                label: "RECENT";
+                accent: #94a3b8;
+                cards: root.recent;
+                empty-hint: "—";
+                horizontal-stretch: 1;
+            }
+        }
+    }
+}

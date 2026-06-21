@@ -10,7 +10,7 @@ export enum ShellMode { desktop, focus }
 // Every app is a window. Rust owns the set (which windows exist, z-order =
 // model order with the last element on top); Slint owns live-drag geometry
 // for smoothness and commits back to Rust on release.
-export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer, occipital }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer, occipital, board }
 
 // ── Persona system (glowup G4) ───────────────────────────────────────────
 // A persona is a named bundle: theme + chrome + wallpaper + default shell mode
@@ -195,6 +195,18 @@ export struct SessionItem {
 }
 
 // ── App-parity Tier A: read/light-action viewers over existing agentd routes ──
+
+// One card on the Work Board (🗂) — a live unit of work, sorted by Rust into a
+// column (Active / Needs-approval / Sub-agents / Recent) from the WS event
+// stream. `id` keys in-place update + removal; `accent` tints the left rail +
+// badge. Phase 1 (docs/ideas/state-machine-eval.md): read-only, view-driven.
+export struct BoardCard {
+    id:       string,   // stable key for upsert/remove ("turn", call-id, "sub<N>", "")
+    title:    string,
+    subtitle: string,
+    badge:    string,   // short kind tag: RUN / ASK / SUB / EVO / MESH / DONE
+    accent:   color,
+}
 
 // One row in the Event Log app (📜) — a filtered entry from /api/events/recent.
 export struct EventLogItem {

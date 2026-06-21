@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, BoardCard } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { IdentityWizard } from "components/identity_wizard.slint";
 import { ImagePicker } from "components/image_picker.slint";
@@ -17,7 +17,7 @@ import { StartMenu, Win98StartMenu } from "components/start_menu.slint";
 import { NotifCenter } from "components/notif_center.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
-export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, FaceGl, ReaderBlock, ReaderLink }
+export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, FaceGl, ReaderBlock, ReaderLink, BoardCard }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -62,6 +62,12 @@ export component AppWindow inherits Window {
     in-out property <int>            council-scroll-tick: 0;
     // Sub-agents currently running (SubAgentStarted − child turn_complete) → taskbar badge.
     in-out property <int>            subagent-count: 0;
+
+    // ── Work Board (🗂) — four live columns from the WS event stream ──────
+    in-out property <[BoardCard]> board-active;
+    in-out property <[BoardCard]> board-blocked;
+    in-out property <[BoardCard]> board-subagents;
+    in-out property <[BoardCard]> board-recent;
 
     // ── Tier-A parity apps (Event Log / Mesh / Inference) ───────────────
     in-out property <[EventLogItem]> event-log;
@@ -697,6 +703,10 @@ export component AppWindow inherits Window {
                         council-status: root.council-status;
                         council-synthesis: root.council-synthesis;
                         council-scroll-tick: root.council-scroll-tick;
+                        board-active: root.board-active;
+                        board-blocked: root.board-blocked;
+                        board-subagents: root.board-subagents;
+                        board-recent: root.board-recent;
                         event-log: root.event-log;
                         mesh-nodes: root.mesh-nodes;
                         mesh-pair-code <=> root.mesh-pair-code;

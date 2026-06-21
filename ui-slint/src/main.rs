@@ -56,6 +56,8 @@ thread_local! {
     // Council app (G3d): the deliberating-agent model, driven by Council* events.
     static COUNCIL: RefCell<Option<Rc<slint::VecModel<CouncilAgent>>>> =
         const { RefCell::new(None) };
+    // Work Board (🗂): four live column models, mutated in place from WS events.
+    static BOARD: RefCell<Option<BoardModels>> = const { RefCell::new(None) };
     // Tier-A parity apps: each replaced wholesale on REFRESH.
     static EVENTS: RefCell<Option<Rc<slint::VecModel<EventLogItem>>>> =
         const { RefCell::new(None) };
@@ -299,6 +301,85 @@ fn notify_action(kind: ToastKind, text: impl Into<String>, action_session: i32) 
 // All helpers run on the Slint thread (called from UI callbacks). The WINDOWS
 // VecModel's order IS the z-order: the last row paints on top.
 
+// ── Work Board (🗂) ───────────────────────────────────────────────────────────
+// Four live column models, mutated in place from the WS event stream (Phase 1 of
+// docs/ideas/state-machine-eval.md — read-only, view-driven). All board_* helpers
+// run on the Slint thread (called from inside invoke_from_event_loop), so the
+// thread-local BOARD is race-free, like MESSAGES / EVENTS.
+struct BoardModels {
+    active:    Rc<slint::VecModel<BoardCard>>,   // the current turn (one card)
+    blocked:   Rc<slint::VecModel<BoardCard>>,   // pending approvals, keyed by call id
+    subagents: Rc<slint::VecModel<BoardCard>>,   // live sub-agents, keyed by "sub<session>"
+    recent:    Rc<slint::VecModel<BoardCard>>,   // finished turns / evolutions / mesh (capped)
+}
+
+const BOARD_RECENT_CAP: usize = 16;
+
+fn board_color(r: u8, g: u8, b: u8) -> slint::Color { slint::Color::from_rgb_u8(r, g, b) }
+
+fn board_with(f: impl FnOnce(&BoardModels)) {
+    BOARD.with(|b| { if let Some(bm) = b.borrow().as_ref() { f(bm); } });
+}
+
+fn board_find(m: &slint::VecModel<BoardCard>, id: &str) -> Option<usize> {
+    (0..m.row_count()).find(|&i| m.row_data(i).map(|c| c.id == id).unwrap_or(false))
+}
+
+fn board_remove(m: &slint::VecModel<BoardCard>, id: &str) {
+    if let Some(i) = board_find(m, id) { m.remove(i); }
+}
+
+fn board_upsert(m: &slint::VecModel<BoardCard>, card: BoardCard) {
+    match board_find(m, &card.id) {
+        Some(i) => m.set_row_data(i, card),
+        None    => m.push(card),
+    }
+}
+
+fn board_card(id: &str, title: String, subtitle: String, badge: &str, c: slint::Color) -> BoardCard {
+    BoardCard { id: id.into(), title: title.into(), subtitle: subtitle.into(), badge: badge.into(), accent: c }
+}
+
+/// Upsert the single "Active" card (the current turn) with a fresh subtitle.
+fn board_active(subtitle: &str) {
+    board_with(|bm| board_upsert(&bm.active,
+        board_card("turn", "Agent turn".into(), subtitle.into(), "RUN", board_color(96, 165, 250))));
+}
+
+fn board_add_blocked(call_id: &str, tool: &str, preview: &str) {
+    board_with(|bm| board_upsert(&bm.blocked,
+        board_card(call_id, format!("approve: {tool}"), preview.into(), "ASK", board_color(251, 191, 36))));
+}
+
+fn board_clear_blocked(call_id: &str) { board_with(|bm| board_remove(&bm.blocked, call_id)); }
+
+fn board_add_subagent(session: u64, prompt: &str) {
+    let sub: String = prompt.chars().take(80).collect();
+    board_with(|bm| board_upsert(&bm.subagents,
+        board_card(&format!("sub{session}"), format!("Sub-agent {session}"), sub, "SUB", board_color(167, 139, 250))));
+}
+
+fn board_remove_subagent(session: u64) {
+    board_with(|bm| board_remove(&bm.subagents, &format!("sub{session}")));
+}
+
+fn board_push_recent(title: String, subtitle: String, badge: &str, c: slint::Color) {
+    board_with(|bm| {
+        bm.recent.insert(0, board_card("", title, subtitle, badge, c));
+        while bm.recent.row_count() > BOARD_RECENT_CAP { bm.recent.remove(bm.recent.row_count() - 1); }
+    });
+}
+
+/// The (main-session) turn finished: drop the Active card + any stale approvals,
+/// and drop a "done" card into Recent.
+fn board_turn_done() {
+    board_with(|bm| {
+        board_remove(&bm.active, "turn");
+        while bm.blocked.row_count() > 0 { bm.blocked.remove(bm.blocked.row_count() - 1); }
+    });
+    board_push_recent("Turn complete".into(), String::new(), "DONE", board_color(148, 163, 184));
+}
+
 fn kind_ordinal(k: AppKind) -> i32 {
     match k {
         AppKind::Chat => 0,
@@ -320,6 +401,7 @@ fn kind_ordinal(k: AppKind) -> i32 {
         AppKind::Calculator => 16,
         AppKind::Explorer => 17,
         AppKind::Occipital => 18,
+        AppKind::Board => 19,
     }
 }
 
@@ -343,6 +425,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         16 => AppKind::Calculator,
         17 => AppKind::Explorer,
         18 => AppKind::Occipital,
+        19 => AppKind::Board,
         _ => AppKind::Chat,
     }
 }
@@ -501,6 +584,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Calculator => "Calculator",
         AppKind::Explorer => "Files",
         AppKind::Occipital => "Occipital",
+        AppKind::Board => "Work Board",
     }
 }
 
@@ -527,6 +611,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Calculator => (300.0, 440.0),
         AppKind::Explorer => (680.0, 520.0),
         AppKind::Occipital => (720.0, 620.0),
+        AppKind::Board => (880.0, 600.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -2764,6 +2849,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_available_models(slint::ModelRc::from(models_vec.clone()));
     MODELS.with(|m| *m.borrow_mut() = Some(models_vec.clone()));
 
+    // Work Board (🗂) — four live column models driven off the WS event stream.
+    let board = BoardModels {
+        active:    Rc::new(slint::VecModel::default()),
+        blocked:   Rc::new(slint::VecModel::default()),
+        subagents: Rc::new(slint::VecModel::default()),
+        recent:    Rc::new(slint::VecModel::default()),
+    };
+    ui.set_board_active(slint::ModelRc::from(board.active.clone()));
+    ui.set_board_blocked(slint::ModelRc::from(board.blocked.clone()));
+    ui.set_board_subagents(slint::ModelRc::from(board.subagents.clone()));
+    ui.set_board_recent(slint::ModelRc::from(board.recent.clone()));
+    BOARD.with(|b| *b.borrow_mut() = Some(board));
+
     // Tier-A parity app models — each replaced wholesale on the app's REFRESH.
     let events_vec: Rc<slint::VecModel<EventLogItem>> = Rc::new(slint::VecModel::default());
     ui.set_event_log(slint::ModelRc::from(events_vec.clone()));
@@ -4844,6 +4942,7 @@ fn dispatch_event(
                             awaiting_approval: false,
                         });
                         ui.set_agent_busy(true);
+                        board_active("responding…");
                     }
                     // Streaming text → APEX is speaking.
                     ui.set_face_state("speaking".into());
@@ -4871,6 +4970,12 @@ fn dispatch_event(
                             if g.subagents.remove(&s) { Some(g.subagents.len() as i32) } else { None }
                         };
                         if let Some(n) = remaining { ui.set_subagent_count(n); }
+                        // Work Board: a sub-agent finishing clears its card; a main-session
+                        // turn finishing closes the Active card into RECENT.
+                        match remaining {
+                            Some(_) => board_remove_subagent(s),
+                            None    => board_turn_done(),
+                        }
                     }
                     finish_last_agent_message();
                     ui.set_agent_busy(false);
@@ -4937,6 +5042,13 @@ fn dispatch_event(
             // ToolCall.id is ActionId(u64) → a bare number; stringify for the row key.
             let tool_name = call.tool.clone();
 
+            // Work Board: reflect the running tool on the Active card (display_face
+            // is APEX emoting, not a work step — skip it).
+            if tool_name != "display_face" {
+                let t = tool_name.clone();
+                slint::invoke_from_event_loop(move || board_active(&format!("running {t}"))).ok();
+            }
+
             // `display_face` is APEX emoting, not a "tool action" — drive the face
             // directly from the call args and show NO tool card (it'd be noise).
             if tool_name == "display_face" {
@@ -4987,6 +5099,11 @@ fn dispatch_event(
         }
 
         Event::ToolResult { call, output: out, .. } => {
+            // Work Board: a tool finished — clear its approval card (if any), keep Active alive.
+            {
+                let cid = call.0.to_string();
+                slint::invoke_from_event_loop(move || { board_clear_blocked(&cid); board_active("working…"); }).ok();
+            }
             // `call` is the bare action-id (ActionId.0); output nests { ok, content }.
             let call_id = call.0.to_string();
             let ok      = out.ok;
@@ -5024,6 +5141,16 @@ fn dispatch_event(
         }
 
         Event::ApprovalPending { call, .. } => {
+            // Work Board: the turn is blocked awaiting approval → a card in NEEDS APPROVAL.
+            {
+                let cid = call.id.0.to_string();
+                let tool = call.tool.clone();
+                let preview: String = call.args.to_string().chars().take(60).collect();
+                slint::invoke_from_event_loop(move || {
+                    board_add_blocked(&cid, &tool, &preview);
+                    board_active("waiting for approval");
+                }).ok();
+            }
             // Same nesting as tool_requested. Normally a tool_requested arrives
             // first (card exists); the else-branch is a fallback.
             let call_id   = call.id.0.to_string();
@@ -5213,23 +5340,38 @@ fn dispatch_event(
             if !msg.is_empty() { notify(ToastKind::Info, format!("Council: {msg}")); }
         }
 
-        Event::SubAgentStarted { child, .. } => {
-            let child = Some(child.0);
+        Event::SubAgentStarted { child, prompt, .. } => {
+            let cid = child.0;
             let st = state.clone();
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
-                    if let Some(c) = child {
-                        let n = {
-                            let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
-                            g.subagents.insert(c);
-                            g.subagents.len() as i32
-                        };
-                        ui.set_subagent_count(n);
-                    }
+                    let n = {
+                        let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
+                        g.subagents.insert(cid);
+                        g.subagents.len() as i32
+                    };
+                    ui.set_subagent_count(n);
+                    board_add_subagent(cid, &prompt);
                 }
             }).ok();
             notify(ToastKind::Info, "Sub-agent started");
+        }
+
+        // Work Board: global colony activity → RECENT cards (these events are
+        // session-less, so every client sees them).
+        Event::EvolutionApplied { patch_summary, .. } => {
+            let s = patch_summary.clone();
+            slint::invoke_from_event_loop(move || {
+                board_push_recent("Evolved".into(), s, "EVO", board_color(52, 211, 153));
+            }).ok();
+        }
+
+        Event::MeshMessage { from_node, preview, .. } => {
+            let (from, prev) = (from_node.clone(), preview.clone());
+            slint::invoke_from_event_loop(move || {
+                board_push_recent(format!("Mesh ← {from}"), prev, "MESH", board_color(45, 212, 191));
+            }).ok();
         }
 
         _ => {}

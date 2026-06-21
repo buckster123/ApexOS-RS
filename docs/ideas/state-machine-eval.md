@@ -164,10 +164,13 @@ existing stream, before any Goal-driver exists.
 
 ## 7. Phasing (value early, risk low)
 
-1. **Phase 1 — read-only work-board.** A new ui-slint view over the *existing* event stream
-   (`SubAgentStarted`, `ApprovalPending`, `TurnComplete`, `EvolutionApplied`, `MeshMessage`) + the
-   session tree. No agentd change, no architecture change, immediate audience value. Ships the
-   differentiator first; teaches us what the board *wants* before we build the driver.
+1. **Phase 1 — read-only work-board.** ✅ **SHIPPED** — `ui-slint/src/ui/components/work_board.slint`
+   (🗂 Work Board, `AppKind::Board`): four live columns (Active · Needs-approval · Sub-agents ·
+   Recent) driven entirely off the *existing* WS event stream (`AgentText`/`ToolRequested`/
+   `ToolResult`/`ApprovalPending`/`TurnComplete`/`SubAgentStarted` + the global `EvolutionApplied`/
+   `MeshMessage`). Zero agentd change. Single-client scope (its session + globals) is honest for
+   watching one autonomous/yolo run fan out into sub-agents; god's-eye multi-session needs the
+   Phase-2 board-state endpoint.
 2. **Phase 2 — the Goal/Run driver.** The orchestration object + driver task (scheduler-sibling) with
    step budget + termination guard + `GoalStateChanged` event + `goals.json` persistence. The real
    autonomy upgrade. A handful of new files, zero rewrites.

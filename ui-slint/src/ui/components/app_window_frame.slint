@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, ReaderBlock, ReaderLink } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, ReaderBlock, ReaderLink, BoardCard } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -22,6 +22,7 @@ import { SettingsView } from "settings_view.slint";
 import { TerminalView } from "terminal_view.slint";
 import { CouncilView } from "council_view.slint";
 import { EventLogView } from "event_log_view.slint";
+import { WorkBoard } from "work_board.slint";
 import { MeshView } from "mesh_view.slint";
 import { InferenceView } from "inference_view.slint";
 import { AudioEditorView } from "audio_editor_view.slint";
@@ -116,6 +117,11 @@ export component AppWindowFrame inherits Rectangle {
     in property <string>         council-status;
     in property <string>         council-synthesis;
     in property <int>            council-scroll-tick;
+    // Work Board (🗂) — four live columns from the WS event stream.
+    in property <[BoardCard]> board-active;
+    in property <[BoardCard]> board-blocked;
+    in property <[BoardCard]> board-subagents;
+    in property <[BoardCard]> board-recent;
     // Tier-A parity apps (Event Log / Mesh / Inference).
     in property <[EventLogItem]> event-log;
     in property <[MeshNode]>     mesh-nodes;
@@ -524,6 +530,14 @@ export component AppWindowFrame inherits Rectangle {
             vertical-stretch: 1;
             events: root.event-log;
             refresh => { root.refresh-events(); }
+        }
+
+        if root.kind == AppKind.board: WorkBoard {
+            vertical-stretch: 1;
+            active: root.board-active;
+            blocked: root.board-blocked;
+            subagents: root.board-subagents;
+            recent: root.board-recent;
         }
 
         if root.kind == AppKind.mesh: MeshView {
