@@ -107,3 +107,16 @@ mode = "suggest"
 # update before the swap); autonomous in yolo. The build/test/health/rollback
 # gates are identical either way — autonomy only changes the human pre-approval.
 "apply_daemon_update" = "ask"
+
+# Sub-agent spawning (agent_spawn / SpawnAgent → child_turn). These are the
+# *defaults* — stated explicitly so a fresh install never falls back to the
+# derived all-zeros (max_depth = 0 rejects EVERY local spawn). Tunables:
+#   max_depth      — how deep sub-agents may nest (root=0; a depth-N agent can't
+#                    spawn once N >= max_depth). 4 = generous; raise for deep
+#                    decomposition, lower to bound runaway recursion.
+#   max_concurrent — ceiling on simultaneous sub-agent turns.
+#   inherit_mode   — children inherit the parent's policy mode.
+[subagents]
+max_depth      = 4
+max_concurrent = 16
+inherit_mode   = true
