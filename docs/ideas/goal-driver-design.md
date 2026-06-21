@@ -251,6 +251,17 @@ Each slice is its own PR. P2a is the keystone; the rest layer on without rewrite
     isn't left pinned; `goal_resume` re-runs the step cleanly (and, with #1, won't re-hit the
     inspection tool). The existing 900s stall timeout is now tunable via **`GOAL_STEP_TIMEOUT_SECS`**
     (≥30s floor) — handy to lower for live testing.
-  - *Still deferred:* **#3 goal-scoped Yolo** (per-goal auto-approve even when global yolo is off) —
-    the genuinely-needs-approval case. Its hard half is still per-session policy threading into the
-    supervisor; tracked as its own slice.
+  - **#3 goal-scoped Yolo** ✅ **SHIPPED** (validated live by APEX, 2026-06-21 — test C showed the
+    block→resume→block loop from the inside: *"Ship it."*). `goal_create{yolo:true}` lets a goal
+    auto-approve its **OWN** `ask`-gated tools (run_command, git_push, …) so it runs unattended even
+    when global approval is on — the genuinely-needs-approval case. Implementation = the
+    `SessionBindings`-mirror pattern: a shared `apexos_core::GoalYoloSessions` (`Arc<Mutex<HashSet<u64>>>`)
+    that the goal driver **arms** on create (and reload/resume for a resumable goal) and **disarms** on a
+    terminal outcome (Done/Failed/Cancelled); the supervisor's approval gate (`supervisor.rs`) checks it
+    in the `Decision::Ask` arm and **dispatches instead of parking** when the session is armed — scoped
+    *strictly* to that goal's session, never root or another (fails closed on a poisoned lock). The flag
+    persists in `goals.json` (`#[serde(default)]` → legacy goals reload gated) and rides the
+    `GoalStateChanged{yolo}` event so the board shows a **⚡ AUTO** chip. `goal_cancel` is the kill
+    switch; no new policy rule needed (`goal_create` is already `allow`). **The goal arc is now
+    complete:** bounded · observable · LLM-steered · reason-bearing · restart-surviving ·
+    cognitively-remembered · approval-safe · *and* autonomous for the hard cases.

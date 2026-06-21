@@ -5384,7 +5384,7 @@ fn dispatch_event(
         }
 
         // Work Board: an autonomous goal advanced → upsert its card in the GOALS lane.
-        Event::GoalStateChanged { goal, objective, state, step, max_steps, detail } => {
+        Event::GoalStateChanged { goal, objective, state, step, max_steps, detail, yolo } => {
             let (badge, c) = match state {
                 GoalState::Acting    => ("RUN",   board_color(96, 165, 250)),
                 GoalState::Done      => ("DONE",  board_color(52, 211, 153)),
@@ -5395,11 +5395,14 @@ fn dispatch_event(
             };
             let gid = goal.0;
             let title: String = objective.chars().take(60).collect();
-            let subtitle = if detail.is_empty() {
+            let base = if detail.is_empty() {
                 format!("step {step}/{max_steps}")
             } else {
                 format!("step {step}/{max_steps} · {detail}")
             };
+            // Goal-scoped yolo: mark the card AUTO (text + ⚡ — the glyph renders mono on
+            // the kiosk, so the word carries it if the emoji tofus). (#3)
+            let subtitle = if yolo { format!("⚡ AUTO · {base}") } else { base };
             slint::invoke_from_event_loop(move || board_goal(gid, title, subtitle, badge, c)).ok();
         }
 

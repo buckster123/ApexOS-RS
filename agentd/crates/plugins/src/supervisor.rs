@@ -130,6 +130,11 @@ pub struct Supervisor {
     /// Set by main.rs so convene_council routes to the council handler.
     council_tx:        Option<mpsc::Sender<(SessionId, ActionId, serde_json::Value)>>,
     goal_tx:           Option<mpsc::Sender<(SessionId, ActionId, String, serde_json::Value)>>,
+    /// Sessions of goals running with goal-scoped yolo (`goal_create{yolo:true}`).
+    /// Shared with the goal driver, which arms/disarms a session. The approval gate
+    /// auto-approves an `ask` tool whose session is in this set — scoped strictly to
+    /// that goal, never root. `None` until wired. (goal-driver-design.md #3)
+    goal_yolo:         Option<apexos_core::GoalYoloSessions>,
     /// Shared with engine so read_soul_md returns the live system prompt.
     soul_arc:          Option<Arc<RwLock<String>>>,
     /// Path to the events log directory so query_event_log can read JSONL files.
@@ -178,6 +183,7 @@ impl Supervisor {
             schedule_tx:       None,
             council_tx:        None,
             goal_tx:           None,
+            goal_yolo:         None,
             events_dir:        None,
             vast_state:        None,
             session_bindings,
@@ -220,6 +226,12 @@ impl Supervisor {
 
     pub fn set_goal_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, String, serde_json::Value)>) {
         self.goal_tx = Some(tx);
+    }
+
+    /// Shares the goal-scoped-yolo session set so the approval gate can auto-approve
+    /// a trusted goal's own `ask` tools (the goal driver arms/disarms each session).
+    pub fn set_goal_yolo_sessions(&mut self, set: apexos_core::GoalYoloSessions) {
+        self.goal_yolo = Some(set);
     }
 
     /// Shares the live soul.md Arc so `read_soul_md` returns current content.
@@ -279,8 +291,20 @@ impl Supervisor {
                                 Decision::Allow
                             }
                         };
+                        // Goal-scoped yolo: a goal launched with yolo:true auto-approves
+                        // its OWN ask tools — dispatch instead of parking, scoped strictly
+                        // to that goal's session (never root/another session). Fails closed
+                        // on a poisoned lock. (goal-driver-design.md #3)
+                        let goal_yolo = decision == Decision::Ask
+                            && self.goal_yolo.as_ref().is_some_and(|set|
+                                apexos_core::goal_session_is_yolo(set, session.0));
                         match decision {
                             Decision::Allow => {
+                                self.dispatch_tool(session, call);
+                            }
+                            Decision::Ask if goal_yolo => {
+                                eprintln!("[policy] goal-yolo auto-approve: '{}' (session {:?})",
+                                    call.tool, session);
                                 self.dispatch_tool(session, call);
                             }
                             Decision::Ask => {

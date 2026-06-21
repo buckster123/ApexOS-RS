@@ -208,6 +208,10 @@ async fn main() -> anyhow::Result<()> {
     let next_goal_id = Arc::new(AtomicU64::new(1));
     let (goal_tx, goal_rx) = mpsc::channel::<(SessionId, ActionId, String, serde_json::Value)>(8);
     let goals_path = log_dir.join("goals.json"); // P2d: goals survive a daemon restart
+    // #3 goal-scoped yolo: sessions of yolo:true goals — shared driver↔supervisor so the
+    // approval gate auto-approves a trusted goal's OWN ask tools (scoped to that session).
+    let goal_yolo: apexos_core::GoalYoloSessions =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
     // Peer registry — /etc/agentd/peers.toml (created empty if missing)
     let peers_path = PathBuf::from(
@@ -363,6 +367,7 @@ async fn main() -> anyhow::Result<()> {
     let (propose_tx, propose_rx) = mpsc::channel::<(SessionId, ActionId, EvolutionId, EvolutionProposal)>(16);
     supervisor.set_propose_tx(propose_tx);
     supervisor.set_goal_tx(goal_tx);
+    supervisor.set_goal_yolo_sessions(goal_yolo.clone());
     supervisor.set_events_dir(log_dir.clone());
     supervisor.set_vast_state(vast_state.clone());
     // Per-agent souls (3b-2): read_soul_md resolves a bound agent's own soul_file.
@@ -485,7 +490,7 @@ async fn main() -> anyhow::Result<()> {
     // Autonomous goal driver — subscribes to the bus for goal sessions' TurnComplete.
     goal::spawn_goal_driver(
         handle.clone(), bcast.subscribe(), goal_rx,
-        Arc::clone(&next_session_id), Arc::clone(&next_goal_id), goals_path, goal_proxy,
+        Arc::clone(&next_session_id), Arc::clone(&next_goal_id), goals_path, goal_proxy, goal_yolo,
     );
 
     // Council handler — wire supervisor channel and spawn handler.
