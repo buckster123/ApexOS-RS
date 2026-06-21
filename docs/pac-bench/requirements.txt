@@ -1,0 +1,14 @@
+# Core: the GPT-family tokenizer used for the headline numbers. Light, offline
+# after first vocab fetch.
+tiktoken>=0.7
+
+# Optional — the exact model APEX runs on. Activated only if ANTHROPIC_API_KEY is
+# set in the environment; run.py skips it otherwise.
+# anthropic>=0.40
+
+# Optional — open-model tokenizers for the model-agnostic cross-check (Qwen,
+# Llama/Mistral families). Lightweight: fetches only tokenizer.json, no weights.
+# Activated only if PAC_HF_MODELS=repo1,repo2 is set, e.g.
+#   PAC_HF_MODELS=Qwen/Qwen2.5-0.5B,mistralai/Mistral-7B-Instruct-v0.3
+# tokenizers>=0.20
+# huggingface_hub>=0.24
