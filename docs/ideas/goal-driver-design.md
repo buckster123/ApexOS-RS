@@ -219,6 +219,15 @@ core.
   mid-flight (Acting) when the daemon stopped re-enters **Blocked: "interrupted by daemon restart"**
   (never silently lost — critically, the nightly self-update binary swap no longer evaporates a
   running goal). A new **`goal_resume{goal_id}`** tool re-activates a Blocked/Failed goal at its last
-  step. **Deferred:** the Cerebro episode wrap (needs a `ToolProxy` in the driver) — small follow-up.
+  step.
+
+- **Loop-closers (shipped after P2d).** ✅ **Cerebro episode wrap** — the driver got a `ToolProxy`;
+  each goal is wrapped in an episode (`episode_start` on create → `episode_end` on Done/Failed with
+  outcome+valence), so a finished run becomes a recallable, `dream_run`-able memory — the goal→cognition
+  loop closed. ✅ **Block-on-approval** (the testable half of `GoalPosture`) — a goal step that hits an
+  `ask`-gated tool emits `ApprovalPending` in its own unwatched session; the driver now parks the goal
+  **Blocked: "awaiting approval — &lt;tool&gt;"** (surfaced on the board, resumable via `goal_resume`)
+  instead of stalling silently. *Still deferred:* the per-goal **Yolo override** (auto-approve inside a
+  goal on a suggest node) — needs per-session policy threading into the supervisor.
 
 Each slice is its own PR. P2a is the keystone; the rest layer on without rewrites.

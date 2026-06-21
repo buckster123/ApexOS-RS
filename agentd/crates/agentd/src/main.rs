@@ -419,6 +419,7 @@ async fn main() -> anyhow::Result<()> {
     let dream_proxy   = tool_proxy.clone();   // nightly autonomous dream_run
     let health_proxy  = tool_proxy.clone();   // boot-health Cerebro reachability probe
     let self_update_proxy = tool_proxy.clone(); // apply_daemon_update: session_save + resume intention
+    let goal_proxy = tool_proxy.clone();        // goal driver: episode_start/end wrapping each goal
 
     // Session-consolidation worker — owns the provider + ToolProxy the gateway
     // can't reach at build time. Drains consolidate_rx: LLM summary + Cerebro
@@ -484,7 +485,7 @@ async fn main() -> anyhow::Result<()> {
     // Autonomous goal driver — subscribes to the bus for goal sessions' TurnComplete.
     goal::spawn_goal_driver(
         handle.clone(), bcast.subscribe(), goal_rx,
-        Arc::clone(&next_session_id), Arc::clone(&next_goal_id), goals_path,
+        Arc::clone(&next_session_id), Arc::clone(&next_goal_id), goals_path, goal_proxy,
     );
 
     // Council handler — wire supervisor channel and spawn handler.
@@ -793,7 +794,7 @@ fn mcp_text(output: &apexos_core::ToolOutput) -> Option<String> {
 
 /// Parse an ID from a Cerebro response. Tries JSON first, then the
 /// human-readable "... (ID: xxxxx)" format that Cerebro 0.5.1 returns.
-fn parse_cerebro_id(output: &apexos_core::ToolOutput, json_key: &str) -> Option<String> {
+pub(crate) fn parse_cerebro_id(output: &apexos_core::ToolOutput, json_key: &str) -> Option<String> {
     let text = mcp_text(output)?;
     if let Some(id) = serde_json::from_str::<serde_json::Value>(&text).ok()
         .and_then(|v| v.get(json_key).and_then(|id| id.as_str()).map(str::to_owned))
