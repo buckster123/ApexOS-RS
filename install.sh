@@ -813,19 +813,56 @@ if $NO_UI; then
   info "Skipping ui-slint (headless/desktop mode)"
 fi
 
-# Low-memory build guard. The ui-slint compile (opt-level=3 + thin-LTO, the single
-# heaviest unit in the workspace) peaks well past available RAM on a small device — on a
-# 4 GB Pi the kernel OOM-killer SIGKILLs rustc (signal 9), so a UI node fails *every*
-# UI-touching update. Cap parallelism and drop LTO so peak rustc memory stays bounded
-# (a marginally larger/slower binary — a fine trade on a spare low-RAM kiosk). High-RAM
-# nodes and headless builds (no ui-slint) keep the fully-optimized build untouched.
+# Temporary build swap — on a low-RAM UI node, guarantee enough headroom that a capped
+# rustc still can't be OOM-killed mid-compile. Created only if existing swap is thin, and
+# torn down after the build (no persistent change). The EXIT trap covers the die/ERR paths.
+BUILD_SWAP=""
+remove_build_swap() {
+  [[ -n "$BUILD_SWAP" ]] || return 0
+  sudo swapoff "$BUILD_SWAP" 2>/dev/null || true
+  sudo rm -f "$BUILD_SWAP" 2>/dev/null || true
+  info "Removed temporary build swap ($BUILD_SWAP)"
+  BUILD_SWAP=""
+}
+trap remove_build_swap EXIT
+ensure_build_swap() {                                   # $1 = desired total swap (KB)
+  local need_kb=$1 have_kb sz_mb
+  have_kb=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  [[ "$have_kb" -ge "$need_kb" ]] && { info "Swap ($((have_kb / 1024)) MB) already sufficient for the build"; return 0; }
+  sz_mb=$(( (need_kb - have_kb) / 1024 + 256 ))
+  BUILD_SWAP="/var/tmp/apexos-build-swap"
+  sudo rm -f "$BUILD_SWAP" 2>/dev/null || true
+  warn "Adding ${sz_mb} MB temporary build swap ($BUILD_SWAP) — removed when the build finishes"
+  if ! sudo fallocate -l "${sz_mb}M" "$BUILD_SWAP" 2>/dev/null; then
+    sudo dd if=/dev/zero of="$BUILD_SWAP" bs=1M count="$sz_mb" status=none 2>/dev/null \
+      || { warn "Could not allocate build swap (low disk?) — continuing without it"; BUILD_SWAP=""; return 0; }
+  fi
+  sudo chmod 600 "$BUILD_SWAP" || true
+  if ! sudo mkswap "$BUILD_SWAP" >/dev/null 2>&1 || ! sudo swapon "$BUILD_SWAP" 2>/dev/null; then
+    warn "Could not enable build swap — continuing without it"
+    sudo rm -f "$BUILD_SWAP" 2>/dev/null || true; BUILD_SWAP=""
+  fi
+}
+
+# Low-memory build guard. The ui-slint compile (the single heaviest unit in the workspace)
+# peaks well past available RAM on a small device — on a 4 GB Pi the kernel OOM-killer
+# SIGKILLs rustc (signal 9), so a UI node fails *every* UI-touching update. We bound peak
+# compiler memory three ways — fewer parallel jobs, opt-level 2 (the big lever: opt-3
+# inlining on the ~5k-line unit is the real hog), LTO off — AND top up swap so the build
+# can only be slowed, never killed. High-RAM and headless (no ui-slint) builds are untouched.
 BUILD_ENV=()
 RAM_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
 if ! $NO_UI && [[ "$RAM_KB" -gt 0 && "$RAM_KB" -lt 6291456 ]]; then   # < 6 GiB
   BUILD_JOBS=2
-  [[ "$RAM_KB" -lt 3145728 ]] && BUILD_JOBS=1                          # < 3 GiB → serialize fully
-  warn "Low-RAM node ($((RAM_KB / 1024)) MB) — building UI with -j$BUILD_JOBS + LTO off so rustc isn't OOM-killed"
-  BUILD_ENV=(CARGO_BUILD_JOBS="$BUILD_JOBS" CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16)
+  [[ "$RAM_KB" -lt 4718592 ]] && BUILD_JOBS=1                          # ≤ 4 GiB → serialize fully
+  warn "Low-RAM node ($((RAM_KB / 1024)) MB) — UI build capped: -j$BUILD_JOBS, opt-level 2, LTO off"
+  BUILD_ENV=(
+    CARGO_BUILD_JOBS="$BUILD_JOBS"
+    CARGO_PROFILE_RELEASE_OPT_LEVEL=2
+    CARGO_PROFILE_RELEASE_LTO=off
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+  )
+  ensure_build_swap 4194304                                            # top up to ~4 GiB total swap
 fi
 
 BUILD_LOG=$(mktemp /tmp/apexos-cargo-build.XXXXXX.log)
@@ -839,13 +876,15 @@ sudo -u "$BUILD_USER" env "${BUILD_ENV[@]}" "$CARGO" build $BUILD_ARGS 2>&1 \
 if grep -q "^error" "$BUILD_LOG"; then
   grep "^error" "$BUILD_LOG" | head -5
   if grep -q "signal: 9" "$BUILD_LOG"; then
-    warn "rustc was OOM-killed (signal 9) — out of RAM during compile. Free memory"
-    warn "(stop other load / agentd), add swap, or re-run: the low-RAM guard caps -j + LTO."
+    warn "rustc was OOM-killed (signal 9) despite the low-RAM guard — the temporary build"
+    warn "swap likely failed to allocate (check free disk on /var/tmp), or other load is"
+    warn "competing for RAM (stop agentd and re-run)."
   fi
   die "Build failed — see $BUILD_LOG for full output"
 fi
 
 ok "Build complete"
+remove_build_swap
 cp "$BUILD_LOG" "$LOG.build" 2>/dev/null || true
 
 # ── Install binaries ───────────────────────────────────────────────────────────
