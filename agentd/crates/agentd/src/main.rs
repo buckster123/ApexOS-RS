@@ -2103,7 +2103,8 @@ fn agent_spawn_spec() -> ToolSpec {
                 },
                 "timeout_s": {
                     "type":        "integer",
-                    "description": "Max seconds to wait for a cross-node sub-agent (default 30, 5–300)."
+                    "description": "Max seconds to wait for a cross-node sub-agent (default 90, 5–300). \
+                                    Cold remote starts routinely exceed 30s — keep ≥90 for cross-node."
                 }
             },
             "required": ["prompt"]

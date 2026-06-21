@@ -1640,7 +1640,11 @@ impl Supervisor {
             let prompt  = call.args["prompt"].as_str().unwrap_or("").to_owned();
             let system  = call.args["system"].as_str().map(str::to_owned);
             let node    = call.args["node"].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
-            let timeout_s = call.args["timeout_s"].as_u64().unwrap_or(30).clamp(5, 300);
+            // Default 90s, not 30 — a cold cross-node sub-agent start (remote Pi spins
+            // up the model + does real work) routinely exceeds 30s; APEX hit this live
+            // running a roadmap-fetch goal (step stalled on the spawn timeout). 90s is
+            // the confirmed floor; callers can still override down to 5 for fast paths.
+            let timeout_s = call.args["timeout_s"].as_u64().unwrap_or(90).clamp(5, 300);
             let bus     = self.bus.clone();
             let call_id = call.id;
             match node {

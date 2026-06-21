@@ -2335,7 +2335,7 @@ async fn spawn_handler(
         return Json(serde_json::json!({ "ok": false, "error": "mesh hop limit reached (loop guard)" }));
     }
     let system = body["system"].as_str().filter(|s| !s.trim().is_empty()).map(str::to_string);
-    let timeout_s = body["timeout_s"].as_u64().unwrap_or(30).clamp(5, 300);
+    let timeout_s = body["timeout_s"].as_u64().unwrap_or(90).clamp(5, 300);
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if state.spawn_tx.send(SpawnReq { prompt, system, timeout_s, reply: reply_tx }).await.is_err() {
