@@ -9,6 +9,8 @@ repository = "https://github.com/buckster123/ApexOS-RS"
 members = [
     # ── Shared wire protocol (Event enum + WS/a2a contract; serde-only) ─────────
     "apexos-protocol",
+    # ── Path-confinement primitives (FS-sandbox algorithm; std-only) ────────────
+    "apexos-confine",
     # ── Agent daemon ──────────────────────────────────────────────────────────
     "agentd/crates/core",
     "agentd/crates/gateway",

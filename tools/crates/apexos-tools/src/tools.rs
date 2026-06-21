@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use apexos_confine::{Access, Denied};
 use std::process::Command;
 use std::time::Duration;
 
@@ -770,73 +771,35 @@ fn is_secret_path(canon: &Path) -> bool {
         || (s.starts_with("/proc/") && s.ends_with("/environ")) // /proc/<pid>/environ
 }
 
-/// Canonicalize `path`, tolerating a non-existent final component (write targets
-/// that don't exist yet): canonicalize the deepest existing ancestor and
-/// re-append the remainder, so symlinks in the existing prefix are resolved.
-/// Callers MUST reject `..` first — this does not normalize parent components.
-fn canonicalize_lenient(path: &Path) -> Option<PathBuf> {
-    if let Ok(c) = fs::canonicalize(path) {
-        return Some(c);
-    }
-    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
-    let mut cur = path;
-    while let Some(parent) = cur.parent() {
-        if let Some(name) = cur.file_name() {
-            suffix.push(name.to_owned());
-        }
-        if let Ok(mut c) = fs::canonicalize(parent) {
-            for comp in suffix.iter().rev() {
-                c.push(comp);
-            }
-            return Some(c);
-        }
-        cur = parent;
-    }
-    None
-}
-
 /// Resolve and confine a filesystem tool path. Relative paths root onto the
 /// workspace. `write = true` (write/create/delete) confines to the workspace;
 /// `write = false` (read/list) also accepts the read allowlist minus the secret
 /// denylist. Returns the canonical path to operate on, or an error string to
 /// hand back to the agent. This is the single confinement gate for FS tools.
+///
+/// The mechanism (reject `..`, lenient-canonicalize, root containment) lives in the
+/// std-only `apexos-confine` crate; here we map our policy — the per-agent workspace,
+/// the read allowlist, the secret denylist — into it and render the agent-facing
+/// error strings.
 fn confine(path: &str, write: bool) -> Result<PathBuf, String> {
     let resolved = resolve_path(path);
-
-    // Reject `..` up front (component-based — avoids the `foo..bar` false
-    // positive of a substring check). Without this a `..` in a non-existent
-    // write suffix would survive lenient canonicalization and defeat starts_with.
-    if resolved.components().any(|c| c == std::path::Component::ParentDir) {
-        return Err("path traversal (..) is not allowed".to_string());
-    }
-
-    let canon = canonicalize_lenient(&resolved)
-        .ok_or_else(|| format!("cannot resolve path {}", resolved.display()))?;
-
-    let ws = workspace_root();
-    if canon.starts_with(&ws) {
-        return Ok(canon);
-    }
-    if write {
-        return Err(format!(
-            "write/delete is confined to the workspace ({}); {} is outside it",
-            ws.display(),
-            canon.display()
-        ));
-    }
-    if is_secret_path(&canon) {
-        return Err(format!("reading {} is blocked (sensitive)", canon.display()));
-    }
-    for root in read_roots() {
-        let root_canon = fs::canonicalize(&root).unwrap_or(root);
-        if canon.starts_with(&root_canon) {
-            return Ok(canon);
-        }
-    }
-    Err(format!(
-        "reading {} is outside the workspace and the read allowlist",
-        canon.display()
-    ))
+    let access = if write { Access::Write } else { Access::Read };
+    apexos_confine::confine_fs(&resolved, access, &workspace_root(), &read_roots(), is_secret_path)
+        .map_err(|d| match d {
+            Denied::Traversal => "path traversal (..) is not allowed".to_string(),
+            Denied::Unresolvable(p) => format!("cannot resolve path {}", p.display()),
+            Denied::OutsideWorkspace { workspace, path } => format!(
+                "write/delete is confined to the workspace ({}); {} is outside it",
+                workspace.display(),
+                path.display(),
+            ),
+            Denied::Secret(p) => format!("reading {} is blocked (sensitive)", p.display()),
+            Denied::OutsideReadAllowlist(p) => format!(
+                "reading {} is outside the workspace and the read allowlist",
+                p.display(),
+            ),
+            Denied::OutsideRoots(p) => format!("{} is outside the allowed roots", p.display()),
+        })
 }
 
 // ─── Git tools ────────────────────────────────────────────────────────────────
@@ -869,20 +832,14 @@ fn git_roots() -> Vec<PathBuf> {
 /// to within a git root. Rejects `..`; canonicalizes. Returns the dir for `git -C`.
 fn confine_git_repo(path: Option<&str>) -> Result<PathBuf, String> {
     let resolved = resolve_path(path.unwrap_or("."));
-    if resolved.components().any(|c| c == std::path::Component::ParentDir) {
-        return Err("path traversal (..) is not allowed".to_string());
-    }
-    let canon = canonicalize_lenient(&resolved)
-        .ok_or_else(|| format!("cannot resolve path {}", resolved.display()))?;
-    for root in git_roots() {
-        if canon.starts_with(&root) {
-            return Ok(canon);
+    apexos_confine::confine_to_roots(&resolved, &git_roots()).map_err(|d| match d {
+        Denied::Traversal => "path traversal (..) is not allowed".to_string(),
+        Denied::Unresolvable(p) => format!("cannot resolve path {}", p.display()),
+        Denied::OutsideRoots(p) => {
+            format!("{} is outside the git roots (workspace + AGENTD_GIT_ROOTS)", p.display())
         }
-    }
-    Err(format!(
-        "{} is outside the git roots (workspace + AGENTD_GIT_ROOTS)",
-        canon.display()
-    ))
+        _ => unreachable!("confine_to_roots only yields Traversal/Unresolvable/OutsideRoots"),
+    })
 }
 
 /// Reject a positional arg git could read as an option (leading `-`).
