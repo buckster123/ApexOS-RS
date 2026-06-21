@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use apexos_core::{ActionId, BusHandle, Event, GoalId, GoalState, SessionId, ToolOutput, ToolSpec};
+use apexos_core::{ActionId, BusHandle, Event, GoalId, GoalState, GoalYoloSessions, SessionId, ToolOutput, ToolSpec};
 use apexos_plugins::ToolProxy;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -47,9 +47,23 @@ struct Goal {
     step_started: Instant,
     pending:      Option<Verdict>, // the agent's goal_step verdict, applied on TurnComplete
     episode:      Option<String>,  // Cerebro episode id wrapping this run (ended on Done/Failed)
+    yolo:         bool,            // goal-scoped yolo: this goal auto-approves its OWN ask tools (#3)
 }
 
 type Goals = Arc<Mutex<HashMap<u64, Goal>>>;
+
+/// Add a goal's session to the auto-approve set so the supervisor's approval gate
+/// dispatches its `ask` tools instead of parking them (goal-scoped yolo). Best-effort:
+/// a poisoned lock is ignored (the gate then just asks — fails safe, never wider).
+fn yolo_insert(set: &GoalYoloSessions, session: u64) {
+    if let Ok(mut s) = set.lock() { s.insert(session); }
+}
+
+/// Remove a goal's session from the auto-approve set on a terminal outcome — the
+/// session id is never reused for a non-goal turn, but we don't leave it lingering.
+fn yolo_remove(set: &GoalYoloSessions, session: u64) {
+    if let Ok(mut s) = set.lock() { s.remove(&session); }
+}
 
 /// The on-disk form of a goal (the transient `step_started`/`pending` are dropped).
 /// Persisted to `goals.json` so an in-flight goal survives a daemon restart — most
@@ -65,6 +79,8 @@ struct PersistedGoal {
     max_steps: u32,
     #[serde(default)]
     episode:   Option<String>,
+    #[serde(default)]
+    yolo:      bool,
 }
 
 async fn save_goals(goals: &Goals, path: &PathBuf) {
@@ -73,6 +89,7 @@ async fn save_goals(goals: &Goals, path: &PathBuf) {
         g.iter().map(|(id, go)| PersistedGoal {
             id: *id, objective: go.objective.clone(), session: go.session,
             state: go.state, step: go.step, max_steps: go.max_steps, episode: go.episode.clone(),
+            yolo: go.yolo,
         }).collect()
     };
     if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
@@ -89,8 +106,8 @@ fn load_goals(path: &PathBuf) -> Vec<PersistedGoal> {
 
 /// What to do after a step resolves — computed under the lock, performed after release.
 enum Outcome {
-    Finished { gid: u64, objective: String, state: GoalState, step: u32, max_steps: u32, detail: String, episode: Option<String> },
-    Next     { gid: u64, objective: String, step: u32, max_steps: u32, directive: String },
+    Finished { gid: u64, objective: String, state: GoalState, step: u32, max_steps: u32, detail: String, episode: Option<String>, yolo: bool },
+    Next     { gid: u64, objective: String, step: u32, max_steps: u32, directive: String, yolo: bool },
 }
 
 pub fn goal_create_spec() -> ToolSpec {
@@ -100,12 +117,16 @@ pub fn goal_create_spec() -> ToolSpec {
                       toward `objective` on its own dedicated session — one gated turn per step — \
                       until you call goal_step{done} or the step budget runs out. Progress shows \
                       live on the Work Board (🗂). Returns immediately with the goal_id; the run \
-                      proceeds in the background.".into(),
+                      proceeds in the background. Set `yolo:true` to let THIS goal auto-approve its \
+                      own ask-gated tools (run_command, git_push, …) so it runs unattended even when \
+                      global approval is on — scoped strictly to this goal; cancel it any time with \
+                      goal_cancel.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "objective": { "type": "string",  "description": "What the goal should accomplish." },
-                "max_steps": { "type": "integer", "description": "Hard ceiling on turns (default 12, max 100)." }
+                "max_steps": { "type": "integer", "description": "Hard ceiling on turns (default 12, max 100)." },
+                "yolo":      { "type": "boolean", "description": "Auto-approve this goal's OWN ask-gated tools so it runs unattended (default false). Scoped to this goal's session only — never widens approval for root chat or other goals." }
             },
             "required": ["objective"]
         }),
@@ -214,9 +235,10 @@ fn parse_verdict(args: &serde_json::Value) -> Verdict {
     }
 }
 
-async fn emit_state(bus: &BusHandle, id: u64, objective: &str, state: GoalState, step: u32, max_steps: u32, detail: &str) {
+#[allow(clippy::too_many_arguments)]
+async fn emit_state(bus: &BusHandle, id: u64, objective: &str, state: GoalState, step: u32, max_steps: u32, detail: &str, yolo: bool) {
     bus.emit(Event::GoalStateChanged {
-        goal: GoalId(id), objective: objective.into(), state, step, max_steps, detail: detail.into(),
+        goal: GoalId(id), objective: objective.into(), state, step, max_steps, detail: detail.into(), yolo,
     }).await;
 }
 
@@ -232,20 +254,21 @@ pub fn spawn_goal_driver(
     next_goal_id:    Arc<AtomicU64>,
     goals_path:      PathBuf,
     proxy:           ToolProxy,
+    goal_yolo:       GoalYoloSessions,
 ) {
     tokio::spawn(async move {
         let goals: Goals = Arc::new(Mutex::new(HashMap::new()));
-        reload_goals(&goals, &bus, &next_goal_id, &goals_path).await;
+        reload_goals(&goals, &bus, &next_goal_id, &goals_path, &goal_yolo).await;
         let step_timeout = step_timeout_from_env();
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
                 Some((session, call_id, tool, args)) = req_rx.recv() => {
                     match tool.as_str() {
-                        "goal_create" => { create_goal(&goals, &bus, &proxy, &next_session_id, &next_goal_id, session, call_id, args).await; save_goals(&goals, &goals_path).await; }
+                        "goal_create" => { create_goal(&goals, &bus, &proxy, &next_session_id, &next_goal_id, &goal_yolo, session, call_id, args).await; save_goals(&goals, &goals_path).await; }
                         "goal_step"   => record_step(&goals, &bus, session, call_id, args).await,
-                        "goal_resume" => { resume_goal(&goals, &bus, session, call_id, args).await; save_goals(&goals, &goals_path).await; }
-                        "goal_cancel" => { cancel_goal(&goals, &bus, &proxy, session, call_id, args).await; save_goals(&goals, &goals_path).await; }
+                        "goal_resume" => { resume_goal(&goals, &bus, &goal_yolo, session, call_id, args).await; save_goals(&goals, &goals_path).await; }
+                        "goal_cancel" => { cancel_goal(&goals, &bus, &proxy, &goal_yolo, session, call_id, args).await; save_goals(&goals, &goals_path).await; }
                         "list_goals"  => handle_list_goals(&goals, &bus, session, call_id).await,
                         _ => {}
                     }
@@ -253,19 +276,22 @@ pub fn spawn_goal_driver(
                 ev = bcast_rx.recv() => {
                     match ev {
                         Ok(Event::TurnComplete { session }) => {
-                            if advance(&goals, &bus, &proxy, session.0).await { save_goals(&goals, &goals_path).await; }
+                            if advance(&goals, &bus, &proxy, &goal_yolo, session.0).await { save_goals(&goals, &goals_path).await; }
                         }
                         // A goal step hit an `ask`-gated tool → ApprovalPending in the goal's
                         // own (unwatched) session. Park the goal Blocked instead of stalling
                         // silently — surfaced on the board; a human approves + goal_resume.
+                        // (A goal-scoped-yolo goal never lands here — the supervisor
+                        // auto-approves its session before any ApprovalPending is emitted.)
                         Ok(Event::ApprovalPending { session, call }) => {
-                            if block_on_approval(&goals, &bus, session.0, &call.tool).await { save_goals(&goals, &goals_path).await; }
+                            let parked = block_on_approval(&goals, &bus, session.0, &call.tool).await;
+                            if parked { save_goals(&goals, &goals_path).await; }
                         }
                         _ => {}
                     }
                 }
                 _ = tick.tick() => {
-                    if fail_stalled(&goals, &bus, &proxy, step_timeout).await { save_goals(&goals, &goals_path).await; }
+                    if fail_stalled(&goals, &bus, &proxy, &goal_yolo, step_timeout).await { save_goals(&goals, &goals_path).await; }
                 }
             }
         }
@@ -275,35 +301,40 @@ pub fn spawn_goal_driver(
 /// Boot: reload persisted goals. A goal that was mid-flight (Acting) when the daemon
 /// stopped is re-entered as Blocked ("interrupted by restart") — never silently lost
 /// — and resumes via goal_resume. Re-seeds the goal-id counter past every loaded id.
-async fn reload_goals(goals: &Goals, bus: &BusHandle, next_goal_id: &Arc<AtomicU64>, path: &PathBuf) {
+async fn reload_goals(goals: &Goals, bus: &BusHandle, next_goal_id: &Arc<AtomicU64>, path: &PathBuf, goal_yolo: &GoalYoloSessions) {
     let loaded = load_goals(path);
     if loaded.is_empty() { return; }
     let mut max_id = 0u64;
-    let mut announce: Vec<(u64, String, GoalState, u32, u32)> = Vec::new();
+    let mut announce: Vec<(u64, String, GoalState, u32, u32, bool)> = Vec::new();
     {
         let mut g = goals.lock().await;
         for pg in loaded {
             max_id = max_id.max(pg.id);
             let state = if pg.state == GoalState::Acting { GoalState::Blocked } else { pg.state };
+            // Re-arm goal-scoped yolo for a goal that's still resumable, so when it's
+            // goal_resume'd its ask tools auto-approve again (terminal goals don't run).
+            if pg.yolo && !matches!(state, GoalState::Done | GoalState::Failed | GoalState::Cancelled) {
+                yolo_insert(goal_yolo, pg.session);
+            }
             g.insert(pg.id, Goal {
                 objective: pg.objective.clone(), session: pg.session, state,
                 step: pg.step, max_steps: pg.max_steps, step_started: Instant::now(),
-                pending: None, episode: pg.episode.clone(),
+                pending: None, episode: pg.episode.clone(), yolo: pg.yolo,
             });
-            announce.push((pg.id, pg.objective, state, pg.step, pg.max_steps));
+            announce.push((pg.id, pg.objective, state, pg.step, pg.max_steps, pg.yolo));
         }
     }
     next_goal_id.fetch_max(max_id + 1, Ordering::SeqCst);
-    for (id, objective, state, step, max_steps) in announce {
+    for (id, objective, state, step, max_steps, yolo) in announce {
         let detail = if state == GoalState::Blocked { "interrupted by daemon restart — goal_resume to continue" } else { "" };
-        emit_state(bus, id, &objective, state, step, max_steps, detail).await;
+        emit_state(bus, id, &objective, state, step, max_steps, detail, yolo).await;
     }
     eprintln!("[goal] reloaded goals from {} (in-flight ones marked blocked)", path.display());
 }
 
 /// goal_resume{goal_id}: re-activate a Blocked/Failed goal — back to Acting at its
 /// last step, re-emitting the continue directive so the agent picks the objective up.
-async fn resume_goal(goals: &Goals, bus: &BusHandle, call_session: SessionId, call_id: ActionId, args: serde_json::Value) {
+async fn resume_goal(goals: &Goals, bus: &BusHandle, goal_yolo: &GoalYoloSessions, call_session: SessionId, call_id: ActionId, args: serde_json::Value) {
     let resumed = {
         let mut g = goals.lock().await;
         match args["goal_id"].as_u64().and_then(|id| g.get_mut(&id).map(|go| (id, go))) {
@@ -311,14 +342,16 @@ async fn resume_goal(goals: &Goals, bus: &BusHandle, call_session: SessionId, ca
                 go.state = GoalState::Acting;
                 go.step_started = Instant::now();
                 go.pending = None;
-                Some((id, go.objective.clone(), go.session, go.step, go.max_steps))
+                Some((id, go.objective.clone(), go.session, go.step, go.max_steps, go.yolo))
             }
             _ => None,
         }
     };
     match resumed {
-        Some((id, objective, session, step, max_steps)) => {
-            emit_state(bus, id, &objective, GoalState::Acting, step, max_steps, "resumed").await;
+        Some((id, objective, session, step, max_steps, yolo)) => {
+            // Re-arm goal-scoped yolo (defensive — a Failed→resume path may have dropped it).
+            if yolo { yolo_insert(goal_yolo, session); }
+            emit_state(bus, id, &objective, GoalState::Acting, step, max_steps, "resumed", yolo).await;
             bus.emit(Event::UserPrompt {
                 session: SessionId(session),
                 text: directive_continue(&objective, step, max_steps, None),
@@ -338,24 +371,25 @@ async fn resume_goal(goals: &Goals, bus: &BusHandle, call_session: SessionId, ca
 /// goal_cancel{goal_id}: operator-stop a live (Acting/Blocked) goal — terminal,
 /// not resumable. Aborts any in-flight turn on the goal's session (so it stops
 /// burning tokens), marks it Cancelled, and closes its Cerebro episode (neutral).
-async fn cancel_goal(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, call_session: SessionId, call_id: ActionId, args: serde_json::Value) {
+async fn cancel_goal(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, goal_yolo: &GoalYoloSessions, call_session: SessionId, call_id: ActionId, args: serde_json::Value) {
     let cancelled = {
         let mut g = goals.lock().await;
         match args["goal_id"].as_u64().and_then(|id| g.get_mut(&id).map(|go| (id, go))) {
             Some((id, go)) if matches!(go.state, GoalState::Acting | GoalState::Blocked) => {
                 go.state = GoalState::Cancelled;
                 go.pending = None;
-                Some((id, go.session, go.objective.clone(), go.step, go.max_steps, go.episode.take()))
+                Some((id, go.session, go.objective.clone(), go.step, go.max_steps, go.episode.take(), go.yolo))
             }
             _ => None,
         }
     };
     match cancelled {
-        Some((id, session, objective, step, max_steps, episode)) => {
-            // Stop the in-flight turn (if any) — cascade_cancel aborts it and emits no
-            // TurnComplete, so advance() won't fire for a goal that no longer exists.
+        Some((id, session, objective, step, max_steps, episode, yolo)) => {
+            // Disarm goal-scoped yolo + stop the in-flight turn (if any) — cascade_cancel
+            // aborts it and emits no TurnComplete, so advance() won't fire for a dead goal.
+            yolo_remove(goal_yolo, session);
             bus.emit(Event::UserCancel { session: SessionId(session) }).await;
-            emit_state(bus, id, &objective, GoalState::Cancelled, step, max_steps, "cancelled").await;
+            emit_state(bus, id, &objective, GoalState::Cancelled, step, max_steps, "cancelled", yolo).await;
             if let Some(ep) = episode { episode_end_goal(proxy, &ep, GoalState::Cancelled, step, max_steps, &objective).await; }
             bus.emit(Event::ToolResult { session: call_session, call: call_id,
                 output: ToolOutput { ok: true, content: serde_json::json!({ "goal_id": id, "status": "cancelled", "step": step }) } }).await;
@@ -371,7 +405,7 @@ async fn cancel_goal(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, call_ses
 #[allow(clippy::too_many_arguments)]
 async fn create_goal(
     goals: &Goals, bus: &BusHandle, proxy: &ToolProxy,
-    next_session_id: &Arc<AtomicU64>, next_goal_id: &Arc<AtomicU64>,
+    next_session_id: &Arc<AtomicU64>, next_goal_id: &Arc<AtomicU64>, goal_yolo: &GoalYoloSessions,
     call_session: SessionId, call_id: ActionId, args: serde_json::Value,
 ) {
     let objective = match args["objective"].as_str() {
@@ -385,28 +419,32 @@ async fn create_goal(
     let max_steps = args["max_steps"].as_u64()
         .map(|n| (n as u32).clamp(1, MAX_STEPS_CEIL))
         .unwrap_or(DEFAULT_MAX_STEPS);
+    let yolo = args["yolo"].as_bool().unwrap_or(false);
 
     let gid = next_goal_id.fetch_add(1, Ordering::SeqCst);
     let sid = next_session_id.fetch_add(1, Ordering::SeqCst);
+
+    // Goal-scoped yolo: arm this session so the supervisor auto-approves its ask tools.
+    if yolo { yolo_insert(goal_yolo, sid); }
 
     // Wrap the run in a Cerebro episode (best-effort) so it's a recallable memory.
     let episode = episode_start_goal(proxy, gid, &objective).await;
 
     goals.lock().await.insert(gid, Goal {
         objective: objective.clone(), session: sid, state: GoalState::Acting,
-        step: 1, max_steps, step_started: Instant::now(), pending: None, episode,
+        step: 1, max_steps, step_started: Instant::now(), pending: None, episode, yolo,
     });
 
     bus.emit(Event::ToolResult { session: call_session, call: call_id,
         output: ToolOutput { ok: true, content: serde_json::json!({
-            "goal_id": gid, "session": sid, "max_steps": max_steps, "status": "started",
+            "goal_id": gid, "session": sid, "max_steps": max_steps, "yolo": yolo, "status": "started",
         }) } }).await;
 
-    emit_state(bus, gid, &objective, GoalState::Acting, 1, max_steps, "").await;
+    emit_state(bus, gid, &objective, GoalState::Acting, 1, max_steps, "", yolo).await;
     bus.emit(Event::UserPrompt {
         session: SessionId(sid), text: directive_first(&objective, max_steps), images: vec![],
     }).await;
-    eprintln!("[goal] {gid} started → session {sid} (max_steps {max_steps})");
+    eprintln!("[goal] {gid} started → session {sid} (max_steps {max_steps}, yolo {yolo})");
 }
 
 /// Root-session visibility: return a snapshot of all goals (APEX's P2c ask — "is
@@ -416,7 +454,7 @@ async fn handle_list_goals(goals: &Goals, bus: &BusHandle, call_session: Session
         let g = goals.lock().await;
         let mut v: Vec<(u64, serde_json::Value)> = g.iter().map(|(gid, go)| (*gid, serde_json::json!({
             "goal_id": gid, "state": format!("{:?}", go.state).to_lowercase(),
-            "step": go.step, "max_steps": go.max_steps, "objective": go.objective,
+            "step": go.step, "max_steps": go.max_steps, "objective": go.objective, "yolo": go.yolo,
         }))).collect();
         v.sort_by_key(|(gid, _)| *gid);
         v.into_iter().map(|(_, j)| j).collect()
@@ -447,7 +485,7 @@ async fn record_step(goals: &Goals, bus: &BusHandle, call_session: SessionId, ca
 
 /// A goal session's turn completed → apply the in-flight step's verdict: done (early),
 /// blocked (park), or continue (next step, or close at the budget ceiling).
-async fn advance(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, session: u64) -> bool {
+async fn advance(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, goal_yolo: &GoalYoloSessions, session: u64) -> bool {
     let outcome = {
         let mut g = goals.lock().await;
         match g.iter_mut().find(|(_, go)| go.session == session && go.state == GoalState::Acting) {
@@ -456,7 +494,7 @@ async fn advance(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, session: u64
                 let gid = *gid;
                 let fin = |goal: &Goal, gid: u64, state: GoalState, detail: String| Outcome::Finished {
                     gid, objective: goal.objective.clone(), state, step: goal.step,
-                    max_steps: goal.max_steps, detail, episode: goal.episode.clone(),
+                    max_steps: goal.max_steps, detail, episode: goal.episode.clone(), yolo: goal.yolo,
                 };
                 match goal.pending.take().unwrap_or(Verdict::Continue(None)) {
                     Verdict::Done => {
@@ -476,7 +514,7 @@ async fn advance(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, session: u64
                             goal.step += 1;
                             goal.step_started = Instant::now();
                             let directive = directive_continue(&goal.objective, goal.step, goal.max_steps, steer.as_deref());
-                            Some(Outcome::Next { gid, objective: goal.objective.clone(), step: goal.step, max_steps: goal.max_steps, directive })
+                            Some(Outcome::Next { gid, objective: goal.objective.clone(), step: goal.step, max_steps: goal.max_steps, directive, yolo: goal.yolo })
                         }
                     }
                 }
@@ -485,16 +523,18 @@ async fn advance(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, session: u64
     };
     let changed = outcome.is_some();
     match outcome {
-        Some(Outcome::Finished { gid, objective, state, step, max_steps, detail, episode }) => {
-            emit_state(bus, gid, &objective, state, step, max_steps, &detail).await;
+        Some(Outcome::Finished { gid, objective, state, step, max_steps, detail, episode, yolo }) => {
+            emit_state(bus, gid, &objective, state, step, max_steps, &detail, yolo).await;
             eprintln!("[goal] {gid} {state:?} at step {step}/{max_steps}");
-            // Close the Cerebro episode on a terminal outcome (Blocked stays open — resumable).
+            // Terminal (Done/Failed): close the episode + disarm goal-scoped yolo. Blocked
+            // stays open AND keeps its yolo arming (it's resumable — see reload/resume).
             if matches!(state, GoalState::Done | GoalState::Failed) {
+                yolo_remove(goal_yolo, session);
                 if let Some(ep) = episode { episode_end_goal(proxy, &ep, state, step, max_steps, &objective).await; }
             }
         }
-        Some(Outcome::Next { gid, objective, step, max_steps, directive }) => {
-            emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps, "").await;
+        Some(Outcome::Next { gid, objective, step, max_steps, directive, yolo }) => {
+            emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps, "", yolo).await;
             bus.emit(Event::UserPrompt { session: SessionId(session), text: directive, images: vec![] }).await;
         }
         None => {}
@@ -519,18 +559,23 @@ fn parse_step_timeout(raw: Option<&str>) -> Duration {
         .unwrap_or(STEP_TIMEOUT)
 }
 
+/// A stalled goal pulled out under the lock, processed after release:
+/// (gid, session, objective, step, max_steps, episode, yolo).
+type StalledGoal = (u64, u64, String, u32, u32, Option<String>, bool);
+
 /// Fail any Acting goal whose current step has stalled past the step timeout.
-async fn fail_stalled(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, step_timeout: Duration) -> bool {
-    let failed: Vec<(u64, String, u32, u32, Option<String>)> = {
+async fn fail_stalled(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, goal_yolo: &GoalYoloSessions, step_timeout: Duration) -> bool {
+    let failed: Vec<StalledGoal> = {
         let mut g = goals.lock().await;
         g.iter_mut()
             .filter(|(_, go)| go.state == GoalState::Acting && go.step_started.elapsed() > step_timeout)
-            .map(|(gid, go)| { go.state = GoalState::Failed; (*gid, go.objective.clone(), go.step, go.max_steps, go.episode.clone()) })
+            .map(|(gid, go)| { go.state = GoalState::Failed; (*gid, go.session, go.objective.clone(), go.step, go.max_steps, go.episode.clone(), go.yolo) })
             .collect()
     };
     let changed = !failed.is_empty();
-    for (gid, objective, step, max_steps, episode) in failed {
-        emit_state(bus, gid, &objective, GoalState::Failed, step, max_steps, "step stalled — no completion").await;
+    for (gid, session, objective, step, max_steps, episode, yolo) in failed {
+        yolo_remove(goal_yolo, session);
+        emit_state(bus, gid, &objective, GoalState::Failed, step, max_steps, "step stalled — no completion", yolo).await;
         eprintln!("[goal] {gid} failed (step {step} stalled > {}s)", step_timeout.as_secs());
         if let Some(ep) = episode { episode_end_goal(proxy, &ep, GoalState::Failed, step, max_steps, &objective).await; }
     }
@@ -577,15 +622,15 @@ async fn block_on_approval(goals: &Goals, bus: &BusHandle, session: u64, tool: &
     let blocked = {
         let mut g = goals.lock().await;
         match g.iter_mut().find(|(_, go)| go.session == session && go.state == GoalState::Acting) {
-            Some((gid, go)) => { go.state = GoalState::Blocked; go.pending = None; Some((*gid, go.objective.clone(), go.step, go.max_steps)) }
+            Some((gid, go)) => { go.state = GoalState::Blocked; go.pending = None; Some((*gid, go.objective.clone(), go.step, go.max_steps, go.yolo)) }
             None => None,
         }
     };
-    if let Some((gid, objective, step, max_steps)) = blocked {
+    if let Some((gid, objective, step, max_steps, yolo)) = blocked {
         // Free the suspended turn (it's waiting on an approval that won't come) so the
         // goal's session isn't left pinned. goal_resume re-runs the step from scratch.
         bus.emit(Event::UserCancel { session: SessionId(session) }).await;
-        emit_state(bus, gid, &objective, GoalState::Blocked, step, max_steps, &format!("awaiting approval — {tool}")).await;
+        emit_state(bus, gid, &objective, GoalState::Blocked, step, max_steps, &format!("awaiting approval — {tool}"), yolo).await;
         eprintln!("[goal] {gid} blocked on approval for '{tool}' at step {step}");
         true
     } else { false }
@@ -634,7 +679,7 @@ mod tests {
     fn persisted_goal_round_trips_json() {
         let pg = PersistedGoal {
             id: 3, objective: "ship it".into(), session: 44,
-            state: GoalState::Acting, step: 2, max_steps: 5, episode: Some("ep_x".into()),
+            state: GoalState::Acting, step: 2, max_steps: 5, episode: Some("ep_x".into()), yolo: true,
         };
         let back: PersistedGoal = serde_json::from_str(&serde_json::to_string(&pg).unwrap()).unwrap();
         assert_eq!(back.id, 3);
@@ -643,6 +688,28 @@ mod tests {
         assert_eq!(back.state, GoalState::Acting);
         assert_eq!(back.objective, "ship it");
         assert_eq!(back.episode.as_deref(), Some("ep_x"));
+        assert!(back.yolo);
+    }
+
+    #[test]
+    fn persisted_goal_yolo_defaults_false_for_legacy_json() {
+        // A goals.json written before #3 has no `yolo` key — #[serde(default)] → false,
+        // so an old persisted goal reloads as a normal (gated) goal.
+        let legacy = r#"{"id":1,"objective":"x","session":9,"state":"acting","step":1,"max_steps":3}"#;
+        let pg: PersistedGoal = serde_json::from_str(legacy).unwrap();
+        assert!(!pg.yolo);
+    }
+
+    #[test]
+    fn goal_yolo_set_arms_and_disarms() {
+        use apexos_core::goal_session_is_yolo;
+        let set: GoalYoloSessions = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        assert!(!goal_session_is_yolo(&set, 7));   // unarmed session is gated
+        yolo_insert(&set, 7);
+        assert!(goal_session_is_yolo(&set, 7));     // armed → auto-approve
+        assert!(!goal_session_is_yolo(&set, 8));    // strictly scoped to the armed session
+        yolo_remove(&set, 7);
+        assert!(!goal_session_is_yolo(&set, 7));     // terminal outcome disarms it
     }
 
     #[test]

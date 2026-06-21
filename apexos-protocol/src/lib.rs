@@ -340,6 +340,11 @@ pub enum Event {
         /// Short context for the current state — the block reason, the stall note,
         /// "" otherwise. Surfaced on the board card. (P2c)
         detail:    String,
+        /// Goal-scoped yolo: this goal auto-approves its own `ask` tools. The board
+        /// renders a distinct AUTO marker. `#[serde(default)]` so a version-skewed UI
+        /// (or an older event) reads it as false. (P2e, goal-driver-design.md #3)
+        #[serde(default)]
+        yolo:      bool,
     },
 }
 

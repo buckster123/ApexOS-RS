@@ -265,6 +265,28 @@ pub fn resolve_agent_id(
         .unwrap_or_else(node_agent_id)
 }
 
+// ── Per-session goal autonomy (goal-scoped yolo) ────────────────────────────
+
+/// Process-wide set of goal session ids running with **goal-scoped yolo**
+/// (`goal_create{yolo:true}`) — their OWN `ask`-gated tools auto-approve. The goal
+/// driver inserts a session on create and removes it on a terminal outcome; the
+/// supervisor's approval gate consults it so a *trusted* goal runs unattended
+/// **without** flipping global yolo — scoped strictly to that one goal's session,
+/// never root or another session. Co-located with [`SessionBindings`] as the other
+/// process-wide per-session runtime map; a `std::sync::Mutex` (not tokio) so the
+/// synchronous decision path checks it with a tiny lock→contains→drop.
+pub type GoalYoloSessions =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u64>>>;
+
+/// True iff `session` is a goal running with goal-scoped yolo. **Fails closed** — a
+/// poisoned lock returns false, so a lock error can never silently auto-approve.
+pub fn goal_session_is_yolo(
+    set: &std::sync::Mutex<std::collections::HashSet<u64>>,
+    session: u64,
+) -> bool {
+    set.lock().map(|s| s.contains(&session)).unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
