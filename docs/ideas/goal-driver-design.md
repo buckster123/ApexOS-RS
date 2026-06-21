@@ -201,8 +201,12 @@ core.
   session, driven step-by-step through the existing `TurnGate`; bounded by `max_steps` (Done) and a
   per-step stall timeout (Failed). No `goal_step` yet — each step re-prompts "continue"; early
   done/blocked is P2b.
-- **P2b — the `goal_step` hook.** The virtual tool + mpsc to the driver; LLM-driven `continue/done/
-  blocked`; the advisory-done model.
+- **P2b — the `goal_step` hook.** ✅ **SHIPPED** — `goal_step{status: continue|done|blocked, next?,
+  reason?}` virtual tool routed to the driver; the agent's verdict is recorded for the in-flight step
+  and applied on `TurnComplete` (advisory `done` ends early; `blocked` parks; `continue` can steer
+  the next step via `next`); the budget/stall guards stay the hard stop. Also fixed the P2a off-by-one
+  APEX caught live — `step` is now the **in-flight** step (1-indexed), so the board card tracks the
+  running step (1/N … N/N → DONE) instead of the completed-count.
 - **P2c — posture + failure-visibility.** `GoalPosture` (revive `inherit_mode`), `AskBlocks` →
   board-blocked cards, FAILED sub-agent/step cards with error text. (The standalone board fix can
   land here or earlier.)
