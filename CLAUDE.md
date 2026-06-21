@@ -420,6 +420,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 |------|----------------------|
 | `docs/repo-map.md` | Navigation — crate tree, per-crate key files, "how a message flows", "where do I change X?" |
 | `BACKLOG.md` (repo root) | Outstanding work — audited findings + parked items, de-duped & prioritized |
+| `PATTERNS.md` (repo root) | The "lift-me" index — a manifest of the repo's reusable patterns (idea · where it lives · explaining doc · liftability ✅/🟡/🔴), for humans or AIs grabbing ideas/parts without reverse-engineering the whole. Doubles as the "factored for theft" smoothing worklist. Complements `docs/repo-map.md` + `docs/porting-guide.md` |
 | `docs/architecture.md` | System layout, workspace crate structure, dependency graph |
 | `docs/build-roadmap.md` | Build order, step-by-step detail, deferred items |
 | `docs/slint-notes.md` | Slint patterns, binding loop rules, layout gotchas |
@@ -434,6 +435,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 | `docs/self-update.md` | Daemon self-update loop (mk3) — DESIGN: the agent rewriting its own core binary safely. The recoverability invariant, the privilege-boundary watchdog, the health contract, Cerebro-as-recovery, the failure-mode table, and the implementation slices |
 | `docs/colony-mesh.md` | Colony mesh expansion plan (agent-originated, FORGE-grounded) — spine/edge constitution (soft-governed), the locked build sequence (file relay → capability advertisement → blocking `agent_spawn` keystone), deferred items with revisit triggers, and the propose/build/steer division of labor |
 | `docs/pac.md` | PAC — the ApexOS authoring dialect: the grounded glyph-lean distillation of the *Prima Alchemica Codex* (`~/Projects/The-PAC`). Semantic compression for souls/procedures/evolution payloads — ~40% fewer tokens, model-agnostic, behaviourally lossless. Reproducible token benchmark + corpus in `docs/pac-bench/` |
+| `docs/prompt-caching.md` | The prompt-caching discipline as a portable pattern — keep the system+tools prefix byte-stable, push per-turn-volatile text (the clock) into messages, roll conversation breakpoints back through stable history. Provider-agnostic contract + the ApexOS idea→code map + the tested spec. Pairs with `docs/pac.md` (PAC shrinks what you write, caching shrinks what you re-send) |
 
 ---
 
