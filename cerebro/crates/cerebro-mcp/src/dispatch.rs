@@ -807,6 +807,11 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 .list_memories_scoped(&scope, &filter).await?;
             let filtered: Vec<_> = nodes.into_iter()
                 .filter(|n| n.salience >= min_salience)
+                // Exclude evolution undo-snapshots: the soul.md rollback artifacts the
+                // evolution applier stores get mis-typed Procedural (their content embeds
+                // the full soul, which trips classify_type) and dominate by access count —
+                // they're rollback records, not skills. (APEX caught this via a goal.)
+                .filter(|n| !n.tags.iter().any(|t| t == "undo_snapshot"))
                 .collect();
             Ok(json!(filtered))
         }
@@ -828,6 +833,8 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 .list_memories_scoped(&scope, &filter).await?;
             let mut filtered: Vec<_> = nodes.into_iter()
                 .filter(|n| {
+                    // Skip evolution undo-snapshots (rollback artifacts mis-typed Procedural).
+                    if n.tags.iter().any(|t| t == "undo_snapshot") { return false; }
                     let tag_hit = tags.iter().any(|t| n.tags.iter().any(|nt| nt == t));
                     let meta_str = n.metadata.to_string();
                     let concept_hit = concepts.iter().any(|c| meta_str.contains(c.as_str()));
