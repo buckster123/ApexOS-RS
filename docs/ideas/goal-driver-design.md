@@ -214,6 +214,11 @@ core.
   own slice:** the `GoalPosture{Yolo|AskBlocks}` *policy override* (auto-approve-within-goal) — its
   hard half needs per-session policy threading into the supervisor, and it's latent on a yolo node
   (which already auto-approves `ask`), so it's untestable on apex1 and not worth bundling here.
-- **P2d — persistence + resume.** `goals.json`, boot reload, Cerebro episode wrap.
+- **P2d — persistence + resume.** ✅ **SHIPPED (core)** — goals persist to `goals.json` (`log_dir`,
+  the `mesh_sessions.json` pattern) on every mutation; on boot they reload, and any goal that was
+  mid-flight (Acting) when the daemon stopped re-enters **Blocked: "interrupted by daemon restart"**
+  (never silently lost — critically, the nightly self-update binary swap no longer evaporates a
+  running goal). A new **`goal_resume{goal_id}`** tool re-activates a Blocked/Failed goal at its last
+  step. **Deferred:** the Cerebro episode wrap (needs a `ToolProxy` in the driver) — small follow-up.
 
 Each slice is its own PR. P2a is the keystone; the rest layer on without rewrites.
