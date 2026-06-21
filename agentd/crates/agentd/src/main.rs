@@ -206,7 +206,7 @@ async fn main() -> anyhow::Result<()> {
     // Autonomous goal driver (Phase 2a, docs/ideas/goal-driver-design.md): goal_create
     // forwards here; the driver owns its goal map and drives each via the bus.
     let next_goal_id = Arc::new(AtomicU64::new(1));
-    let (goal_tx, goal_rx) = mpsc::channel::<(SessionId, ActionId, serde_json::Value)>(8);
+    let (goal_tx, goal_rx) = mpsc::channel::<(SessionId, ActionId, String, serde_json::Value)>(8);
 
     // Peer registry — /etc/agentd/peers.toml (created empty if missing)
     let peers_path = PathBuf::from(
@@ -1728,6 +1728,7 @@ async fn gather_tools(
     tools.push(cancel_schedule_spec());
     tools.push(convene_council_spec());
     tools.push(goal::goal_create_spec());
+    tools.push(goal::goal_step_spec());
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());
     tools.push(mesh_capabilities_spec());

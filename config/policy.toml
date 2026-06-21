@@ -61,10 +61,12 @@ mode = "suggest"
 # which only worked under yolo).
 "agent_spawn"      = "allow"
 
-# goal_create: start an autonomous bounded multi-turn run (docs/ideas/goal-driver-design.md).
-# allow — it's non-destructive (just kicks off gated turns); every tool the goal's
-# steps call is still individually policy-gated, and the run is bounded by max_steps.
+# goal_create / goal_step: run + steer an autonomous bounded multi-turn goal
+# (docs/ideas/goal-driver-design.md). allow — non-destructive: goal_create just kicks
+# off gated turns (every step tool stays individually policy-gated, bounded by
+# max_steps), and goal_step only reports the step outcome (continue/done/blocked).
 "goal_create"      = "allow"
+"goal_step"        = "allow"
 
 # Git tools (apexos-tools) — confined by the tool to the workspace + AGENTD_GIT_ROOTS.
 # Read-only verbs + init/branch/commit are allow (self-confined, like read_file:

@@ -1,17 +1,17 @@
-//! The autonomous Goal driver — Phase 2a (docs/ideas/goal-driver-design.md).
+//! The autonomous Goal driver — Phase 2a + 2b (docs/ideas/goal-driver-design.md).
 //!
 //! A goal is a bounded multi-turn run: a dedicated session, driven step by step
 //! through the EXISTING `TurnGate` by emitting `UserPrompt` on the bus (the
-//! scheduler generalized). The control-plane here is deterministic — the loop, the
+//! scheduler generalized). The control-plane is deterministic — the loop, the
 //! `max_steps` ceiling, and a per-step stall timeout are enforced in code; the LLM
-//! just does the work each step. **P2a has no `goal_step` tool yet:** each step
-//! re-prompts "continue", and the run ends at `max_steps` (Done) or a stalled step
-//! (Failed). The `goal_step` hook (early done / blocked) + the real failure breaker
-//! land in P2b / P2c.
+//! does the work each step **and proposes the next move** via the `goal_step` tool.
+//! Code disposes: `goal_step{done}` is honoured but the budget/guards are the hard
+//! stop (LLM-proposes / code-disposes, like the evolution applier + council).
 //!
-//! Pattern: like `scheduler.rs`, a virtual tool forwards `(session, call_id, args)`
-//! over an mpsc; unlike it, the driver is reactive — it also subscribes to the bus
-//! to observe each goal session's `TurnComplete` and advance.
+//! P2b: the `goal_step{continue|done|blocked}` hook lets a goal finish early (no
+//! more burning the whole budget) or park gracefully. `step` is the **in-flight**
+//! step (1-indexed), so the board card tracks what the agent is actually doing
+//! (1/N … N/N → DONE), not the completed-count (the P2a off-by-one APEX caught live).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,26 +28,39 @@ const MAX_STEPS_CEIL:    u32 = 100;
 /// hanging. The richer failure breaker (consecutive `ok:false` steps) lands in P2c.
 const STEP_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// The agent's reported outcome for the in-flight step (via `goal_step`).
+enum Verdict {
+    Continue(Option<String>), // optional steer for the next step
+    Done,
+    Blocked(String),          // reason
+}
+
 struct Goal {
     objective:    String,
     session:      u64,
     state:        GoalState,
-    step:         u32,
+    step:         u32,            // IN-FLIGHT step, 1-indexed (1 = first step running)
     max_steps:    u32,
     step_started: Instant,
+    pending:      Option<Verdict>, // the agent's goal_step verdict, applied on TurnComplete
 }
 
 type Goals = Arc<Mutex<HashMap<u64, Goal>>>;
 
-/// The `goal_create` virtual-tool spec.
+/// What to do after a step resolves — computed under the lock, performed after release.
+enum Outcome {
+    Finished { gid: u64, objective: String, state: GoalState, step: u32, max_steps: u32 },
+    Next     { gid: u64, objective: String, step: u32, max_steps: u32, directive: String },
+}
+
 pub fn goal_create_spec() -> ToolSpec {
     ToolSpec {
         name: "goal_create".into(),
         description: "Start an autonomous GOAL: a bounded, self-driving multi-turn run that works \
                       toward `objective` on its own dedicated session — one gated turn per step — \
-                      until the objective is met or the step budget runs out. Progress shows live on \
-                      the Work Board (🗂). Returns immediately with the goal_id; the run proceeds in \
-                      the background.".into(),
+                      until you call goal_step{done} or the step budget runs out. Progress shows \
+                      live on the Work Board (🗂). Returns immediately with the goal_id; the run \
+                      proceeds in the background.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -59,19 +72,51 @@ pub fn goal_create_spec() -> ToolSpec {
     }
 }
 
-fn directive(objective: &str, step: u32, max_steps: u32) -> String {
-    if step == 0 {
-        format!(
-            "You are running an autonomous GOAL (step 1/{max_steps}).\n\nOBJECTIVE:\n{objective}\n\n\
-             Make concrete progress now. You'll be re-prompted to continue each step until the \
-             objective is met or the step budget is spent."
-        )
-    } else {
-        format!(
-            "Continue the GOAL (step {}/{}).\nOBJECTIVE: {}\n\nKeep making concrete progress toward \
-             completion.",
-            step + 1, max_steps, objective
-        )
+pub fn goal_step_spec() -> ToolSpec {
+    ToolSpec {
+        name: "goal_step".into(),
+        description: "Report the outcome of the CURRENT goal step — only meaningful while running a \
+                      goal. `done`: the objective is fully met, finish now (don't waste the rest of \
+                      the budget). `blocked`: an unresolvable dependency — park the goal with a \
+                      `reason`. `continue` (also the default if you DON'T call this): keep going, \
+                      optionally steering the next step via `next`. The driver applies your verdict \
+                      when this turn completes.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "status": { "type": "string", "enum": ["continue", "done", "blocked"],
+                            "description": "done = objective met; blocked = parked; continue = keep going." },
+                "next":   { "type": "string", "description": "Optional steer for the next step (status=continue)." },
+                "reason": { "type": "string", "description": "Why it's parked (status=blocked)." }
+            },
+            "required": ["status"]
+        }),
+    }
+}
+
+fn directive_first(objective: &str, max_steps: u32) -> String {
+    format!(
+        "You are running an autonomous GOAL (step 1/{max_steps}).\n\nOBJECTIVE:\n{objective}\n\n\
+         Make concrete progress now. When the objective is FULLY met, call \
+         `goal_step{{status:\"done\"}}` to finish early — don't burn the rest of the budget. If you \
+         hit an unresolvable blocker, call `goal_step{{status:\"blocked\", reason:\"…\"}}`. Otherwise \
+         just keep working; you'll be re-prompted to continue until done or the budget runs out."
+    )
+}
+
+fn directive_continue(objective: &str, step: u32, max_steps: u32, steer: Option<&str>) -> String {
+    let head = format!("Continue the GOAL (step {step}/{max_steps}). OBJECTIVE: {objective}");
+    match steer {
+        Some(s) => format!("{head}\n\nFocus this step on: {s}\n\nCall `goal_step{{status:\"done\"}}` when fully complete."),
+        None    => format!("{head}\n\nKeep making concrete progress. Call `goal_step{{status:\"done\"}}` when fully complete."),
+    }
+}
+
+fn parse_verdict(args: &serde_json::Value) -> Verdict {
+    match args["status"].as_str() {
+        Some("done")    => Verdict::Done,
+        Some("blocked") => Verdict::Blocked(args["reason"].as_str().unwrap_or("blocked").to_string()),
+        _               => Verdict::Continue(args["next"].as_str().map(str::to_owned)),
     }
 }
 
@@ -81,12 +126,13 @@ async fn emit_state(bus: &BusHandle, id: u64, objective: &str, state: GoalState,
     }).await;
 }
 
-/// Spawn the goal driver: creates goals from `req_rx`, drives each through the gate,
-/// advances on the goal session's `TurnComplete`, fails stalled steps on a 30s tick.
+/// Spawn the goal driver: creates goals + records `goal_step` verdicts from `req_rx`,
+/// drives each through the gate, advances on the goal session's `TurnComplete`, and
+/// fails stalled steps on a 30s tick.
 pub fn spawn_goal_driver(
     bus:             BusHandle,
     mut bcast_rx:    broadcast::Receiver<Event>,
-    mut req_rx:      mpsc::Receiver<(SessionId, ActionId, serde_json::Value)>,
+    mut req_rx:      mpsc::Receiver<(SessionId, ActionId, String, serde_json::Value)>,
     next_session_id: Arc<AtomicU64>,
     next_goal_id:    Arc<AtomicU64>,
 ) {
@@ -95,18 +141,19 @@ pub fn spawn_goal_driver(
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
-                Some((call_session, call_id, args)) = req_rx.recv() => {
-                    create_goal(&goals, &bus, &next_session_id, &next_goal_id,
-                                call_session, call_id, args).await;
+                Some((session, call_id, tool, args)) = req_rx.recv() => {
+                    match tool.as_str() {
+                        "goal_create" => create_goal(&goals, &bus, &next_session_id, &next_goal_id, session, call_id, args).await,
+                        "goal_step"   => record_step(&goals, &bus, session, call_id, args).await,
+                        _ => {}
+                    }
                 }
                 ev = bcast_rx.recv() => {
                     if let Ok(Event::TurnComplete { session }) = ev {
                         advance(&goals, &bus, session.0).await;
                     }
                 }
-                _ = tick.tick() => {
-                    fail_stalled(&goals, &bus).await;
-                }
+                _ = tick.tick() => { fail_stalled(&goals, &bus).await; }
             }
         }
     });
@@ -134,52 +181,89 @@ async fn create_goal(
 
     goals.lock().await.insert(gid, Goal {
         objective: objective.clone(), session: sid, state: GoalState::Acting,
-        step: 0, max_steps, step_started: Instant::now(),
+        step: 1, max_steps, step_started: Instant::now(), pending: None,
     });
 
-    // Deferred ack — the tool result carries the goal id.
     bus.emit(Event::ToolResult { session: call_session, call: call_id,
         output: ToolOutput { ok: true, content: serde_json::json!({
             "goal_id": gid, "session": sid, "max_steps": max_steps, "status": "started",
         }) } }).await;
 
-    // Announce + fire the first step.
-    emit_state(bus, gid, &objective, GoalState::Acting, 0, max_steps).await;
+    emit_state(bus, gid, &objective, GoalState::Acting, 1, max_steps).await;
     bus.emit(Event::UserPrompt {
-        session: SessionId(sid), text: directive(&objective, 0, max_steps), images: vec![],
+        session: SessionId(sid), text: directive_first(&objective, max_steps), images: vec![],
     }).await;
     eprintln!("[goal] {gid} started → session {sid} (max_steps {max_steps})");
 }
 
-/// A goal session's turn completed → advance: bump step, then re-prompt (still
-/// Acting) or close (Done at the ceiling). No-op if the session isn't a goal's.
-async fn advance(goals: &Goals, bus: &BusHandle, session: u64) {
-    let advanced = {
+/// The agent called `goal_step` from within a goal's turn — record the verdict for
+/// the in-flight step (applied on the upcoming TurnComplete) and ack the tool now.
+async fn record_step(goals: &Goals, bus: &BusHandle, call_session: SessionId, call_id: ActionId, args: serde_json::Value) {
+    let status = args["status"].as_str().unwrap_or("continue").to_string();
+    let recorded = {
         let mut g = goals.lock().await;
-        match g.iter_mut().find(|(_, go)| go.session == session && go.state == GoalState::Acting) {
-            Some((gid, goal)) => {
-                goal.step += 1;
-                let done = goal.step >= goal.max_steps;
-                if done { goal.state = GoalState::Done; } else { goal.step_started = Instant::now(); }
-                Some((*gid, goal.objective.clone(), goal.state, goal.step, goal.max_steps, done))
-            }
-            None => None,
+        match g.iter_mut().find(|(_, go)| go.session == call_session.0 && go.state == GoalState::Acting) {
+            Some((_, goal)) => { goal.pending = Some(parse_verdict(&args)); true }
+            None => false,
         }
     };
-    if let Some((gid, objective, state, step, max_steps, done)) = advanced {
-        emit_state(bus, gid, &objective, state, step, max_steps).await;
-        if done {
-            eprintln!("[goal] {gid} done (reached step budget {max_steps})");
-        } else {
-            bus.emit(Event::UserPrompt {
-                session: SessionId(session), text: directive(&objective, step, max_steps), images: vec![],
-            }).await;
+    let content = if recorded {
+        serde_json::json!({ "recorded": status, "note": "applied when this step completes" })
+    } else {
+        serde_json::json!("goal_step has no effect outside a running goal session")
+    };
+    bus.emit(Event::ToolResult { session: call_session, call: call_id,
+        output: ToolOutput { ok: recorded, content } }).await;
+}
+
+/// A goal session's turn completed → apply the in-flight step's verdict: done (early),
+/// blocked (park), or continue (next step, or close at the budget ceiling).
+async fn advance(goals: &Goals, bus: &BusHandle, session: u64) {
+    let outcome = {
+        let mut g = goals.lock().await;
+        match g.iter_mut().find(|(_, go)| go.session == session && go.state == GoalState::Acting) {
+            None => None,
+            Some((gid, goal)) => {
+                let gid = *gid;
+                match goal.pending.take().unwrap_or(Verdict::Continue(None)) {
+                    Verdict::Done => {
+                        goal.state = GoalState::Done;
+                        Some(Outcome::Finished { gid, objective: goal.objective.clone(), state: GoalState::Done, step: goal.step, max_steps: goal.max_steps })
+                    }
+                    Verdict::Blocked(reason) => {
+                        goal.state = GoalState::Blocked;
+                        eprintln!("[goal] {gid} blocked at step {}: {reason}", goal.step);
+                        Some(Outcome::Finished { gid, objective: goal.objective.clone(), state: GoalState::Blocked, step: goal.step, max_steps: goal.max_steps })
+                    }
+                    Verdict::Continue(steer) => {
+                        if goal.step >= goal.max_steps {
+                            goal.state = GoalState::Done; // budget reached
+                            Some(Outcome::Finished { gid, objective: goal.objective.clone(), state: GoalState::Done, step: goal.step, max_steps: goal.max_steps })
+                        } else {
+                            goal.step += 1;
+                            goal.step_started = Instant::now();
+                            let directive = directive_continue(&goal.objective, goal.step, goal.max_steps, steer.as_deref());
+                            Some(Outcome::Next { gid, objective: goal.objective.clone(), step: goal.step, max_steps: goal.max_steps, directive })
+                        }
+                    }
+                }
+            }
         }
+    };
+    match outcome {
+        Some(Outcome::Finished { gid, objective, state, step, max_steps }) => {
+            emit_state(bus, gid, &objective, state, step, max_steps).await;
+            eprintln!("[goal] {gid} {state:?} at step {step}/{max_steps}");
+        }
+        Some(Outcome::Next { gid, objective, step, max_steps, directive }) => {
+            emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps).await;
+            bus.emit(Event::UserPrompt { session: SessionId(session), text: directive, images: vec![] }).await;
+        }
+        None => {}
     }
 }
 
-/// Fail any Acting goal whose current step has stalled past STEP_TIMEOUT (no
-/// TurnComplete arrived — the turn errored/aborted). Prevents a hung goal.
+/// Fail any Acting goal whose current step has stalled past STEP_TIMEOUT.
 async fn fail_stalled(goals: &Goals, bus: &BusHandle) {
     let failed: Vec<(u64, String, u32, u32)> = {
         let mut g = goals.lock().await;
@@ -190,7 +274,7 @@ async fn fail_stalled(goals: &Goals, bus: &BusHandle) {
     };
     for (gid, objective, step, max_steps) in failed {
         emit_state(bus, gid, &objective, GoalState::Failed, step, max_steps).await;
-        eprintln!("[goal] {gid} failed (step stalled > {}s)", STEP_TIMEOUT.as_secs());
+        eprintln!("[goal] {gid} failed (step {step} stalled > {}s)", STEP_TIMEOUT.as_secs());
     }
 }
 
@@ -199,16 +283,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn directive_step0_has_objective_and_budget() {
-        let d = directive("ship the lander", 0, 5);
+    fn first_directive_is_1_indexed_and_names_goal_step() {
+        let d = directive_first("ship the lander", 5);
+        assert!(d.contains("step 1/5"));
         assert!(d.contains("ship the lander"));
-        assert!(d.contains("1/5"));
+        assert!(d.contains("goal_step"));
     }
 
     #[test]
-    fn directive_continue_increments_visible_step() {
-        // step index 2 → human-readable "3/5" (step+1).
-        let d = directive("x", 2, 5);
-        assert!(d.contains("3/5"), "got: {d}");
+    fn continue_directive_tracks_inflight_step_and_steer() {
+        let d = directive_continue("x", 3, 5, Some("write the tests"));
+        assert!(d.contains("step 3/5"), "got: {d}");
+        assert!(d.contains("write the tests"));
+    }
+
+    #[test]
+    fn parse_verdict_maps_status() {
+        assert!(matches!(parse_verdict(&serde_json::json!({"status":"done"})), Verdict::Done));
+        assert!(matches!(parse_verdict(&serde_json::json!({"status":"blocked","reason":"no key"}), ), Verdict::Blocked(r) if r == "no key"));
+        assert!(matches!(parse_verdict(&serde_json::json!({"status":"continue","next":"step 2"})), Verdict::Continue(Some(s)) if s == "step 2"));
+        // Absent/unknown status defaults to continue.
+        assert!(matches!(parse_verdict(&serde_json::json!({})), Verdict::Continue(None)));
     }
 }
