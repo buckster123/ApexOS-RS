@@ -432,6 +432,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 | `docs/occipital.md` | Occipital integration — the agent's reading cortex (standalone sibling repo): registering `occipital-mcp` (web_search/fetch/recall), the deploy + activation paths, and the ui-slint follow-along reader window |
 | `docs/self-update.md` | Daemon self-update loop (mk3) — DESIGN: the agent rewriting its own core binary safely. The recoverability invariant, the privilege-boundary watchdog, the health contract, Cerebro-as-recovery, the failure-mode table, and the implementation slices |
 | `docs/colony-mesh.md` | Colony mesh expansion plan (agent-originated, FORGE-grounded) — spine/edge constitution (soft-governed), the locked build sequence (file relay → capability advertisement → blocking `agent_spawn` keystone), deferred items with revisit triggers, and the propose/build/steer division of labor |
+| `docs/pac.md` | PAC — the ApexOS authoring dialect: the grounded glyph-lean distillation of the *Prima Alchemica Codex* (`~/Projects/The-PAC`). Semantic compression for souls/procedures/evolution payloads — ~40% fewer tokens, model-agnostic, behaviourally lossless. Reproducible token benchmark + corpus in `docs/pac-bench/` |
 
 ---
 
