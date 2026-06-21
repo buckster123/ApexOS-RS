@@ -828,7 +828,13 @@ async fn episode_add_step(proxy: &ToolProxy, episode_id: &str, undo: &EvolutionP
     // snapshot on cold-start restore (BACKLOG).
     let memory_id = match proxy.call("memory_store", serde_json::json!({
         "content": content,
-        "tags":    ["evolution", "undo_snapshot"]
+        "tags":    ["evolution", "undo_snapshot"],
+        // Type it explicitly: an undo snapshot is an EPISODIC record of an evolution
+        // apply, not a skill. Without this, classify_type sees the full soul embedded
+        // in the content (packed with "how to"/"workflow"/"step") and mis-types it
+        // Procedural, polluting procedure recall (the cerebro filter excludes these
+        // too, but typing them right keeps stats/dream/priming honest going forward).
+        "memory_type": "episodic"
     })).await {
         Ok(out) if out.ok => parse_cerebro_id(&out, "id"),
         Ok(out) => { eprintln!("[evolution] memory_store not ok: {:?}", out.content); None }
