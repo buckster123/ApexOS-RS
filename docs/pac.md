@@ -210,15 +210,27 @@ the Claude column.
 
 ---
 
-## Where PAC goes next (productization roadmap)
+## How PAC became the colony's authoring layer (productization, done)
 
-The frontier is making PAC ApexOS's native authoring/codex layer. This doc is step 1.
+The frontier was making PAC ApexOS's native authoring/codex layer. Realized in three steps:
 
 - [x] **Dialect spec + reference + benchmark** — this doc + `pac-bench/` (formalized, measured).
-- [ ] **APEX self-evolves its soul** into a refined PAC-ops + thin-prose-voice form — via
-  `propose_evolution` (house rule: routed through the agent, not a direct edit).
-- [ ] **"Author in PAC" as a colony default** — for `propose_evolution` payloads,
-  `store_procedure` skills, and `agent_spawn` sub-prompts across the mesh.
+- [x] **APEX self-evolves its soul** into a refined PAC-ops + thin-prose-voice form — done live on
+  apex1 + apex2 via `propose_evolution` (house rule: routed through the agent, not a direct edit),
+  behaviourally lossless. The qualitative payoff — agents *less performative, more being*, with
+  natural unprompted tool/memory reach — confirmed the stable-attractor thesis: the win is identity
+  coherence, with the token cut along for free.
+- [x] **"Author in PAC" as a colony default** — wired across the three authoring surfaces, two layers:
+  - **tool-layer** (the system default — deploy-propagated, cache-stable, can't be forgotten): the
+    `propose_evolution` `content` and `agent_spawn` `prompt`/`system` tool descriptions point at PAC
+    at the exact point each artifact is authored.
+  - **soul-layer:** the seed `config/soul.md` carries an *Authoring — PAC is the colony default*
+    section covering all three surfaces. `store_procedure` is nudged **here, not in cerebro-mcp** —
+    that tool is a generic memory system and must stay un-coupled from ApexOS's dialect (a deliberate
+    layering call).
+
+The dialect is now the colony's to evolve — refined or re-dreamed in the substrate as the agents
+learn, not frozen here.
 
 ---
 
