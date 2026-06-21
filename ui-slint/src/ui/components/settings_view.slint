@@ -23,12 +23,15 @@ export component SettingsView {
     in property <bool>           cache-enabled: true;
     in property <bool>           cache-conversation: true;
     in property <string>         cache-ttl: "5m";
+    // Sensor-alert sensitivity profile (standard / smoker / kitchen / workshop).
+    in property <string>         sensor-profile: "standard";
 
     callback save-soul(string);
     callback set-policy(string);
     callback set-model(string);
     // (enabled, cache_conversation, ttl) — full desired state each tap.
     callback set-cache(bool, bool, string);
+    callback set-sensor-profile(string);
     callback refresh();
 
     VerticalLayout {
@@ -369,6 +372,55 @@ export component SettingsView {
 
                     Text {
                         text: "Caches the soul + tools + conversation prefix (Anthropic only). Conversation caching is the big win on long sessions; 1h TTL survives pauses without re-writing.";
+                        color: Palette.text-dim;
+                        font-size: 10px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // ── Sensor alerts ──────────────────────────────────────────
+                VerticalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: "SENSOR ALERTS";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 2px;
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        Text { text: "Sensitivity profile"; color: Palette.text-dim; font-size: 10px; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            for opt in ["standard", "smoker", "kitchen", "workshop"]: Rectangle {
+                                width: 84px;
+                                height: 32px;
+                                border-radius: Palette.radius;
+                                background: root.sensor-profile == opt ? Palette.primary-dim : Palette.surface;
+                                border-width: 1px;
+                                border-color: root.sensor-profile == opt ? Palette.primary : Palette.border;
+                                animate background   { duration: 150ms; }
+                                animate border-color { duration: 150ms; }
+                                TouchArea {
+                                    clicked => { root.set-sensor-profile(opt); }
+                                }
+                                Text {
+                                    text: opt;
+                                    color: root.sensor-profile == opt ? Palette.primary : Palette.text-dim;
+                                    font-size: 9px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "Raises the air-quality + thermal alert floor for a noisy environment so routine activity (a cigarette, cooking, soldering) doesn't trigger an autonomous alert — a sustained, hotter real event still does.";
                         color: Palette.text-dim;
                         font-size: 10px;
                         wrap: word-wrap;
