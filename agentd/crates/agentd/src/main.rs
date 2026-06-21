@@ -1729,6 +1729,7 @@ async fn gather_tools(
     tools.push(convene_council_spec());
     tools.push(goal::goal_create_spec());
     tools.push(goal::goal_step_spec());
+    tools.push(goal::list_goals_spec());
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());
     tools.push(mesh_capabilities_spec());

@@ -49,7 +49,7 @@ type Goals = Arc<Mutex<HashMap<u64, Goal>>>;
 
 /// What to do after a step resolves — computed under the lock, performed after release.
 enum Outcome {
-    Finished { gid: u64, objective: String, state: GoalState, step: u32, max_steps: u32 },
+    Finished { gid: u64, objective: String, state: GoalState, step: u32, max_steps: u32, detail: String },
     Next     { gid: u64, objective: String, step: u32, max_steps: u32, directive: String },
 }
 
@@ -94,6 +94,16 @@ pub fn goal_step_spec() -> ToolSpec {
     }
 }
 
+pub fn list_goals_spec() -> ToolSpec {
+    ToolSpec {
+        name: "list_goals".into(),
+        description: "List the autonomous goals on this node and their live state (id, state \
+                      acting/done/blocked/failed, step/max_steps, objective) — check on a running \
+                      goal from anywhere, without the Work Board open.".into(),
+        input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+    }
+}
+
 fn directive_first(objective: &str, max_steps: u32) -> String {
     format!(
         "You are running an autonomous GOAL (step 1/{max_steps}).\n\nOBJECTIVE:\n{objective}\n\n\
@@ -120,9 +130,9 @@ fn parse_verdict(args: &serde_json::Value) -> Verdict {
     }
 }
 
-async fn emit_state(bus: &BusHandle, id: u64, objective: &str, state: GoalState, step: u32, max_steps: u32) {
+async fn emit_state(bus: &BusHandle, id: u64, objective: &str, state: GoalState, step: u32, max_steps: u32, detail: &str) {
     bus.emit(Event::GoalStateChanged {
-        goal: GoalId(id), objective: objective.into(), state, step, max_steps,
+        goal: GoalId(id), objective: objective.into(), state, step, max_steps, detail: detail.into(),
     }).await;
 }
 
@@ -145,6 +155,7 @@ pub fn spawn_goal_driver(
                     match tool.as_str() {
                         "goal_create" => create_goal(&goals, &bus, &next_session_id, &next_goal_id, session, call_id, args).await,
                         "goal_step"   => record_step(&goals, &bus, session, call_id, args).await,
+                        "list_goals"  => handle_list_goals(&goals, &bus, session, call_id).await,
                         _ => {}
                     }
                 }
@@ -189,11 +200,27 @@ async fn create_goal(
             "goal_id": gid, "session": sid, "max_steps": max_steps, "status": "started",
         }) } }).await;
 
-    emit_state(bus, gid, &objective, GoalState::Acting, 1, max_steps).await;
+    emit_state(bus, gid, &objective, GoalState::Acting, 1, max_steps, "").await;
     bus.emit(Event::UserPrompt {
         session: SessionId(sid), text: directive_first(&objective, max_steps), images: vec![],
     }).await;
     eprintln!("[goal] {gid} started → session {sid} (max_steps {max_steps})");
+}
+
+/// Root-session visibility: return a snapshot of all goals (APEX's P2c ask — "is
+/// goal N still running?" without the board open).
+async fn handle_list_goals(goals: &Goals, bus: &BusHandle, call_session: SessionId, call_id: ActionId) {
+    let list: Vec<serde_json::Value> = {
+        let g = goals.lock().await;
+        let mut v: Vec<(u64, serde_json::Value)> = g.iter().map(|(gid, go)| (*gid, serde_json::json!({
+            "goal_id": gid, "state": format!("{:?}", go.state).to_lowercase(),
+            "step": go.step, "max_steps": go.max_steps, "objective": go.objective,
+        }))).collect();
+        v.sort_by_key(|(gid, _)| *gid);
+        v.into_iter().map(|(_, j)| j).collect()
+    };
+    bus.emit(Event::ToolResult { session: call_session, call: call_id,
+        output: ToolOutput { ok: true, content: serde_json::json!({ "goals": list, "count": list.len() }) } }).await;
 }
 
 /// The agent called `goal_step` from within a goal's turn — record the verdict for
@@ -225,20 +252,23 @@ async fn advance(goals: &Goals, bus: &BusHandle, session: u64) {
             None => None,
             Some((gid, goal)) => {
                 let gid = *gid;
+                let fin = |goal: &Goal, gid: u64, state: GoalState, detail: String| Outcome::Finished {
+                    gid, objective: goal.objective.clone(), state, step: goal.step, max_steps: goal.max_steps, detail,
+                };
                 match goal.pending.take().unwrap_or(Verdict::Continue(None)) {
                     Verdict::Done => {
                         goal.state = GoalState::Done;
-                        Some(Outcome::Finished { gid, objective: goal.objective.clone(), state: GoalState::Done, step: goal.step, max_steps: goal.max_steps })
+                        Some(fin(goal, gid, GoalState::Done, String::new()))
                     }
                     Verdict::Blocked(reason) => {
                         goal.state = GoalState::Blocked;
                         eprintln!("[goal] {gid} blocked at step {}: {reason}", goal.step);
-                        Some(Outcome::Finished { gid, objective: goal.objective.clone(), state: GoalState::Blocked, step: goal.step, max_steps: goal.max_steps })
+                        Some(fin(goal, gid, GoalState::Blocked, reason))
                     }
                     Verdict::Continue(steer) => {
                         if goal.step >= goal.max_steps {
                             goal.state = GoalState::Done; // budget reached
-                            Some(Outcome::Finished { gid, objective: goal.objective.clone(), state: GoalState::Done, step: goal.step, max_steps: goal.max_steps })
+                            Some(fin(goal, gid, GoalState::Done, "step budget reached".into()))
                         } else {
                             goal.step += 1;
                             goal.step_started = Instant::now();
@@ -251,12 +281,12 @@ async fn advance(goals: &Goals, bus: &BusHandle, session: u64) {
         }
     };
     match outcome {
-        Some(Outcome::Finished { gid, objective, state, step, max_steps }) => {
-            emit_state(bus, gid, &objective, state, step, max_steps).await;
+        Some(Outcome::Finished { gid, objective, state, step, max_steps, detail }) => {
+            emit_state(bus, gid, &objective, state, step, max_steps, &detail).await;
             eprintln!("[goal] {gid} {state:?} at step {step}/{max_steps}");
         }
         Some(Outcome::Next { gid, objective, step, max_steps, directive }) => {
-            emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps).await;
+            emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps, "").await;
             bus.emit(Event::UserPrompt { session: SessionId(session), text: directive, images: vec![] }).await;
         }
         None => {}
@@ -273,7 +303,7 @@ async fn fail_stalled(goals: &Goals, bus: &BusHandle) {
             .collect()
     };
     for (gid, objective, step, max_steps) in failed {
-        emit_state(bus, gid, &objective, GoalState::Failed, step, max_steps).await;
+        emit_state(bus, gid, &objective, GoalState::Failed, step, max_steps, "step stalled — no completion").await;
         eprintln!("[goal] {gid} failed (step {step} stalled > {}s)", STEP_TIMEOUT.as_secs());
     }
 }

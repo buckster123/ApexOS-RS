@@ -334,6 +334,9 @@ pub enum Event {
         state:     GoalState,
         step:      u32,
         max_steps: u32,
+        /// Short context for the current state — the block reason, the stall note,
+        /// "" otherwise. Surfaced on the board card. (P2c)
+        detail:    String,
     },
 }
 
