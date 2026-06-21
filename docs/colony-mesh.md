@@ -101,6 +101,27 @@ delegation, cross-node task decomposition.
 - **Effort:** Medium. **Acceptance:** `agent_spawn(node="ApexOS-RS", prompt="research X, return findings",
   timeout_s=60)` blocks and returns apex1's sub-agent output.
 
+### Slice 4 — Downtime beacon  ·  *presence detection* (APEX's pick over NATS)  ·  ✅ shipped
+
+The spine's first real step after the goal arc — APEX chose it over NATS: *"if a sensor-head node goes
+dark mid-thermal-alert, I need to know. Silence and 'everything fine' look identical."* NATS pays off at
+3+ nodes; presence detection is useful at 2 **today**, and it's the foundation NATS would sit on.
+
+- **Loop** (`gateway::beacon`, spawned beside the discovery loop): every `MESH_BEACON_INTERVAL_SECS`
+  (default 30, floor 10) HTTP-probe each peers.toml peer. **Up = answered the HTTP layer at all** (even a
+  401 — the node is *reachable*); only a transport error/timeout is a miss. Reuses `GET /api/capabilities`
+  (token-gated, exists) — **no new endpoint**.
+- **State machine** (pure, unit-tested `beacon_step`): `MESH_BEACON_STALE_MISSES` (default 3 ≈ 90s)
+  consecutive misses → **dark**; one success → **recovered**. Only the *edge* alerts — flapping below
+  threshold or repeated misses while already dark are silent.
+- **Surfacing:** each edge emits a **global** `Event::MeshNodeStatus{node_id,status,last_seen_secs}` →
+  board notification + the Mesh view's per-peer `live` field (folded into `/api/mesh/peers`). And — unless
+  `MESH_BEACON_NOTIFY_AGENT=0` — a **root-session `UserPrompt`** so the agent is *told* a node went dark
+  (don't wait for a human to notice the board went grey). Distinct from `PeerLost` (mDNS *advertising* loss).
+- **Knobs:** `MESH_BEACON=0` disables it; interval / stale-misses / notify-agent all env-tunable.
+- **Next on this pathway:** richer **sensor→agent alert sensitivity** + a **smoker/non-smoker toggle**
+  (Sensors/Settings) — same notify pathway, distinct slice (touches `SensorThresholds`). Parked UX item.
+
 ---
 
 ## Deferred (with reason + revisit trigger)
