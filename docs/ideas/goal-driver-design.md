@@ -207,9 +207,13 @@ core.
   the next step via `next`); the budget/stall guards stay the hard stop. Also fixed the P2a off-by-one
   APEX caught live — `step` is now the **in-flight** step (1-indexed), so the board card tracks the
   running step (1/N … N/N → DONE) instead of the completed-count.
-- **P2c — posture + failure-visibility.** `GoalPosture` (revive `inherit_mode`), `AskBlocks` →
-  board-blocked cards, FAILED sub-agent/step cards with error text. (The standalone board fix can
-  land here or earlier.)
+- **P2c — observability + visibility.** ✅ **SHIPPED (core)** — `Event::GoalStateChanged` gained a
+  `detail` field, so **Blocked cards carry the reason** and **FAILED cards carry the stall note** (the
+  snag's observability gap, closed on the board), plus a **`list_goals`** tool for root-session
+  visibility ("is goal N still running?" without the board open — APEX's field ask). **Deferred to its
+  own slice:** the `GoalPosture{Yolo|AskBlocks}` *policy override* (auto-approve-within-goal) — its
+  hard half needs per-session policy threading into the supervisor, and it's latent on a yolo node
+  (which already auto-approves `ask`), so it's untestable on apex1 and not worth bundling here.
 - **P2d — persistence + resume.** `goals.json`, boot reload, Cerebro episode wrap.
 
 Each slice is its own PR. P2a is the keystone; the rest layer on without rewrites.

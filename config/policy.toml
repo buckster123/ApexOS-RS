@@ -67,6 +67,7 @@ mode = "suggest"
 # max_steps), and goal_step only reports the step outcome (continue/done/blocked).
 "goal_create"      = "allow"
 "goal_step"        = "allow"
+"list_goals"       = "allow"
 
 # Git tools (apexos-tools) — confined by the tool to the workspace + AGENTD_GIT_ROOTS.
 # Read-only verbs + init/branch/commit are allow (self-confined, like read_file:

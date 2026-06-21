@@ -5384,7 +5384,7 @@ fn dispatch_event(
         }
 
         // Work Board: an autonomous goal advanced → upsert its card in the GOALS lane.
-        Event::GoalStateChanged { goal, objective, state, step, max_steps } => {
+        Event::GoalStateChanged { goal, objective, state, step, max_steps, detail } => {
             let (badge, c) = match state {
                 GoalState::Acting  => ("RUN",   board_color(96, 165, 250)),
                 GoalState::Done    => ("DONE",  board_color(52, 211, 153)),
@@ -5394,7 +5394,11 @@ fn dispatch_event(
             };
             let gid = goal.0;
             let title: String = objective.chars().take(60).collect();
-            let subtitle = format!("step {step}/{max_steps}");
+            let subtitle = if detail.is_empty() {
+                format!("step {step}/{max_steps}")
+            } else {
+                format!("step {step}/{max_steps} · {detail}")
+            };
             slint::invoke_from_event_loop(move || board_goal(gid, title, subtitle, badge, c)).ok();
         }
 
