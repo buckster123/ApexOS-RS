@@ -23,7 +23,15 @@ pub enum Rule {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision { Allow, Ask }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+// NOTE: do NOT `#[derive(Default)]` here. PolicyConfig.subagents is
+// `#[serde(default)]`, so a policy.toml with NO `[subagents]` table (the shipped
+// default) fills this via `SubagentsConfig::default()` — NOT the per-field
+// `#[serde(default = "…")]` fns (those only fire when the table is present but a
+// field is omitted). A derived Default would yield `max_depth = 0`, and the spawn
+// guard `parent_depth >= max_depth` then rejects EVERY local sub-agent spawn with
+// "max sub-agent depth exceeded". The manual impl below keeps the absent-section
+// default identical to the per-field defaults.
+#[derive(Debug, Clone, Deserialize)]
 pub struct SubagentsConfig {
     #[serde(default = "default_max_depth")]
     pub max_depth: u32,
@@ -31,6 +39,16 @@ pub struct SubagentsConfig {
     pub max_concurrent: u32,
     #[serde(default = "default_inherit_mode")]
     pub inherit_mode: bool,
+}
+
+impl Default for SubagentsConfig {
+    fn default() -> Self {
+        Self {
+            max_depth:      default_max_depth(),
+            max_concurrent: default_max_concurrent(),
+            inherit_mode:   default_inherit_mode(),
+        }
+    }
 }
 
 fn default_max_depth()      -> u32  { 4 }
@@ -309,5 +327,19 @@ inherit_mode    = false
         assert_eq!(cfg.subagents.max_depth, 3);
         assert_eq!(cfg.subagents.max_concurrent, 8);
         assert!(!cfg.subagents.inherit_mode);
+    }
+
+    // Regression: a policy.toml with NO [subagents] table (the shipped default)
+    // must use the intended defaults — NOT the derived all-zeros, which would set
+    // max_depth=0 and make the spawn guard reject every local sub-agent
+    // ("max sub-agent depth exceeded"). Bit a live landing-site build (2026-06-22).
+    #[test]
+    fn absent_subagents_section_keeps_intended_defaults() {
+        let cfg = PolicyConfig::parse("mode = \"yolo\"\n").unwrap();
+        assert_eq!(cfg.subagents.max_depth, 4, "absent [subagents] must NOT yield max_depth=0");
+        assert_eq!(cfg.subagents.max_concurrent, 16);
+        assert!(cfg.subagents.inherit_mode);
+        // And SubagentsConfig::default() (what serde calls for the absent section).
+        assert_eq!(SubagentsConfig::default().max_depth, 4);
     }
 }
