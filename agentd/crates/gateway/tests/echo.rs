@@ -41,6 +41,8 @@ fn make_state(handle: apexos_core::BusHandle, bcast: tokio::sync::broadcast::Sen
             apexos_gateway::PeerRegistry::load(std::path::Path::new("/dev/null"))
         )),
         liveness:             apexos_gateway::new_liveness_map(),
+        smoker_mode:          Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        sensor_config_path:   std::path::PathBuf::from("/dev/null"),
         pairing:              Arc::new(std::sync::Mutex::new(None)),
         node_id:              Arc::new("test-node".into()),
         mesh_sessions:        Arc::new(std::sync::Mutex::new(HashMap::new())),
