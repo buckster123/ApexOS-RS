@@ -813,16 +813,35 @@ if $NO_UI; then
   info "Skipping ui-slint (headless/desktop mode)"
 fi
 
+# Low-memory build guard. The ui-slint compile (opt-level=3 + thin-LTO, the single
+# heaviest unit in the workspace) peaks well past available RAM on a small device — on a
+# 4 GB Pi the kernel OOM-killer SIGKILLs rustc (signal 9), so a UI node fails *every*
+# UI-touching update. Cap parallelism and drop LTO so peak rustc memory stays bounded
+# (a marginally larger/slower binary — a fine trade on a spare low-RAM kiosk). High-RAM
+# nodes and headless builds (no ui-slint) keep the fully-optimized build untouched.
+BUILD_ENV=()
+RAM_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+if ! $NO_UI && [[ "$RAM_KB" -gt 0 && "$RAM_KB" -lt 6291456 ]]; then   # < 6 GiB
+  BUILD_JOBS=2
+  [[ "$RAM_KB" -lt 3145728 ]] && BUILD_JOBS=1                          # < 3 GiB → serialize fully
+  warn "Low-RAM node ($((RAM_KB / 1024)) MB) — building UI with -j$BUILD_JOBS + LTO off so rustc isn't OOM-killed"
+  BUILD_ENV=(CARGO_BUILD_JOBS="$BUILD_JOBS" CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16)
+fi
+
 BUILD_LOG=$(mktemp /tmp/apexos-cargo-build.XXXXXX.log)
 info "Build log → $BUILD_LOG"
 
-sudo -u "$BUILD_USER" "$CARGO" build $BUILD_ARGS 2>&1 \
+sudo -u "$BUILD_USER" env "${BUILD_ENV[@]}" "$CARGO" build $BUILD_ARGS 2>&1 \
   | tee "$BUILD_LOG" \
   | grep --line-buffered -E "(^Compiling (agentd|cerebro|apexos|ui-slint|apex)|Finished|^error)" \
   || true
 
 if grep -q "^error" "$BUILD_LOG"; then
-  cat "$BUILD_LOG" | grep "^error" | head -5
+  grep "^error" "$BUILD_LOG" | head -5
+  if grep -q "signal: 9" "$BUILD_LOG"; then
+    warn "rustc was OOM-killed (signal 9) — out of RAM during compile. Free memory"
+    warn "(stop other load / agentd), add swap, or re-run: the low-RAM guard caps -j + LTO."
+  fi
   die "Build failed — see $BUILD_LOG for full output"
 fi
 
