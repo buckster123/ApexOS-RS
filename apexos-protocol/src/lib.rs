@@ -26,6 +26,22 @@ pub struct SessionId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ActionId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GoalId(pub u64);
+
+/// Lifecycle state of an autonomous Goal run (docs/ideas/goal-driver-design.md).
+/// P2a uses Acting / Done / Failed; the rest are reserved for later slices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalState {
+    Planning,
+    Acting,
+    Blocked,
+    Reflecting,
+    Done,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PluginId(pub String);
 
@@ -306,6 +322,18 @@ pub enum Event {
         evolution_id:   EvolutionId,
         reason:         String,
         rolled_back_by: Option<SessionId>,
+    },
+
+    // autonomous goals (docs/ideas/goal-driver-design.md, Phase 2)
+    /// A Goal run advanced (created / step / done / failed). GLOBAL (session-less
+    /// in `event_session`) so every client's Work Board sees it, even though the
+    /// goal's own turns run in a dedicated, session-scoped stream.
+    GoalStateChanged {
+        goal:      GoalId,
+        objective: String,
+        state:     GoalState,
+        step:      u32,
+        max_steps: u32,
     },
 }
 

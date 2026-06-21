@@ -18,7 +18,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 // Selective import (NOT a glob): apexos_protocol::Message would collide with
 // tokio_tungstenite's Message used below.
-use apexos_protocol::{Event, SensorReading};
+use apexos_protocol::{Event, GoalState, SensorReading};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -307,6 +307,7 @@ fn notify_action(kind: ToastKind, text: impl Into<String>, action_session: i32) 
 // run on the Slint thread (called from inside invoke_from_event_loop), so the
 // thread-local BOARD is race-free, like MESSAGES / EVENTS.
 struct BoardModels {
+    goals:     Rc<slint::VecModel<BoardCard>>,   // autonomous goals, keyed by "goal<id>"
     active:    Rc<slint::VecModel<BoardCard>>,   // the current turn (one card)
     blocked:   Rc<slint::VecModel<BoardCard>>,   // pending approvals, keyed by call id
     subagents: Rc<slint::VecModel<BoardCard>>,   // live sub-agents, keyed by "sub<session>"
@@ -368,6 +369,12 @@ fn board_push_recent(title: String, subtitle: String, badge: &str, c: slint::Col
         bm.recent.insert(0, board_card("", title, subtitle, badge, c));
         while bm.recent.row_count() > BOARD_RECENT_CAP { bm.recent.remove(bm.recent.row_count() - 1); }
     });
+}
+
+/// Upsert an autonomous goal's card in the GOALS column (keyed by goal id, so the
+/// card updates in place through Acting → Done/Failed).
+fn board_goal(id: u64, title: String, subtitle: String, badge: &str, c: slint::Color) {
+    board_with(|bm| board_upsert(&bm.goals, board_card(&format!("goal{id}"), title, subtitle, badge, c)));
 }
 
 /// The (main-session) turn finished: drop the Active card + any stale approvals,
@@ -2851,11 +2858,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Work Board (🗂) — four live column models driven off the WS event stream.
     let board = BoardModels {
+        goals:     Rc::new(slint::VecModel::default()),
         active:    Rc::new(slint::VecModel::default()),
         blocked:   Rc::new(slint::VecModel::default()),
         subagents: Rc::new(slint::VecModel::default()),
         recent:    Rc::new(slint::VecModel::default()),
     };
+    ui.set_board_goals(slint::ModelRc::from(board.goals.clone()));
     ui.set_board_active(slint::ModelRc::from(board.active.clone()));
     ui.set_board_blocked(slint::ModelRc::from(board.blocked.clone()));
     ui.set_board_subagents(slint::ModelRc::from(board.subagents.clone()));
@@ -5372,6 +5381,21 @@ fn dispatch_event(
             slint::invoke_from_event_loop(move || {
                 board_push_recent(format!("Mesh ← {from}"), prev, "MESH", board_color(45, 212, 191));
             }).ok();
+        }
+
+        // Work Board: an autonomous goal advanced → upsert its card in the GOALS lane.
+        Event::GoalStateChanged { goal, objective, state, step, max_steps } => {
+            let (badge, c) = match state {
+                GoalState::Acting  => ("RUN",   board_color(96, 165, 250)),
+                GoalState::Done    => ("DONE",  board_color(52, 211, 153)),
+                GoalState::Failed  => ("FAIL",  board_color(239, 68, 68)),
+                GoalState::Blocked => ("BLOCK", board_color(251, 191, 36)),
+                _                  => ("…",     board_color(148, 163, 184)),
+            };
+            let gid = goal.0;
+            let title: String = objective.chars().take(60).collect();
+            let subtitle = format!("step {step}/{max_steps}");
+            slint::invoke_from_event_loop(move || board_goal(gid, title, subtitle, badge, c)).ok();
         }
 
         _ => {}

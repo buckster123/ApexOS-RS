@@ -8,6 +8,7 @@ mod health;
 mod self_update;
 mod consolidate;
 mod evolution;
+mod goal;
 
 use apexos_core::{
     ActionId, Bus, ContentBlock, Event, EvolutionId, EvolutionProposal, ImageSource, Message,
@@ -202,6 +203,11 @@ async fn main() -> anyhow::Result<()> {
     let (council_tx, council_rx) = mpsc::channel::<(SessionId, ActionId, serde_json::Value)>(8);
     let council_start_tx  = council_tx.clone();
 
+    // Autonomous goal driver (Phase 2a, docs/ideas/goal-driver-design.md): goal_create
+    // forwards here; the driver owns its goal map and drives each via the bus.
+    let next_goal_id = Arc::new(AtomicU64::new(1));
+    let (goal_tx, goal_rx) = mpsc::channel::<(SessionId, ActionId, serde_json::Value)>(8);
+
     // Peer registry — /etc/agentd/peers.toml (created empty if missing)
     let peers_path = PathBuf::from(
         std::env::var("PEERS_TOML").unwrap_or_else(|_| "/etc/agentd/peers.toml".into())
@@ -355,6 +361,7 @@ async fn main() -> anyhow::Result<()> {
     // the bus) so the deferred tool-result ack can't be lag-dropped.
     let (propose_tx, propose_rx) = mpsc::channel::<(SessionId, ActionId, EvolutionId, EvolutionProposal)>(16);
     supervisor.set_propose_tx(propose_tx);
+    supervisor.set_goal_tx(goal_tx);
     supervisor.set_events_dir(log_dir.clone());
     supervisor.set_vast_state(vast_state.clone());
     // Per-agent souls (3b-2): read_soul_md resolves a bound agent's own soul_file.
@@ -472,6 +479,12 @@ async fn main() -> anyhow::Result<()> {
     let root_session = SessionId(0); // scheduled prompts fire on root session unless task specifies
     spawn_scheduler_handler(Arc::clone(&scheduler_state), schedules_path.clone(), handle.clone(), sched_rx);
     tokio::spawn(run_scheduler(Arc::clone(&scheduler_state), handle.clone(), schedules_path, root_session));
+
+    // Autonomous goal driver — subscribes to the bus for goal sessions' TurnComplete.
+    goal::spawn_goal_driver(
+        handle.clone(), bcast.subscribe(), goal_rx,
+        Arc::clone(&next_session_id), Arc::clone(&next_goal_id),
+    );
 
     // Council handler — wire supervisor channel and spawn handler.
     if sv_cmd_tx.send(SupervisorCmd::SetCouncilTx { tx: council_tx }).await.is_err() {
@@ -1714,6 +1727,7 @@ async fn gather_tools(
     tools.push(list_schedules_spec());
     tools.push(cancel_schedule_spec());
     tools.push(convene_council_spec());
+    tools.push(goal::goal_create_spec());
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());
     tools.push(mesh_capabilities_spec());
