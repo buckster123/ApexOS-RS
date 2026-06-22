@@ -3550,6 +3550,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tx_reject.send(payload).ok();
     });
 
+    // ── "+ New chat" callback (via AgentBridge global) ────────────────────────
+    // Mint a fresh session without restarting agentd: hello{new:true} → the gateway
+    // allocates a new session id + empty history, and its session_init reply clears
+    // the view + sets current_session_id (the same path session restore uses).
+    let tx_new = tx.clone();
+    ui.global::<AgentBridge>().on_new_chat(move || {
+        let payload = serde_json::json!({ "type": "hello", "new": true }).to_string();
+        tx_new.send(payload).ok();
+    });
+
     // ── send-message callback ─────────────────────────────────────────────────
     let tx_send = tx.clone();
     let messages_send = messages.clone();

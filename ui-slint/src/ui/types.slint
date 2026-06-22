@@ -87,6 +87,7 @@ export struct WindowDesc {
 export global AgentBridge {
     callback approve-tool(string);   // call_id
     callback reject-tool(string);    // call_id
+    callback new-chat();             // start a fresh session (the "+ New" button)
     in property <int> chat-scroll-tick: 0;
 }
 
