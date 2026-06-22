@@ -199,7 +199,7 @@ export component AppWindow inherits Window {
     callback power-action(string);
     callback terminal-send(string);          // a submitted terminal command line
     // Tier-A parity apps
-    callback refresh-events();
+    callback refresh-events(string, int);
     callback refresh-mesh();
     callback add-peer(string, string, string);   // node_id, ws_url, token
     callback remove-peer(string);            // node_id
@@ -800,7 +800,7 @@ export component AppWindow inherits Window {
                         set-cache(e, c, t) => { root.set-cache(e, c, t); }
                         set-sensor-profile(p) => { root.set-sensor-profile(p); }
                         refresh-settings => { root.refresh-settings(); }
-                        refresh-events => { root.refresh-events(); }
+                        refresh-events(types, hours) => { root.refresh-events(types, hours); }
                         refresh-mesh => { root.refresh-mesh(); }
                         add-peer(id, url, token) => { root.add-peer(id, url, token); }
                         remove-peer(id) => { root.remove-peer(id); }
