@@ -12,6 +12,8 @@ pub mod mesh;
 pub use mesh::{parse_avahi_output, PeerRecord, PeerRegistry, PeerRole};
 pub mod beacon;
 pub use beacon::{new_liveness_map, spawn_beacon_loop, LivenessMap};
+pub mod session_auth;
+pub use session_auth::{SessionAuth, SessionStore};
 use serde::{Deserialize, Serialize};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -147,6 +149,11 @@ pub struct GatewayState {
     pub identities:        Arc<RwLock<apexos_core::Identities>>,
     /// In-memory PIN guess-lockout, keyed by user id (never persisted).
     pub pin_lockouts:      Arc<std::sync::Mutex<HashMap<String, PinLockout>>>,
+    /// In-memory human-login session tokens (agent-identity.md slice 3e). Minted by
+    /// `/api/auth/login`, accepted by `require_token` alongside the admin token, and
+    /// cleared on restart — never persisted. Lets the desktop UI / PWA authenticate
+    /// without the shared `AGENTD_TOKEN`.
+    pub sessions:          Arc<std::sync::Mutex<SessionStore>>,
 }
 
 /// Per-user PIN guess-lockout: N consecutive failures locks verification for a
@@ -212,6 +219,19 @@ async fn require_token(
         .decode_utf8_lossy();
     if tokens_match(&from_query, token) {
         return next.run(req).await;
+    }
+    // Not the admin token — accept a valid minted human-login session token
+    // (slice 3e). Either transport (header or ?token=) may carry it; the store is a
+    // direct lookup over 256-bit opaque tokens, so no constant-time compare needed.
+    if !from_header.is_empty() || !from_query.is_empty() {
+        let now = std::time::Instant::now();
+        let ok = {
+            let s = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            s.verify(from_header, now).is_some() || s.verify(from_query.as_ref(), now).is_some()
+        };
+        if ok {
+            return next.run(req).await;
+        }
     }
     (StatusCode::UNAUTHORIZED, "invalid or missing token").into_response()
 }
@@ -303,6 +323,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/identities/user",    post(identities_create_user_handler))
         .route("/api/identities/agent",   post(identities_create_agent_handler))
         .route("/api/identities/verify",  post(identities_verify_pin_handler))
+        .route("/api/auth/logout",        post(auth_logout_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new()
@@ -311,6 +332,12 @@ pub fn router(state: GatewayState) -> Router {
         // UNgated: the pairing claim is authenticated by the short-lived code itself,
         // not the api_token (the whole point is the caller doesn't have our token yet).
         .route("/api/mesh/pair/claim", post(pair_claim_handler))
+        // UNgated: human login (slice 3e) — authenticated by the profile PIN itself,
+        // not the api_token (the whole point is the human client doesn't have it). An
+        // open profile mints a token with no secret (LAN-trusted one-tap); a PIN
+        // profile is gated + guess-lockout-guarded. Mints the session token clients
+        // then use as Bearer for every gated route above.
+        .route("/api/auth/login", post(auth_login_handler))
         .fallback(static_handler)
         .with_state(state)
 }
@@ -2748,6 +2775,95 @@ async fn identities_verify_pin_handler(
             "retry_after_secs": locked,
         }))).into_response()
     }
+}
+
+// ── Human login → session token (agent-identity.md slice 3e) ────────────────────
+
+#[derive(serde::Deserialize)]
+struct LoginBody {
+    user_id: String,
+    #[serde(default)]
+    pin: String,
+}
+
+/// POST /api/auth/login — profile (+ optional PIN) → a minted session token.
+///
+/// UNGATED (authenticated by the PIN itself, mirroring `/api/mesh/pair/claim`): the
+/// whole point is the human client does NOT have the node's `AGENTD_TOKEN`. An open
+/// (PIN-less) profile mints a token with no secret — the decided LAN-trusted one-tap
+/// auth-weight; a PIN profile is verified and guarded by the shared per-user guess
+/// lockout. On success the client uses the returned token as the Bearer for every
+/// gated route (and `?token=` on the WS).
+async fn auth_login_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<LoginBody>,
+) -> impl IntoResponse {
+    let now = std::time::Instant::now();
+    // Locked out from too many bad guesses? Refuse without revealing validity.
+    {
+        let lk = state.pin_lockouts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(remaining) = lk.get(&body.user_id).and_then(|l| l.locked_for(now)) {
+            return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({
+                "ok": false, "locked": true, "retry_after_secs": remaining,
+            }))).into_response();
+        }
+    }
+    // Resolve the profile + verify. An open profile (no PIN) always verifies; an
+    // unknown user fails (and still counts toward the lockout, so it can't be used
+    // to probe which profiles exist without rate-limiting).
+    let (exists, ok, agent_id) = {
+        let ids = state.identities.read().await;
+        match ids.user(&body.user_id) {
+            Some(u) => (true, u.verify_pin(&body.pin), u.default_agent.clone().unwrap_or_default()),
+            None    => (false, false, String::new()),
+        }
+    };
+    let locked = {
+        let mut lk = state.pin_lockouts.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = lk.entry(body.user_id.clone()).or_default();
+        entry.record(ok && exists, now);
+        entry.locked_for(now)
+    };
+    if !exists || !ok {
+        return (StatusCode::OK, Json(serde_json::json!({
+            "ok": false, "locked": locked.is_some(), "retry_after_secs": locked,
+        }))).into_response();
+    }
+    // Mint + store the session token (sweeping abandoned ones first).
+    let token = session_auth::gen_session_token();
+    {
+        let mut s = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        s.sweep(now);
+        s.insert(
+            token.clone(),
+            SessionAuth { user_id: body.user_id.clone(), agent_id: agent_id.clone() },
+            now,
+            std::time::Duration::from_secs(session_auth::SESSION_TTL_SECS),
+        );
+    }
+    (StatusCode::OK, Json(serde_json::json!({
+        "ok": true,
+        "token": token,
+        "user_id": body.user_id,
+        "agent_id": agent_id,                 // the user's default agent ("" → client picks)
+        "expires_in": session_auth::SESSION_TTL_SECS,
+    }))).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct LogoutBody {
+    token: String,
+}
+
+/// POST /api/auth/logout — revoke a session token. Gated (you must present a valid
+/// token to reach it); idempotent — revoking an unknown/expired token is `ok:true`.
+async fn auth_logout_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<LogoutBody>,
+) -> impl IntoResponse {
+    let mut s = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+    s.revoke(&body.token);
+    Json(serde_json::json!({ "ok": true }))
 }
 
 // ── Mesh pairing — kiosk-friendly token exchange ────────────────────────────────
