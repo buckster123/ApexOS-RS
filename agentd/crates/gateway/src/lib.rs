@@ -338,6 +338,9 @@ pub fn router(state: GatewayState) -> Router {
         // profile is gated + guess-lockout-guarded. Mints the session token clients
         // then use as Bearer for every gated route above.
         .route("/api/auth/login", post(auth_login_handler))
+        // UNgated: the minimal profile list (id/name/has_pin) the login screen needs
+        // before the client holds any token. PINs/agents stay behind /api/identities.
+        .route("/api/auth/profiles", get(auth_profiles_handler))
         .fallback(static_handler)
         .with_state(state)
 }
@@ -2864,6 +2867,18 @@ async fn auth_logout_handler(
     let mut s = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
     s.revoke(&body.token);
     Json(serde_json::json!({ "ok": true }))
+}
+
+/// GET /api/auth/profiles — the minimal login-tile data (id, name, has_pin) for each
+/// profile. UNGATED: the login screen needs it *before* the client holds any token.
+/// Deliberately minimal — no agents, no PIN hashes; the full registry stays behind
+/// the token-gated `/api/identities`.
+async fn auth_profiles_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let ids = state.identities.read().await;
+    let users: Vec<serde_json::Value> = ids.users.iter().map(|u| serde_json::json!({
+        "id": u.id, "name": u.name, "has_pin": u.has_pin(),
+    })).collect();
+    Json(serde_json::json!({ "users": users }))
 }
 
 // ── Mesh pairing — kiosk-friendly token exchange ────────────────────────────────
