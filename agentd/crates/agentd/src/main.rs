@@ -332,6 +332,7 @@ async fn main() -> anyhow::Result<()> {
         session_bindings:     Arc::clone(&session_bindings),
         identities:           Arc::clone(&identities),
         pin_lockouts:         Arc::new(std::sync::Mutex::new(HashMap::new())),
+        sessions:             Arc::new(std::sync::Mutex::new(apexos_gateway::SessionStore::default())),
     };
     let gw_bind = std::env::var("AGENTD_BIND").unwrap_or_else(|_| "127.0.0.1:8787".into());
     let gw_addr: std::net::SocketAddr = gw_bind.parse()?;

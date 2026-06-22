@@ -54,6 +54,7 @@ fn make_state(handle: apexos_core::BusHandle, bcast: tokio::sync::broadcast::Sen
         session_bindings:     Arc::new(std::sync::Mutex::new(HashMap::new())),
         identities:           Arc::new(tokio::sync::RwLock::new(apexos_core::Identities::default())),
         pin_lockouts:         Arc::new(std::sync::Mutex::new(HashMap::new())),
+        sessions:             Arc::new(std::sync::Mutex::new(apexos_gateway::SessionStore::default())),
     }
 }
 
