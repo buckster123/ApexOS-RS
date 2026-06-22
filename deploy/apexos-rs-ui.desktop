@@ -1,0 +1,16 @@
+[Desktop Entry]
+# ApexOS-RS native UI in DESKTOP mode — a winit window in the user's graphical
+# session (vs the kiosk's root KMS/DRM systemd service). Installed by install.sh
+# --mode=desktop to /usr/share/applications (app menu) and the user's
+# ~/.config/autostart. No token is baked in: with no AGENTD_TOKEN the UI shows the
+# slice-3e login screen, mints a session token, and re-execs itself with it.
+Type=Application
+Name=ApexOS-RS
+GenericName=ApexOS-RS UI
+Comment=ApexOS-RS native interface (logs in — no shared token needed)
+Exec=env AGENTD_WS=ws://localhost:8787/ws SLINT_BACKEND=winit /usr/local/bin/apexos-rs-ui
+Icon=apexos-rs-ui
+Terminal=false
+Categories=Utility;System;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
