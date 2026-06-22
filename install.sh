@@ -254,6 +254,7 @@ NO_UI=false; NO_CEREBRO_API=false; NO_SENSOR=true; NO_VOICE=true
 NO_OCCIPITAL=false; OCC_FEATURES=""; OCCIPITAL_INSTALLED=false
 API_KEY=""; OPENROUTER_KEY=""
 TIER="auto"; MODE="auto"; REPO_DIR=""
+IS_DESKTOP=false   # MODE==desktop → build the UI but launch a winit window, not the kiosk service
 
 # Provenance markers — which knobs were set explicitly on the command line. A CLI
 # flag always wins; stored install.conf and USB provisioning only fill knobs the
@@ -477,7 +478,7 @@ This will install the pure-Rust agent OS on your device:
   • agentd       — AI agent daemon + WebSocket gateway
   • cerebro-mcp  — cognitive memory ($(echo "$TIER_DESC" | cut -d— -f1 | xargs))
   • apexos-tools — system tool plugins
-  • apexos-rs-ui — native Slint UI (kiosk mode only)
+  • apexos-rs-ui — native Slint UI (kiosk KMS/DRM, or desktop winit window)
 
 Detected device:
   Model : $PI_MODEL
@@ -500,7 +501,11 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
     "desktop"  "Desktop  — shared monitor, native window (x86/Mac)")
   [[ -n "$MODE_CHOICE" ]] && MODE="$MODE_CHOICE"
 fi
-[[ "$MODE" == "headless" || "$MODE" == "desktop" ]] && NO_UI=true
+# Headless = no local UI. Desktop = build the UI but run it as a winit window in the
+# user's session (app-menu + autostart launcher), NOT the root KMS/DRM kiosk service.
+# Slice-3e auth means it shows a login screen → no token plumbing needed in the launcher.
+[[ "$MODE" == "headless" ]] && NO_UI=true
+[[ "$MODE" == "desktop"  ]] && IS_DESKTOP=true
 info "Mode: $MODE | Tier: $TIER | Arch: $ARCH"
 
 # ── TUI: Addon checklist (manual only — auto uses sensible defaults) ──────────
@@ -512,7 +517,7 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
 
   ADDONS=$(tui_checklist "Components" \
     "Select the components to install:\n(Space to toggle, Enter to confirm)" \
-    "ui"        "apexos-rs-ui     Native Slint UI — KMS/DRM display"         "$UI_STATE" \
+    "ui"        "apexos-rs-ui     Native Slint UI — kiosk display / desktop window" "$UI_STATE" \
     "cerebro"   "Cerebro API      REST dashboard + memory UI on :8765"        "$API_STATE" \
     "occipital" "Web Cortex       web_search/fetch + semantic recall"         "$OCC_STATE" \
     "sensor"    "Sensor Head      BME688 air quality + MLX90640 thermal cam"  "$SENSOR_STATE" \
@@ -591,7 +596,7 @@ fi
 # ── TUI: Pre-build summary + confirm ─────────────────────────────────────────
 if ! $YES; then
   ADDONS_LIST=""
-  ! $NO_UI          && ADDONS_LIST+="  ✓ apexos-rs-ui  (KMS/DRM display)\n"
+  ! $NO_UI          && ADDONS_LIST+="  ✓ apexos-rs-ui  ($($IS_DESKTOP && echo 'desktop window' || echo 'KMS/DRM display'))\n"
   ! $NO_CEREBRO_API && ADDONS_LIST+="  ✓ cerebro-api   (REST dashboard :8765)\n"
   OCC_RECALL="FTS5 keyword recall"
   case "$TIER" in micro|standard|pro) OCC_RECALL="semantic recall (bge-small)" ;; esac
@@ -910,6 +915,23 @@ if ! $NO_UI; then
   install_bin ui-slint
   install -m 755 "$BIN_DIR/ui-slint" /usr/local/bin/apexos-rs-ui
   ok "apexos-rs-ui → /usr/local/bin/apexos-rs-ui"
+  if $IS_DESKTOP; then
+    # Desktop mode: a winit window in the user's session (app menu + autostart),
+    # NOT the root KMS kiosk service. The same binary, launched differently. Both
+    # launcher writes are best-effort — the binary is already installed, so a
+    # launcher hiccup shouldn't abort the whole install.
+    install -Dm 644 "$REPO_DIR/deploy/apexos-rs-ui.desktop" /usr/share/applications/apexos-rs-ui.desktop \
+      && ok "Desktop launcher → app menu (ApexOS-RS)" \
+      || warn "Could not install the app-menu launcher — launch /usr/local/bin/apexos-rs-ui manually"
+    DESK_HOME=$(getent passwd "$BUILD_USER" 2>/dev/null | cut -d: -f6)
+    if [[ -n "$DESK_HOME" && -d "$DESK_HOME" && "$BUILD_USER" != "root" ]]; then
+      if install -Dm 644 "$REPO_DIR/deploy/apexos-rs-ui.desktop" \
+           "$DESK_HOME/.config/autostart/apexos-rs-ui.desktop"; then
+        chown -R "$BUILD_USER":"$BUILD_USER" "$DESK_HOME/.config/autostart" 2>/dev/null || true
+        ok "Autostart for $BUILD_USER (rm ~/.config/autostart/apexos-rs-ui.desktop to disable)"
+      fi
+    fi
+  fi
 fi
 
 # ── Occipital (web reading cortex) ───────────────────────────────────────────────
@@ -1152,13 +1174,15 @@ install_svc() {
 install_svc agentd
 install_svc apex-sensor-bridge
 ! $NO_CEREBRO_API && install_svc cerebro-api   || true
-! $NO_UI          && install_svc apexos-rs-ui  || true
+# The root KMS/DRM kiosk service is kiosk-mode only; desktop mode launches the UI
+# as a user-session winit window (the .desktop launcher above), never this service.
+! $NO_UI && ! $IS_DESKTOP && install_svc apexos-rs-ui  || true
 
 systemctl daemon-reload
 
 systemctl enable agentd apex-sensor-bridge
 ! $NO_CEREBRO_API && systemctl enable cerebro-api  || true
-! $NO_UI          && systemctl enable apexos-rs-ui || true
+! $NO_UI && ! $IS_DESKTOP && systemctl enable apexos-rs-ui || true
 
 ok "Services enabled"
 
@@ -1243,7 +1267,7 @@ svc_start() {
 svc_start agentd            "agentd"
 $NO_SENSOR || svc_start apex-sensor-bridge "sensor-bridge"
 $NO_CEREBRO_API || svc_start cerebro-api   "cerebro-api"
-$NO_UI          || svc_start apexos-rs-ui  "apexos-rs-ui"
+{ $NO_UI || $IS_DESKTOP; } || svc_start apexos-rs-ui  "apexos-rs-ui"
 
 # ── Health check ──────────────────────────────────────────────────────────────
 hdr "Health check"
@@ -1290,9 +1314,12 @@ $NO_CEREBRO_API || { systemctl is-active cerebro-api &>/dev/null \
     && check "cerebro-api on :8765" "pass" \
     || check "cerebro-api on :8765" "not running"; }
 
-$NO_UI          || { systemctl is-active apexos-rs-ui &>/dev/null \
+{ $NO_UI || $IS_DESKTOP; } || { systemctl is-active apexos-rs-ui &>/dev/null \
     && check "apexos-rs-ui (KMS display)" "pass" \
     || check "apexos-rs-ui (KMS display)" "not running"; }
+$IS_DESKTOP && { [[ -x /usr/local/bin/apexos-rs-ui ]] \
+    && check "apexos-rs-ui (desktop window — launch from app menu)" "pass" \
+    || check "apexos-rs-ui (desktop)" "binary missing"; } || true
 
 API_CHECK=""
 grep -q "^ANTHROPIC_API_KEY=sk-" /etc/agentd/env 2>/dev/null \
