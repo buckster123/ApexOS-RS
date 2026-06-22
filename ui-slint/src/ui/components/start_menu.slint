@@ -12,6 +12,7 @@ import { Win98, BevelEdges } from "win98.slint";
 component MenuRow inherits Rectangle {
     in property <string> glyph;
     in property <string> label;
+    in property <int>    badge: 0;   // unread count pill (0 = hidden)
     callback clicked;
 
     height: 44px;
@@ -25,7 +26,6 @@ component MenuRow inherits Rectangle {
         padding-left: 12px;
         padding-right: 16px;
         spacing: 12px;
-        alignment: start;
 
         Text {
             text: root.glyph;
@@ -42,12 +42,30 @@ component MenuRow inherits Rectangle {
             letter-spacing: 0.4px;
             color: touch.has-hover ? Palette.primary : Palette.text;
             vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        // Unread badge (e.g. mesh inbox count on the Mesh row).
+        if root.badge > 0: Rectangle {
+            width: bdg.preferred-width + 12px;
+            height: 18px;
+            border-radius: 9px;
+            background: Palette.primary;
+            y: (parent.height - self.height) / 2;
+            bdg := Text {
+                text: root.badge > 9 ? "9+" : "\{root.badge}";
+                color: Palette.text-bright;
+                font-size: 9px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
         }
     }
 }
 
 export component StartMenu inherits Rectangle {
     callback launch(int);     // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings 5=terminal 6=council
+    in property <int> mesh-unread: 0;   // mesh inbox unread → badge on the Mesh row
 
     width: 240px;
     height: layout.preferred-height;
@@ -93,7 +111,7 @@ export component StartMenu inherits Rectangle {
         if Personas.show-tech-apps: MenuRow { glyph: "⌨"; label: "Terminal"; clicked => { root.launch(5); } }
         if Personas.show-tech-apps: MenuRow { glyph: "⚖"; label: "Council";  clicked => { root.launch(6); } }
         if Personas.show-tech-apps: MenuRow { glyph: "📜"; label: "Event Log"; clicked => { root.launch(7); } }
-        if Personas.show-tech-apps: MenuRow { glyph: "🕸"; label: "Mesh";      clicked => { root.launch(8); } }
+        if Personas.show-tech-apps: MenuRow { glyph: "🕸"; label: "Mesh";      badge: root.mesh-unread; clicked => { root.launch(8); } }
         if Personas.show-tech-apps: MenuRow { glyph: "⚡"; label: "Inference"; clicked => { root.launch(9); } }
         if Personas.show-tech-apps: MenuRow { glyph: "🎛"; label: "Audio Editor"; clicked => { root.launch(10); } }
         if Personas.show-tech-apps: MenuRow { glyph: "🌐"; label: "Web";          clicked => { root.launch(15); } }

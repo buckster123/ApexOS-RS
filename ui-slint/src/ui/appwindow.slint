@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, BoardCard } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, BoardCard } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { IdentityWizard } from "components/identity_wizard.slint";
 import { ImagePicker } from "components/image_picker.slint";
@@ -17,7 +17,7 @@ import { StartMenu, Win98StartMenu } from "components/start_menu.slint";
 import { NotifCenter } from "components/notif_center.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
-export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, FaceGl, ReaderBlock, ReaderLink, BoardCard }
+export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, FaceGl, ReaderBlock, ReaderLink, BoardCard }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -75,6 +75,8 @@ export component AppWindow inherits Window {
     // ── Tier-A parity apps (Event Log / Mesh / Inference) ───────────────
     in-out property <[EventLogItem]> event-log;
     in-out property <[MeshNode]>     mesh-nodes;
+    in-out property <[InboxThread]>  mesh-threads;
+    in-out property <int>            mesh-unread: 0;
     in-out property <string>         mesh-pair-code;
     in-out property <int>            mesh-pair-remaining;
     in-out property <string>         inference-backend: "—";
@@ -203,6 +205,7 @@ export component AppWindow inherits Window {
     callback remove-peer(string);            // node_id
     callback start-pairing();
     callback redeem-pairing(string, string);     // peer ws_url, code
+    callback open-mesh-thread(int);              // peer thread SessionId → restore
     callback refresh-inference();
     callback refresh-audio();
     callback select-audio(string, string);   // path, name
@@ -717,6 +720,8 @@ export component AppWindow inherits Window {
                         board-recent: root.board-recent;
                         event-log: root.event-log;
                         mesh-nodes: root.mesh-nodes;
+                        mesh-threads: root.mesh-threads;
+                        mesh-unread: root.mesh-unread;
                         mesh-pair-code <=> root.mesh-pair-code;
                         mesh-pair-remaining <=> root.mesh-pair-remaining;
                         inference-backend: root.inference-backend;
@@ -801,6 +806,7 @@ export component AppWindow inherits Window {
                         remove-peer(id) => { root.remove-peer(id); }
                         start-pairing => { root.start-pairing(); }
                         redeem-pairing(url, code) => { root.redeem-pairing(url, code); }
+                        open-mesh-thread(s) => { root.open-mesh-thread(s); }
                         refresh-inference => { root.refresh-inference(); }
                         refresh-audio => { root.refresh-audio(); }
                         select-audio(p, n) => { root.select-audio(p, n); }
@@ -864,6 +870,7 @@ export component AppWindow inherits Window {
                 if root.start-menu-open && !win98: StartMenu {
                     x: tb-margin;
                     y: parent.height - tb-h - tb-margin - self.height - 8px;
+                    mesh-unread: root.mesh-unread;
                     launch(ord) => {
                         root.launch-app(ord);
                         root.start-menu-open = false;

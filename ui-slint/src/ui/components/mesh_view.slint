@@ -1,6 +1,6 @@
 import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
-import { MeshNode } from "../types.slint";
+import { MeshNode, InboxThread } from "../types.slint";
 
 // ── MeshView (🕸) ─────────────────────────────────────────────────────────────
 //
@@ -21,6 +21,11 @@ export component MeshView {
     min-height: 0px;
 
     in property <[MeshNode]> nodes;
+
+    // INBOX: per-peer a2a threads (event-driven, separate from the HTTP roster).
+    in property <[InboxThread]> threads;
+    in property <int> unread;            // total unread across threads (header pill)
+    callback open-thread(int);           // peer thread SessionId → restore it
 
     // Token-capture / pairing dialog state. pending-node != "" ⇒ ADD dialog open.
     in-out property <string> pending-node;
@@ -55,8 +60,27 @@ export component MeshView {
                     font-size: 9px;
                     letter-spacing: 2px;
                     vertical-alignment: center;
-                    horizontal-stretch: 1;
                 }
+
+                // Unread-mail pill (total across all peer threads).
+                if root.unread > 0: Rectangle {
+                    width: pill.preferred-width + 14px;
+                    height: 18px;
+                    border-radius: 9px;
+                    background: Palette.primary;
+                    y: (parent.height - self.height) / 2;
+                    pill := Text {
+                        text: "✉ \{root.unread}";
+                        color: Palette.text-bright;
+                        font-size: 9px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Spacer pushes PAIR / REFRESH to the right edge.
+                Rectangle { horizontal-stretch: 1; }
 
                 // PAIR — show this node's code for another node to enter.
                 Rectangle {
@@ -123,6 +147,93 @@ export component MeshView {
                 padding: 12px;
                 spacing: 8px;
                 alignment: start;
+
+                // ── INBOX: a2a threads (peer → this node) ───────────────────
+                if root.threads.length > 0: Text {
+                    text: "✉ MESSAGES";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 2px;
+                }
+
+                for t in root.threads: Rectangle {
+                    height: 54px;
+                    border-radius: Palette.radius;
+                    background: th-ta.has-hover ? Palette.surface-hi : Palette.surface;
+                    border-width: 1px;
+                    border-color: t.unread > 0 ? Palette.primary.with-alpha(0.5) : Palette.border;
+                    animate background { duration: 120ms; }
+
+                    th-ta := TouchArea { clicked => { root.open-thread(t.session); } }
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 12px;
+                        spacing: 12px;
+
+                        // unread dot: bright when unread, dim when read
+                        Rectangle {
+                            width: 8px; height: 8px;
+                            border-radius: 4px;
+                            y: (parent.height - self.height) / 2;
+                            background: t.unread > 0 ? Palette.primary : Palette.text-dim;
+                        }
+
+                        VerticalLayout {
+                            spacing: 3px;
+                            alignment: center;
+                            horizontal-stretch: 1;
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Text {
+                                    text: t.node-id;
+                                    color: Palette.text-bright;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: t.last-seen;
+                                    color: Palette.text-dim;
+                                    font-size: 9px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Text {
+                                text: t.preview;
+                                color: t.unread > 0 ? Palette.text : Palette.text-dim;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
+                        }
+
+                        // unread-count badge
+                        if t.unread > 0: Rectangle {
+                            width: 20px; height: 20px;
+                            border-radius: 10px;
+                            background: Palette.primary;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: t.unread > 9 ? "9+" : "\{t.unread}";
+                                color: Palette.text-bright;
+                                font-size: 9px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // Separator label before the node roster.
+                if root.threads.length > 0: Text {
+                    text: "NODES";
+                    color: Palette.text-dim;
+                    font-size: 9px;
+                    letter-spacing: 2px;
+                }
 
                 if root.nodes.length == 0: Text {
                     text: "Tap REFRESH to scan the mesh…";
