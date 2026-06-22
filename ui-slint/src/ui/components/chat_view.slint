@@ -5,10 +5,11 @@ import { MessageItem, AgentBridge } from "../types.slint";
 import { MessageBubble } from "message_bubble.slint";
 import { ToolCard } from "tool_card.slint";
 
-// Scrollable message list.
+// Scrollable message list + a "+ New" header.
 // Auto-scroll: Rust bumps AgentBridge.chat-scroll-tick, which feeds `scroll-tick`
-// here; the `changed` handler snaps the flickable to the bottom. Tool approval
-// routes through the AgentBridge global so ChatView is no longer single-instance.
+// here; the `changed` handler snaps the flickable to the bottom. Tool approval AND
+// "+ New chat" route through the AgentBridge global so ChatView is no longer
+// single-instance (it renders in both the focus surface and a desktop window).
 
 export component ChatView {
     preferred-height: 0px;
@@ -25,80 +26,117 @@ export component ChatView {
         sv.viewport-y = min(0px, -(sv.viewport-height - sv.visible-height));
     }
 
-    // ScrollView (not Flickable): draws a drag-able scrollbar, the only way to
-    // scroll back through history on the kiosk — the linuxkms backend drops
-    // scroll-wheel events. See the "No mouse-wheel scroll on linuxkms" gotcha.
-    sv := ScrollView {
-        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
-        viewport-width: sv.visible-width;
-        // Explicit viewport-height so overflow (and the scroll-tick auto-scroll
-        // math above) work. max(content, visible) keeps a sparse thread
-        // bottom-anchored: the column is stretched to the full visible height and
-        // `alignment: end` drops the messages to the bottom (chat-style), instead
-        // of stacking at the top.
-        viewport-height: max(msg-col.preferred-height, sv.visible-height);
-
-        msg-col := VerticalLayout {
-            padding:  12px;
-            spacing:  6px;
-            alignment: end;
-
-            // Empty-state hint
-            if root.messages.length == 0: Text {
-                text: "Say 'apex' or type below…";
-                color: Palette.text-dim;
-                font-size: 13px * Personas.font-scale;
-                horizontal-alignment: center;
-            }
-
-            for item in root.messages: VerticalLayout {
-                // Route to tool card or chat bubble based on role.
-                // NB: a real layout (not a plain Rectangle) so each row reports its
-                // child's height to the list — a bare Rectangle doesn't, which made
-                // rows collapse to ~0 height and draw on top of each other. The layout
-                // also stretches the child to full width so the bubble's left/right
-                // alignment has room to act.
-                if item.role == "tool": ToolCard {
-                    width: 100%;
-                    tool-name:          item.tool-name;
-                    tool-args:          item.tool-args;
-                    tool-output:        item.tool-output;
-                    tool-status:        item.tool-status;
-                    awaiting-approval:  item.awaiting-approval;
-                    glow-alpha:         root.glow-alpha;
-                    approve => { AgentBridge.approve-tool(item.call-id); }
-                    reject  => { AgentBridge.reject-tool(item.call-id); }
-                }
-                // Temporal marker (G6.1) — a centered date/time chip dropped in
-                // at the start of an exchange after a gap; grounds the thread.
-                if item.role == "time": HorizontalLayout {
-                    width: 100%;
-                    alignment: center;
-                    Rectangle {
-                        height: 20px;
-                        width: stamp.preferred-width + 20px;
-                        background: Palette.surface-hi;
-                        border-radius: 10px;
-                        border-width: 1px;
-                        border-color: Palette.border;
-                        stamp := Text {
-                            text: item.text;
-                            color: Palette.text-dim;
-                            font-size: 10px * Personas.font-scale;
-                            letter-spacing: 0.5px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+    VerticalLayout {
+        // ── Header: + New chat — mints a fresh session (AgentBridge.new-chat →
+        // Rust sends hello{new:true}; the session_init reply clears the view). ──
+        Rectangle {
+            height: 34px;
+            background: Palette.surface;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 10px;
+                Rectangle { horizontal-stretch: 1; }
+                Rectangle {
+                    width: nbtn.preferred-width + 24px;
+                    height: 24px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Palette.radius;
+                    background: nb-ta.pressed   ? Palette.primary-dim
+                              : nb-ta.has-hover ? Palette.surface
+                              : Palette.surface-hi;
+                    border-width: 1px;
+                    border-color: nb-ta.has-hover ? Palette.primary : Palette.border;
+                    animate background, border-color { duration: 150ms; }
+                    nb-ta := TouchArea { clicked => { AgentBridge.new-chat(); } }
+                    nbtn := Text {
+                        text: "+ New";
+                        color: nb-ta.has-hover ? Palette.primary : Palette.text-dim;
+                        font-size: 10px * Personas.font-scale;
+                        letter-spacing: 0.5px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
                     }
                 }
-                if item.role != "tool" && item.role != "time": MessageBubble {
-                    width: 100%;
-                    role:       item.role;
-                    text:       item.text;
-                    streaming:  item.streaming;
-                    glow-alpha: root.glow-alpha;
-                    // ChatView width is top-down, so capping here is loop-free.
-                    max-bubble-width: root.width * 0.78;
+            }
+        }
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ScrollView (not Flickable): draws a drag-able scrollbar, the only way to
+        // scroll back through history on the kiosk — the linuxkms backend drops
+        // scroll-wheel events. See the "No mouse-wheel scroll on linuxkms" gotcha.
+        sv := ScrollView {
+            vertical-stretch: 1;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            viewport-width: sv.visible-width;
+            // Explicit viewport-height so overflow (and the scroll-tick auto-scroll
+            // math above) work. max(content, visible) keeps a sparse thread
+            // bottom-anchored: the column is stretched to the full visible height and
+            // `alignment: end` drops the messages to the bottom (chat-style), instead
+            // of stacking at the top.
+            viewport-height: max(msg-col.preferred-height, sv.visible-height);
+
+            msg-col := VerticalLayout {
+                padding:  12px;
+                spacing:  6px;
+                alignment: end;
+
+                // Empty-state hint
+                if root.messages.length == 0: Text {
+                    text: "Say 'apex' or type below…";
+                    color: Palette.text-dim;
+                    font-size: 13px * Personas.font-scale;
+                    horizontal-alignment: center;
+                }
+
+                for item in root.messages: VerticalLayout {
+                    // Route to tool card or chat bubble based on role.
+                    // NB: a real layout (not a plain Rectangle) so each row reports its
+                    // child's height to the list — a bare Rectangle doesn't, which made
+                    // rows collapse to ~0 height and draw on top of each other. The layout
+                    // also stretches the child to full width so the bubble's left/right
+                    // alignment has room to act.
+                    if item.role == "tool": ToolCard {
+                        width: 100%;
+                        tool-name:          item.tool-name;
+                        tool-args:          item.tool-args;
+                        tool-output:        item.tool-output;
+                        tool-status:        item.tool-status;
+                        awaiting-approval:  item.awaiting-approval;
+                        glow-alpha:         root.glow-alpha;
+                        approve => { AgentBridge.approve-tool(item.call-id); }
+                        reject  => { AgentBridge.reject-tool(item.call-id); }
+                    }
+                    // Temporal marker (G6.1) — a centered date/time chip dropped in
+                    // at the start of an exchange after a gap; grounds the thread.
+                    if item.role == "time": HorizontalLayout {
+                        width: 100%;
+                        alignment: center;
+                        Rectangle {
+                            height: 20px;
+                            width: stamp.preferred-width + 20px;
+                            background: Palette.surface-hi;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            stamp := Text {
+                                text: item.text;
+                                color: Palette.text-dim;
+                                font-size: 10px * Personas.font-scale;
+                                letter-spacing: 0.5px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                    if item.role != "tool" && item.role != "time": MessageBubble {
+                        width: 100%;
+                        role:       item.role;
+                        text:       item.text;
+                        streaming:  item.streaming;
+                        glow-alpha: root.glow-alpha;
+                        // ChatView width is top-down, so capping here is loop-free.
+                        max-bubble-width: root.width * 0.78;
+                    }
                 }
             }
         }

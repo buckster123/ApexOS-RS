@@ -431,6 +431,7 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
     let bus      = state.bus.clone();
     let histories = state.histories.clone();
     let session_bindings = state.session_bindings.clone();
+    let next_session_id = state.next_session_id.clone();   // for `hello{new:true}` (start a fresh chat)
     let read = tokio::spawn(async move {
         let mut stream   = stream;
         let mut session_id = session_id;   // mutable — updated by hello
@@ -442,14 +443,21 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                     Err(_) => continue,
                 };
                 if val["type"].as_str() == Some("hello") {
-                    // Client wants to resume an existing session.
+                    // Resume an existing session, start a brand-new one (`new:true`,
+                    // the "+ New chat" button), or (neither) keep the current session.
                     let resume = val["resume_session"].as_u64().map(SessionId);
+                    let want_new = val["new"].as_bool().unwrap_or(false);
                     let hist = {
                         let lock = histories.lock().await;
                         match resume {
                             Some(s) if lock.contains_key(&s) => {
                                 session_id = s.0;
                                 lock.get(&s).cloned().unwrap_or_default()
+                            }
+                            _ if want_new => {
+                                // Fresh chat: a new id from the shared atomic, empty history.
+                                session_id = next_session_id.fetch_add(1, Ordering::SeqCst);
+                                vec![]
                             }
                             _ => vec![],  // keep current session_id
                         }
