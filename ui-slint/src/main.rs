@@ -115,8 +115,85 @@ struct UserRow { id: String, name: String, has_pin: bool }
 #[derive(Clone, Default)]
 struct AgentRow { id: String, name: String, owner: String }
 #[derive(Default)]
-struct IdState { users: Vec<UserRow>, agents: Vec<AgentRow>, selected: String, pin: String }
+struct IdState { users: Vec<UserRow>, agents: Vec<AgentRow>, selected: String, pin: String,
+    /// True when the wizard is acting as the LOGIN screen (no AGENTD_TOKEN in env →
+    /// the desktop/PWA path): profiles come from /api/auth/profiles and a pick/OK
+    /// mints a session token via /api/auth/login + re-execs. See agent-identity.md 3e.
+    login: bool }
 impl IdState { fn new() -> Self { Self::default() } }
+
+/// Re-exec this binary with `AGENTD_TOKEN` set to the freshly-minted session token,
+/// so the normal (token-present) connection path runs unchanged — no boot refactor.
+/// Returns ONLY on failure (`exec` replaces the process image on success). Unix-only
+/// (every ApexOS-RS tier is Linux/Unix).
+fn reexec_with_token(token: &str) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("apexos-rs-ui"));
+    std::process::Command::new(exe)
+        .args(std::env::args().skip(1))
+        .env("AGENTD_TOKEN", token)
+        .exec()
+}
+
+/// Slice-3e login: POST profile+PIN to the ungated `/api/auth/login`. On success,
+/// re-exec with the minted token (→ the normal connection path). On failure, surface
+/// it on the keypad + a toast. Runs in a tokio task (the re-exec replaces the whole
+/// process, so it doesn't matter which thread calls it).
+async fn do_login(
+    client:  &reqwest::Client,
+    base:    &str,
+    user_id: String,
+    pin:     String,
+    ui_w:    slint::Weak<AppWindow>,
+) {
+    let body = serde_json::json!({ "user_id": user_id, "pin": pin });
+    let resp = client.post(format!("{base}/api/auth/login"))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await;
+    match resp {
+        Ok(r) => {
+            let v = r.json::<Value>().await.unwrap_or(Value::Null);
+            if v["ok"].as_bool().unwrap_or(false) {
+                if let Some(tok) = v["token"].as_str() {
+                    let e = reexec_with_token(tok);   // returns only if exec failed
+                    notify(ToastKind::Error, format!("Re-launch after login failed: {e}"));
+                    return;
+                }
+            }
+            let locked = v["locked"].as_bool().unwrap_or(false);
+            let retry  = v["retry_after_secs"].as_u64();
+            let msg = if locked {
+                match retry {
+                    Some(s) => format!("Too many tries — locked {s}s"),
+                    None    => "Too many tries — locked".to_string(),
+                }
+            } else {
+                "Wrong PIN — try again".to_string()
+            };
+            let m = msg.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    ID_STATE.with(|s| s.borrow_mut().pin.clear());
+                    ui.set_identity_pin_filled(0);
+                    ui.set_identity_pin_error(true);
+                    ui.set_identity_pin_message(m.into());
+                }
+            }).ok();
+            notify(ToastKind::Error, msg);
+        }
+        Err(_) => {
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    ui.set_identity_pin_error(true);
+                    ui.set_identity_pin_message("Can't reach agentd — try again".into());
+                }
+            }).ok();
+            notify(ToastKind::Error, "Login failed — can't reach agentd");
+        }
+    }
+}
 
 /// Tile glyph: the name's first character, uppercased (fallback "?").
 fn id_glyph(name: &str) -> slint::SharedString {
@@ -3795,47 +3872,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ID_USERS.with(|m| *m.borrow_mut() = Some(users_model));
         ID_AGENTS.with(|m| *m.borrow_mut() = Some(agents_model));
 
-        // Fetch + gate on boot.
+        // Fetch + gate on boot. WITH an env AGENTD_TOKEN (kiosk/dev) → the identity
+        // wizard over the already-authed connection (3d, below). WITHOUT one
+        // (desktop/PWA) → LOGIN mode (3e): fetch the UNgated profile list, show the
+        // same wizard as a login screen; a pick/OK mints a session token and re-execs
+        // with it (the connection task spins harmlessly behind the modal meanwhile).
         {
             let ui_w = ui.as_weak();
             let client = Arc::clone(&http_client);
             let base = http_base.clone();
+            let has_token = std::env::var("AGENTD_TOKEN").map(|t| !t.is_empty()).unwrap_or(false);
             rt.handle().spawn(async move {
-                let v = json_get(&client, format!("{base}/api/identities")).await;
-                let users: Vec<UserRow> = v["users"].as_array().map(|a| a.iter().map(|u| UserRow {
-                    id:      u["id"].as_str().unwrap_or("").to_string(),
-                    name:    u["name"].as_str().unwrap_or("").to_string(),
-                    has_pin: u["has_pin"].as_bool().unwrap_or(false),
-                }).collect()).unwrap_or_default();
-                let agents: Vec<AgentRow> = v["agents"].as_array().map(|a| a.iter().map(|g| AgentRow {
-                    id:    g["id"].as_str().unwrap_or("").to_string(),
-                    name:  g["name"].as_str().unwrap_or("").to_string(),
-                    owner: g["owner"].as_str().unwrap_or("").to_string(),
-                }).collect()).unwrap_or_default();
-                let trivial = users.len() <= 1
-                    && users.iter().all(|u| !u.has_pin)
-                    && agents.len() <= 1;
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = ui_w.upgrade() else { return };
-                    let user_defs: Vec<UserDef> = users.iter().map(|u| UserDef {
-                        id: u.id.clone().into(), name: u.name.clone().into(),
-                        has_pin: u.has_pin, glyph: id_glyph(&u.name),
-                    }).collect();
-                    ID_STATE.with(|s| { let mut s = s.borrow_mut(); s.users = users; s.agents = agents; });
-                    if !trivial {
+                if has_token {
+                    let v = json_get(&client, format!("{base}/api/identities")).await;
+                    let users: Vec<UserRow> = v["users"].as_array().map(|a| a.iter().map(|u| UserRow {
+                        id:      u["id"].as_str().unwrap_or("").to_string(),
+                        name:    u["name"].as_str().unwrap_or("").to_string(),
+                        has_pin: u["has_pin"].as_bool().unwrap_or(false),
+                    }).collect()).unwrap_or_default();
+                    let agents: Vec<AgentRow> = v["agents"].as_array().map(|a| a.iter().map(|g| AgentRow {
+                        id:    g["id"].as_str().unwrap_or("").to_string(),
+                        name:  g["name"].as_str().unwrap_or("").to_string(),
+                        owner: g["owner"].as_str().unwrap_or("").to_string(),
+                    }).collect()).unwrap_or_default();
+                    let trivial = users.len() <= 1
+                        && users.iter().all(|u| !u.has_pin)
+                        && agents.len() <= 1;
+                    slint::invoke_from_event_loop(move || {
+                        let Some(ui) = ui_w.upgrade() else { return };
+                        let user_defs: Vec<UserDef> = users.iter().map(|u| UserDef {
+                            id: u.id.clone().into(), name: u.name.clone().into(),
+                            has_pin: u.has_pin, glyph: id_glyph(&u.name),
+                        }).collect();
+                        ID_STATE.with(|s| { let mut s = s.borrow_mut(); s.users = users; s.agents = agents; });
+                        if !trivial {
+                            ID_USERS.with(|m| { if let Some(model) = m.borrow().as_ref() { model.set_vec(user_defs); } });
+                            ui.set_identity_step(0);
+                            ui.set_identity_pin_filled(0);
+                            ui.set_identity_pin_error(false);
+                            ui.set_identity_wizard_open(true);
+                        }
+                    }).ok();
+                } else {
+                    // LOGIN mode — ungated profile list; always show (even one profile:
+                    // we need a token to connect). A pick → PIN or immediate login.
+                    let v = json_get(&client, format!("{base}/api/auth/profiles")).await;
+                    let users: Vec<UserRow> = v["users"].as_array().map(|a| a.iter().map(|u| UserRow {
+                        id:      u["id"].as_str().unwrap_or("").to_string(),
+                        name:    u["name"].as_str().unwrap_or("").to_string(),
+                        has_pin: u["has_pin"].as_bool().unwrap_or(false),
+                    }).collect()).unwrap_or_default();
+                    slint::invoke_from_event_loop(move || {
+                        let Some(ui) = ui_w.upgrade() else { return };
+                        let user_defs: Vec<UserDef> = users.iter().map(|u| UserDef {
+                            id: u.id.clone().into(), name: u.name.clone().into(),
+                            has_pin: u.has_pin, glyph: id_glyph(&u.name),
+                        }).collect();
+                        ID_STATE.with(|s| { let mut s = s.borrow_mut(); s.users = users; s.login = true; });
                         ID_USERS.with(|m| { if let Some(model) = m.borrow().as_ref() { model.set_vec(user_defs); } });
                         ui.set_identity_step(0);
                         ui.set_identity_pin_filled(0);
                         ui.set_identity_pin_error(false);
                         ui.set_identity_wizard_open(true);
-                    }
-                }).ok();
+                    }).ok();
+                }
             });
         }
 
-        // Pick a profile → PIN step (if protected) or straight to agents.
+        // Pick a profile → PIN step (if protected); else agents (identity mode) or an
+        // immediate token mint + re-exec (login mode, open profile = one tap).
         {
             let ui_w = ui.as_weak();
+            let client_c = Arc::clone(&http_client);
+            let base_c = http_base.clone();
+            let rt_h = rt.handle().clone();
             ui.on_identity_pick_user(move |id| {
                 let id = id.to_string();
                 let Some(ui) = ui_w.upgrade() else { return };
@@ -3845,6 +3955,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|u| (u.has_pin, u.name.clone()))
                         .unwrap_or((false, id.clone()))
                 });
+                let login = ID_STATE.with(|s| s.borrow().login);
                 ID_STATE.with(|s| { let mut s = s.borrow_mut(); s.selected = id.clone(); s.pin.clear(); });
                 ui.set_identity_selected_name(name.into());
                 ui.set_identity_pin_filled(0);
@@ -3852,6 +3963,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.set_identity_pin_message("".into());
                 if has_pin {
                     ui.set_identity_step(1);
+                } else if login {
+                    let (client, base, ui_w2) = (Arc::clone(&client_c), base_c.clone(), ui_w.clone());
+                    rt_h.spawn(async move { do_login(&client, &base, id, String::new(), ui_w2).await; });
                 } else {
                     id_load_agents(&id);
                     ui.set_identity_step(2);
@@ -3875,10 +3989,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_identity_pin_message("".into());
                 } else if k == "OK" {
                     let (user_id, pin) = ID_STATE.with(|s| { let s = s.borrow(); (s.selected.clone(), s.pin.clone()) });
+                    let login = ID_STATE.with(|s| s.borrow().login);
                     let ui_w2 = ui_w.clone();
                     let client = Arc::clone(&client_c);
                     let base = base_c.clone();
                     rt_h.spawn(async move {
+                        // Login mode (3e): mint a session token + re-exec instead of verify.
+                        if login {
+                            do_login(&client, &base, user_id, pin, ui_w2).await;
+                            return;
+                        }
                         let body = serde_json::json!({ "user_id": user_id, "pin": pin });
                         let (ok, locked, retry, reached) = match client.post(format!("{base}/api/identities/verify"))
                             .json(&body)
