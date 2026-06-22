@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, ReaderBlock, ReaderLink, BoardCard } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, ReaderBlock, ReaderLink, BoardCard } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -127,6 +127,8 @@ export component AppWindowFrame inherits Rectangle {
     // Tier-A parity apps (Event Log / Mesh / Inference).
     in property <[EventLogItem]> event-log;
     in property <[MeshNode]>     mesh-nodes;
+    in property <[InboxThread]>  mesh-threads;
+    in property <int>            mesh-unread;
     in-out property <string>     mesh-pair-code;
     in-out property <int>        mesh-pair-remaining;
     in property <string>         inference-backend;
@@ -216,6 +218,7 @@ export component AppWindowFrame inherits Rectangle {
     callback remove-peer(string);        // node_id
     callback start-pairing();
     callback redeem-pairing(string, string);     // peer ws_url, code
+    callback open-mesh-thread(int);              // peer thread SessionId → restore
     callback refresh-inference();
     callback refresh-audio();
     callback select-audio(string, string);   // path, name
@@ -549,6 +552,8 @@ export component AppWindowFrame inherits Rectangle {
         if root.kind == AppKind.mesh: MeshView {
             vertical-stretch: 1;
             nodes: root.mesh-nodes;
+            threads: root.mesh-threads;
+            unread: root.mesh-unread;
             pair-code <=> root.mesh-pair-code;
             pair-remaining <=> root.mesh-pair-remaining;
             refresh => { root.refresh-mesh(); }
@@ -556,6 +561,7 @@ export component AppWindowFrame inherits Rectangle {
             remove-peer(id) => { root.remove-peer(id); }
             start-pairing => { root.start-pairing(); }
             redeem-pairing(url, code) => { root.redeem-pairing(url, code); }
+            open-thread(s) => { root.open-mesh-thread(s); }
         }
 
         if root.kind == AppKind.inference: InferenceView {

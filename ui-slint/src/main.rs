@@ -63,6 +63,10 @@ thread_local! {
         const { RefCell::new(None) };
     static MESH: RefCell<Option<Rc<slint::VecModel<MeshNode>>>> =
         const { RefCell::new(None) };
+    // Mesh INBOX: per-peer a2a threads, mutated in place from the mesh_message
+    // event stream (distinct from MESH, which the HTTP roster replaces wholesale).
+    static INBOX: RefCell<Option<Rc<slint::VecModel<InboxThread>>>> =
+        const { RefCell::new(None) };
     static INFER_MODELS: RefCell<Option<Rc<slint::VecModel<ModelItem>>>> =
         const { RefCell::new(None) };
     static AUDIO_FILES: RefCell<Option<Rc<slint::VecModel<AudioFileItem>>>> =
@@ -1513,6 +1517,123 @@ fn replace_mesh(items: Vec<MeshNode>) {
     });
 }
 
+// ── Mesh INBOX (per-peer a2a threads) ───────────────────────────────────────────
+// Event-driven (the `mesh_message` stream), not HTTP-polled like the roster. The
+// unread counts are UI-session-scoped (the messages themselves persist in each
+// peer's thread JSONL — only the "since you last looked" count is ephemeral).
+
+/// Epoch seconds (UI-side wall clock) for relative inbox timestamps.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// "just now" / "5m ago" / "3h ago" / "2d ago" from a seconds delta.
+fn ago_label(delta: i64) -> String {
+    let d = delta.max(0);
+    if d < 45 {
+        "just now".into()
+    } else if d < 5_400 {
+        format!("{}m ago", (d + 30) / 60)
+    } else if d < 86_400 {
+        format!("{}h ago", (d + 1_800) / 3_600)
+    } else {
+        format!("{}d ago", d / 86_400)
+    }
+}
+
+/// Total unread across inbox threads → the Mesh badge (header pill + start menu).
+/// Slint thread only.
+fn inbox_refresh_badge() {
+    let total: i32 = INBOX.with(|m| {
+        m.borrow()
+            .as_ref()
+            .map(|model| {
+                (0..model.row_count())
+                    .filter_map(|i| model.row_data(i))
+                    .map(|t| t.unread)
+                    .sum()
+            })
+            .unwrap_or(0)
+    });
+    UI_WEAK.with(|u| {
+        if let Some(ui) = u.borrow().as_ref().and_then(|w| w.upgrade()) {
+            ui.set_mesh_unread(total);
+        }
+    });
+}
+
+/// A mesh a2a message from `from` (its thread = `session`) arrived: bump that
+/// peer's unread, refresh preview/time, float it to the top. Marshals onto the
+/// Slint thread (called from the WS receive task).
+fn inbox_upsert(from: String, session: i32, preview: String) {
+    slint::invoke_from_event_loop(move || {
+        INBOX.with(|m| {
+            if let Some(model) = m.borrow().as_ref() {
+                let existing = (0..model.row_count()).find(|&i| {
+                    model.row_data(i).map(|t| t.node_id.as_str() == from).unwrap_or(false)
+                });
+                let prior_unread =
+                    existing.and_then(|i| model.row_data(i)).map(|t| t.unread).unwrap_or(0);
+                if let Some(i) = existing {
+                    model.remove(i);
+                }
+                model.insert(
+                    0,
+                    InboxThread {
+                        node_id: from.as_str().into(),
+                        preview: preview.as_str().into(),
+                        unread: prior_unread + 1,
+                        last_seen: ago_label(0).into(),
+                        last_ts: now_secs() as i32,
+                        session,
+                    },
+                );
+            }
+        });
+        inbox_refresh_badge();
+    })
+    .ok();
+}
+
+/// User opened the thread for `session` → clear that peer's unread. Slint thread.
+fn inbox_clear_session(session: i32) {
+    INBOX.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            for i in 0..model.row_count() {
+                if let Some(mut t) = model.row_data(i) {
+                    if t.session == session && t.unread != 0 {
+                        t.unread = 0;
+                        model.set_row_data(i, t);
+                    }
+                }
+            }
+        }
+    });
+    inbox_refresh_badge();
+}
+
+/// Re-stamp every thread's relative-time label (called on the 1 s clock tick).
+/// Only writes a row when its label actually changes, so most ticks are no-ops.
+fn inbox_restamp() {
+    INBOX.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            let now = now_secs();
+            for i in 0..model.row_count() {
+                if let Some(mut t) = model.row_data(i) {
+                    let lbl = ago_label(now - t.last_ts as i64);
+                    if t.last_seen.as_str() != lbl.as_str() {
+                        t.last_seen = lbl.into();
+                        model.set_row_data(i, t);
+                    }
+                }
+            }
+        }
+    });
+}
+
 fn replace_infer_models(items: Vec<ModelItem>) {
     INFER_MODELS.with(|m| {
         if let Some(model) = m.borrow().as_ref() {
@@ -2885,6 +3006,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_mesh_nodes(slint::ModelRc::from(mesh_vec.clone()));
     MESH.with(|m| *m.borrow_mut() = Some(mesh_vec.clone()));
 
+    let inbox_vec: Rc<slint::VecModel<InboxThread>> = Rc::new(slint::VecModel::default());
+    ui.set_mesh_threads(slint::ModelRc::from(inbox_vec.clone()));
+    INBOX.with(|m| *m.borrow_mut() = Some(inbox_vec.clone()));
+
     let infer_models_vec: Rc<slint::VecModel<ModelItem>> = Rc::new(slint::VecModel::default());
     ui.set_inference_models(slint::ModelRc::from(infer_models_vec.clone()));
     INFER_MODELS.with(|m| *m.borrow_mut() = Some(infer_models_vec.clone()));
@@ -3959,6 +4084,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     });
 
+    // Tap a mesh inbox thread → clear its unread + restore the peer's session
+    // (the exact replay path the notification click uses).
+    {
+        let uw = ui.as_weak();
+        ui.on_open_mesh_thread(move |session| {
+            inbox_clear_session(session);
+            if let Some(ui) = uw.upgrade() {
+                ui.invoke_restore_session(session);
+            }
+        });
+    }
+
     let rt_h_addp    = rt.handle().clone();
     let client_addp  = Arc::clone(&http_client);
     let base_addp    = http_base.clone();
@@ -4707,6 +4844,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             move || {
                 if let Some(ui) = ui_weak.upgrade() {
                     update_clock(&ui);
+                    inbox_restamp();
                 }
             },
         );
@@ -4936,6 +5074,8 @@ fn dispatch_event(
                 format!("✉ {from}: {preview}")
             };
             notify_action(ToastKind::Info, body, session);
+            // Fold it into the per-peer inbox (grouped threads + unread badge).
+            inbox_upsert(from.to_string(), session, preview.to_string());
             return;
         }
 
