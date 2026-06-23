@@ -2569,8 +2569,23 @@ fn event_summary(ev: &Value) -> String {
 }
 
 // GET /api/events/recent → newest-first EventLogItem list.
-async fn fetch_events(client: &reqwest::Client, base_url: &str) -> Vec<EventLogItem> {
-    let body = json_get(client, format!("{base_url}/api/events/recent?max=200")).await;
+// `types` = CSV of Event "type" tags to keep (empty = all; server still strips
+// the noisy streaming events). `hours` = lookback window (server caps at 168).
+async fn fetch_events(
+    client: &reqwest::Client,
+    base_url: &str,
+    types: &str,
+    hours: i32,
+) -> Vec<EventLogItem> {
+    let mut url = format!("{base_url}/api/events/recent?max=200&hours={hours}");
+    let types = types.trim();
+    if !types.is_empty() {
+        // type tags are snake_case CSV ([a-z_,]) — query-safe, no encoding; the
+        // server splits the value on a literal comma.
+        url.push_str("&types=");
+        url.push_str(types);
+    }
+    let body = json_get(client, url).await;
     let arr = match body.as_array() { Some(a) => a.clone(), None => return Vec::new() };
     arr.iter().rev().map(|ev| {
         let ty = ev["type"].as_str().unwrap_or("event");
@@ -3223,7 +3238,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     AppKind::Settings => ui.invoke_refresh_settings(),
                     AppKind::Sessions => ui.invoke_refresh_sessions(),
                     AppKind::Terminal => start_terminal(&rt_h_term, &term_url, ui.as_weak()),
-                    AppKind::EventLog => ui.invoke_refresh_events(),
+                    // Fresh window → default filter (ALL / 24h), matching the
+                    // EventLogView's reset state.
+                    AppKind::EventLog => ui.invoke_refresh_events("".into(), 24),
                     AppKind::Mesh => ui.invoke_refresh_mesh(),
                     AppKind::Inference => ui.invoke_refresh_inference(),
                     AppKind::AudioEditor => ui.invoke_refresh_audio(),
@@ -4193,11 +4210,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt_h_ev    = rt.handle().clone();
     let client_ev  = Arc::clone(&http_client);
     let base_ev    = http_base.clone();
-    ui.on_refresh_events(move || {
+    ui.on_refresh_events(move |types, hours| {
         let client = Arc::clone(&client_ev);
         let base   = base_ev.clone();
         rt_h_ev.spawn(async move {
-            let items = fetch_events(&client, &base).await;
+            let items = fetch_events(&client, &base, types.as_str(), hours).await;
             slint::invoke_from_event_loop(move || replace_events(items)).ok();
         });
     });

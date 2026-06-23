@@ -8,7 +8,37 @@ import { EventLogItem } from "../types.slint";
 // events filtered server-side). Newest at the top. Each row shows the event
 // type as a tinted badge + a one-line summary derived by Rust.
 //
+// Filtering: a category chip row maps a label → a `types` CSV the endpoint
+// understands (empty = all). A header toggle picks the time window (24h / 7d).
+// Tapping any chip / toggle auto-refetches; REFRESH re-fetches the current
+// filter. State lives here; the window is recreated on open so it resets to
+// ALL / 24h — matching the launch-time fetch in Rust.
+//
 // preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
+
+// A tap-toggle chip matching the header's REFRESH style (sizes to its label).
+component FilterChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    callback clicked();
+    width: txt.preferred-width + 18px;
+    height: 26px;
+    border-radius: Palette.radius-sm;
+    background: root.active ? Palette.primary-dim
+              : touch.has-hover ? Palette.surface-hi : transparent;
+    border-width: 1px;
+    border-color: root.active ? Palette.primary : Palette.border;
+    touch := TouchArea { clicked => { root.clicked(); } }
+    txt := Text {
+        text: root.label;
+        color: root.active ? Palette.primary : Palette.text-dim;
+        font-size: 9px;
+        font-weight: root.active ? 700 : 400;
+        letter-spacing: 1px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
 
 export component EventLogView {
     preferred-height: 0px;
@@ -16,7 +46,28 @@ export component EventLogView {
 
     in property <[EventLogItem]> events;
 
-    callback refresh();
+    // refresh(types-csv, hours). Empty types = all (server still strips noise).
+    callback refresh(string, int);
+
+    // ── Filter state ──────────────────────────────────────────────────────
+    property <int>  cat: 0;       // index into cat-labels / cat-types
+    property <bool> week: false;  // false = 24h, true = 7d (server caps at 168)
+
+    // Category label → server `types` CSV. Index-aligned with cat-labels.
+    property <[string]> cat-labels: ["ALL", "TOOLS", "SENSORS", "MESH", "AGENTS", "EVOLVE", "SYSTEM"];
+    property <[string]> cat-types: [
+        "",
+        "tool_requested,approval_pending",
+        "sensor_reading",
+        "mesh_message,peer_seen,peer_registered,peer_lost,mesh_node_status",
+        "spawn_agent,sub_agent_started,agent_message,agent_message_ack,council_started,council_complete,council_round_done",
+        "evolution_proposed,evolution_applied,evolution_rolled_back,goal_state_changed",
+        "plugin_up,plugin_down,wake_triggered,error,vast_instance_launched,vast_instance_ready,vast_instance_destroyed,vast_tunnel_lost",
+    ];
+
+    function do-refresh() {
+        root.refresh(root.cat-types[root.cat], root.week ? 168 : 24);
+    }
 
     VerticalLayout {
         // ── Header ────────────────────────────────────────────────────────
@@ -27,6 +78,7 @@ export component EventLogView {
             HorizontalLayout {
                 padding-left: 20px;
                 padding-right: 14px;
+                spacing: 8px;
 
                 Text {
                     text: "EVENT LOG";
@@ -35,6 +87,14 @@ export component EventLogView {
                     letter-spacing: 2px;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
+                }
+
+                // Time-window toggle (24 HRS ⇄ 7 DAYS).
+                FilterChip {
+                    label: root.week ? "7 DAYS" : "24 HRS";
+                    active: root.week;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { root.week = !root.week; root.do-refresh(); }
                 }
 
                 Rectangle {
@@ -46,7 +106,7 @@ export component EventLogView {
                     border-color: Palette.border;
                     y: (parent.height - self.height) / 2;
 
-                    TouchArea { clicked => { root.refresh(); } }
+                    TouchArea { clicked => { root.do-refresh(); } }
 
                     Text {
                         text: "REFRESH";
@@ -56,6 +116,29 @@ export component EventLogView {
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Category filter chips ───────────────────────────────────────────
+        Rectangle {
+            height: 40px;
+            background: Palette.surface;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 7px;
+                padding-bottom: 7px;
+                spacing: 5px;
+                alignment: start;
+
+                for label[i] in root.cat-labels: FilterChip {
+                    label: label;
+                    active: i == root.cat;
+                    clicked => { root.cat = i; root.do-refresh(); }
                 }
             }
         }
@@ -77,7 +160,7 @@ export component EventLogView {
                 alignment: start;
 
                 if root.events.length == 0: Text {
-                    text: "Tap REFRESH to load recent events…";
+                    text: "No events match this filter.";
                     color: Palette.text-dim;
                     font-size: 13px;
                     horizontal-alignment: center;

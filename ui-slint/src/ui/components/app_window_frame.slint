@@ -212,7 +212,7 @@ export component AppWindowFrame inherits Rectangle {
     callback refresh-settings();
     callback terminal-send(string);
     // Tier-A parity apps.
-    callback refresh-events();
+    callback refresh-events(string, int);
     callback refresh-mesh();
     callback add-peer(string, string, string);   // node_id, ws_url, token
     callback remove-peer(string);        // node_id
@@ -537,7 +537,7 @@ export component AppWindowFrame inherits Rectangle {
         if root.kind == AppKind.event-log: EventLogView {
             vertical-stretch: 1;
             events: root.event-log;
-            refresh => { root.refresh-events(); }
+            refresh(types, hours) => { root.refresh-events(types, hours); }
         }
 
         if root.kind == AppKind.board: WorkBoard {
