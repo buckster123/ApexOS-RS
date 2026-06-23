@@ -20,6 +20,15 @@
 # Boot/USB provisioning file (apexos.env / apexos.conf), any of these lines:
 #   ANTHROPIC_API_KEY=sk-ant-...   (or just a bare sk-ant-... on its own line)
 #   OPENROUTER_API_KEY=...
+#
+# API-key handling: a key is discovered from (in precedence) --api-key, a boot/USB
+# apexos.env, an exported $ANTHROPIC_API_KEY (best-effort — sudo resets env), or
+# typed in. Whatever the source, it's surfaced (masked + where it came from) and
+# LIVE-VERIFIED against Anthropic (GET /v1/models — auth-only, costs nothing; an
+# out-of-credits-but-valid key still passes). A rejected (invalid/revoked) key
+# re-prompts interactively, or is kept-with-a-loud-warning under --yes. Offline →
+# can't verify, kept with a note. An existing /etc/agentd/env key is preserved +
+# re-verified on a key-less re-run.
 #   APEXOS_MODE=kiosk|headless|desktop      APEXOS_TIER=nano|micro|standard|pro
 #   APEXOS_NO_UI=1   APEXOS_NO_SENSOR=0   APEXOS_NO_CEREBRO_API=0   APEXOS_VOICE=1
 #
@@ -115,6 +124,73 @@ _envval() {
 # Truthy test for config flags: yes/y/1/true/on (case-insensitive).
 _truthy() { [[ "$1" =~ ^([Yy]([Ee][Ss])?|1|[Tt][Rr][Uu][Ee]|[Oo][Nn])$ ]]; }
 
+# Mask an API key for display — enough to recognize, never enough to leak.
+mask_key() {
+  local k="$1"
+  if [[ ${#k} -le 14 ]]; then printf 'sk-ant-…'; else printf '%s…%s' "${k:0:11}" "${k: -4}"; fi
+}
+
+# Live-verify an Anthropic key WITHOUT spending a cent: GET /v1/models is auth-
+# gated but free (listing models consumes no tokens), so it confirms the KEY is
+# real regardless of credit balance — a valid-but-out-of-credits key still lists
+# models (200). 401/403 = invalid or revoked. No network / server error = we
+# simply can't verify (an offline-first install is legitimate). Convenience worth
+# keeping (auto-discovery from the operator's existing env) without the dud-key
+# footgun. Echoes: valid | invalid | offline.
+check_anthropic_key() {
+  local key="$1" code
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 12 \
+    https://api.anthropic.com/v1/models \
+    -H "x-api-key: ${key}" -H "anthropic-version: 2023-06-01" 2>/dev/null || true)
+  case "$code" in
+    200|429) echo valid   ;;   # 200 OK; 429 = valid key, just rate-limited
+    401|403) echo invalid ;;   # authentication_error / permission denied
+    *)       echo offline ;;   # '', 000 (timeout), 5xx, anything unexpected
+  esac
+}
+
+# Surface a resolved key (masked + where it came from) and verify it live.
+# Returns 0 when it's safe to use (valid, or unverifiable-offline); 1 when
+# Anthropic rejected it, so the caller can re-prompt / warn.
+vet_key() {
+  local key="$1" src="${2:-provided}"
+  info "Anthropic key $(mask_key "$key")  (from: ${src})"
+  VET_RESULT="$(check_anthropic_key "$key")"   # global — finalize_key_check reads it
+  case "$VET_RESULT" in
+    valid)   ok   "Key verified with Anthropic ✓"; return 0 ;;
+    offline) warn "Couldn't reach Anthropic to verify the key (offline?). Keeping it."; return 0 ;;
+    *)       warn "Anthropic REJECTED this key — invalid or revoked ✗"; return 1 ;;
+  esac
+}
+
+# Vet the currently-resolved $API_KEY and route the outcome: a rejected key is
+# CLEARED in interactive mode (so the key menu re-prompts) but KEPT-with-warning
+# under --yes (don't silently drop an operator's explicit unattended choice).
+# Valid / unverifiable-offline → kept. No-op when no key is set.
+finalize_key_check() {
+  [[ -z "${API_KEY:-}" ]] && return 0
+  if vet_key "$API_KEY" "${API_KEY_SRC:-provided}"; then
+    if ! ${YES:-false}; then
+      if [[ "${VET_RESULT:-}" == valid ]]; then
+        tui_msg "Key verified ✓" \
+          "Anthropic confirmed your key:\n\n  $(mask_key "$API_KEY")\n  from: ${API_KEY_SRC:-provided}"
+      else
+        tui_msg "Key not verified" \
+          "Couldn't reach Anthropic to check this key (no internet yet?):\n\n  $(mask_key "$API_KEY")\n\nKeeping it — make sure it's valid before starting agentd."
+      fi
+    fi
+    return 0
+  fi
+  if ${YES:-false}; then
+    warn "Continuing with the rejected key (unattended). Update ANTHROPIC_API_KEY in /etc/agentd/env, then restart agentd."
+    return 0
+  fi
+  tui_msg "Key rejected ✗" \
+    "Anthropic rejected this key (invalid or revoked):\n\n  $(mask_key "$API_KEY")\n  from: ${API_KEY_SRC:-provided}\n\nLet's pick another one."
+  API_KEY=""; API_KEY_SRC=""
+  return 1
+}
+
 # Parse a provisioning file: API keys (or a bare sk-ant-… key) plus optional
 # APEXOS_* install settings. Returns 0 if it carried anything we can use.
 _parse_key_file() {
@@ -188,7 +264,7 @@ find_key_file() {
 # partition from any PC. Precedence: explicit CLI flags > boot file > auto-detect.
 load_boot_provisioning() {
   find_key_file || return 0          # nothing on removable media — fine
-  [[ -z "$API_KEY"        && -n "$FOUND_ANTHROPIC"  ]] && API_KEY="$FOUND_ANTHROPIC"
+  [[ -z "$API_KEY"        && -n "$FOUND_ANTHROPIC"  ]] && { API_KEY="$FOUND_ANTHROPIC"; API_KEY_SRC="boot/USB: ${FOUND_KEY_SRC}"; }
   [[ -z "$OPENROUTER_KEY" && -n "$FOUND_OPENROUTER" ]] && OPENROUTER_KEY="$FOUND_OPENROUTER"
   # A freshly-plugged USB file overrides a stored install.conf (deliberate re-
   # provisioning) but never a CLI flag — so gate on the *_CLI provenance markers,
@@ -252,7 +328,7 @@ NO_UI=false; NO_CEREBRO_API=false; NO_SENSOR=true; NO_VOICE=true
 # sibling repo and registers occipital-mcp. Skip with --no-occipital / a boot-file
 # APEXOS_NO_OCCIPITAL=1. (OCC_FEATURES/OCCIPITAL_INSTALLED initialised for `set -u`.)
 NO_OCCIPITAL=false; OCC_FEATURES=""; OCCIPITAL_INSTALLED=false
-API_KEY=""; OPENROUTER_KEY=""
+API_KEY=""; OPENROUTER_KEY=""; API_KEY_SRC=""
 TIER="auto"; MODE="auto"; REPO_DIR=""
 IS_DESKTOP=false   # MODE==desktop → build the UI but launch a winit window, not the kiosk service
 
@@ -272,7 +348,7 @@ for arg in "$@"; do
     --no-sensor)           NO_SENSOR=true; NO_SENSOR_CLI=true ;;
     --no-occipital)        NO_OCCIPITAL=true; NO_OCCIPITAL_CLI=true ;;
     --no-voice)            NO_VOICE=true; NO_VOICE_CLI=true ;;
-    --api-key=*)           API_KEY="${arg#*=}" ;;
+    --api-key=*)           API_KEY="${arg#*=}"; API_KEY_SRC="--api-key flag" ;;
     --openrouter-key=*)    OPENROUTER_KEY="${arg#*=}" ;;
     --tier=*)              TIER="${arg#*=}"; TIER_CLI=true ;;
     --mode=*)              MODE="${arg#*=}"; MODE_CLI=true ;;
@@ -535,14 +611,26 @@ fi
 # Priority: --api-key flag  >  key file on USB/SD-boot  >  manual TUI entry.
 # The key is ~100 chars of "alien glyphs", so a pre-written file beats typing it.
 
+# Convenience: pick up an ANTHROPIC_API_KEY already exported in the environment
+# (eases onboarding for operators who keep their key in their shell). Best-effort:
+# `sudo` resets the environment by default, so this only fires under a root shell,
+# `sudo -E`, or a non-sudo run. A deliberate --api-key / boot-USB key still wins.
+if [[ -z "$API_KEY" && -n "${ANTHROPIC_API_KEY:-}" ]]; then
+  API_KEY="$ANTHROPIC_API_KEY"; API_KEY_SRC="environment (\$ANTHROPIC_API_KEY)"
+  info "Found ANTHROPIC_API_KEY in the environment."
+fi
+
+# A key from --api-key / the environment / a boot file is surfaced + live-verified
+# here; a rejected one is cleared (interactive) so the picker below re-prompts.
+finalize_key_check
+
 if [[ -z "$API_KEY" ]]; then
   info "Looking for a key file (apexos.env) on USB / SD-boot media …"
   if find_key_file; then
-    API_KEY="$FOUND_ANTHROPIC"
+    API_KEY="$FOUND_ANTHROPIC"; API_KEY_SRC="boot/USB: ${FOUND_KEY_SRC}"
     [[ -z "$OPENROUTER_KEY" && -n "$FOUND_OPENROUTER" ]] && OPENROUTER_KEY="$FOUND_OPENROUTER"
     ok "Loaded API key from ${FOUND_KEY_SRC}"
-    ! $YES && tui_msg "Key file found 🎉" \
-      "Loaded your Anthropic API key from:\n\n  ${FOUND_KEY_SRC}\n\nNo glyph-typing required."
+    finalize_key_check   # surface (masked) + live-verify; clears it if rejected
   else
     info "No key file found on removable media."
   fi
@@ -567,10 +655,10 @@ Easiest path (no typing):
     case "$KEYCHOICE" in
       scan)
         if find_key_file; then
-          API_KEY="$FOUND_ANTHROPIC"
+          API_KEY="$FOUND_ANTHROPIC"; API_KEY_SRC="boot/USB: ${FOUND_KEY_SRC}"
           [[ -z "$OPENROUTER_KEY" && -n "$FOUND_OPENROUTER" ]] && OPENROUTER_KEY="$FOUND_OPENROUTER"
-          tui_msg "Key file found 🎉" "Loaded from:\n  ${FOUND_KEY_SRC}"
-          break
+          # Verify before accepting — a rejected key is cleared, so we re-loop.
+          finalize_key_check; [[ -n "$API_KEY" ]] && break
         else
           tui_msg "Nothing found" \
             "Still no apexos.env on any USB or SD-boot partition.\n\nCheck the filename and that the device is plugged in,\nthen try again."
@@ -578,7 +666,8 @@ Easiest path (no typing):
       type)
         API_KEY=$(tui_input "Anthropic API Key" \
           "Paste or type your key (sk-ant-...):" "password") || true
-        [[ -n "$API_KEY" ]] && break ;;
+        API_KEY_SRC="typed by hand"
+        finalize_key_check; [[ -n "$API_KEY" ]] && break ;;
       skip)  break ;;
       abort) die "Install aborted — no API key provided." ;;
       *)     break ;;
@@ -1152,8 +1241,17 @@ fi
 write_env_key "ANTHROPIC_API_KEY"  "$API_KEY"
 write_env_key "OPENROUTER_API_KEY" "$OPENROUTER_KEY"
 
-if [[ -z "$API_KEY" ]] && ! grep -q "^ANTHROPIC_API_KEY=" "$ENV_FILE" 2>/dev/null; then
-  warn "No Anthropic API key set. Add ANTHROPIC_API_KEY to $ENV_FILE before starting."
+# No new key resolved this run → either an existing env key is being PRESERVED
+# (surface + verify it, so a stale one doesn't ride along silently) or there's none.
+if [[ -z "$API_KEY" ]]; then
+  _existing=$(_envval "$ENV_FILE" ANTHROPIC_API_KEY)
+  if [[ -n "$_existing" ]]; then
+    info "Keeping the existing Anthropic key in ${ENV_FILE}: $(mask_key "$_existing")"
+    [[ "$(check_anthropic_key "$_existing")" == invalid ]] && \
+      warn "…but Anthropic REJECTED that existing key (invalid/revoked). Update ANTHROPIC_API_KEY in ${ENV_FILE}."
+  else
+    warn "No Anthropic API key set. Add ANTHROPIC_API_KEY to $ENV_FILE before starting."
+  fi
 fi
 
 ok "Config written"
