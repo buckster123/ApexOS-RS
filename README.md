@@ -305,6 +305,6 @@ ApexOS-RS is a **distro, not a replacement.** Canonical [ApexOS](https://github.
 
 ## License
 
-[Apache-2.0](LICENSE) © [buckster123](https://github.com/buckster123) — keeps your copyright + change notices attached as the code spreads (built to be forked).
+[Apache-2.0](LICENSE) © [buckster123](https://github.com/buckster123)
 
 <div align="center"><sub>Built in the open. An agent that remembers, evolves, and rewrites itself — on the hardware you already own.</sub></div>
