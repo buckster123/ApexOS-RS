@@ -20,8 +20,27 @@ use crate::{
 /// CerebroCortex — top-level coordinator.
 /// Owns all 9 engines + the storage coordinator.
 /// This is what `cerebro-mcp` and `cerebro-api` construct and share via Arc.
+/// What to search the visual memory with (search_vision).
+pub enum VisionQuery {
+    /// A text description → CLIP text tower → ranks images by visual content.
+    Text(String),
+    /// Raw image bytes → CLIP image tower → finds visually-similar images.
+    Image(Vec<u8>),
+}
+
+/// One search_vision result: the caption memory, its CLIP similarity, and the
+/// source image path (present when CLIP-indexed; None on the caption/FTS fallback).
+pub struct VisionHit {
+    pub memory:     MemoryNode,
+    pub score:      f32,
+    pub image_path: Option<String>,
+}
+
 pub struct CerebroCortex {
     pub storage:     Arc<RwLock<StorageCoordinator>>,
+    /// Whether CLIP visual embedding is active (tier-gated on text-embeddings, env
+    /// `CEREBRO_VISION_EMBED` override). Off → search_vision uses caption/FTS recall.
+    pub vision_embed: bool,
     // Engines
     pub thalamus:    GatingEngine,
     pub amygdala:    AffectEngine,
@@ -36,9 +55,11 @@ pub struct CerebroCortex {
 
 impl CerebroCortex {
     pub async fn new(config: Config) -> Result<Self> {
+        let vision_embed = vision_embed_enabled(&config);
         let storage = StorageCoordinator::new(&config).await?;
         Ok(Self {
             storage:     Arc::new(RwLock::new(storage)),
+            vision_embed,
             thalamus:    GatingEngine::new(),
             amygdala:    AffectEngine::new(),
             temporal:    SemanticEngine::new(),
@@ -203,6 +224,91 @@ impl CerebroCortex {
         Ok(results)
     }
 
+    // -----------------------------------------------------------------------
+    // Visual recall (search_vision) — CLIP image/text shared embedding space
+    // -----------------------------------------------------------------------
+
+    /// Index an image's CLIP embedding against its caption `memory_id`, so visual
+    /// recall can rank it later. No-op (`Ok(false)`) when visual embedding is off
+    /// (Nano tier / opt-out) or the CLIP tower can't load — describe_image still
+    /// stored the caption, so the loop degrades, never breaks.
+    pub async fn index_image(
+        &self,
+        memory_id:  &MemoryId,
+        image_bytes: Vec<u8>,
+        image_path:  Option<String>,
+    ) -> Result<bool> {
+        if !self.vision_embed {
+            return Ok(false);
+        }
+        let vec = match crate::vision::clip_embed_image(image_bytes).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("index_image: CLIP embed failed ({e}) — caption stored, image not indexed");
+                return Ok(false);
+            }
+        };
+        let storage = self.storage.read().await;
+        storage.vector.store_vision_embedding(memory_id, &vec, image_path.as_deref()).await?;
+        Ok(true)
+    }
+
+    /// Visual recall: rank stored images by a text or image query in CLIP's shared
+    /// space, scope-filtered. Falls back to caption/FTS recall over `vision`-tagged
+    /// memories when visual embedding is off or no images are indexed yet (a text
+    /// query only — an image query has no text to keyword-search).
+    pub async fn search_vision(
+        &self,
+        query: VisionQuery,
+        k:     usize,
+        scope: VisibilityScope,
+    ) -> Result<Vec<VisionHit>> {
+        if self.vision_embed {
+            let qvec = match &query {
+                VisionQuery::Text(t)  => crate::vision::clip_embed_text(t.clone()).await,
+                VisionQuery::Image(b) => crate::vision::clip_embed_image(b.clone()).await,
+            };
+            match qvec {
+                Ok(qvec) => {
+                    let storage = self.storage.read().await;
+                    let cands = storage.vector.vision_search(&qvec, k * 3).await?;
+                    if !cands.is_empty() {
+                        let ids: Vec<MemoryId> = cands.iter().map(|(id, _, _)| id.clone()).collect();
+                        let nodes = storage.sqlite.get_memories_by_ids(&ids, &scope).await?;
+                        let node_map: HashMap<MemoryId, MemoryNode> =
+                            nodes.into_iter().map(|n| (n.id.clone(), n)).collect();
+                        // cands are already similarity-sorted; keep that order, drop
+                        // out-of-scope ids, take k.
+                        let mut hits: Vec<VisionHit> = cands.into_iter()
+                            .filter_map(|(id, sim, path)| {
+                                node_map.get(&id).map(|n| VisionHit {
+                                    memory: n.clone(), score: sim, image_path: path,
+                                })
+                            })
+                            .collect();
+                        hits.truncate(k);
+                        return Ok(hits);
+                    }
+                    // No images indexed yet → fall through to caption recall.
+                }
+                Err(e) => tracing::warn!("search_vision: CLIP embed failed ({e}) — caption fallback"),
+            }
+        }
+
+        // Fallback: semantic recall over vision-tagged captions (text query only).
+        let qtext = match query {
+            VisionQuery::Text(t)  => t,
+            VisionQuery::Image(_) => return Ok(vec![]),
+        };
+        let recalled = self.recall(&qtext, k * 2, scope).await?;
+        let hits = recalled.into_iter()
+            .filter(|(n, _)| n.tags.iter().any(|t| t == "vision"))
+            .take(k)
+            .map(|(n, score)| VisionHit { memory: n, score, image_path: None })
+            .collect();
+        Ok(hits)
+    }
+
     /// Associate two existing memories with a typed link.
     ///
     /// Writes to SQLite first (source of truth), then mirrors into the graph.
@@ -230,5 +336,22 @@ impl CerebroCortex {
             tracing::warn!("associate: graph edge not added — {e}");
         }
         Ok(())
+    }
+}
+
+/// Whether CLIP visual embedding is active. Default (env unset / `auto`): follow
+/// text-embeddings — on for Micro+ (`CEREBRO_EMBED_MODEL` set), off for Nano
+/// (empty), keeping the tier ladder automatic and CLIP's ~350 MB model off the
+/// smallest boards. `CEREBRO_VISION_EMBED=off` force-disables; any other value
+/// (`on` / a model name) force-enables. The model itself lazy-loads on first use,
+/// so an enabled node that never does visual recall pays nothing.
+fn vision_embed_enabled(config: &Config) -> bool {
+    match std::env::var("CEREBRO_VISION_EMBED") {
+        Err(_) => !config.embed_model.is_empty(),
+        Ok(v) => match v.trim().to_lowercase().as_str() {
+            "" | "off" | "0" | "false" | "no" => false,
+            "auto" => !config.embed_model.is_empty(),
+            _ => true,
+        },
     }
 }

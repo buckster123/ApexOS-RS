@@ -101,6 +101,60 @@ impl VectorStore {
         Ok(())
     }
 
+    // ── CLIP visual recall (search_vision) ──────────────────────────────────
+    // A separate 512-dim CLIP image-vector space (distinct from the 384-dim bge
+    // text store above). Stored in the plain `vision_embeddings` row table; recall
+    // is brute-force cosine in Rust (image counts are modest). The embedding itself
+    // is computed by the caller (`cerebro::vision` CLIP towers) — this layer only
+    // persists + ranks, so the store stays embedder-agnostic.
+
+    /// Persist (or replace) a memory's CLIP image embedding + source path.
+    pub async fn store_vision_embedding(
+        &self,
+        memory_id:  &MemoryId,
+        embedding:  &[f32],
+        image_path: Option<&str>,
+    ) -> Result<()> {
+        let blob = vec_to_blob(embedding);
+        let now  = chrono::Utc::now().to_rfc3339();
+        let path = image_path.map(|s| s.to_string());
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO vision_embeddings (memory_id, embedding, image_path, created_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(memory_id) DO UPDATE SET embedding=?2, image_path=?3, created_at=?4",
+            params![memory_id.0, blob, path, now],
+        )?;
+        Ok(())
+    }
+
+    /// Brute-force cosine search over stored CLIP image vectors. Returns
+    /// `(memory_id, similarity, image_path)` for the top `k`, unscoped — the caller
+    /// (Cortex) fetches the memory nodes and applies visibility scope.
+    pub async fn vision_search(
+        &self,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<(MemoryId, f32, Option<String>)>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare("SELECT memory_id, embedding, image_path FROM vision_embeddings")?;
+        let rows = stmt.query_map([], |row| {
+            let id:   String      = row.get(0)?;
+            let blob: Vec<u8>     = row.get(1)?;
+            let path: Option<String> = row.get(2)?;
+            Ok((id, blob, path))
+        })?;
+        let mut scored: Vec<(MemoryId, f32, Option<String>)> = Vec::new();
+        for r in rows {
+            let (id, blob, path) = r?;
+            let sim = cosine(query, &blob_to_vec(&blob));
+            scored.push((MemoryId(id), sim, path));
+        }
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        Ok(scored)
+    }
+
     /// Return top-k most similar memory IDs.
     ///
     /// When vec0 is available and the embedder is initialized, runs cosine-distance
@@ -245,6 +299,23 @@ pub fn blob_to_vec(blob: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Cosine similarity in [-1, 1]; 0 for a zero/empty or length-mismatched vector.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na  += a[i] * a[i];
+        nb  += b[i] * b[i];
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
 /// Upsert a memory's row in the vec0 index, keyed by its integer rowid.
 ///
 /// sqlite-vec's vec0 virtual table does **not** honor `INSERT OR REPLACE` — it
@@ -323,5 +394,42 @@ mod tests {
         // The bug: this second write hit `UNIQUE constraint failed on memory_vectors`.
         vector.store_raw_embedding(&node.id, &vec![0.9f32; 384]).await
             .expect("re-embed of the same memory must succeed");
+    }
+
+    #[test]
+    fn cosine_basics() {
+        assert!((cosine(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6, "identical → 1");
+        assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6, "orthogonal → 0");
+        assert_eq!(cosine(&[1.0], &[1.0, 2.0]), 0.0, "length mismatch → 0");
+        assert_eq!(cosine(&[], &[]), 0.0, "empty → 0");
+        assert_eq!(cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0, "zero vector → 0");
+    }
+
+    // The CLIP visual-recall store/search ranking, exercised with fake vectors so it
+    // needs no ONNX model. Covers the brute-force cosine ordering, image_path
+    // round-trip, and the ON CONFLICT replace.
+    #[tokio::test]
+    async fn vision_store_and_search_ranks_by_cosine() {
+        let (sqlite, vector, _dir) = fresh_store().await;
+        let a = MemoryNode::new("a red bicycle", MemoryType::Episodic);
+        let b = MemoryNode::new("a blue car", MemoryType::Episodic);
+        sqlite.insert_memory(&a).await.unwrap();
+        sqlite.insert_memory(&b).await.unwrap();
+
+        vector.store_vision_embedding(&a.id, &[1.0, 0.0, 0.0, 0.0], Some("imgs/a.png")).await.unwrap();
+        vector.store_vision_embedding(&b.id, &[0.0, 1.0, 0.0, 0.0], None).await.unwrap();
+
+        // A query closest to `a`.
+        let hits = vector.vision_search(&[0.9, 0.1, 0.0, 0.0], 5).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].0, a.id, "nearest vector ranks first");
+        assert_eq!(hits[0].2.as_deref(), Some("imgs/a.png"), "image_path returned");
+        assert!(hits[0].1 > hits[1].1, "cosine descending");
+
+        // ON CONFLICT replaces the vector + path in place (no error).
+        vector.store_vision_embedding(&a.id, &[0.0, 0.0, 1.0, 0.0], Some("imgs/a2.png")).await.unwrap();
+        let hits2 = vector.vision_search(&[0.0, 0.0, 1.0, 0.0], 1).await.unwrap();
+        assert_eq!(hits2[0].0, a.id);
+        assert_eq!(hits2[0].2.as_deref(), Some("imgs/a2.png"), "path updated on conflict");
     }
 }
