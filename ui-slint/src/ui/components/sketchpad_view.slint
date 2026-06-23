@@ -26,6 +26,7 @@ export component SketchpadView {
     callback up();
     callback clear();
     callback send(float, float);      // canvas px width, height
+    callback report-canvas(float, float); // canvas px w, h → Rust (agent draw scaling)
     callback set-color(int);
     callback set-width(int);
     callback set-tool(int);
@@ -105,6 +106,11 @@ export component SketchpadView {
             vertical-stretch: 1;
             background: #0d0f18;   // mirrors the gateway's default sketch bg
             clip: true;
+
+            // Report the canvas pixel size to Rust so agent-driven `sketch_draw`
+            // (normalized 0-1 coords) can scale exactly to this canvas.
+            changed width  => { root.report-canvas(self.width / 1px, self.height / 1px); }
+            changed height => { root.report-canvas(self.width / 1px, self.height / 1px); }
 
             // Empty-state hint.
             if root.strokes.length == 0: Text {

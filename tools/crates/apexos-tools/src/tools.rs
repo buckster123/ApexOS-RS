@@ -118,6 +118,32 @@ pub fn list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "sketch_draw",
+            "description": "Draw on the Sketchpad canvas — your hand on this device's screen. Use it to sketch, diagram, or doodle for the user, or to add to what they've drawn. Coordinates are normalized 0.0-1.0 with the origin at the TOP-LEFT (x increases right, y increases down), so they scale to any canvas size. Provide `strokes`, drawn in order: each stroke is EITHER a freehand path (`points`: a list of [x,y] pairs) OR a primitive (`shape`: \"line\"|\"rect\"|\"ellipse\", with `from` and `to` corner points). Optional per-stroke `color` (\"#rrggbb\", default off-white) and `width` (px, default 3). Set `clear: true` to wipe the canvas first. The drawing appears live on the canvas; call sketch_snapshot afterwards to SEE the composited result. Works on the Slint UI (kiosk/desktop); a no-op (not an error) on a headless node.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clear":   { "type": "boolean", "description": "Wipe the canvas before drawing (default false)" },
+                    "strokes": {
+                        "type": "array",
+                        "description": "Strokes to draw, in order. Each needs either `points` or `shape`+`from`+`to`.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "points": { "type": "array", "description": "Freehand path: list of [x,y] pairs, each 0.0-1.0", "items": { "type": "array", "items": { "type": "number" } } },
+                                "shape":  { "type": "string", "description": "Primitive: line|rect|ellipse (use with from/to instead of points)" },
+                                "from":   { "type": "array", "description": "[x,y] start (line) or a corner (rect/ellipse), 0.0-1.0", "items": { "type": "number" } },
+                                "to":     { "type": "array", "description": "[x,y] end (line) or the opposite corner (rect/ellipse), 0.0-1.0", "items": { "type": "number" } },
+                                "color":  { "type": "string", "description": "Stroke colour #rrggbb (default #e6e6eb)" },
+                                "width":  { "type": "number", "description": "Stroke width in px (default 3)" }
+                            }
+                        }
+                    }
+                },
+                "required": ["strokes"]
+            }
+        },
+        {
             "name": "screenshot_mirror",
             "description": "Capture and SEE your own live screen — the ApexOS-RS UI as it is rendered right now. Use this to look in the mirror: inspect the current interface, verify a UI change you just made, or check what the user is looking at. Returns the screenshot inline so you see it directly. Only works on a node with a display (kiosk or desktop); returns a note when headless.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -477,6 +503,7 @@ pub fn call(name: &str, args: &Value) -> Value {
         "notes_read" => notes_read(args),
         "notes_append" => notes_append(args),
         "sketch_snapshot" => sketch_snapshot(),
+        "sketch_draw" => sketch_draw(args),
         "screenshot_mirror" => screenshot_mirror(),
         "camera_capture" => camera_capture(args),
         "create_dir" => create_dir(args),
@@ -2593,6 +2620,42 @@ fn display_face(args: &Value) -> Value {
 
     // Always ok: the expression request is the contract; rendering is the UI's job.
     tool_ok(json!({ "ok": true, "state": state, "gaze": gaze, "intensity": intensity }))
+}
+
+fn sketch_draw(args: &Value) -> Value {
+    // The Slint UI renders these strokes from the tool_requested event it already
+    // receives (mirrors display_face) — scaling the normalized coords to its
+    // canvas and persisting a composite PNG. This handler has no canvas of its
+    // own; it validates the request + acks. A headless node simply has no
+    // sketchpad, which is a no-op, not an error.
+    let strokes = match args["strokes"].as_array() {
+        Some(s) if !s.is_empty() => s,
+        _ => return tool_error("sketch_draw: `strokes` must be a non-empty array".to_string()),
+    };
+    let clear = args["clear"].as_bool().unwrap_or(false);
+
+    // Each stroke is valid if it carries a `points` path OR a `shape` with
+    // `from`+`to`. Count the usable ones so the ack is honest.
+    let mut n_ok = 0usize;
+    for s in strokes {
+        let has_points = s["points"].as_array().map(|p| !p.is_empty()).unwrap_or(false);
+        let has_shape  = s["shape"].as_str().is_some()
+            && s["from"].as_array().is_some()
+            && s["to"].as_array().is_some();
+        if has_points || has_shape { n_ok += 1; }
+    }
+    if n_ok == 0 {
+        return tool_error(
+            "sketch_draw: no valid strokes — each needs `points` or `shape`+`from`+`to`".to_string(),
+        );
+    }
+
+    tool_ok(json!({
+        "ok": true,
+        "strokes": n_ok,
+        "cleared": clear,
+        "note": "Dispatched to the Sketchpad. If this node has a display, it renders on the live canvas — call sketch_snapshot to view the result.",
+    }))
 }
 
 #[cfg(test)]

@@ -228,6 +228,7 @@ export component AppWindow inherits Window {
     callback sketch-up();
     callback sketch-clear();
     callback sketch-send(float, float);       // canvas px w, h
+    callback sketch-report-canvas(float, float); // canvas px w, h → Rust
     callback sketch-set-color(int);
     callback sketch-set-width(int);
     callback sketch-set-tool(int);
@@ -823,6 +824,7 @@ export component AppWindow inherits Window {
                         sketch-up => { root.sketch-up(); }
                         sketch-clear => { root.sketch-clear(); }
                         sketch-send(w, h) => { root.sketch-send(w, h); }
+                        sketch-report-canvas(w, h) => { root.sketch-report-canvas(w, h); }
                         sketch-set-color(i) => { root.sketch-set-color(i); }
                         sketch-set-width(i) => { root.sketch-set-width(i); }
                         sketch-set-tool(i) => { root.sketch-set-tool(i); }

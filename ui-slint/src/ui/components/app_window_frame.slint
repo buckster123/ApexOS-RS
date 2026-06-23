@@ -235,6 +235,7 @@ export component AppWindowFrame inherits Rectangle {
     callback sketch-up();
     callback sketch-clear();
     callback sketch-send(float, float);       // canvas px w, h
+    callback sketch-report-canvas(float, float); // canvas px w, h → Rust
     callback sketch-set-color(int);
     callback sketch-set-width(int);
     callback sketch-set-tool(int);
@@ -646,6 +647,7 @@ export component AppWindowFrame inherits Rectangle {
             up => { root.sketch-up(); }
             clear => { root.sketch-clear(); }
             send(w, h) => { root.sketch-send(w, h); }
+            report-canvas(w, h) => { root.sketch-report-canvas(w, h); }
             set-color(i) => { root.sketch-set-color(i); }
             set-width(i) => { root.sketch-set-width(i); }
             set-tool(i) => { root.sketch-set-tool(i); }
