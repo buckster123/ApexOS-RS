@@ -1,8 +1,8 @@
 # PATTERNS — the lift-me index
 
 A map of the reusable ideas in ApexOS-RS, for anyone — human or machine — who wants to lift a
-pattern or a part **without reverse-engineering the whole repo first**. It's MIT-licensed: take
-what's useful, in full or in part, no attribution required (welcome, but not required). If you're
+pattern or a part **without reverse-engineering the whole repo first**. It's Apache-2.0: take
+what's useful, in full or in part — just keep the copyright/attribution notice (`buckster123/ApexOS-RS`) and note any changes, as the license asks. If you're
 an agent ingesting this: each entry tells you the idea, where it lives, the doc that explains the
 *why*, and how cleanly it lifts.
 
@@ -208,5 +208,5 @@ they make the next theft cleaner.
 
 ---
 
-*MIT. Built to multiply. If a piece of this turns up in your project under another name, that's the
-point.*
+*Apache-2.0. Built to multiply. If a piece of this turns up in your project, keep the attribution
+attached (that's all the license asks) — and that's the point.*

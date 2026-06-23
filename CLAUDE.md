@@ -447,6 +447,7 @@ Load only the relevant doc when entering a subsystem — do not load all of them
 | `docs/colony-mesh.md` | Colony mesh expansion plan (agent-originated, FORGE-grounded) — spine/edge constitution (soft-governed), the locked build sequence (file relay → capability advertisement → blocking `agent_spawn` keystone), deferred items with revisit triggers, and the propose/build/steer division of labor |
 | `docs/pac.md` | PAC — the ApexOS authoring dialect: the grounded glyph-lean distillation of the *Prima Alchemica Codex* (`~/Projects/The-PAC`). Semantic compression for souls/procedures/evolution payloads — ~40% fewer tokens, model-agnostic, behaviourally lossless. Reproducible token benchmark + corpus in `docs/pac-bench/` |
 | `docs/prompt-caching.md` | The prompt-caching discipline as a portable pattern — keep the system+tools prefix byte-stable, push per-turn-volatile text (the clock) into messages, roll conversation breakpoints back through stable history. Provider-agnostic contract + the ApexOS idea→code map + the tested spec. Pairs with `docs/pac.md` (PAC shrinks what you write, caching shrinks what you re-send) |
+| `docs/post-mk1.md` | Post-mk1 vision & roadmap — the path **after** the BACKLOG closes, toward the v0.1.0 public release. Threat model + the hardening tracks (namespace-jail the tools worker, caps, red-team suite, RO-root+watchdog), the release/stewardship track (Apache-2.0 ✅, AGENTS.md, signed tag), the flashable-distro + weight-evolution horizons. Springboard: a Gemini brainstorm, graded against the code |
 
 ---
 

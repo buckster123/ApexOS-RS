@@ -1,8 +1,8 @@
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
-authors = ["buckster123"]
+license = "Apache-2.0"
+authors = ["buckster123 (André)"]
 repository = "https://github.com/buckster123/ApexOS-RS"
 
 [workspace]
