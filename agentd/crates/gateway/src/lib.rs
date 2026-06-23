@@ -324,6 +324,8 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/identities/agent",   post(identities_create_agent_handler))
         .route("/api/identities/verify",  post(identities_verify_pin_handler))
         .route("/api/auth/logout",        post(auth_logout_handler))
+        .route("/api/auth/default",       post(auth_default_handler))
+        .route("/api/auth/me",            get(auth_me_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new()
@@ -360,6 +362,20 @@ async fn ws_handler(
     // socket; this only recovers WHO, for the per-session bind gate.
     let auth = resolve_ws_auth(&state, headers, query.as_deref());
     ws.on_upgrade(move |socket| handle_socket(socket, state, auth))
+}
+
+/// Recover the `SessionAuth` behind an `Authorization: Bearer` request — Some only
+/// for a valid *session* token (a logged-in human), None for the admin token or a
+/// token-less node. Used by `/api/auth/me` so a logged-in client learns WHO it is.
+fn resolve_req_auth(state: &GatewayState, headers: &axum::http::HeaderMap) -> Option<SessionAuth> {
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let now = std::time::Instant::now();
+    let s = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+    s.verify(bearer, now).cloned()
 }
 
 /// Recover the `SessionAuth` behind a WS connection from its bearer/`?token=`
@@ -2989,7 +3005,60 @@ async fn auth_profiles_handler(State(state): State<GatewayState>) -> impl IntoRe
     let users: Vec<serde_json::Value> = ids.users.iter().map(|u| serde_json::json!({
         "id": u.id, "name": u.name, "has_pin": u.has_pin(),
     })).collect();
-    Json(serde_json::json!({ "users": users }))
+    // `default_user` (slice 3e) drives login-screen auto-skip — the picker isn't a
+    // secret, so this stays on the same UNgated endpoint the login screen reads.
+    Json(serde_json::json!({ "users": users, "default_user": ids.default_user }))
+}
+
+#[derive(serde::Deserialize)]
+struct DefaultBody {
+    /// Profile to auto-login on launch; an empty string clears the default.
+    user_id: String,
+}
+
+/// POST /api/auth/default — set (or clear, with `""`) the device's default login
+/// profile (slice 3e). Gated: you must already be authenticated to change it. The
+/// login screen ("remember me") sets it; Settings clears it.
+async fn auth_default_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<DefaultBody>,
+) -> impl IntoResponse {
+    let mut ids = state.identities.write().await;
+    let id = body.user_id.trim();
+    if id.is_empty() {
+        ids.default_user = None;
+    } else if ids.user(id).is_some() {
+        ids.default_user = Some(id.to_string());
+    } else {
+        return (StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": format!("no such profile '{id}'") }))).into_response();
+    }
+    if let Err(e) = ids.save(&apexos_core::Identities::default_path()) {
+        eprintln!("[identity] persist default_user failed: {e}");
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true, "default_user": ids.default_user }))).into_response()
+}
+
+/// GET /api/auth/me — who the caller is logged in as (slice 3e). `{user_id, name,
+/// agent_id}` for a session-token client; `{user_id: null}` for the admin token /
+/// token-less node (no human session). Lets Settings show "auto-login me" without
+/// the client tracking its own id across the post-login re-exec.
+async fn auth_me_handler(
+    State(state):  State<GatewayState>,
+    headers:       axum::http::HeaderMap,
+) -> impl IntoResponse {
+    match resolve_req_auth(&state, &headers) {
+        Some(auth) => {
+            let name = {
+                let ids = state.identities.read().await;
+                ids.user(&auth.user_id).map(|u| u.name.clone()).unwrap_or_default()
+            };
+            Json(serde_json::json!({
+                "user_id": auth.user_id, "name": name, "agent_id": auth.agent_id,
+            }))
+        }
+        None => Json(serde_json::json!({ "user_id": serde_json::Value::Null })),
+    }
 }
 
 // ── Mesh pairing — kiosk-friendly token exchange ────────────────────────────────

@@ -48,6 +48,10 @@ export component AppWindow inherits Window {
     in-out property <string>         settings-cache-ttl: "5m";
     // Sensor-alert sensitivity profile, surfaced in Settings + set via /api/sensors/config.
     in-out property <string>         settings-sensor-profile: "standard";
+    // Login default-profile (slice 3e): the logged-in human's name + whether they're
+    // this device's auto-login default; set/cleared via the Settings LOGIN section.
+    in-out property <string>         settings-login-user-name: "";
+    in-out property <bool>           settings-login-is-default: false;
     in-out property <[ModelItem]>    available-models;
     in-out property <bool>           power-modal-open: false;
     // Terminal app (G3d) — Rust owns the /terminal-ws PTY; output streams here.
@@ -196,6 +200,7 @@ export component AppWindow inherits Window {
     callback set-model(string);
     callback set-cache(bool, bool, string);
     callback set-sensor-profile(string);
+    callback set-default-login(bool);
     callback power-action(string);
     callback terminal-send(string);          // a submitted terminal command line
     // Tier-A parity apps
@@ -588,11 +593,14 @@ export component AppWindow inherits Window {
                         cache-conversation: root.settings-cache-conversation;
                         cache-ttl: root.settings-cache-ttl;
                         sensor-profile: root.settings-sensor-profile;
+                        login-user-name: root.settings-login-user-name;
+                        login-is-default: root.settings-login-is-default;
                         save-soul(text) => { root.save-soul(text); }
                         set-policy(mode) => { root.set-policy(mode); }
                         set-model(id) => { root.set-model(id); }
                         set-cache(e, c, t) => { root.set-cache(e, c, t); }
                         set-sensor-profile(p) => { root.set-sensor-profile(p); }
+                        set-default-login(b) => { root.set-default-login(b); }
                         refresh => { root.refresh-settings(); }
                     }
 
@@ -704,6 +712,8 @@ export component AppWindow inherits Window {
                         cache-conversation: root.settings-cache-conversation;
                         cache-ttl: root.settings-cache-ttl;
                         sensor-profile: root.settings-sensor-profile;
+                        login-user-name: root.settings-login-user-name;
+                        login-is-default: root.settings-login-is-default;
                         terminal-text: root.terminal-text;
                         terminal-scroll-tick: root.terminal-scroll-tick;
                         council-agents: root.council-agents;
@@ -800,6 +810,7 @@ export component AppWindow inherits Window {
                         set-model(id) => { root.set-model(id); }
                         set-cache(e, c, t) => { root.set-cache(e, c, t); }
                         set-sensor-profile(p) => { root.set-sensor-profile(p); }
+                        set-default-login(b) => { root.set-default-login(b); }
                         refresh-settings => { root.refresh-settings(); }
                         refresh-events(types, hours) => { root.refresh-events(types, hours); }
                         refresh-mesh => { root.refresh-mesh(); }

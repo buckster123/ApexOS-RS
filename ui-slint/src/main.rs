@@ -97,6 +97,10 @@ thread_local! {
     // Lets agent-driven `sketch_draw` scale its normalized 0-1 coords to px.
     // Default ≈ the sketchpad window's canvas before the first report lands.
     static SKETCH_CANVAS: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((600.0, 433.0)) };
+    // Slice 3e: the logged-in human's user_id ("" for the admin/device token), set on
+    // a settings refresh from /api/auth/me — so the LOGIN toggle knows whom to make
+    // (or clear as) this device's auto-login default.
+    static LOGIN_ME: RefCell<String> = const { RefCell::new(String::new()) };
     // Calculator — pure-UI immediate-execution state machine.
     static CALC: RefCell<Calc> = RefCell::new(Calc::new());
     // Identity boot wizard (3d): wizard state + its two tile models. Thread-local
@@ -4082,25 +4086,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }).ok();
                 } else {
-                    // LOGIN mode — ungated profile list; always show (even one profile:
-                    // we need a token to connect). A pick → PIN or immediate login.
+                    // LOGIN mode — ungated profile list. A pick → PIN or immediate login.
                     let v = json_get(&client, format!("{base}/api/auth/profiles")).await;
                     let users: Vec<UserRow> = v["users"].as_array().map(|a| a.iter().map(|u| UserRow {
                         id:      u["id"].as_str().unwrap_or("").to_string(),
                         name:    u["name"].as_str().unwrap_or("").to_string(),
                         has_pin: u["has_pin"].as_bool().unwrap_or(false),
                     }).collect()).unwrap_or_default();
+
+                    // Auto-skip (slice 3e): if a default profile is set, an OPEN one
+                    // logs in with zero taps; a PIN one jumps straight to the keypad.
+                    let default_user = v["default_user"].as_str().map(|s| s.to_string());
+                    let default_profile = default_user.as_ref()
+                        .and_then(|du| users.iter().find(|u| &u.id == du).cloned());
+                    if let Some(dp) = default_profile.as_ref().filter(|u| !u.has_pin) {
+                        // Re-execs on success; only RETURNS on failure → fall through
+                        // and show the picker so the user isn't stranded.
+                        do_login(&client, &base, dp.id.clone(), String::new(), ui_w.clone()).await;
+                    }
+                    let pin_default = default_profile.filter(|u| u.has_pin);
+
                     slint::invoke_from_event_loop(move || {
                         let Some(ui) = ui_w.upgrade() else { return };
                         let user_defs: Vec<UserDef> = users.iter().map(|u| UserDef {
                             id: u.id.clone().into(), name: u.name.clone().into(),
                             has_pin: u.has_pin, glyph: id_glyph(&u.name),
                         }).collect();
-                        ID_STATE.with(|s| { let mut s = s.borrow_mut(); s.users = users; s.login = true; });
+                        ID_STATE.with(|s| {
+                            let mut s = s.borrow_mut();
+                            s.users = users; s.login = true;
+                            if let Some(pd) = &pin_default { s.selected = pd.id.clone(); }
+                        });
                         ID_USERS.with(|m| { if let Some(model) = m.borrow().as_ref() { model.set_vec(user_defs); } });
-                        ui.set_identity_step(0);
                         ui.set_identity_pin_filled(0);
                         ui.set_identity_pin_error(false);
+                        ui.set_identity_pin_message("".into());
+                        // PIN default → pre-selected keypad (step 1, ‹ Back returns to
+                        // the picker); otherwise the profile picker (step 0).
+                        if let Some(pd) = pin_default {
+                            ui.set_identity_selected_name(pd.name.into());
+                            ui.set_identity_step(1);
+                        } else {
+                            ui.set_identity_step(0);
+                        }
                         ui.set_identity_wizard_open(true);
                     }).ok();
                 }
@@ -4331,6 +4359,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui_w   = ui_weak_stg.clone();
         rt_h_stg.spawn(async move {
             let data = fetch_settings(&client, &base).await;
+            // Slice 3e: who am I (session-token login) + is my profile this device's
+            // auto-login default? `me.user_id` is null for the admin/device token.
+            let me = json_get(&client, format!("{base}/api/auth/me")).await;
+            let me_id   = me["user_id"].as_str().unwrap_or("").to_string();
+            let me_name = me["name"].as_str().unwrap_or("").to_string();
+            let default_user = json_get(&client, format!("{base}/api/auth/profiles")).await
+                ["default_user"].as_str().unwrap_or("").to_string();
+            let is_default = !me_id.is_empty() && me_id == default_user;
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = ui_w.upgrade() {
                     ui.set_soul_text(data.soul_text.into());
@@ -4341,9 +4377,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_settings_cache_conversation(data.cache_conversation);
                     ui.set_settings_cache_ttl(data.cache_ttl.into());
                     ui.set_settings_sensor_profile(data.sensor_profile.into());
+                    LOGIN_ME.with(|m| *m.borrow_mut() = me_id);
+                    ui.set_settings_login_user_name(me_name.into());
+                    ui.set_settings_login_is_default(is_default);
                     replace_models(data.models);
                 }
             }).ok();
+        });
+    });
+
+    // Slice 3e: set/clear this device's auto-login default = the logged-in profile.
+    let rt_h_dl   = rt.handle().clone();
+    let client_dl = Arc::clone(&http_client);
+    let base_dl   = http_base.clone();
+    let ui_weak_dl = ui.as_weak();
+    ui.on_set_default_login(move |enabled| {
+        let me = LOGIN_ME.with(|m| m.borrow().clone());
+        if me.is_empty() { return; }   // admin/device token — no profile to default
+        let user_id = if enabled { me } else { String::new() };
+        let client = Arc::clone(&client_dl);
+        let base   = base_dl.clone();
+        let ui_w   = ui_weak_dl.clone();
+        rt_h_dl.spawn(async move {
+            let ok = client.post(format!("{base}/api/auth/default"))
+                .json(&serde_json::json!({ "user_id": user_id }))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok {
+                notify(ToastKind::Success, if enabled { "Auto-login set for this device" } else { "Auto-login cleared" });
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_w.upgrade() { ui.set_settings_login_is_default(enabled); }
+                }).ok();
+            } else {
+                notify(ToastKind::Error, "Couldn't update auto-login");
+            }
         });
     });
 
