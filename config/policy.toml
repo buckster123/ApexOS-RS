@@ -30,6 +30,9 @@ mode = "suggest"
 "audio_trim"         = "allow"
 "audio_clean"        = "allow"
 "display_face"       = "allow"
+# Drawing on the Sketchpad — a benign UI effect (renders to the canvas + a
+# workspace PNG), same trust basis as display_face.
+"sketch_draw"        = "allow"
 # Camera eyes: read-only "look", same vision flow as screenshot_mirror. Allowed so
 # APEX can see fluidly; privacy-conscious operators may set this to "ask".
 "camera_capture"     = "allow"

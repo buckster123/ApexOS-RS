@@ -93,6 +93,10 @@ thread_local! {
     // Shape tool: 0 freehand · 1 line · 2 rect · 3 ellipse; + the drag anchor.
     static SKETCH_TOOL: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
     static SKETCH_ANCHOR: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((0.0, 0.0)) };
+    // Last-reported canvas pixel size (from SketchpadView's changed handler).
+    // Lets agent-driven `sketch_draw` scale its normalized 0-1 coords to px.
+    // Default ≈ the sketchpad window's canvas before the first report lands.
+    static SKETCH_CANVAS: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((600.0, 433.0)) };
     // Calculator — pure-UI immediate-execution state machine.
     static CALC: RefCell<Calc> = RefCell::new(Calc::new());
     // Identity boot wizard (3d): wizard state + its two tile models. Thread-local
@@ -1948,6 +1952,98 @@ fn sketch_payload(width: f32, height: f32) -> Value {
     })
 }
 
+// "#rrggbb" (or "rrggbb") → slint::Color, falling back to off-white.
+fn hex_to_color(hex: &str) -> slint::Color {
+    let h = hex.trim().trim_start_matches('#');
+    let v = u32::from_str_radix(h, 16).ok().filter(|_| h.len() == 6).unwrap_or(0xe6e6eb);
+    slint::Color::from_rgb_u8((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
+// One agent-drawn stroke, points in NORMALIZED 0-1 space (scaled to canvas px
+// when applied). Built off the Slint thread → only Send data.
+struct AgentStroke {
+    points: Vec<(f32, f32)>,
+    color_hex: String,
+    width: f32,
+}
+
+// Read an [x, y] pair from a JSON array ([x,y]) or object ({x,y}).
+fn read_xy(v: &Value) -> Option<(f32, f32)> {
+    if let Some(a) = v.as_array() {
+        if a.len() >= 2 {
+            return Some((a[0].as_f64()? as f32, a[1].as_f64()? as f32));
+        }
+    }
+    Some((v["x"].as_f64()? as f32, v["y"].as_f64()? as f32))
+}
+
+// Parse a `sketch_draw` tool call's `strokes` into normalized AgentStrokes.
+// Each stroke is a freehand `points` path or a `shape`+`from`+`to` primitive.
+// Coords are clamped to 0-1; invalid/empty strokes are dropped.
+fn parse_agent_strokes(args: &Value) -> Vec<AgentStroke> {
+    let Some(arr) = args["strokes"].as_array() else { return Vec::new() };
+    let mut out = Vec::new();
+    for s in arr {
+        let color = s["color"].as_str().unwrap_or("#e6e6eb").to_string();
+        let width = s["width"].as_f64().unwrap_or(3.0).clamp(0.5, 64.0) as f32;
+        let pts: Vec<(f32, f32)> = if let Some(shape) = s["shape"].as_str() {
+            match (read_xy(&s["from"]), read_xy(&s["to"])) {
+                (Some((ax, ay)), Some((bx, by))) => {
+                    let tool = match shape { "line" => 1, "rect" => 2, "ellipse" => 3, _ => 0 };
+                    sketch_shape_points(tool, ax, ay, bx, by)
+                }
+                _ => Vec::new(),
+            }
+        } else if let Some(ps) = s["points"].as_array() {
+            ps.iter().filter_map(read_xy).collect()
+        } else {
+            Vec::new()
+        };
+        if pts.is_empty() { continue; }
+        let pts = pts.into_iter().map(|(x, y)| (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))).collect();
+        out.push(AgentStroke { points: pts, color_hex: color, width });
+    }
+    out
+}
+
+// Reveal (or focus) the Sketchpad window so the human watches APEX draw.
+fn reveal_sketchpad(ui: &AppWindow) {
+    WINDOWS.with(|w| {
+        if let Some(model) = w.borrow().as_ref() {
+            wm_launch(ui, model, AppKind::Sketchpad);
+        }
+    });
+}
+
+// Apply agent-drawn strokes to the live canvas (same models the user draws into,
+// so the existing save path persists a USER+AGENT composite). Returns the
+// /api/sketch payload to persist, or None if nothing changed. Slint thread only.
+fn apply_agent_sketch(ui: &AppWindow, clear: bool, strokes: &[AgentStroke]) -> Option<Value> {
+    if clear { sketch_clear_all(); }
+    let (cw, ch) = SKETCH_CANVAS.with(|c| c.get());
+    let (cw, ch) = (cw.max(1.0), ch.max(1.0));
+    let mut added = 0;
+    for st in strokes {
+        let px: Vec<(f32, f32)> = st.points.iter().map(|(x, y)| (x * cw, y * ch)).collect();
+        let commands = sketch_points_to_commands(&px);
+        let color = hex_to_color(&st.color_hex);
+        SKETCH_DATA.with(|d| d.borrow_mut().push(StrokeData {
+            color_hex: st.color_hex.clone(),
+            width: st.width,
+            points: px,
+        }));
+        SKETCH_STROKES.with(|m| {
+            if let Some(model) = m.borrow().as_ref() {
+                model.push(SketchStroke { commands: commands.into(), color, width: st.width });
+            }
+        });
+        added += 1;
+    }
+    if added == 0 && !clear { return None; }
+    reveal_sketchpad(ui);
+    Some(sketch_payload(cw, ch))
+}
+
 fn find_tool_row(call_id: &str) -> Option<usize> {
     MESSAGES.with(|m| {
         if let Some(model) = m.borrow().as_ref() {
@@ -2049,7 +2145,7 @@ fn ws_to_http(ws_url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ws_to_http, ironbow, build_thermal_image};
+    use super::{ws_to_http, ironbow, build_thermal_image, parse_agent_strokes};
 
     #[test]
     fn ironbow_spans_black_to_white() {
@@ -2069,6 +2165,51 @@ mod tests {
         let img = build_thermal_image(&[25.0_f32; 768]).expect("image");
         assert_eq!(img.size().width, 32);
         assert_eq!(img.size().height, 24);
+    }
+
+    #[test]
+    fn agent_strokes_parse_points_and_clamp() {
+        // A freehand path; out-of-range coords clamp into 0-1.
+        let strokes = parse_agent_strokes(&json!({
+            "strokes": [{ "points": [[0.1, 0.2], [1.5, -0.3]], "color": "#39ff14", "width": 4 }]
+        }));
+        assert_eq!(strokes.len(), 1);
+        assert_eq!(strokes[0].color_hex, "#39ff14");
+        assert_eq!(strokes[0].width, 4.0);
+        assert_eq!(strokes[0].points, vec![(0.1, 0.2), (1.0, 0.0)]);
+    }
+
+    #[test]
+    fn agent_strokes_expand_shapes() {
+        // A line shape → 2 points; a rect → 5 (closed); ellipse → many.
+        let parsed = parse_agent_strokes(&json!({
+            "strokes": [
+                { "shape": "line", "from": [0.0, 0.0], "to": [1.0, 1.0] },
+                { "shape": "rect", "from": [0.2, 0.2], "to": [0.8, 0.8] },
+                { "shape": "ellipse", "from": [0.1, 0.1], "to": [0.9, 0.9] }
+            ]
+        }));
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].points.len(), 2);
+        assert_eq!(parsed[1].points.len(), 5);
+        assert!(parsed[2].points.len() > 5);
+        // Default colour/width when omitted.
+        assert_eq!(parsed[0].color_hex, "#e6e6eb");
+        assert_eq!(parsed[0].width, 3.0);
+    }
+
+    #[test]
+    fn agent_strokes_drop_invalid_and_accept_xy_objects() {
+        // No points + no complete shape → dropped; {x,y} object form accepted.
+        let parsed = parse_agent_strokes(&json!({
+            "strokes": [
+                { "color": "#fff" },                                  // dropped: empty
+                { "shape": "line", "from": [0.0, 0.0] },              // dropped: no `to`
+                { "points": [{ "x": 0.5, "y": 0.5 }, { "x": 0.6, "y": 0.7 }] }
+            ]
+        }));
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].points, vec![(0.5, 0.5), (0.6, 0.7)]);
     }
 
     #[test]
@@ -4756,6 +4897,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     ui.on_sketch_up(|| { /* stroke/shape complete; nothing to finalise */ });
     ui.on_sketch_clear(sketch_clear_all);
+    // Canvas reports its pixel size → agent `sketch_draw` scales 0-1 coords to it.
+    ui.on_sketch_report_canvas(|w, h| SKETCH_CANVAS.with(|c| c.set((w, h))));
     ui.on_sketch_set_color(|i| SKETCH_COLOR.with(|c| c.set(i)));
     ui.on_sketch_set_width(|i| SKETCH_WIDTH.with(|c| c.set(i)));
     ui.on_sketch_set_tool(|i| SKETCH_TOOL.with(|t| t.set(i)));
@@ -5368,9 +5511,9 @@ fn dispatch_event(
             // ToolCall.id is ActionId(u64) → a bare number; stringify for the row key.
             let tool_name = call.tool.clone();
 
-            // Work Board: reflect the running tool on the Active card (display_face
-            // is APEX emoting, not a work step — skip it).
-            if tool_name != "display_face" {
+            // Work Board: reflect the running tool on the Active card. display_face
+            // (emoting) and sketch_draw (drawing) aren't work steps — skip them.
+            if tool_name != "display_face" && tool_name != "sketch_draw" {
                 let t = tool_name.clone();
                 slint::invoke_from_event_loop(move || board_active(&format!("running {t}"))).ok();
             }
@@ -5386,6 +5529,34 @@ fn dispatch_event(
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = w.upgrade() {
                         set_face_emote(&ui, &fstate, &fgaze, fint);
+                    }
+                })
+                .ok();
+            } else if tool_name == "sketch_draw" {
+                // APEX drawing on the canvas — apply to the live stroke models and
+                // persist a composite PNG (so sketch_snapshot reflects it). No tool
+                // card; the canvas IS the feedback.
+                let clear  = call.args["clear"].as_bool().unwrap_or(false);
+                let parsed = parse_agent_strokes(&call.args);
+                let w      = ui_weak.clone();
+                let rt_h   = ctx.rt_handle.clone();
+                let client = Arc::clone(&ctx.http_client);
+                let base   = ctx.http_base.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = w.upgrade() {
+                        if let Some(payload) = apply_agent_sketch(&ui, clear, &parsed) {
+                            let empty = payload["strokes"].as_array()
+                                .map(|a| a.is_empty()).unwrap_or(true);
+                            if !empty {
+                                rt_h.spawn(async move {
+                                    let _ = client.post(format!("{base}/api/sketch"))
+                                        .json(&payload)
+                                        .timeout(std::time::Duration::from_secs(10))
+                                        .send().await;
+                                });
+                            }
+                            notify(ToastKind::Success, "🎨 APEX drew on the Sketchpad");
+                        }
                     }
                 })
                 .ok();
