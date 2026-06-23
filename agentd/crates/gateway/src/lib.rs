@@ -125,6 +125,12 @@ pub struct GatewayState {
     pub mesh_sessions:      Arc<std::sync::Mutex<HashMap<String, SessionId>>>,
     /// On-disk JSON backing for `mesh_sessions` (`<log_dir>/mesh_sessions.json`).
     pub mesh_sessions_path: PathBuf,
+    /// Per-peer-thread unread counts (session id → state), bumped on each inbound
+    /// a2a and persisted so the UI's inbox unread survives a restart. See
+    /// `mesh_inbox_handler` / `mesh_inbox_read_handler`.
+    pub mesh_unread:        MeshInbox,
+    /// On-disk JSON backing for `mesh_unread` (`<log_dir>/mesh_unread.json`).
+    pub mesh_unread_path:   PathBuf,
     /// Session-consolidation requests → the agentd-side worker (which owns the LLM
     /// provider + Cerebro ToolProxy, unavailable here at GatewayState build time).
     /// The handler sends a `ConsolidateReq` and awaits its oneshot reply. See
@@ -303,6 +309,8 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/mesh/nodes",         get(mesh_nodes_handler))
         .route("/api/mesh/peers",         get(mesh_peers_get_handler).post(mesh_peers_post_handler))
         .route("/api/mesh/peers/{id}",    delete(mesh_peers_delete_handler))
+        .route("/api/mesh/inbox",         get(mesh_inbox_handler))
+        .route("/api/mesh/inbox/read",    post(mesh_inbox_read_handler))
         .route("/api/mesh/pair/start",    post(pair_start_handler))
         .route("/api/mesh/pair/status",   get(pair_status_handler))
         .route("/api/mesh/pair/redeem",   post(pair_redeem_handler))
@@ -1276,6 +1284,96 @@ fn mesh_session_for(state: &GatewayState, peer: &str) -> SessionId {
     sid
 }
 
+// ── Mesh inbox unread (cross-restart persistence) ───────────────────────────────
+// Per-peer-thread unread counts that survive a daemon/UI restart. The UI's inbox
+// is event-driven (the `mesh_message` stream) but its counts were UI-session-scoped
+// (lost on restart). This is the durable side: agentd increments a per-session
+// counter on each inbound a2a, persists it to `<log_dir>/mesh_unread.json`, serves
+// it at `GET /api/mesh/inbox` (the UI seeds from this on launch) and zeroes it at
+// `POST /api/mesh/inbox/read`. Keyed by the peer's thread SessionId — the same join
+// key the UI's inbox + `mesh_sessions` already use.
+
+/// One peer thread's unread state (carries the node_id + last preview/time so the
+/// UI can rebuild a full inbox row from a cold start, not just a bare count).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MeshUnread {
+    pub node_id: String,
+    pub unread:  u32,
+    pub preview: String,
+    pub last_ts: i64, // epoch seconds
+}
+
+/// Session id → unread state. `Arc<std::sync::Mutex>` (not tokio) — the critical
+/// sections are tiny map ops, never held across an await.
+pub type MeshInbox = Arc<std::sync::Mutex<HashMap<u64, MeshUnread>>>;
+
+/// Bump a peer thread's unread on an inbound a2a message (pure; caller persists).
+fn mesh_unread_bump(map: &mut HashMap<u64, MeshUnread>, session: u64, node_id: &str, preview: &str, now: i64) {
+    let e = map.entry(session).or_default();
+    e.node_id = node_id.to_string();
+    e.unread  = e.unread.saturating_add(1);
+    e.preview = preview.to_string();
+    e.last_ts = now;
+}
+
+/// Zero a peer thread's unread (the user opened it). Returns true if it changed.
+fn mesh_unread_clear(map: &mut HashMap<u64, MeshUnread>, session: u64) -> bool {
+    match map.get_mut(&session) {
+        Some(e) if e.unread != 0 => { e.unread = 0; true }
+        _ => false,
+    }
+}
+
+fn persist_mesh_unread(path: &std::path::Path, map: &HashMap<u64, MeshUnread>) {
+    if let Ok(json) = serde_json::to_string_pretty(map) {
+        if let Err(e) = std::fs::write(path, json) {
+            eprintln!("[mesh] could not persist mesh_unread: {e}");
+        }
+    }
+}
+
+fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// GET /api/mesh/inbox — persisted per-peer unread threads, newest first. The UI
+/// seeds its inbox model from this on launch so unread survives a restart.
+async fn mesh_inbox_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let map = state.mesh_unread.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rows: Vec<MeshUnread> = Vec::with_capacity(map.len());
+    let mut sessions: Vec<u64> = Vec::with_capacity(map.len());
+    for (sid, e) in map.iter() { sessions.push(*sid); rows.push(e.clone()); }
+    drop(map);
+    let mut threads: Vec<serde_json::Value> = sessions.into_iter().zip(rows).map(|(sid, e)| {
+        serde_json::json!({
+            "session": sid, "node_id": e.node_id,
+            "unread": e.unread, "preview": e.preview, "last_ts": e.last_ts,
+        })
+    }).collect();
+    threads.sort_by(|a, b| b["last_ts"].as_i64().cmp(&a["last_ts"].as_i64()));
+    Json(serde_json::json!({ "threads": threads }))
+}
+
+#[derive(Deserialize)]
+struct InboxReadBody { session: u64 }
+
+/// POST /api/mesh/inbox/read — zero a peer thread's unread (the user opened it).
+async fn mesh_inbox_read_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<InboxReadBody>,
+) -> impl IntoResponse {
+    let snapshot = {
+        let mut map = state.mesh_unread.lock().unwrap_or_else(|e| e.into_inner());
+        mesh_unread_clear(&mut map, body.session);
+        map.clone()
+    };
+    persist_mesh_unread(&state.mesh_unread_path, &snapshot);
+    Json(serde_json::json!({ "ok": true }))
+}
+
 /// POST /api/sessions/:id/message — inject a message into an agent session from
 /// external code (scripts, other services, the desktop UI) or a mesh peer (a2a).
 /// Emits UserPrompt on the bus so the target session starts a new turn.
@@ -1325,7 +1423,14 @@ async fn session_message_handler(
     // Global notification so it surfaces regardless of the user's active session.
     if let Some(peer) = from {
         let preview: String = message.chars().take(140).collect();
-        state.bus.emit(Event::MeshMessage { from_node: peer, session, preview }).await;
+        state.bus.emit(Event::MeshMessage { from_node: peer.clone(), session, preview: preview.clone() }).await;
+        // Durable unread (survives a restart): bump + persist this peer's thread.
+        let snapshot = {
+            let mut map = state.mesh_unread.lock().unwrap_or_else(|e| e.into_inner());
+            mesh_unread_bump(&mut map, session.0, &peer, &preview, now_epoch_secs());
+            map.clone()
+        };
+        persist_mesh_unread(&state.mesh_unread_path, &snapshot);
     }
 
     Json(serde_json::json!({ "ok": true, "session_id": session.0 }))
@@ -4254,6 +4359,33 @@ mod ws_filter_tests {
         // The counter is shared with socket-session allocation, so the next socket
         // id is strictly above every mesh id — they can never collide.
         assert_eq!(counter.fetch_add(1, Ordering::SeqCst), 25);
+    }
+
+    #[test]
+    fn mesh_unread_bump_clear_and_persist_roundtrip() {
+        let mut map: HashMap<u64, MeshUnread> = HashMap::new();
+        // Two inbound messages on one thread → unread 2, latest preview/time win.
+        mesh_unread_bump(&mut map, 23, "ApexOS-RS", "hi", 100);
+        mesh_unread_bump(&mut map, 23, "ApexOS-RS", "you there?", 160);
+        let e = &map[&23];
+        assert_eq!((e.unread, e.preview.as_str(), e.last_ts), (2, "you there?", 160));
+        assert_eq!(e.node_id, "ApexOS-RS");
+
+        // A different thread is independent.
+        mesh_unread_bump(&mut map, 24, "apex3-radxa", "ping", 170);
+        assert_eq!(map[&24].unread, 1);
+
+        // Clear zeroes only the named thread (and is idempotent).
+        assert!(mesh_unread_clear(&mut map, 23));
+        assert_eq!(map[&23].unread, 0);
+        assert!(!mesh_unread_clear(&mut map, 23), "already zero → no change");
+        assert_eq!(map[&24].unread, 1, "other thread untouched");
+
+        // JSON round-trips with u64 keys (serde stringifies/parses them).
+        let json = serde_json::to_string(&map).unwrap();
+        let back: HashMap<u64, MeshUnread> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back[&24].preview, "ping");
+        assert_eq!(back[&23].unread, 0);
     }
 }
 
