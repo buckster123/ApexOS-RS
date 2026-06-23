@@ -100,6 +100,15 @@ pub struct PreparedImage {
     pub media_type: String,
 }
 
+impl PreparedImage {
+    /// Decode the prepared base64 back to raw image bytes (for CLIP embedding).
+    pub fn decoded(&self) -> Result<Vec<u8>> {
+        base64::engine::general_purpose::STANDARD
+            .decode(self.b64.trim())
+            .map_err(|e| anyhow!("decode image b64: {e}"))
+    }
+}
+
 /// Read an image off disk, sniff its media type, and base64-encode it.
 pub fn prepare_from_path(path: &str) -> Result<PreparedImage> {
     let p = Path::new(path);
@@ -308,6 +317,65 @@ async fn describe_anthropic(
         backend: "anthropic",
         model: cfg.anthropic_model.clone(),
     })
+}
+
+// ── CLIP visual embeddings (search_vision) ──────────────────────────────────
+// The recall half of the vision loop: CLIP's image + text towers map both into
+// ONE shared 512-dim space (fastembed `ClipVitB32`), so a text query can rank
+// stored images by visual content (text→image), and an image query finds similar
+// images (image→image). Both towers lazy-load on first use (no cost until the
+// agent actually does visual recall) and cache to fastembed's default dir. A load
+// failure (offline first run, ONNX error) degrades to None — the Cortex then falls
+// back to caption/FTS recall, never errors. Whether to use CLIP at all is the
+// Cortex's call (tier-gated on text-embeddings being enabled); this module just
+// supplies the vectors.
+
+use std::sync::{Arc, OnceLock};
+
+static CLIP_IMAGE: OnceLock<Option<Arc<fastembed::ImageEmbedding>>> = OnceLock::new();
+static CLIP_TEXT:  OnceLock<Option<Arc<fastembed::TextEmbedding>>> = OnceLock::new();
+
+fn clip_image_model() -> Option<Arc<fastembed::ImageEmbedding>> {
+    CLIP_IMAGE.get_or_init(|| {
+        use fastembed::{ImageEmbedding, ImageEmbeddingModel, ImageInitOptions};
+        match ImageEmbedding::try_new(ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)) {
+            Ok(m)  => { tracing::info!("CLIP image tower loaded (ClipVitB32, 512-dim)"); Some(Arc::new(m)) }
+            Err(e) => { tracing::warn!("CLIP image tower load failed ({e}) — visual recall degrades to caption/FTS"); None }
+        }
+    }).clone()
+}
+
+fn clip_text_model() -> Option<Arc<fastembed::TextEmbedding>> {
+    CLIP_TEXT.get_or_init(|| {
+        use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+        match TextEmbedding::try_new(InitOptions::new(EmbeddingModel::ClipVitB32)) {
+            Ok(m)  => { tracing::info!("CLIP text tower loaded (clip-ViT-B-32-text, 512-dim)"); Some(Arc::new(m)) }
+            Err(e) => { tracing::warn!("CLIP text tower load failed ({e}) — text→image recall unavailable"); None }
+        }
+    }).clone()
+}
+
+/// Embed raw image bytes into the CLIP image space (512-dim). `Err` if the tower
+/// can't load (offline / ONNX error) — caller decides the fallback.
+pub async fn clip_embed_image(bytes: Vec<u8>) -> Result<Vec<f32>> {
+    tokio::task::spawn_blocking(move || {
+        let model = clip_image_model().ok_or_else(|| anyhow!("CLIP image tower unavailable"))?;
+        let mut out = model.embed_bytes(&[bytes.as_slice()], None)?;
+        if out.is_empty() { return Err(anyhow!("CLIP image embed produced no vector")); }
+        Ok(out.remove(0))
+    })
+    .await?
+}
+
+/// Embed a text query into the CLIP text space (512-dim, shared with images).
+pub async fn clip_embed_text(text: String) -> Result<Vec<f32>> {
+    tokio::task::spawn_blocking(move || {
+        let model = clip_text_model().ok_or_else(|| anyhow!("CLIP text tower unavailable"))?;
+        let mut out = model.embed(vec![text], None)?;
+        if out.is_empty() { return Err(anyhow!("CLIP text embed produced no vector")); }
+        Ok(out.remove(0))
+    })
+    .await?
 }
 
 #[cfg(test)]

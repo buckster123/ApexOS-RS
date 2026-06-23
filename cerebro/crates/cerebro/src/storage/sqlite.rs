@@ -1833,6 +1833,19 @@ CREATE TABLE IF NOT EXISTS memory_versions (
 
 CREATE INDEX IF NOT EXISTS idx_versions_memory ON memory_versions(memory_id);
 
+-- CLIP image embeddings for visual recall (search_vision). 512-dim f32 LE blob,
+-- keyed by the caption memory it indexes; image_path lets a hit return the source
+-- image for re-viewing. Brute-force cosine in Rust (image counts are modest), so
+-- no vec0 virtual table — a plain row store. Scope is enforced via the memories
+-- join at search time, not denormalized here.
+CREATE TABLE IF NOT EXISTS vision_embeddings (
+    memory_id   TEXT PRIMARY KEY,
+    embedding   BLOB NOT NULL,
+    image_path  TEXT,
+    created_at  TEXT NOT NULL,
+    FOREIGN KEY (memory_id) REFERENCES memories(id)
+);
+
 -- FTS5 virtual table for keyword search (FTS5 fallback when vector search unavailable)
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     id UNINDEXED,

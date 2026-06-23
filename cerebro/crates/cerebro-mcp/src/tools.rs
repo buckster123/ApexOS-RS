@@ -862,9 +862,26 @@ fn tool_schema(name: &str) -> Value {
             }
         }),
 
-        // Deferred Tier-7 tools (ingest_file, search_vision). Advertised for
-        // surface parity with Python, but calling them returns an honest "not
-        // implemented" error (see dispatch, C-RS-007).
+        "search_vision" => json!({
+            "name": "search_vision",
+            "description": "Visually recall stored images — the read half of the vision loop (describe_image with remember:true is the write half). Rank your remembered images by a `query` (a text description; CLIP text→image) OR by an example image (`path`/`b64`; image→image similarity). Returns the matching caption memories with the source image_path (when available) so you can re-view them. On a node with image embeddings disabled (Nano tier) it falls back to keyword/semantic recall over the captions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query":      { "type": "string", "description": "Text describing what to find (e.g. 'a red bicycle by a door')" },
+                    "path":       { "type": "string", "description": "Instead of text: a workspace image path to find visually-similar images" },
+                    "b64":        { "type": "string", "description": "Instead of text: an inline base64 image to match against" },
+                    "media_type": { "type": "string", "description": "Media type hint for `b64` (e.g. image/jpeg)" },
+                    "k":          { "type": "integer", "description": "Max results (default 5, max 50)" },
+                    "agent_id":   { "type": "string", "description": "Scope the search to this agent's memories" }
+                },
+                "required": []
+            }
+        }),
+
+        // Deferred Tier-7 tools (ingest_file). Advertised for surface parity with
+        // Python, but calling them returns an honest "not implemented" error (see
+        // dispatch, C-RS-007).
         _ => json!({
             "name": name,
             "description": format!("(not yet implemented) {name}"),

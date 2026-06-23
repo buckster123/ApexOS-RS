@@ -6,7 +6,7 @@ use cerebro::{
     models::{AssociativeLink, MemoryNode},
     storage::ListFilter,
     types::{AgentId, LinkType, MemoryId, MemoryType, VisibilityScope},
-    CerebroCortex,
+    CerebroCortex, VisionQuery,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -1086,6 +1086,15 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 let node = brain
                     .remember(caption.text.clone(), Some(memory_type), Some(tags), None, scope)
                     .await?;
+                // Index the image itself for visual recall (search_vision). Best-
+                // effort: a CLIP-off node (Nano) just keeps the caption. The prepared
+                // b64 → bytes; the source path (if given) rides along for re-viewing.
+                if let Ok(bytes) = image.decoded() {
+                    let path_owned = path.map(|p| p.to_string());
+                    if let Err(e) = brain.index_image(&node.id, bytes, path_owned).await {
+                        tracing::warn!("describe_image: visual index failed (caption kept): {e}");
+                    }
+                }
                 Some(node.id.0)
             } else {
                 None
@@ -1100,11 +1109,46 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             }))
         }
 
-        // Deferred Tier-7 tools (ingest_file, search_vision) and any unknown
-        // name. C-RS-007: these are still advertised in tools/list (surface
-        // parity with Python's 66) but must NOT return a success payload — that
-        // reads as "it worked." Return an honest not-implemented error so
-        // callers can branch on it.
+        // Tier-7 visual recall: the read half of the vision loop. Rank stored
+        // images by a text `query` (CLIP text→image) or an image (`path`/`b64`,
+        // image→image) in CLIP's shared space; falls back to caption/FTS recall
+        // over vision-tagged memories when visual embedding is off (Nano).
+        "search_vision" => {
+            let k     = args["k"].as_u64().unwrap_or(5).clamp(1, 50) as usize;
+            let scope = agent_scope(args);
+            let query = args["query"].as_str().filter(|s| !s.trim().is_empty());
+            let path  = args["path"].as_str().filter(|s| !s.is_empty());
+            let b64   = args["b64"].as_str().filter(|s| !s.is_empty());
+            let media_type = args["media_type"].as_str();
+
+            let vquery = if let Some(p) = path {
+                VisionQuery::Image(cerebro::vision::prepare_from_path(p)?.decoded()?)
+            } else if let Some(b) = b64 {
+                VisionQuery::Image(cerebro::vision::prepare_from_b64(b, media_type)?.decoded()?)
+            } else if let Some(q) = query {
+                VisionQuery::Text(q.to_string())
+            } else {
+                return Err(anyhow::anyhow!(
+                    "search_vision: provide `query` (text) or `path`/`b64` (an image)"
+                ));
+            };
+
+            let hits = brain.search_vision(vquery, k, scope).await?;
+            let results: Vec<Value> = hits.into_iter().map(|h| json!({
+                "memory_id":  h.memory.id.0,
+                "caption":    h.memory.content,
+                "score":      h.score,
+                "image_path": h.image_path,
+                "tags":       h.memory.tags,
+            })).collect();
+            let count = results.len();
+            Ok(json!({ "results": results, "count": count }))
+        }
+
+        // Deferred Tier-7 tools (ingest_file) and any unknown name. C-RS-007:
+        // these are still advertised in tools/list (surface parity with Python's
+        // 66) but must NOT return a success payload — that reads as "it worked."
+        // Return an honest not-implemented error so callers can branch on it.
         _ => Err(anyhow::anyhow!("tool not implemented: {name}")),
     }
 }

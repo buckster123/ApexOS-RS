@@ -7,5 +7,5 @@ pub mod storage;
 pub mod types;
 pub mod vision;
 
-pub use cortex::CerebroCortex;
+pub use cortex::{CerebroCortex, VisionHit, VisionQuery};
 pub use types::*;
