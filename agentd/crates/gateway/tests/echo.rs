@@ -47,6 +47,8 @@ fn make_state(handle: apexos_core::BusHandle, bcast: tokio::sync::broadcast::Sen
         node_id:              Arc::new("test-node".into()),
         mesh_sessions:        Arc::new(std::sync::Mutex::new(HashMap::new())),
         mesh_sessions_path:   PathBuf::from("."),
+        mesh_unread:          Arc::new(std::sync::Mutex::new(HashMap::new())),
+        mesh_unread_path:     PathBuf::from("."),
         consolidate_tx:       tokio::sync::mpsc::channel(1).0,
         spawn_tx:             tokio::sync::mpsc::channel(1).0,
         capabilities:         Arc::new(tokio::sync::RwLock::new(serde_json::Value::Null)),

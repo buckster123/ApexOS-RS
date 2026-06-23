@@ -2743,6 +2743,40 @@ async fn fetch_events(
 }
 
 // GET /api/mesh/{peers,nodes} → saved peers first, then discovered-but-unsaved.
+// GET /api/mesh/inbox → the persisted per-peer unread threads, used to SEED the
+// inbox at launch so unread + previews survive a restart (the live `mesh_message`
+// stream takes over from there). Relative-time labels are re-derived from last_ts.
+async fn fetch_inbox(client: &reqwest::Client, base_url: &str) -> Vec<InboxThread> {
+    let body = json_get(client, format!("{base_url}/api/mesh/inbox")).await;
+    let now = now_secs();
+    body["threads"].as_array().map(|a| a.iter().filter_map(|t| {
+        let node_id = t["node_id"].as_str().unwrap_or("");
+        if node_id.is_empty() { return None; }
+        let last_ts = t["last_ts"].as_i64().unwrap_or(0);
+        Some(InboxThread {
+            node_id:   node_id.into(),
+            preview:   t["preview"].as_str().unwrap_or("").into(),
+            unread:    t["unread"].as_i64().unwrap_or(0) as i32,
+            last_seen: ago_label(now - last_ts).into(),
+            last_ts:   last_ts as i32,
+            session:   t["session"].as_i64().unwrap_or(0) as i32,
+        })
+    }).collect()).unwrap_or_default()
+}
+
+/// Seed the inbox model wholesale from the persisted threads (launch only). Safe
+/// against a racing live event: the server already counted it, so its snapshot is
+/// authoritative. Slint thread only.
+fn seed_inbox(rows: Vec<InboxThread>) {
+    INBOX.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            while model.row_count() > 0 { model.remove(model.row_count() - 1); }
+            for r in rows { model.push(r); }
+        }
+    });
+    inbox_refresh_badge();
+}
+
 async fn fetch_mesh(client: &reqwest::Client, base_url: &str) -> Vec<MeshNode> {
     let (peers_resp, nodes_resp) = tokio::join!(
         json_get(client, format!("{base_url}/api/mesh/peers")),
@@ -4441,12 +4475,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     });
 
+    // One-shot at launch: seed the inbox from agentd's persisted unread so the
+    // badge + threads survive a restart. The live `mesh_message` stream then drives
+    // it as before (the server also persisted each, so the two stay in step).
+    {
+        let client = Arc::clone(&http_client);
+        let base   = http_base.clone();
+        rt.handle().spawn(async move {
+            let rows = fetch_inbox(&client, &base).await;
+            slint::invoke_from_event_loop(move || seed_inbox(rows)).ok();
+        });
+    }
+
     // Tap a mesh inbox thread → clear its unread + restore the peer's session
     // (the exact replay path the notification click uses).
     {
         let uw = ui.as_weak();
+        let rt_h_read = rt.handle().clone();
+        let client_read = Arc::clone(&http_client);
+        let base_read = http_base.clone();
         ui.on_open_mesh_thread(move |session| {
             inbox_clear_session(session);
+            // Persist the read so the cleared unread survives a restart.
+            let client = Arc::clone(&client_read);
+            let base   = base_read.clone();
+            rt_h_read.spawn(async move {
+                let _ = client.post(format!("{base}/api/mesh/inbox/read"))
+                    .json(&serde_json::json!({ "session": session as u64 }))
+                    .timeout(std::time::Duration::from_secs(8))
+                    .send().await;
+            });
             if let Some(ui) = uw.upgrade() {
                 ui.invoke_restore_session(session);
             }

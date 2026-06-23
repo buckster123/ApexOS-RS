@@ -169,6 +169,14 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default();
     let max_mesh_sid = mesh_sessions.values().map(|s| s.0).max().unwrap_or(0);
 
+    // Per-peer inbox unread (cross-restart persistence) — session id → unread state.
+    let mesh_unread_path = log_dir.join("mesh_unread.json");
+    let mesh_unread: HashMap<u64, apexos_gateway::MeshUnread> = std::fs::read_to_string(&mesh_unread_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let mesh_unread = Arc::new(std::sync::Mutex::new(mesh_unread));
+
     // Server-issued session IDs — start above any IDs already loaded from disk
     // (history JSONL *and* the mesh per-peer map).
     let max_loaded_sid = initial_histories.keys().map(|s| s.0).max().unwrap_or(0)
@@ -325,6 +333,8 @@ async fn main() -> anyhow::Result<()> {
         node_id:              Arc::clone(&node_id),
         mesh_sessions:        Arc::clone(&mesh_sessions),
         mesh_sessions_path:   mesh_sessions_path.clone(),
+        mesh_unread:          Arc::clone(&mesh_unread),
+        mesh_unread_path:     mesh_unread_path.clone(),
         consolidate_tx:       consolidate_tx.clone(),
         spawn_tx:             spawn_tx.clone(),
         capabilities:         Arc::clone(&capabilities_arc),
