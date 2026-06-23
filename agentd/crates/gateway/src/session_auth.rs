@@ -72,6 +72,32 @@ impl SessionStore {
     pub fn is_empty(&self) -> bool { self.sessions.is_empty() }
 }
 
+/// Resolve which agent a **session-authenticated** connection may bind to
+/// (agent-identity.md slice 3e — auth-gating the multi-agent `hello{agent_id}`).
+///
+/// A logged-in human may only act as an agent **they own**, so a guest can never
+/// bind APEX (the node owner's agent) and inherit its Cerebro memory. `owned` is
+/// the agent ids the session's user owns (`Identities::agents_for(user)`):
+///
+/// - requested id is owned → bind it;
+/// - requested id is empty / not owned → **fall back to the user's own default
+///   agent** (`auth.agent_id`, set from `default_agent` at login) if that's owned;
+/// - nothing valid → `None` (leave unbound → the session resolves to the node
+///   default; only reachable for a profile that owns no agents, a setup error).
+///
+/// The **admin / token-less** path is NOT gated (a trusted operator binds anything)
+/// — that case is handled by the caller and never reaches here.
+pub fn gate_agent_bind(auth: &SessionAuth, requested: &str, owned: &[String]) -> Option<String> {
+    let owns = |a: &str| !a.is_empty() && owned.iter().any(|o| o == a);
+    if owns(requested) {
+        Some(requested.to_string())
+    } else if owns(&auth.agent_id) {
+        Some(auth.agent_id.clone())
+    } else {
+        None
+    }
+}
+
 /// A fresh 256-bit session token: hex of 32 bytes from the OS CSPRNG
 /// (`/dev/urandom`, same source as the mesh pairing code — no `rand` dependency).
 pub fn gen_session_token() -> String {
@@ -135,6 +161,28 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert!(s.verify("b", t0 + Duration::from_secs(50)).is_some());
         assert!(s.verify("a", t0 + Duration::from_secs(50)).is_none());
+    }
+
+    #[test]
+    fn gate_binds_owned_else_falls_back_to_default() {
+        let owned = vec!["LUMA".to_string(), "SAGE".to_string()];
+        let auth = SessionAuth { user_id: "andre".into(), agent_id: "LUMA".into() };
+        // Owned request → bound as asked.
+        assert_eq!(gate_agent_bind(&auth, "SAGE", &owned), Some("SAGE".into()));
+        // Disallowed request → falls back to the user's own default (LUMA).
+        assert_eq!(gate_agent_bind(&auth, "APEX", &owned), Some("LUMA".into()));
+        // No request → also falls back to the default.
+        assert_eq!(gate_agent_bind(&auth, "", &owned), Some("LUMA".into()));
+    }
+
+    #[test]
+    fn gate_returns_none_when_nothing_owned() {
+        // A profile with no agents (and a default it doesn't own) binds nothing.
+        let auth = SessionAuth { user_id: "guest".into(), agent_id: "GONE".into() };
+        assert_eq!(gate_agent_bind(&auth, "APEX", &[]), None);
+        // Default not in the owned set → no fallback either.
+        let owned = vec!["MOTE".to_string()];
+        assert_eq!(gate_agent_bind(&auth, "APEX", &owned), None);
     }
 
     #[test]

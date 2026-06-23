@@ -152,9 +152,19 @@ The cognitive boot loop is the **missing middle**: Slice 1 *enforces* an identit
 > (lock badge · agent empty-state · lockout messaging). a human picks at boot (3d), and **connection auth is real** — a login mints a session
 > token so the desktop/web/PWA client no longer needs the shared node secret (3e, server **and**
 > native-UI wiring — login screen → `/api/auth/login` → re-exec with the minted token).
-> Remaining is the still-optional polish — a "set default + skip" persistence pass, binding-eviction on
-> disconnect, and auth-gating *which* agents a profile may bind at the **API** (it accepts any
-> `agent_id` today; the session token now carries the user's `default_agent`, a step toward it).
+> **Binding security closed (3e):** the multi-agent `hello{agent_id}` bind is now **auth-gated** — a
+> session-token human may only bind an agent **they own** (`Identities::agents_for(user)`); a
+> disallowed/blank request falls back to their own `default_agent`, so a guest can never inherit APEX
+> (the node owner's agent). Gated at every entry: the initial connect session, `hello{new}`/`{resume}`,
+> and an explicit `{agent_id}` pick. The admin / token-less path is trusted (binds anything). And
+> **bindings are evicted when the socket closes**, so a later resume must re-bind (and re-gate) rather
+> than silently re-enter a stale identity. The pure gate (`session_auth::gate_agent_bind`) is
+> unit-tested; the WS wiring (`resolve_ws_auth` → `handle_socket`) recovers WHO from the session token.
+> Residual edge: a profile that owns **no** agents falls through to the node default (a setup error —
+> the boot flow gives every user an agent).
+>
+> Remaining is the last UX polish — a **"set default + skip"** pass (a default profile the login screen
+> auto-logs-in, skipping the picker for a single-human device).
 
 ---
 
