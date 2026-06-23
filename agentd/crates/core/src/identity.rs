@@ -153,6 +153,12 @@ pub struct AgentRecord {
 /// The on-disk identity registry (identities.toml): `[[user]]` + `[[agent]]`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Identities {
+    /// The device's default login profile (user id). When set, the login screen
+    /// auto-logs-in this profile (open → zero-tap; PIN → straight to the keypad),
+    /// skipping the picker on a single-human device (agent-identity.md slice 3e).
+    /// Declared FIRST so TOML serializes this scalar before the `[[user]]` arrays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_user: Option<String>,
     #[serde(default, rename = "user")]
     pub users:  Vec<User>,
     #[serde(default, rename = "agent")]
@@ -380,6 +386,24 @@ mod tests {
         std::env::remove_var("AGENTD_WORKSPACE");
         assert_eq!(agent_workspace_root("LUMA"),
                    Path::new("/var/lib/agentd/workspace/workspaces/LUMA"));
+    }
+
+    #[test]
+    fn default_user_roundtrips_before_tables() {
+        let mut ids = Identities::default();
+        ids.seed_defaults("/etc/agentd/soul.md");
+        ids.default_user = Some(DEFAULT_USER_ID.to_string());
+        let toml = toml::to_string_pretty(&ids).unwrap();
+        // The scalar must serialize before the array-of-tables, or TOML reparses it
+        // as a key of the last [[user]]/[[agent]] table.
+        let du = toml.find("default_user").expect("default_user present");
+        let tbl = toml.find("[[").expect("a table array present");
+        assert!(du < tbl, "default_user must precede [[user]]/[[agent]]");
+        let back: Identities = toml::from_str(&toml).unwrap();
+        assert_eq!(back.default_user.as_deref(), Some(DEFAULT_USER_ID));
+        // Absent in older files → None (migration-safe).
+        let legacy: Identities = toml::from_str("[[user]]\nid='owner'\nname='Owner'\n").unwrap();
+        assert_eq!(legacy.default_user, None);
     }
 
     #[test]

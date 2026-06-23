@@ -163,8 +163,13 @@ The cognitive boot loop is the **missing middle**: Slice 1 *enforces* an identit
 > Residual edge: a profile that owns **no** agents falls through to the node default (a setup error —
 > the boot flow gives every user an agent).
 >
-> Remaining is the last UX polish — a **"set default + skip"** pass (a default profile the login screen
-> auto-logs-in, skipping the picker for a single-human device).
+> **Set-default + skip (3e, closed).** The registry carries a `default_user`; the **UNgated**
+> `/api/auth/profiles` exposes it so the login screen **auto-skips** the picker — an OPEN default logs in
+> with zero taps, a PIN default jumps straight to the keypad (`‹ Back` still reaches the picker). It's
+> set/cleared from **Settings → LOGIN** (a toggle: `GET /api/auth/me` tells the client who it's logged in
+> as, `POST /api/auth/default {user_id}` sets, `{""}` clears — both **gated**). The kiosk/device-token
+> path has no per-profile login, so the toggle hides there. **Slice 3e is fully closed**, and with it the
+> whole identity arc.
 
 ---
 

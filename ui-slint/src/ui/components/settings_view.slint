@@ -25,10 +25,15 @@ export component SettingsView {
     in property <string>         cache-ttl: "5m";
     // Sensor-alert sensitivity profile (standard / smoker / kitchen / workshop).
     in property <string>         sensor-profile: "standard";
+    // Login default-profile (slice 3e): the logged-in human's name ("" for the
+    // device-token / admin path) and whether they're this device's auto-login default.
+    in property <string>         login-user-name: "";
+    in property <bool>           login-is-default: false;
 
     callback save-soul(string);
     callback set-policy(string);
     callback set-model(string);
+    callback set-default-login(bool);
     // (enabled, cache_conversation, ttl) — full desired state each tap.
     callback set-cache(bool, bool, string);
     callback set-sensor-profile(string);
@@ -421,6 +426,65 @@ export component SettingsView {
 
                     Text {
                         text: "Raises the air-quality + thermal alert floor for a noisy environment so routine activity (a cigarette, cooking, soldering) doesn't trigger an autonomous alert — a sustained, hotter real event still does.";
+                        color: Palette.text-dim;
+                        font-size: 10px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // ── Login (default profile / auto-skip) ────────────────────
+                VerticalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: "LOGIN";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 2px;
+                    }
+
+                    if root.login-user-name != "": VerticalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Auto-login as " + root.login-user-name + " on launch";
+                            color: Palette.text-dim;
+                            font-size: 10px;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            for opt in ["on", "off"]: Rectangle {
+                                width: 70px;
+                                height: 32px;
+                                border-radius: Palette.radius;
+                                background: (root.login-is-default ? "on" : "off") == opt ? Palette.primary-dim : Palette.surface;
+                                border-width: 1px;
+                                border-color: (root.login-is-default ? "on" : "off") == opt ? Palette.primary : Palette.border;
+                                animate background   { duration: 150ms; }
+                                animate border-color { duration: 150ms; }
+                                TouchArea {
+                                    clicked => { root.set-default-login(opt == "on"); }
+                                }
+                                Text {
+                                    text: opt;
+                                    color: (root.login-is-default ? "on" : "off") == opt ? Palette.primary : Palette.text-dim;
+                                    font-size: 10px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Text {
+                            text: "Skip the profile picker on this device. An open profile logs in with zero taps; a PIN profile jumps straight to the keypad (‹ Back still reaches the picker).";
+                            color: Palette.text-dim;
+                            font-size: 10px;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    if root.login-user-name == "": Text {
+                        text: "Signed in with the device token — per-profile auto-login applies to human (session-token) logins.";
                         color: Palette.text-dim;
                         font-size: 10px;
                         wrap: word-wrap;
