@@ -13,7 +13,7 @@
 [![rust](https://img.shields.io/badge/100%25-Rust-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
 [![ui](https://img.shields.io/badge/UI-Slint_·_KMS%2FDRM-8b5cf6?style=for-the-badge)](https://slint.dev/)
 [![self--updating](https://img.shields.io/badge/self--updating-binary_+_rollback-e11d48?style=for-the-badge)]()
-[![license](https://img.shields.io/badge/license-MIT-0891b2?style=for-the-badge)](#license)
+[![license](https://img.shields.io/badge/license-Apache--2.0-0891b2?style=for-the-badge)](#license)
 
 </div>
 
@@ -305,6 +305,6 @@ ApexOS-RS is a **distro, not a replacement.** Canonical [ApexOS](https://github.
 
 ## License
 
-MIT © [buckster123](https://github.com/buckster123)
+[Apache-2.0](LICENSE) © [buckster123](https://github.com/buckster123) — keeps your copyright + change notices attached as the code spreads (built to be forked).
 
 <div align="center"><sub>Built in the open. An agent that remembers, evolves, and rewrites itself — on the hardware you already own.</sub></div>
