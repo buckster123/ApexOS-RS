@@ -349,9 +349,42 @@ pub fn router(state: GatewayState) -> Router {
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
     State(state): State<GatewayState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    // Resolve the connection's human session (slice 3e): a session-token client
+    // → its SessionAuth (user + default agent), used to gate which agents a
+    // `hello{agent_id}` may bind. None = the admin token / token-less dev path
+    // (a trusted operator — not gated). require_token already authorized the
+    // socket; this only recovers WHO, for the per-session bind gate.
+    let auth = resolve_ws_auth(&state, headers, query.as_deref());
+    ws.on_upgrade(move |socket| handle_socket(socket, state, auth))
+}
+
+/// Recover the `SessionAuth` behind a WS connection from its bearer/`?token=`
+/// credential — Some only for a valid *session* token (a logged-in human), None
+/// for the admin token or a token-less node. Mirrors `require_token`'s extraction.
+fn resolve_ws_auth(
+    state:   &GatewayState,
+    headers: axum::http::HeaderMap,
+    query:   Option<&str>,
+) -> Option<SessionAuth> {
+    let from_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let from_query_raw = query.unwrap_or("")
+        .split('&')
+        .find_map(|p| p.strip_prefix("token="))
+        .unwrap_or("");
+    let from_query = percent_encoding::percent_decode_str(from_query_raw).decode_utf8_lossy();
+    let now = std::time::Instant::now();
+    let s = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+    s.verify(from_header, now)
+        .or_else(|| s.verify(from_query.as_ref(), now))
+        .cloned()
 }
 
 /// The session a broadcast event belongs to, or `None` if it's a global/status
@@ -381,9 +414,15 @@ fn event_session(event: &Event) -> Option<SessionId> {
     }
 }
 
-async fn handle_socket(socket: WebSocket, state: GatewayState) {
+async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<SessionAuth>) {
     let mut rx = state.bcast.subscribe();
     let (mut sink, stream) = socket.split();
+
+    // Sessions this socket bound to an agent — evicted from `session_bindings` when
+    // the socket closes (slice 3e), so a resume must re-bind (and re-gate) rather
+    // than silently inherit a stale identity. Shared with the read task.
+    let bound_sessions: Arc<std::sync::Mutex<std::collections::HashSet<SessionId>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
     // Priority channel: read task sends session_init frames; write task forwards them
     // before anything from the broadcast. Capacity 8 is enough for the hello + one resume.
@@ -391,6 +430,25 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
 
     // Assign a fresh session_id immediately — no blocking on hello.
     let session_id = state.next_session_id.fetch_add(1, Ordering::SeqCst);
+
+    // Initial bind (slice 3e): an authenticated human's first session resolves to
+    // one of THEIR agents (their default) up front — so a guest can't act as APEX
+    // (the node default) in the fresh session before explicitly picking an agent.
+    // Admin / token-less connections stay unbound here (node default), as before.
+    if let Some(a) = &auth {
+        let owned: Vec<String> = {
+            let ids = state.identities.read().await;
+            ids.agents_for(&a.user_id).iter().map(|ag| ag.id.clone()).collect()
+        };
+        if let Some(agent) = session_auth::gate_agent_bind(a, "", &owned) {
+            if let Ok(mut m) = state.session_bindings.lock() {
+                m.insert(SessionId(session_id), agent);
+            }
+            if let Ok(mut b) = bound_sessions.lock() {
+                b.insert(SessionId(session_id));
+            }
+        }
+    }
 
     // The socket's current session, shared with the write task so it can drop
     // session-scoped events belonging to OTHER sessions. The read task updates it
@@ -432,6 +490,9 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
     let histories = state.histories.clone();
     let session_bindings = state.session_bindings.clone();
     let next_session_id = state.next_session_id.clone();   // for `hello{new:true}` (start a fresh chat)
+    let identities = state.identities.clone();              // slice 3e — agent-bind gate
+    let conn_auth = auth.clone();                           // this socket's human session (if any)
+    let bound_w = bound_sessions.clone();
     let read = tokio::spawn(async move {
         let mut stream   = stream;
         let mut session_id = session_id;   // mutable — updated by hello
@@ -465,12 +526,42 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
                     // Keep the write task's per-session event filter in sync with
                     // the (possibly new) session this socket now follows.
                     sock_session.store(session_id, Ordering::Relaxed);
-                    // Bind this session to the chosen agent identity, if provided
-                    // (multi-agent runtime, slice 3b). The stamp + CCBS resolve it;
-                    // unbound sessions fall back to the node default (APEX).
-                    if let Some(agent_id) = val["agent_id"].as_str().filter(|s| !s.is_empty()) {
-                        if let Ok(mut m) = session_bindings.lock() {
-                            m.insert(SessionId(session_id), agent_id.to_string());
+                    // Bind this session to the chosen agent identity (multi-agent
+                    // runtime, slice 3b). The stamp + CCBS resolve it; unbound
+                    // sessions fall back to the node default (APEX).
+                    //
+                    // Auth-gate (slice 3e): a session-token human may only bind an
+                    // agent THEY own — a disallowed/blank request resolves to their
+                    // own default agent, so a guest can never inherit APEX. The
+                    // admin / token-less path is trusted and binds whatever it asks.
+                    let requested = val["agent_id"].as_str().unwrap_or("");
+                    let sid = SessionId(session_id);
+                    match &conn_auth {
+                        Some(a) => {
+                            let owned: Vec<String> = {
+                                let ids = identities.read().await;
+                                ids.agents_for(&a.user_id).iter().map(|ag| ag.id.clone()).collect()
+                            };
+                            let to_bind = session_auth::gate_agent_bind(a, requested, &owned);
+                            if let Ok(mut m) = session_bindings.lock() {
+                                match to_bind {
+                                    Some(agent) => {
+                                        m.insert(sid, agent);
+                                        if let Ok(mut b) = bound_w.lock() { b.insert(sid); }
+                                    }
+                                    // Nothing the user may bind → clear any stale
+                                    // binding so this session resolves to the default.
+                                    None => { m.remove(&sid); }
+                                }
+                            }
+                        }
+                        None => {
+                            if !requested.is_empty() {
+                                if let Ok(mut m) = session_bindings.lock() {
+                                    m.insert(sid, requested.to_string());
+                                }
+                                if let Ok(mut b) = bound_w.lock() { b.insert(sid); }
+                            }
                         }
                     }
                     let _ = prio_tx.send(make_session_init(session_id, &hist)).await;
@@ -500,6 +591,18 @@ async fn handle_socket(socket: WebSocket, state: GatewayState) {
     tokio::select! {
         _ = read  => {}
         _ = write => {}
+    }
+
+    // Socket closed: evict the agent bindings this socket established (slice 3e).
+    // A later resume of one of these sessions must send `hello{agent_id}` again and
+    // pass the gate — so a disconnected session can't be silently re-entered as a
+    // stale identity. Sessions never reuse ids, so this only drops this socket's own.
+    let bound = bound_sessions.lock().unwrap_or_else(|e| e.into_inner());
+    if !bound.is_empty() {
+        let mut binds = state.session_bindings.lock().unwrap_or_else(|e| e.into_inner());
+        for sid in bound.iter() {
+            binds.remove(sid);
+        }
     }
 }
 
