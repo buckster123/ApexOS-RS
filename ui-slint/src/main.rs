@@ -596,8 +596,36 @@ fn is_femtovg() -> bool {
 /// Switch persona live: theme + chrome/wallpaper (derived in the global from
 /// `current`) + shell mode (tier-clamped). Persists the choice when `persist`.
 /// Must run on the Slint thread (touches globals + properties).
+// G5 tier-2 (agent style preamble): the outbound WS sender + the active persona
+// slug, process-global so `apply_persona` (Slint thread) can push a live
+// `set_persona` frame and the WS task (tokio thread) can re-send the current
+// persona on every (re)connect. agentd maps the persona → a response-style fragment
+// it appends to the system prompt, so the agent's voice matches the chosen face.
+static WS_TX: std::sync::OnceLock<mpsc::UnboundedSender<String>> = std::sync::OnceLock::new();
+static CURRENT_PERSONA: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+
+/// The active persona slug (defaults to "apex" before any persona is applied).
+fn current_persona_slug() -> String {
+    CURRENT_PERSONA.get()
+        .and_then(|m| m.lock().ok().map(|s| s.clone()))
+        .unwrap_or_else(|| "apex".into())
+}
+
+/// Record the active persona + push a live `set_persona` if the WS is up (no-op
+/// before connect — the connect path re-sends `current_persona_slug()` anyway).
+fn update_persona_voice(slug: &str) {
+    let cell = CURRENT_PERSONA.get_or_init(|| std::sync::Mutex::new("apex".into()));
+    if let Ok(mut s) = cell.lock() { *s = slug.to_string(); }
+    if let Some(tx) = WS_TX.get() {
+        let _ = tx.send(serde_json::json!({ "type": "set_persona", "persona": slug }).to_string());
+    }
+}
+
 fn apply_persona(ui: &AppWindow, p: Persona, persist: bool) {
     ui.global::<Personas>().set_current(p);
+    // Tell agentd the active persona so the agent's *voice* matches the face (G5
+    // tier-2). Runs at boot (persisted persona) + on every live switch.
+    update_persona_voice(persona_slug(p));
     ui.global::<Palette>().set_theme(persona_theme(p));
     let mode = if is_femtovg() { ShellMode::Focus } else { persona_default_mode(p) };
     ui.set_shell_mode(mode);
@@ -3521,6 +3549,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Outbound WS channel
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    // Expose the sender globally so apply_persona can push live `set_persona` frames
+    // (G5 tier-2). Set once; ignore if already set (single WS task per process).
+    let _ = WS_TX.set(tx.clone());
 
     let ws_url = {
         let base = std::env::var("AGENTD_WS")
@@ -3599,6 +3630,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let init = serde_json::json!({"type": "session_init"});
             write.send(Message::Text(init.to_string())).await.ok();
+            // G5 tier-2: announce the active persona on every (re)connect so the
+            // agent's voice matches the current face from the first turn.
+            let persona_frame = serde_json::json!({
+                "type": "set_persona", "persona": current_persona_slug(),
+            });
+            write.send(Message::Text(persona_frame.to_string())).await.ok();
 
             {
                 let w = ui_weak.clone();
@@ -3752,7 +3789,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the view + sets current_session_id (the same path session restore uses).
     let tx_new = tx.clone();
     ui.global::<AgentBridge>().on_new_chat(move || {
-        let payload = serde_json::json!({ "type": "hello", "new": true }).to_string();
+        // Carry the active persona so the fresh session starts in the right voice
+        // (G5 tier-2) — the new session id has no persona until we set one.
+        let payload = serde_json::json!({
+            "type": "hello", "new": true, "persona": current_persona_slug(),
+        }).to_string();
         tx_new.send(payload).ok();
     });
 

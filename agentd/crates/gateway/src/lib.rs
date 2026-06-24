@@ -150,6 +150,10 @@ pub struct GatewayState {
     /// its session to an agent; the supervisor stamp + CCBS boot resolve identity
     /// here. See docs/agent-identity.md (slice 3b).
     pub session_bindings:  apexos_core::SessionBindings,
+    /// Per-session active persona/skin (ui-glowup G5 tier-2). The UI sends the chosen
+    /// persona over the WS (`set_persona` frame / a `persona` field on `hello`); the
+    /// router reads it to append the matching response-style fragment.
+    pub persona_sessions:  apexos_core::PersonaSessions,
     /// The identity registry (users + agents). The API mutates it; the router
     /// reads it for per-agent souls. See docs/agent-identity.md (slice 3a/3c).
     pub identities:        Arc<RwLock<apexos_core::Identities>>,
@@ -513,6 +517,7 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
     let bus      = state.bus.clone();
     let histories = state.histories.clone();
     let session_bindings = state.session_bindings.clone();
+    let persona_sessions = state.persona_sessions.clone();  // G5 tier-2 — per-session persona
     let next_session_id = state.next_session_id.clone();   // for `hello{new:true}` (start a fresh chat)
     let identities = state.identities.clone();              // slice 3e — agent-bind gate
     let conn_auth = auth.clone();                           // this socket's human session (if any)
@@ -550,6 +555,14 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
                     // Keep the write task's per-session event filter in sync with
                     // the (possibly new) session this socket now follows.
                     sock_session.store(session_id, Ordering::Relaxed);
+                    // G5 tier-2: a hello may carry the active persona, so a fresh /
+                    // resumed session starts in the right voice (the live switch goes
+                    // through `set_persona` below). Absent → leave it to the default.
+                    if let Some(p) = val["persona"].as_str().filter(|s| !s.is_empty()) {
+                        if let Ok(mut m) = persona_sessions.lock() {
+                            m.insert(SessionId(session_id), p.to_string());
+                        }
+                    }
                     // Bind this session to the chosen agent identity (multi-agent
                     // runtime, slice 3b). The stamp + CCBS resolve it; unbound
                     // sessions fall back to the node default (APEX).
@@ -589,6 +602,15 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
                         }
                     }
                     let _ = prio_tx.send(make_session_init(session_id, &hist)).await;
+                } else if val["type"].as_str() == Some("set_persona") {
+                    // G5 tier-2: a live persona switch — update this session's voice
+                    // WITHOUT touching the session (no re-init), so the chat view isn't
+                    // cleared the way a `hello` would. Empty persona clears it (→ default).
+                    let p = val["persona"].as_str().unwrap_or("");
+                    if let Ok(mut m) = persona_sessions.lock() {
+                        if p.is_empty() { m.remove(&SessionId(session_id)); }
+                        else { m.insert(SessionId(session_id), p.to_string()); }
+                    }
                 } else {
                     // Regular frame — inject WS-bound session_id and emit as Event.
                     let mut frame = val;

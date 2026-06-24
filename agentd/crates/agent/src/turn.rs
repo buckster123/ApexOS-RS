@@ -22,6 +22,11 @@ pub struct TurnEngine {
     // after soul+embodiment. Empty on the base engine; set per-session via
     // `with_priming`. See docs/agent-identity.md (slice 2).
     priming:      Arc<RwLock<String>>,
+    // Optional per-session persona/skin response-style fragment (ui-glowup G5
+    // tier-2) — "warm + plain" for mom, "terse + telemetry" for the tech kid — so
+    // the agent's voice matches the face the human picked. Empty on the base engine
+    // (and for sub-agents); set per session via `with_style`. Composed after priming.
+    style:        Arc<RwLock<String>>,
     // Live wall-clock + uptime line, agentd-refreshed. Injected into the OUTBOUND
     // messages each turn — deliberately NOT in `system`, because it changes every
     // minute and would bust the prompt-cache prefix (soul+embodiment+tools) on every
@@ -36,9 +41,12 @@ pub struct TurnEngine {
 }
 
 /// Compose the system prompt from identity (soul) + live embodiment + optional
-/// per-session boot-priming, skipping empty parts. Pure for testability.
-pub fn compose_system(soul: &str, embodiment: &str, priming: &str) -> String {
-    [soul.trim(), embodiment.trim(), priming.trim()]
+/// per-session boot-priming + optional per-session persona style, skipping empty
+/// parts. Pure for testability. `style` is last so the response-voice directive
+/// reads most-recent; it's empty on the common path (default persona), so the
+/// composed prompt is unchanged there.
+pub fn compose_system(soul: &str, embodiment: &str, priming: &str, style: &str) -> String {
+    [soul.trim(), embodiment.trim(), priming.trim(), style.trim()]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
@@ -57,6 +65,7 @@ impl TurnEngine {
             system:     Arc::new(RwLock::new(system.unwrap_or_default())),
             embodiment: Arc::new(RwLock::new(String::new())),
             priming:    Arc::new(RwLock::new(String::new())),
+            style:      Arc::new(RwLock::new(String::new())),
             ambient:    Arc::new(RwLock::new(String::new())),
             ambient_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
@@ -109,6 +118,9 @@ impl TurnEngine {
             system,
             embodiment: Arc::clone(&self.embodiment),
             priming:    Arc::new(RwLock::new(String::new())),
+            // Sub-agents get NO persona style either — they're task-scoped, not a
+            // human-facing persona surface.
+            style:      Arc::new(RwLock::new(String::new())),
             ambient:    Arc::clone(&self.ambient),
             ambient_seen: Arc::clone(&self.ambient_seen),
         }
@@ -116,7 +128,7 @@ impl TurnEngine {
 
     /// Derive an engine variant carrying a per-session CCBS boot-priming block,
     /// appended after soul+embodiment in the system prompt. Shares every other Arc
-    /// (same provider, semaphore, live soul + embodiment).
+    /// (same provider, semaphore, live soul + embodiment + any persona style already set).
     pub fn with_priming(&self, priming: String) -> Self {
         Self {
             provider:   self.provider.clone(),
@@ -124,6 +136,23 @@ impl TurnEngine {
             system:     Arc::clone(&self.system),
             embodiment: Arc::clone(&self.embodiment),
             priming:    Arc::new(RwLock::new(priming)),
+            style:      Arc::clone(&self.style),
+            ambient:    Arc::clone(&self.ambient),
+            ambient_seen: Arc::clone(&self.ambient_seen),
+        }
+    }
+
+    /// Derive an engine variant carrying a per-session persona/skin response-style
+    /// fragment (G5 tier-2), appended after priming. Shares every other Arc, so it
+    /// chains cleanly after `with_system`/`with_priming` in `root_turn`.
+    pub fn with_style(&self, style: String) -> Self {
+        Self {
+            provider:   self.provider.clone(),
+            sem:        self.sem.clone(),
+            system:     Arc::clone(&self.system),
+            embodiment: Arc::clone(&self.embodiment),
+            priming:    Arc::clone(&self.priming),
+            style:      Arc::new(RwLock::new(style)),
             ambient:    Arc::clone(&self.ambient),
             ambient_seen: Arc::clone(&self.ambient_seen),
         }
@@ -194,7 +223,8 @@ pub async fn run_turn(
             let soul = engine.system.read().await.clone();
             let emb  = engine.embodiment.read().await.clone();
             let prime = engine.priming.read().await.clone();
-            let system_str = compose_system(&soul, &emb, &prime);
+            let style = engine.style.read().await.clone();
+            let system_str = compose_system(&soul, &emb, &prime, &style);
             let system_opt = if system_str.is_empty() { None } else { Some(system_str.as_str()) };
             // The live clock rides in the messages (not `system`) so the cacheable
             // soul+embodiment+tools prefix stays byte-stable across turns. Ephemeral —
@@ -425,16 +455,18 @@ mod tests {
 
     #[test]
     fn compose_system_joins_nonempty_parts_in_order() {
-        // All three present → soul, embodiment, priming joined by blank lines.
-        assert_eq!(compose_system("soul", "emb", "prime"), "soul\n\nemb\n\nprime");
-        // Empty priming (the common case before/without CCBS) → soul + embodiment.
-        assert_eq!(compose_system("soul", "emb", ""), "soul\n\nemb");
-        // Only priming (no soul/embodiment) → just priming.
-        assert_eq!(compose_system("  ", "", "prime"), "prime");
+        // All four present → soul, embodiment, priming, style joined by blank lines.
+        assert_eq!(compose_system("soul", "emb", "prime", "style"), "soul\n\nemb\n\nprime\n\nstyle");
+        // No priming + no style (the common case) → soul + embodiment, unchanged.
+        assert_eq!(compose_system("soul", "emb", "", ""), "soul\n\nemb");
+        // Only priming (no soul/embodiment/style) → just priming.
+        assert_eq!(compose_system("  ", "", "prime", ""), "prime");
         // All empty → empty (no system prompt).
-        assert_eq!(compose_system("", "  ", ""), "");
+        assert_eq!(compose_system("", "  ", "", ""), "");
         // Whitespace-only parts are trimmed out, surviving parts are trimmed.
-        assert_eq!(compose_system(" soul ", "", " prime "), "soul\n\nprime");
+        assert_eq!(compose_system(" soul ", "", " prime ", "  "), "soul\n\nprime");
+        // Persona style rides last (most-recent), after soul/embodiment with no priming.
+        assert_eq!(compose_system("soul", "emb", "", "be warm"), "soul\n\nemb\n\nbe warm");
     }
 
     #[test]

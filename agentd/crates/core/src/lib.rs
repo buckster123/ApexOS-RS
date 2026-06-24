@@ -2,6 +2,7 @@ pub mod state;
 pub mod bus;
 pub mod vision;
 pub mod identity;
+pub mod persona;
 pub mod history;
 
 // The wire-protocol types now live in the standalone `apexos-protocol` crate so
@@ -13,3 +14,4 @@ pub use apexos_protocol::*;
 pub use state::SystemState;
 pub use bus::{Bus, BusHandle};
 pub use identity::*;
+pub use persona::{persona_style, resolve_persona_style, PersonaSessions};
