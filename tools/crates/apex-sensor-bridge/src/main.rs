@@ -1,7 +1,10 @@
 //! apex-sensor-bridge — forwards sensor readings to the ApexOS gateway
 //!
-//! Connects to ws://{SENSOR_BRIDGE_HOST}/sensor-bridge?token={SENSOR_BRIDGE_TOKEN}
-//! and pushes SensorReading events on a configurable interval.
+//! Connects to ws://{SENSOR_BRIDGE_HOST}/sensor-bridge and pushes SensorReading
+//! events on a configurable interval. SENSOR_BRIDGE_TOKEN (when set) rides in the
+//! `Authorization: Bearer` header — NOT the URL — so it can't leak into proxy /
+//! access logs (a Rust client can set request headers; the browser-facing `/ws`
+//! endpoint keeps `?token=` because the browser WebSocket API can't).
 //!
 //! Env vars:
 //!   SENSOR_BRIDGE_HOST   (default: localhost:8787)
@@ -12,7 +15,8 @@
 
 use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tungstenite::{connect, Message};
+use tungstenite::{connect, ClientRequestBuilder, Message};
+use tungstenite::http::Uri;
 
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
@@ -185,10 +189,24 @@ fn ws_send(ws: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<s
 
 // ── Main connect + send loop ──────────────────────────────────────────────────
 
-fn run(url: &str, node_id: &str, interval: Duration, sensorhead: Option<SensorHeadClient>) {
+fn run(url: &str, token: &str, node_id: &str, interval: Duration, sensorhead: Option<SensorHeadClient>) {
     loop {
         eprintln!("[apex-sensor-bridge] connecting to {url}");
-        match connect(url) {
+        // Build the handshake request fresh each attempt (ClientRequestBuilder is
+        // consumed by connect). The token rides in the Authorization header, so it
+        // never appears in the URL (and thus never in proxy/access logs).
+        let req = match url.parse::<Uri>() {
+            Ok(uri) => {
+                let b = ClientRequestBuilder::new(uri);
+                if token.is_empty() { b } else { b.with_header("Authorization", format!("Bearer {token}")) }
+            }
+            Err(e) => {
+                eprintln!("[apex-sensor-bridge] bad url {url}: {e} — retry in 10s");
+                std::thread::sleep(Duration::from_secs(10));
+                continue;
+            }
+        };
+        match connect(req) {
             Err(e) => {
                 eprintln!("[apex-sensor-bridge] connect failed: {e} — retry in 10s");
                 std::thread::sleep(Duration::from_secs(10));
@@ -241,11 +259,8 @@ fn main() {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(30);
 
-    let ws_url = if token.is_empty() {
-        format!("ws://{host}/sensor-bridge")
-    } else {
-        format!("ws://{host}/sensor-bridge?token={token}")
-    };
+    // The token rides in the Authorization header (built in `run`), never the URL.
+    let ws_url = format!("ws://{host}/sensor-bridge");
 
     let sensorhead = sensorhead_url.map(|url| {
         eprintln!("[apex-sensor-bridge] SensorHead polling enabled: {url}");
@@ -253,5 +268,5 @@ fn main() {
     });
 
     eprintln!("[apex-sensor-bridge] node_id={node_id} interval={interval_secs}s");
-    run(&ws_url, &node_id, Duration::from_secs(interval_secs), sensorhead);
+    run(&ws_url, &token, &node_id, Duration::from_secs(interval_secs), sensorhead);
 }

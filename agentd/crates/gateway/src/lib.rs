@@ -656,13 +656,21 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
 
 async fn sensor_bridge_ws_handler(
     ws:              WebSocketUpgrade,
+    headers:         axum::http::HeaderMap,
     Query(params):   Query<HashMap<String, String>>,
     State(state):    State<GatewayState>,
 ) -> Response {
     let expected = state.sensor_bridge_token.as_str();
     if !expected.is_empty() {
-        let provided = params.get("token").map(|s| s.as_str()).unwrap_or("");
-        if provided != expected {
+        // Prefer the Authorization header (the token stays out of the URL → out of
+        // logs); fall back to ?token= for a not-yet-updated sensor-bridge during a
+        // rolling apexos-update.
+        let from_header = headers.get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .unwrap_or("");
+        let from_query = params.get("token").map(|s| s.as_str()).unwrap_or("");
+        if from_header != expected && from_query != expected {
             return (StatusCode::UNAUTHORIZED, "invalid sensor bridge token").into_response();
         }
     }
