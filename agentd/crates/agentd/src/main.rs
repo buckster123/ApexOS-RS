@@ -260,6 +260,12 @@ async fn main() -> anyhow::Result<()> {
     // Shared across gateway (writes), supervisor (stamp), and router (boot).
     let session_bindings: apexos_core::SessionBindings = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
+    // Per-session active persona/skin (ui-glowup G5 tier-2). The UI sends the
+    // human's chosen persona over the WS (`set_persona` / `hello{persona}`); the
+    // gateway writes this map, root_turn reads it to append the matching response-
+    // style fragment. Shared gateway↔router exactly like `session_bindings`.
+    let persona_sessions: apexos_core::PersonaSessions = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
     // Identity registry (docs/agent-identity.md 3a/3b-2): users + agents. Seed the
     // default owner + built-in APEX (pointing at the live soul.md) on a fresh node.
     // Best-effort persist — /etc/agentd may be root-owned pre-install.sh; runtime
@@ -343,6 +349,7 @@ async fn main() -> anyhow::Result<()> {
         capabilities:         Arc::clone(&capabilities_arc),
         vast_state:           vast_state.clone(),
         session_bindings:     Arc::clone(&session_bindings),
+        persona_sessions:     Arc::clone(&persona_sessions),
         identities:           Arc::clone(&identities),
         pin_lockouts:         Arc::new(std::sync::Mutex::new(HashMap::new())),
         sessions:             Arc::new(std::sync::Mutex::new(apexos_gateway::SessionStore::default())),
@@ -588,7 +595,8 @@ async fn main() -> anyhow::Result<()> {
     // PluginUp events that populate tool_reg are captured (see the comment there).
     spawn_agent_router(agent_rx, bcast.clone(), handle.clone(),
                        tool_reg, histories, engine, max_depth, session_store, router_proxy,
-                       Arc::clone(&session_bindings), Arc::clone(&identities), spawn_rx,
+                       Arc::clone(&session_bindings), Arc::clone(&persona_sessions),
+                       Arc::clone(&identities), spawn_rx,
                        Arc::clone(&sensor_presence), Arc::clone(&sensor_profile));
 
     // Vast.ai backend hot-swap — on VastInstanceReady swap BOTH the endpoint AND the
@@ -1185,6 +1193,7 @@ fn spawn_agent_router(
     session_store: Arc<SessionStore>,
     tool_proxy:    ToolProxy,
     session_bindings: apexos_core::SessionBindings,
+    persona_sessions: apexos_core::PersonaSessions,
     identities:    Arc<RwLock<apexos_core::Identities>>,
     spawn_rx:      tokio::sync::mpsc::Receiver<SpawnReq>,
     sensor_presence: SensorPresence,
@@ -1518,7 +1527,8 @@ fn spawn_agent_router(
                     histories.clone(), Arc::clone(&session_store), snapshot_len,
                     tracker.clone(), gen,
                     tool_proxy.clone(), boot_primings.clone(),
-                    Arc::clone(&session_bindings), Arc::clone(&identities),
+                    Arc::clone(&session_bindings), Arc::clone(&persona_sessions),
+                    Arc::clone(&identities),
                 );
                 let handle = tokio::spawn(async move {
                     let _slot = slot;
@@ -1688,6 +1698,7 @@ async fn root_turn(
     tool_proxy:    ToolProxy,
     boot_primings: Arc<Mutex<HashMap<SessionId, String>>>,
     session_bindings: apexos_core::SessionBindings,
+    persona_sessions: apexos_core::PersonaSessions,
     identities:    Arc<RwLock<apexos_core::Identities>>,
 ) {
     // Resolve the session's identity (3b): bound agent, else the node default.
@@ -1702,6 +1713,21 @@ async fn root_turn(
     // cached per session, scoped to the resolved agent.
     let priming = boot_priming_for(&tool_proxy, &boot_primings, session, &agent_id, &history).await;
 
+    // Persona style (G5 tier-2): the session's explicit persona (the UI's `set_persona`
+    // / `hello{persona}`), else the bound agent's own `default_skin` — so a bound agent
+    // speaks in its skin even with no UI frame (the multi-agent angle). Resolves to a
+    // response-style fragment; the default/unknown persona → None (common path unchanged).
+    let style = match apexos_core::resolve_persona_style(&persona_sessions, session) {
+        Some(s) => Some(s),
+        None => {
+            let ids = identities.read().await;
+            ids.agent(&agent_id)
+                .and_then(|a| a.default_skin.as_deref())
+                .and_then(apexos_core::persona_style)
+                .map(str::to_owned)
+        }
+    };
+
     // Compose the per-session engine: with_system swaps soul, with_priming appends
     // the CCBS block. The common path (APEX, no priming) reuses the global engine.
     let engine = match (agent_soul, priming) {
@@ -1709,6 +1735,12 @@ async fn root_turn(
         (Some(soul), None)        => Arc::new(engine.with_system(Some(soul))),
         (None,       Some(block)) => Arc::new(engine.with_priming(block)),
         (Some(soul), Some(block)) => Arc::new(engine.with_system(Some(soul)).with_priming(block)),
+    };
+    // Persona style rides last so the no-persona path above stays byte-identical
+    // (the global engine Arc is reused untouched when there's no style).
+    let engine = match style {
+        Some(s) => Arc::new(engine.with_style(s)),
+        None    => engine,
     };
 
     match run_turn(session, history, bus.clone(), bcast, tools, engine).await {
