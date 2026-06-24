@@ -108,7 +108,10 @@ async fn main() -> anyhow::Result<()> {
         _                 => "claude-sonnet-4-6".into(),
     });
     eprintln!("[agentd] backend: {backend_str}, model: {default_model}");
-    let model_arc        = Arc::new(RwLock::new(default_model));
+    // Keep the resolved boot model owned (clone into the arc) — the vast hot-swap
+    // block reverts to this exact value, which is correct even when AGENTD_MODEL is
+    // unset (the per-backend default), unlike re-reading AGENTD_MODEL alone.
+    let model_arc        = Arc::new(RwLock::new(default_model.clone()));
     let backend_arc      = Arc::new(RwLock::new(backend_str));
     let oai_base_url_arc = Arc::new(RwLock::new(oai_base_url_str));
 
@@ -588,36 +591,37 @@ async fn main() -> anyhow::Result<()> {
                        Arc::clone(&session_bindings), Arc::clone(&identities), spawn_rx,
                        Arc::clone(&sensor_presence), Arc::clone(&sensor_profile));
 
-    // Vast.ai backend hot-swap — listens for VastInstanceReady / VastInstanceDestroyed
+    // Vast.ai backend hot-swap — on VastInstanceReady swap BOTH the endpoint AND the
+    // served model id; on VastInstanceDestroyed OR VastTunnelLost revert to the boot
+    // defaults. The decision is the pure `vast_swap_target`; this loop is IO-thin glue.
     {
         let mut vast_rx    = bcast.subscribe();
         let backend_w      = Arc::clone(&backend_arc);
         let oai_url_w      = Arc::clone(&oai_base_url_arc);
         let model_w        = Arc::clone(&model_arc);
-        let default_backend = std::env::var("AGENTD_BACKEND").unwrap_or_else(|_| "anthropic".into());
-        let default_url     = std::env::var("AGENTD_OAI_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:11434/v1".into());
-        let default_model   = std::env::var("AGENTD_MODEL").unwrap_or_default();
+        let defaults = VastRevertDefaults {
+            backend: std::env::var("AGENTD_BACKEND").unwrap_or_else(|_| "anthropic".into()),
+            oai_url: std::env::var("AGENTD_OAI_BASE_URL")
+                .unwrap_or_else(|_| "http://localhost:11434/v1".into()),
+            // The model the daemon BOOTED with — restored on revert. The old code
+            // re-read AGENTD_MODEL (empty when unset) and only restored when set, so
+            // an unset-MODEL node reverted the backend but left the vast model id in
+            // place → every post-revert turn failed against Anthropic.
+            model:   default_model,
+        };
         tokio::spawn(async move {
             loop {
                 match vast_rx.recv().await {
-                    Ok(Event::VastInstanceReady { instance_id, local_port }) => {
-                        eprintln!("[vast] hot-swapping backend → http://127.0.0.1:{local_port}/v1");
-                        *backend_w.write().await = "ollama".into();
-                        *oai_url_w.write().await = format!("http://127.0.0.1:{local_port}/v1");
-                        eprintln!("[vast] backend ready on instance {instance_id}");
-                    }
-                    Ok(Event::VastInstanceDestroyed { instance_id }) => {
-                        eprintln!("[vast] reverting backend after destroy (instance {instance_id})");
-                        *backend_w.write().await = default_backend.clone();
-                        *oai_url_w.write().await = default_url.clone();
-                        if !default_model.is_empty() {
-                            *model_w.write().await = default_model.clone();
+                    Ok(ev) => {
+                        if let Some(t) = vast_swap_target(&ev, &defaults) {
+                            eprintln!("[vast] inference → backend={} url={} model={}", t.backend, t.oai_url, t.model);
+                            *backend_w.write().await = t.backend;
+                            *oai_url_w.write().await = t.oai_url;
+                            *model_w.write().await   = t.model;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => break,
-                    Ok(_)  => {}
                 }
             }
         });
@@ -2967,12 +2971,101 @@ fn persistence_passed(
     now.duration_since(since) >= persist
 }
 
+// ── vast.ai inference hot-swap (pure) ───────────────────────────────────────────
+
+/// The inference target the daemon should run after a vast-lifecycle event.
+#[derive(Debug, Clone, PartialEq)]
+struct InferenceTarget {
+    backend: String,
+    oai_url: String,
+    model:   String,
+}
+
+/// Boot-time inference settings, captured once and restored on revert.
+struct VastRevertDefaults {
+    backend: String,
+    oai_url: String,
+    model:   String,
+}
+
+/// Decide the inference target for a vast-lifecycle event. Pure so the swap/revert
+/// rules are unit-testable; the event loop is IO-thin glue around it. `None` means
+/// the event is not a vast transition (leave the backend untouched).
+///
+/// `Ready` swaps to the tunnelled OAI endpoint AND the served `model` (an OAI-compat
+/// server rejects a turn whose model id it doesn't serve). `Destroyed`/`TunnelLost`
+/// both revert to the boot defaults — the same path, since a lost tunnel must undo
+/// the swap exactly like an explicit destroy.
+fn vast_swap_target(event: &Event, def: &VastRevertDefaults) -> Option<InferenceTarget> {
+    match event {
+        Event::VastInstanceReady { local_port, model, .. } => Some(InferenceTarget {
+            backend: "ollama".into(),
+            oai_url: format!("http://127.0.0.1:{local_port}/v1"),
+            model:   model.clone(),
+        }),
+        Event::VastInstanceDestroyed { .. } | Event::VastTunnelLost { .. } => Some(InferenceTarget {
+            backend: def.backend.clone(),
+            oai_url: def.oai_url.clone(),
+            model:   def.model.clone(),
+        }),
+        _ => None,
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use apexos_core::{ContentBlock, Message};
+
+    // ── vast.ai inference hot-swap ───────────────────────────────────────────
+    fn vast_def() -> VastRevertDefaults {
+        VastRevertDefaults {
+            backend: "anthropic".into(),
+            oai_url: "http://localhost:11434/v1".into(),
+            model:   "claude-sonnet-4-6".into(),
+        }
+    }
+
+    #[test]
+    fn vast_ready_swaps_endpoint_and_served_model() {
+        // The bug: backend flipped to ollama but the model id stayed Anthropic, so
+        // every turn failed against the vast OAI server. Ready must swap BOTH.
+        let t = vast_swap_target(&Event::VastInstanceReady {
+            instance_id: "i1".into(), local_port: 8000, model: "Qwen/Qwen3-32B".into(),
+        }, &vast_def()).unwrap();
+        assert_eq!(t.backend, "ollama");
+        assert_eq!(t.oai_url, "http://127.0.0.1:8000/v1");
+        assert_eq!(t.model, "Qwen/Qwen3-32B"); // not the leftover claude id
+    }
+
+    #[test]
+    fn vast_destroy_restores_boot_defaults() {
+        // Revert must restore the boot model even though AGENTD_MODEL may be unset —
+        // def.model is the *resolved* boot value, so the model never lags the backend.
+        let t = vast_swap_target(&Event::VastInstanceDestroyed { instance_id: "i1".into() }, &vast_def()).unwrap();
+        assert_eq!(t.backend, "anthropic");
+        assert_eq!(t.oai_url, "http://localhost:11434/v1");
+        assert_eq!(t.model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn vast_tunnel_lost_reverts_like_destroy() {
+        // The previously-unhandled event: a lost tunnel must undo the swap exactly
+        // like an explicit destroy, or the daemon keeps pointing at a dead port.
+        let lost = vast_swap_target(&Event::VastTunnelLost { instance_id: "i1".into() }, &vast_def()).unwrap();
+        let gone = vast_swap_target(&Event::VastInstanceDestroyed { instance_id: "i1".into() }, &vast_def()).unwrap();
+        assert_eq!(lost, gone);
+    }
+
+    #[test]
+    fn vast_swap_ignores_unrelated_events() {
+        // Launched (instance created, model not yet up) must NOT swap the backend.
+        assert!(vast_swap_target(&Event::VastInstanceLaunched {
+            instance_id: "i1".into(), recipe: "r".into(), cost_per_hr: 1.0,
+        }, &vast_def()).is_none());
+    }
 
     // ── sensor-alert classification + persistence ────────────────────────────
     fn th() -> SensorThresholds { SensorThresholds { iaq: 150.0, cpu_temp: 85.0, thermal: 45.0 } }
