@@ -1,0 +1,13 @@
+{
+  "name": "ApexOS",
+  "short_name": "ApexOS",
+  "description": "Talk to your ApexOS agent — chat, tools, and approvals from any browser or phone.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0d0f18",
+  "theme_color": "#0d0f18",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

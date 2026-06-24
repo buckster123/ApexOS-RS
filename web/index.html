@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="apex">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#0d0f18">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ApexOS">
+  <link rel="icon" href="/icon.svg">
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <link rel="manifest" href="/manifest.json">
+  <title>ApexOS</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- ── Login screen (3e session-token auth) ─────────────────────────────── -->
+  <div id="login" class="login hidden">
+    <div class="login-card">
+      <div class="brand"><div class="brand-mark"></div><div class="brand-name">ApexOS</div></div>
+
+      <div id="login-sub" class="login-sub">Choose your profile</div>
+
+      <div id="profiles" class="profiles"></div>
+
+      <div id="pinpad" class="pinpad hidden">
+        <div id="pin-name" class="pin-name"></div>
+        <div id="pin-dots" class="pin-dots"></div>
+        <div class="keys">
+          <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+          <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+          <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+          <button data-k="back" class="key-aux">⌫</button>
+          <button data-k="0">0</button>
+          <button data-k="ok" class="key-ok">→</button>
+        </div>
+        <button id="pin-cancel" class="link-btn">‹ Back</button>
+      </div>
+
+      <div id="login-err" class="login-err"></div>
+    </div>
+  </div>
+
+  <!-- ── Chat app ─────────────────────────────────────────────────────────── -->
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div class="topbar-id">
+        <span id="conn-dot" class="dot"></span>
+        <span id="agent-name">APEX</span>
+      </div>
+      <div class="topbar-actions">
+        <button id="new-btn" title="New chat">＋ New</button>
+        <button id="logout-btn" title="Log out">⏻</button>
+      </div>
+    </header>
+
+    <main id="messages" class="messages"></main>
+
+    <footer class="composer">
+      <button id="cancel-btn" class="cancel-btn hidden" title="Stop the current turn">■</button>
+      <textarea id="input" rows="1" placeholder="Message your agent…" autocomplete="off" autocapitalize="sentences"></textarea>
+      <button id="send-btn" class="send-btn" title="Send">➤</button>
+    </footer>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
