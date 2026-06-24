@@ -194,6 +194,7 @@ export component AppWindowFrame inherits Rectangle {
     callback explorer-up();
     callback explorer-select(string, string, string); // path, abs, ext
     callback explorer-attach();
+    callback explorer-eject(string);               // safe-eject an exo-workspace stick
     callback toggle-recording();
     callback stop-turn();
     callback restore-session(int);
@@ -632,6 +633,7 @@ export component AppWindowFrame inherits Rectangle {
             up => { root.explorer-up(); }
             select(p, a, e) => { root.explorer-select(p, a, e); }
             attach => { root.explorer-attach(); }
+            eject(l) => { root.explorer-eject(l); }
         }
 
         if root.kind == AppKind.face: FaceView {

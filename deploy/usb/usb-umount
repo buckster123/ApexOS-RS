@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# apexos usb-umount — unmount an ApexOS exo-workspace stick. Two call paths:
+#
+#   usb-umount <kernel-dev>        from the udev `remove` event (device gone →
+#                                  resolve the mountpoint from the /run state file)
+#   usb-umount --label APEX-<name> from the UI/agent eject (POST /api/media/eject)
+#
+# Runs as root: from the systemd unit (ExecStop) or via the narrow sudoers drop-in
+# that lets the agentd user invoke ONLY this script. Hard-confines the target to
+# <workspace>/media/ and the label to APEX-* before unmounting anything.
+set -euo pipefail
+
+WORKSPACE="$(. /etc/agentd/env 2>/dev/null; echo "${AGENTD_WORKSPACE:-/var/lib/agentd/workspace}")"
+MEDIA_ROOT="${WORKSPACE%/}/media"
+
+MNT=""
+STATE=""
+if [[ "${1:-}" == "--label" ]]; then
+  LABEL="${2:?usage: usb-umount --label APEX-<name>}"
+  [[ "$LABEL" == APEX-* ]] || { echo "usb-umount: '$LABEL' is not an APEX-* label" >&2; exit 1; }
+  SAFE_LABEL="$(printf '%s' "$LABEL" | tr -cd 'A-Za-z0-9._-')"
+  [[ -n "$SAFE_LABEL" && "$SAFE_LABEL" != *..* ]] || { echo "usb-umount: unsafe label" >&2; exit 1; }
+  MNT="${MEDIA_ROOT}/${SAFE_LABEL}"
+else
+  DEV_NAME="${1:?usage: usb-umount <kernel-dev> | --label APEX-<name>}"
+  STATE="/run/apexos-usb/${DEV_NAME}.mnt"
+  [[ -f "$STATE" ]] || { echo "usb-umount: no state for ${DEV_NAME} (already gone?)" >&2; exit 0; }
+  MNT="$(cat "$STATE")"
+fi
+
+# Hard-confine: only ever unmount something strictly under <workspace>/media/.
+case "$MNT" in
+  "${MEDIA_ROOT}/"*) : ;;
+  *) echo "usb-umount: refusing target $MNT outside $MEDIA_ROOT" >&2; exit 1 ;;
+esac
+
+if mountpoint -q "$MNT"; then
+  sync
+  umount "$MNT" 2>/dev/null || umount -l "$MNT"   # lazy as a fallback on a yanked stick
+  echo "usb-umount: unmounted $MNT" >&2
+fi
+# Remove the (now-empty) mountpoint + the state file.
+rmdir "$MNT" 2>/dev/null || true
+[[ -n "$STATE" ]] && rm -f "$STATE"
+exit 0

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# apexos-workspace-init — prepare a USB stick as an ApexOS exo-workspace.
+#
+#   apexos-workspace-init <mountpoint> [name]
+#
+# Non-destructive: writes the apexos-workspace.toml marker + the standard layout
+# onto an already-mounted stick. It never reformats. The filesystem LABEL is what
+# udev keys on (must be APEX-*), and relabelling needs the *unmounted* device, so
+# this script prints the exact relabel command rather than doing it for you.
+set -euo pipefail
+
+MNT="${1:?usage: apexos-workspace-init <mountpoint> [name]}"
+NAME="${2:-$(basename "$MNT")}"
+[[ -d "$MNT" ]] || { echo "init: $MNT is not a directory / not mounted" >&2; exit 1; }
+[[ -w "$MNT" ]] || { echo "init: $MNT is not writable (mount it rw, or run as the owner)" >&2; exit 1; }
+
+# Standard exo-workspace layout — mirrors the agent workspace's working dirs.
+mkdir -p "$MNT/projects" "$MNT/data" "$MNT/notes"
+
+MARKER="$MNT/apexos-workspace.toml"
+if [[ -f "$MARKER" ]]; then
+  echo "init: $MARKER already present — leaving it" >&2
+else
+  cat > "$MARKER" <<EOF
+# ApexOS exo-workspace — a portable agent workspace on removable media.
+# Presence of this file (and an APEX-* filesystem label) marks the stick as an
+# exo-workspace; a node claims it, own-mounts it under the agent workspace, and the
+# agent + Explorer + desktop apps read/write it. See docs/usb-workspace.md.
+version = 1
+name    = "$NAME"
+layout  = ["projects", "data", "notes"]
+EOF
+  echo "init: wrote $MARKER" >&2
+fi
+
+# Surface the label situation — udev claims only APEX-* labels.
+DEV="$(findmnt -no SOURCE --target "$MNT" 2>/dev/null || true)"
+LABEL="$( [[ -n "$DEV" ]] && blkid -s LABEL -o value "$DEV" 2>/dev/null || true)"
+echo "init: exo-workspace ready at $MNT (name: $NAME)" >&2
+if [[ "$LABEL" == APEX-* ]]; then
+  echo "init: filesystem label '$LABEL' already matches APEX-* — it will be claimed on next plug." >&2
+else
+  echo "init: NOTE — the filesystem label is '${LABEL:-<none>}'; it must be APEX-* to be claimed." >&2
+  echo "init:   unmount the stick, then relabel the device ${DEV:-/dev/sdX}:" >&2
+  echo "init:     exFAT:  sudo exfatlabel ${DEV:-/dev/sdX} APEX-${NAME}" >&2
+  echo "init:     FAT32:  sudo fatlabel  ${DEV:-/dev/sdX} APEX-${NAME}" >&2
+fi
