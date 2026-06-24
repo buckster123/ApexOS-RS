@@ -1023,6 +1023,26 @@ if ! $NO_UI; then
   fi
 fi
 
+# ── Web UI (browser + PWA) ────────────────────────────────────────────────────
+# The browser + mobile-PWA frontend agentd serves at http://<node>:8787/ — login
+# (3e session-token auth), streaming chat, tool cards + inline approvals. -RS owns
+# this now: a fresh, lean, installable PWA (NOT the legacy ../ApexOS web app).
+# Deployed to AGENTD_UI (/var/lib/agentd/ui) on EVERY node, headless included — on a
+# headless node it's the *only* human interface. Copy-always (these are -RS-owned
+# static assets, like a binary, not seed-if-absent config), so an apexos-update
+# refreshes the web client too.
+hdr "Installing web UI (browser + PWA)"
+WEB_DST=/var/lib/agentd/ui
+if [[ -d "$REPO_DIR/web" ]]; then
+  for f in index.html style.css app.js sw.js manifest.json icon.svg; do
+    [[ -f "$REPO_DIR/web/$f" ]] && install -Dm 644 "$REPO_DIR/web/$f" "$WEB_DST/$f"
+  done
+  chown -R agentd:agentd "$WEB_DST" 2>/dev/null || true
+  ok "Web UI → $WEB_DST (open http://<node>:8787/ — log in with your profile)"
+else
+  warn "web/ not found in repo — browser/PWA UI not installed"
+fi
+
 # ── Occipital (web reading cortex) ───────────────────────────────────────────────
 # The agent's reading cortex — web_search / web_fetch / web_recall / web_save /
 # web_forget — lives in a SEPARATE sibling repo (github.com/buckster123/Occipital-RS),

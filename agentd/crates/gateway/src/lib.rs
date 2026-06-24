@@ -707,7 +707,9 @@ async fn static_handler(
             "desktop-style.css" => "text/css; charset=utf-8",
             "app.js"            => "application/javascript; charset=utf-8",
             "desktop-app.js"    => "application/javascript; charset=utf-8",
+            "sw.js"             => "application/javascript; charset=utf-8",
             "manifest.json"     => "application/manifest+json; charset=utf-8",
+            "icon.svg"          => "image/svg+xml; charset=utf-8",
             _                   => return StatusCode::NOT_FOUND.into_response(),
         }
     };
