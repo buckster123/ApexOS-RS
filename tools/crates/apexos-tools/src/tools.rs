@@ -2105,12 +2105,25 @@ fn parse_silence(text: &str, duration_s: f64) -> (f64, f64) {
     (silence_start_s, silence_end_s)
 }
 
+/// Confine an audio tool's input (read) + output (write) paths to the workspace,
+/// returning canonical path strings for ffmpeg — or a clear tool error. Roots a
+/// relative path in the (per-agent) workspace and turns an out-of-workspace target
+/// into a readable "outside workspace" message instead of an opaque ffmpeg EROFS
+/// under the read-only systemd sandbox (ProtectSystem=strict). (#6)
+fn confine_audio_io(in_path: &str, out_path: &str) -> Result<(String, String), Value> {
+    let i = confine(in_path, false).map_err(tool_error)?;
+    let o = confine(out_path, true).map_err(tool_error)?;
+    Ok((i.to_string_lossy().into_owned(), o.to_string_lossy().into_owned()))
+}
+
 fn audio_analyze(args: &Value) -> Value {
     let path = match args["path"].as_str() {
         Some(p) => p,
         None => return tool_error("path is required"),
     };
-    match audio_analyze_inner(path) {
+    // Confine the read to the workspace (+ read allowlist); roots a relative path.
+    let path = match confine(path, false) { Ok(p) => p, Err(e) => return tool_error(e) };
+    match audio_analyze_inner(&path.to_string_lossy()) {
         Ok(stats) => tool_ok(stats),
         Err(e) => tool_error(e),
     }
@@ -2119,6 +2132,7 @@ fn audio_analyze(args: &Value) -> Value {
 fn audio_trim_silence(args: &Value) -> Value {
     let path = match args["path"].as_str() { Some(p) => p, None => return tool_error("path required") };
     let out  = match args["output_path"].as_str() { Some(p) => p, None => return tool_error("output_path required") };
+    let (path, out) = match confine_audio_io(path, out) { Ok(v) => v, Err(e) => return e };
 
     let trim_start = args["start"].as_bool().unwrap_or(true);
     let trim_end   = args["end"].as_bool().unwrap_or(true);
@@ -2142,7 +2156,7 @@ fn audio_trim_silence(args: &Value) -> Value {
     }
 
     let filter = parts.join(",");
-    let (_, stderr, ok) = cmd_capture("ffmpeg", &["-y", "-i", path, "-af", &filter, out]);
+    let (_, stderr, ok) = cmd_capture("ffmpeg", &["-y", "-i", &path, "-af", &filter, &out]);
     if ok {
         tool_ok(json!({ "output_path": out }))
     } else {
@@ -2153,12 +2167,13 @@ fn audio_trim_silence(args: &Value) -> Value {
 fn audio_normalize(args: &Value) -> Value {
     let path        = match args["path"].as_str() { Some(p) => p, None => return tool_error("path required") };
     let out         = match args["output_path"].as_str() { Some(p) => p, None => return tool_error("output_path required") };
+    let (path, out) = match confine_audio_io(path, out) { Ok(v) => v, Err(e) => return e };
     let target_lufs = args["target_lufs"].as_f64().unwrap_or(-14.0);
     let true_peak   = args["true_peak"].as_f64().unwrap_or(-2.0);
 
     // Pass 1: measure
     let filter1 = format!("loudnorm=I={target_lufs}:TP={true_peak}:LRA=11:print_format=json");
-    let (_, stderr1, _) = cmd_capture("ffmpeg", &["-i", path, "-af", &filter1, "-f", "null", "-"]);
+    let (_, stderr1, _) = cmd_capture("ffmpeg", &["-i", &path, "-af", &filter1, "-f", "null", "-"]);
 
     let measured = extract_json_from_text(&stderr1).unwrap_or_default();
     let mi    = measured["input_i"].as_str().unwrap_or("-70");
@@ -2171,7 +2186,7 @@ fn audio_normalize(args: &Value) -> Value {
     let filter2 = format!(
         "loudnorm=I={target_lufs}:TP={true_peak}:LRA=11:measured_I={mi}:measured_TP={mtp}:measured_LRA={mlra}:measured_thresh={mth}:offset={off}:linear=true"
     );
-    let (_, stderr2, ok) = cmd_capture("ffmpeg", &["-y", "-i", path, "-af", &filter2, out]);
+    let (_, stderr2, ok) = cmd_capture("ffmpeg", &["-y", "-i", &path, "-af", &filter2, &out]);
 
     if ok {
         tool_ok(json!({ "output_path": out, "measured_lufs": mi, "measured_peak": mtp }))
@@ -2183,13 +2198,14 @@ fn audio_normalize(args: &Value) -> Value {
 fn audio_peak_limit(args: &Value) -> Value {
     let path     = match args["path"].as_str() { Some(p) => p, None => return tool_error("path required") };
     let out      = match args["output_path"].as_str() { Some(p) => p, None => return tool_error("output_path required") };
+    let (path, out) = match confine_audio_io(path, out) { Ok(v) => v, Err(e) => return e };
     let limit_db = args["limit_db"].as_f64().unwrap_or(-1.0);
 
     // Convert dBFS to linear (alimiter limit is linear 0..1)
     let limit_linear = 10f64.powf(limit_db / 20.0);
     let filter = format!("alimiter=limit={limit_linear:.4}:level_in=1:level_out=1:attack=5:release=50:asc=1");
 
-    let (_, stderr, ok) = cmd_capture("ffmpeg", &["-y", "-i", path, "-af", &filter, out]);
+    let (_, stderr, ok) = cmd_capture("ffmpeg", &["-y", "-i", &path, "-af", &filter, &out]);
     if ok {
         tool_ok(json!({ "output_path": out }))
     } else {
@@ -2200,6 +2216,7 @@ fn audio_peak_limit(args: &Value) -> Value {
 fn audio_trim(args: &Value) -> Value {
     let path  = match args["path"].as_str() { Some(p) => p, None => return tool_error("path required") };
     let out   = match args["output_path"].as_str() { Some(p) => p, None => return tool_error("output_path required") };
+    let (path, out) = match confine_audio_io(path, out) { Ok(v) => v, Err(e) => return e };
     let start = args["start_s"].as_f64().unwrap_or(0.0);
     let end   = match args["end_s"].as_f64() { Some(e) => e, None => return tool_error("end_s required") };
 
@@ -2207,7 +2224,7 @@ fn audio_trim(args: &Value) -> Value {
     let end_str   = format!("{end:.3}");
     // -c copy avoids re-encode; -ss/-to after -i for sample-accurate trim
     let (_, stderr, ok) = cmd_capture("ffmpeg", &[
-        "-y", "-i", path, "-ss", &start_str, "-to", &end_str, "-c", "copy", out,
+        "-y", "-i", &path, "-ss", &start_str, "-to", &end_str, "-c", "copy", &out,
     ]);
     if ok {
         tool_ok(json!({ "output_path": out }))
@@ -2221,22 +2238,26 @@ fn audio_clean(args: &Value) -> Value {
     let target_lufs = args["target_lufs"].as_f64().unwrap_or(-14.0);
     let thresh_db   = args["silence_threshold_db"].as_f64().unwrap_or(-50.0);
 
-    // Default output: <stem>_clean.<ext>
-    let out_path_owned: String;
-    let out = match args["output_path"].as_str() {
-        Some(p) => p,
+    // Confine the input (read); a relative path roots in the (per-agent) workspace.
+    let path = match confine(path, false) { Ok(p) => p.to_string_lossy().into_owned(), Err(e) => return tool_error(e) };
+
+    // Output: explicit output_path, else <stem>_clean.<ext> beside the (confined)
+    // input. Either way confine it (write) → a clear "outside workspace" error, never
+    // an opaque ffmpeg EROFS under the read-only sandbox.
+    let out_raw = match args["output_path"].as_str() {
+        Some(p) => p.to_string(),
         None => {
-            let p = std::path::Path::new(path);
+            let p = std::path::Path::new(&path);
             let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
             let ext  = p.extension().and_then(|s| s.to_str()).unwrap_or("mp3");
             let dir  = p.parent().and_then(|d| d.to_str()).unwrap_or(".");
-            out_path_owned = format!("{dir}/{stem}_clean.{ext}");
-            &out_path_owned
+            format!("{dir}/{stem}_clean.{ext}")
         }
     };
+    let out = match confine(&out_raw, true) { Ok(p) => p.to_string_lossy().into_owned(), Err(e) => return tool_error(e) };
 
     // Analyze original
-    let stats_before = match audio_analyze_inner(path) {
+    let stats_before = match audio_analyze_inner(&path) {
         Ok(s) => s,
         Err(e) => return tool_error(format!("analyze failed: {e}")),
     };
@@ -2246,7 +2267,7 @@ fn audio_clean(args: &Value) -> Value {
     let silence_end_s   = stats_before["silence_end_s"].as_f64().unwrap_or(0.0);
 
     let mut ops_applied: Vec<&str> = Vec::new();
-    let mut current_input = path.to_string();
+    let mut current_input = path.clone();
     let mut tmp_files: Vec<String> = Vec::new();
 
     let stamp = std::time::SystemTime::now()
@@ -2308,7 +2329,7 @@ fn audio_clean(args: &Value) -> Value {
 
     // Copy final result to output path
     if current_input != out {
-        let (_, stderr, ok) = cmd_capture("ffmpeg", &["-y", "-i", &current_input, "-c", "copy", out]);
+        let (_, stderr, ok) = cmd_capture("ffmpeg", &["-y", "-i", &current_input, "-c", "copy", &out]);
         if !ok {
             for t in &tmp_files { let _ = std::fs::remove_file(t); }
             return tool_error(format!("final copy failed: {}", stderr.lines().last().unwrap_or("")));
@@ -2321,7 +2342,7 @@ fn audio_clean(args: &Value) -> Value {
     }
 
     // Analyze output
-    let stats_after = audio_analyze_inner(out).unwrap_or_default();
+    let stats_after = audio_analyze_inner(&out).unwrap_or_default();
 
     tool_ok(json!({
         "output_path":  out,
@@ -2765,6 +2786,27 @@ mod tests {
         std::env::set_var("AGENTD_READ_ROOTS", "/etc/hostname");
         assert!(confine("/etc/hostname", false).is_ok());
         std::env::remove_var("AGENTD_READ_ROOTS");
+
+        std::env::remove_var("AGENTD_WORKSPACE");
+    }
+
+    #[test]
+    fn audio_output_outside_workspace_rejected_clearly() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("AGENTD_WORKSPACE", "/tmp");
+
+        // An absolute output outside the workspace is refused with a clear
+        // "outside workspace" message BEFORE ffmpeg runs — not an opaque EROFS (#6).
+        let res = audio_trim(&json!({
+            "path": "in.wav", "output_path": "/etc/evil.wav", "end_s": 1.0,
+        }));
+        assert_eq!(res["isError"], json!(true));
+        let txt = res["content"][0]["text"].as_str().unwrap_or("");
+        assert!(txt.contains("workspace"), "expected a workspace-confinement error, got: {txt}");
+
+        // A `..` escape on the output is likewise rejected (not passed to ffmpeg).
+        let res2 = audio_normalize(&json!({ "path": "in.wav", "output_path": "../escape.wav" }));
+        assert_eq!(res2["isError"], json!(true));
 
         std::env::remove_var("AGENTD_WORKSPACE");
     }
