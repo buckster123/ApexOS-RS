@@ -282,8 +282,12 @@ pub enum Event {
     /// Emitted when a Vast instance is created (before model is loaded).
     VastInstanceLaunched  { instance_id: String, recipe: String, cost_per_hr: f64 },
     /// Emitted when the SSH tunnel is up and model health check passes.
-    /// main.rs catches this to hot-swap the OaiProvider backend.
-    VastInstanceReady     { instance_id: String, local_port: u16 },
+    /// main.rs catches this to hot-swap the OaiProvider backend. `model` is the
+    /// served model id (the recipe's model_repo) so the daemon swaps BOTH the
+    /// endpoint AND the model id — an OAI-compat server rejects a turn whose model
+    /// it doesn't serve, which is why leaving the Anthropic id in place broke
+    /// every post-swap turn.
+    VastInstanceReady     { instance_id: String, local_port: u16, model: String },
     /// Emitted after destroy completes; main.rs reverts backend.
     VastInstanceDestroyed { instance_id: String },
     /// Emitted by keepalive task after 3 consecutive health failures.

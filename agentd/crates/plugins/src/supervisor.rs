@@ -1469,16 +1469,24 @@ impl Supervisor {
                 vs.persist_instance().await;
                 *vs.phase.write().await = VastPhase::Launching { phase: "opening tunnel".into() };
 
-                // Step 7: open SSH tunnel
-                let cm_path = format!("/tmp/apex-vast-cm-{instance_id}");
+                // Step 7: open SSH tunnel.
+                // -N (forward only, no remote command) and crucially NO -f: the
+                // spawned `ssh` IS the forwarding process, so the stored Child owns
+                // the tunnel and `child.kill()` deterministically tears it down.
+                // With -f, ssh forks into the background after the forward is up and
+                // the parent — the Child we store — exits immediately; a later
+                // kill() then hit a dead PID while the real forward, reparented to
+                // init, leaked and held local_port. ControlMaster/-Persist could
+                // likewise outlive a kill, so they're gone too — we own exactly one
+                // dedicated tunnel and want its lifecycle bound to this Child.
+                // ServerAliveCountMax bounds how long a silently-dropped foreground
+                // tunnel lingers before ssh self-exits.
                 let mut ssh = tokio::process::Command::new("ssh");
                 ssh.args([
-                    "-f", "-N",
+                    "-N",
                     "-o", "StrictHostKeyChecking=accept-new",
-                    "-o", "ControlMaster=auto",
-                    "-o", &format!("ControlPath={cm_path}"),
-                    "-o", "ControlPersist=5m",
                     "-o", "ServerAliveInterval=30",
+                    "-o", "ServerAliveCountMax=3",
                     "-o", "ExitOnForwardFailure=yes",
                     "-L", &format!("{local_port}:127.0.0.1:8000"),
                     "-p", &ssh_port.to_string(),
@@ -1540,7 +1548,13 @@ impl Supervisor {
                 // Step 9: ready — emit event for main.rs to hot-swap backend
                 *vs.phase.write().await = VastPhase::Ready;
                 eprintln!("[vast] model ready on port {local_port}");
-                bus.emit(Event::VastInstanceReady { instance_id: instance_id.clone(), local_port }).await;
+                bus.emit(Event::VastInstanceReady {
+                    instance_id: instance_id.clone(),
+                    local_port,
+                    // Served model id — the daemon swaps to this so it doesn't keep
+                    // sending the leftover Anthropic id to the vast OAI endpoint.
+                    model: recipe.model_repo.clone(),
+                }).await;
 
                 // Spawn keepalive loop
                 let vs_ka  = vs.clone();
@@ -1563,7 +1577,19 @@ impl Supervisor {
                                 fails += 1;
                                 eprintln!("[vast] keepalive fail {fails}/3");
                                 if fails >= 3 {
-                                    eprintln!("[vast] tunnel lost after 3 failures");
+                                    eprintln!("[vast] tunnel lost after 3 failures — tearing down");
+                                    // The keepalive owns recovery: kill the tunnel
+                                    // child + clear instance/phase/instance.json
+                                    // RIGHT HERE, so the phase doesn't stay Ready, the
+                                    // forward doesn't leak, and a stale Ready instance
+                                    // isn't reloaded on next boot. (vast_destroy does
+                                    // the same; whoever takes the tunnel lock first
+                                    // wins, and clear_instance is idempotent.)
+                                    if let Some(mut t) = vs_ka.tunnel.lock().await.take() {
+                                        let _ = t.child.kill().await;
+                                    }
+                                    vs_ka.clear_instance().await;
+                                    // Tell main.rs to revert the inference backend.
                                     bus_ka.emit(Event::VastTunnelLost { instance_id: id_ka.clone() }).await;
                                     break;
                                 }
@@ -1622,14 +1648,13 @@ impl Supervisor {
                 *vs.phase.write().await = VastPhase::Destroying;
                 let instance_id = i.id.clone();
 
-                // Kill tunnel
+                // Kill tunnel — the stored Child IS the foreground forwarder now
+                // (no -f), so this actually tears down the forward and frees the
+                // local port instead of signalling an already-exited parent.
                 {
                     let mut guard = vs.tunnel.lock().await;
                     if let Some(mut t) = guard.take() {
                         let _ = t.child.kill().await;
-                        let _ = tokio::fs::remove_file(
-                            format!("/tmp/apex-vast-cm-{instance_id}")
-                        ).await;
                     }
                 }
 
