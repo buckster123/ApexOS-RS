@@ -1336,11 +1336,13 @@ fn camera_capture(args: &Value) -> Value {
     }))
 }
 
-/// Safely eject a mounted exo-workspace stick by its `APEX-<label>`. Shells the
-/// root umount helper via the narrow sudoers drop-in (the SAME path the UI ⏏
-/// affordance uses); the helper hard-confines the mountpoint to `<workspace>/media/`
-/// and re-validates the label. We validate here too — a clear error for the agent,
-/// and defence in depth. Non-destructive: it just flushes + unmounts.
+/// Safely eject a mounted exo-workspace stick by its `APEX-<label>`. agentd runs
+/// non-root with NoNewPrivileges=true (so it CAN'T sudo/umount) — instead we drop an
+/// APEX-<label> request file into the eject dir, which fires the root drain service
+/// (apexos-usb-eject.path → .service) that does the umount on our behalf. Success is
+/// confirmed by polling /proc/mounts (the mountpoint disappears). The label is validated
+/// here, again by the drain, and a third time by usb-umount — defence in depth.
+/// Non-destructive: it just flushes + unmounts; the stick is safe to re-plug.
 fn eject_media(args: &Value) -> Value {
     let label = args["label"].as_str().unwrap_or("").trim().to_string();
     if !valid_exo_label(&label) {
@@ -1349,16 +1351,43 @@ fn eject_media(args: &Value) -> Value {
              See the mounted sticks in your embodiment block, or run list_dir(\"media\").",
         );
     }
-    let (_out, err, ok) = cmd_capture("sudo", &["-n", "/usr/local/lib/apexos/usb-umount", "--label", &label]);
-    if ok {
-        tool_ok(json!({
-            "ejected": label,
-            "message": format!("Ejected {label} — safe to physically remove the stick."),
-        }))
-    } else {
-        let detail = err.lines().last().unwrap_or("eject failed").trim();
-        tool_error(format!("eject {label} failed: {detail}"))
+    if !media_mount_present(&label) {
+        return tool_error(format!("{label} is not mounted — nothing to eject."));
     }
+    let dir = std::env::var("AGENTD_USB_EJECT_DIR").unwrap_or_else(|_| "/var/lib/agentd/usb-eject".to_string());
+    if let Err(e) = fs::create_dir_all(&dir) {
+        return tool_error(format!("eject dir {dir}: {e}"));
+    }
+    if let Err(e) = fs::write(Path::new(&dir).join(&label), b"") {
+        return tool_error(format!("could not drop eject request: {e}"));
+    }
+    // Wait (≤8s) for the root drain to unmount it.
+    for _ in 0..16 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if !media_mount_present(&label) {
+            return tool_ok(json!({
+                "ejected": label,
+                "message": format!("Ejected {label} — safe to physically remove the stick."),
+            }));
+        }
+    }
+    tool_error(format!(
+        "{label} still mounted after 8s — the root eject service may have failed \
+         (check: journalctl -u apexos-usb-eject)."
+    ))
+}
+
+/// Is `<workspace>/media/<label>` currently a mountpoint? The authoritative eject oracle.
+/// Uses the NODE workspace (AGENTD_WORKSPACE env), where the sticks own-mount — not the
+/// per-agent stamped workspace.
+fn media_mount_present(label: &str) -> bool {
+    let ws = std::env::var("AGENTD_WORKSPACE").ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    let ws = std::fs::canonicalize(&ws).map(|p| p.to_string_lossy().into_owned()).unwrap_or(ws);
+    let target = format!("{}/media/{}", ws.trim_end_matches('/'), label);
+    std::fs::read_to_string("/proc/mounts").map(|m| {
+        m.lines().any(|l| l.split_whitespace().nth(1) == Some(target.as_str()))
+    }).unwrap_or(false)
 }
 
 /// A valid exo-workspace filesystem label (mirrors the gateway's `valid_exo_label`):

@@ -1052,26 +1052,30 @@ fi
 # across modes. Provisioned on every node; harmless where no exo-stick is ever used.
 hdr "Installing USB exo-workspace support"
 if [[ -d "$REPO_DIR/deploy/usb" ]]; then
-  # Helper scripts (root-run by the mount unit; usb-umount also via the agentd sudoers).
+  # Helper scripts (all root-run by the systemd units — never via sudo).
   install -Dm 755 "$REPO_DIR/deploy/usb/usb-mount"             /usr/local/lib/apexos/usb-mount
   install -Dm 755 "$REPO_DIR/deploy/usb/usb-umount"            /usr/local/lib/apexos/usb-umount
+  install -Dm 755 "$REPO_DIR/deploy/usb/usb-eject-drain"       /usr/local/lib/apexos/usb-eject-drain
   install -Dm 755 "$REPO_DIR/deploy/usb/apexos-workspace-init" /usr/local/bin/apexos-workspace-init
   # udev rule (claim APEX-* sticks + defer udisks) + the templated mount service.
   install -Dm 644 "$REPO_DIR/deploy/udev/99-apexos-usb.rules"  /etc/udev/rules.d/99-apexos-usb.rules
   install -Dm 644 "$REPO_DIR/deploy/systemd/apexos-usb-mount@.service" /etc/systemd/system/apexos-usb-mount@.service
-  # Narrow sudoers: the non-root agentd user may eject ONLY via the umount helper.
-  if install -Dm 440 "$REPO_DIR/deploy/sudoers.d/apexos-usb" /etc/sudoers.d/apexos-usb \
-     && visudo -cf /etc/sudoers.d/apexos-usb >/dev/null 2>&1; then
-    :
-  else
-    rm -f /etc/sudoers.d/apexos-usb   # never leave a broken sudoers file
-    warn "sudoers drop-in failed validation — UI/agent eject disabled (unplug still works)"
-  fi
-  # The mount target lives under the agent workspace.
+  # UI/agent eject = privilege separation, NOT sudo: agentd runs NoNewPrivileges=true so
+  # the kernel blocks setuid sudo. Instead it drops an APEX-<label> request file into the
+  # (agentd-owned) eject dir; the path unit fires the root drain service that umounts it.
+  install -Dm 644 "$REPO_DIR/deploy/systemd/apexos-usb-eject.path"    /etc/systemd/system/apexos-usb-eject.path
+  install -Dm 644 "$REPO_DIR/deploy/systemd/apexos-usb-eject.service" /etc/systemd/system/apexos-usb-eject.service
+  # The old sudoers drop-in is now dead (sudo can't escalate under NoNewPrivileges) — remove it.
+  rm -f /etc/sudoers.d/apexos-usb
+  # The mount target + the eject request dir both live under /var/lib/agentd (agentd-owned).
   install -d -o agentd -g agentd /var/lib/agentd/workspace/media 2>/dev/null \
     || mkdir -p /var/lib/agentd/workspace/media
+  install -d -o agentd -g agentd /var/lib/agentd/usb-eject 2>/dev/null \
+    || mkdir -p /var/lib/agentd/usb-eject
   systemctl daemon-reload >/dev/null 2>&1 || true
   udevadm control --reload >/dev/null 2>&1 || true
+  # Arm the eject watcher now (idempotent on re-runs); the dir above must exist first.
+  systemctl enable --now apexos-usb-eject.path >/dev/null 2>&1 || true
   ok "USB exo-workspace ready (prep a stick: label it APEX-<name> + 'apexos-workspace-init <mnt>')"
 else
   warn "deploy/usb not found — USB exo-workspace support not installed"

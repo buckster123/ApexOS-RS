@@ -1,6 +1,0 @@
-# Let the (non-root) agentd user eject an ApexOS exo-workspace stick — and ONLY
-# that: it may run the umount helper as root, nothing else, no password. The helper
-# itself hard-confines the target to <workspace>/media/ and the label to APEX-*.
-# Installed by install.sh to /etc/sudoers.d/apexos-usb (mode 0440, validated with
-# visudo -c).
-agentd ALL=(root) NOPASSWD: /usr/local/lib/apexos/usb-umount
