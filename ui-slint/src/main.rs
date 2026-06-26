@@ -83,6 +83,9 @@ thread_local! {
     // Explorer (📁 Files): the current directory's entries.
     static EXPLORER_ENTRIES: RefCell<Option<Rc<slint::VecModel<ExplorerEntry>>>> =
         const { RefCell::new(None) };
+    // "Use this drive" picker: the adoptable USB sticks from /api/media/candidates.
+    static DRIVE_CANDIDATES: RefCell<Option<Rc<slint::VecModel<UsbCandidate>>>> =
+        const { RefCell::new(None) };
     // Sketchpad: the rendered stroke model (Slint Paths) + the raw point data we
     // post to /api/sketch. Index into SKETCH_PALETTE drives colour; width index 0/1.
     static SKETCH_STROKES: RefCell<Option<Rc<slint::VecModel<SketchStroke>>>> =
@@ -1838,6 +1841,19 @@ fn replace_explorer_entries(items: Vec<ExplorerEntry>) {
     });
 }
 
+fn replace_drive_candidates(items: Vec<UsbCandidate>) {
+    DRIVE_CANDIDATES.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            while model.row_count() > 0 {
+                model.remove(model.row_count() - 1);
+            }
+            for item in items {
+                model.push(item);
+            }
+        }
+    });
+}
+
 /// Icon for an Explorer entry — directory or file-by-extension.
 fn explorer_glyph(is_dir: bool, ext: &str) -> &'static str {
     if is_dir { return "📁"; }
@@ -3072,6 +3088,33 @@ async fn workspace_op(client: &reqwest::Client, base_url: &str, endpoint: &str, 
     }
 }
 
+/// GET /api/media/candidates → the USB sticks the "Use this drive" picker can adopt.
+/// Rust pre-formats each into a single display line ("SanDisk Ultra · 57.3 GB · LABEL (exfat)").
+async fn fetch_drive_candidates(client: &reqwest::Client, base_url: &str) -> Vec<UsbCandidate> {
+    let body: Value = match client.get(format!("{base_url}/api/media/candidates"))
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await
+    {
+        Ok(r) => r.json().await.unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
+    body["candidates"].as_array().unwrap_or(&vec![]).iter().map(|c| {
+        let model = c["model"].as_str().unwrap_or("").trim();
+        let size  = c["size"].as_str().unwrap_or("");
+        let label = c["label"].as_str().unwrap_or("");
+        let fs    = c["fstype"].as_str().unwrap_or("");
+        let mut parts: Vec<String> = Vec::new();
+        if !model.is_empty() { parts.push(model.to_string()); }
+        if !size.is_empty()  { parts.push(size.to_string()); }
+        parts.push(if label.is_empty() { format!("(unlabeled · {fs})") } else { format!("{label} · {fs}") });
+        UsbCandidate {
+            dev:     c["dev"].as_str().unwrap_or("").into(),
+            display: parts.join("  ·  ").into(),
+            label:   label.into(),
+        }
+    }).collect()
+}
+
 /// GET /api/workspace/read?path= → (content, binary). Empty + binary=true on a
 /// non-text file; empty + false on error.
 async fn fetch_explorer_read(client: &reqwest::Client, base_url: &str, path: &str) -> (String, bool) {
@@ -3353,6 +3396,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let explorer_entries_vec: Rc<slint::VecModel<ExplorerEntry>> = Rc::new(slint::VecModel::default());
     ui.set_explorer_entries(slint::ModelRc::from(explorer_entries_vec.clone()));
     EXPLORER_ENTRIES.with(|m| *m.borrow_mut() = Some(explorer_entries_vec.clone()));
+
+    let drive_candidates_vec: Rc<slint::VecModel<UsbCandidate>> = Rc::new(slint::VecModel::default());
+    ui.set_explorer_drive_candidates(slint::ModelRc::from(drive_candidates_vec.clone()));
+    DRIVE_CANDIDATES.with(|m| *m.borrow_mut() = Some(drive_candidates_vec.clone()));
 
     let sketch_strokes_vec: Rc<slint::VecModel<SketchStroke>> = Rc::new(slint::VecModel::default());
     ui.set_sketch_strokes(slint::ModelRc::from(sketch_strokes_vec.clone()));
@@ -5053,6 +5100,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if ok { ui.invoke_refresh_explorer(); }
                     ui.set_status(if ok { format!("{verb} {name}") }
                                   else   { format!("Paste failed: {err}") }.into());
+                }
+            }).ok();
+        });
+    });
+
+    // drive-scan: (re)list the USB sticks "Use this drive" can adopt → the picker model.
+    let rt_h_exds    = rt.handle().clone();
+    let client_exds  = Arc::clone(&http_client);
+    let base_exds    = http_base.clone();
+    ui.on_explorer_drive_scan(move || {
+        let client = Arc::clone(&client_exds);
+        let base   = base_exds.clone();
+        rt_h_exds.spawn(async move {
+            let items = fetch_drive_candidates(&client, &base).await;
+            slint::invoke_from_event_loop(move || replace_drive_candidates(items)).ok();
+        });
+    });
+
+    // drive-prep: adopt the picked stick as an exo-workspace (POST /api/media/prep,
+    // relabel mode). Shows a busy state for the ≤25s prep; on success the picker
+    // auto-closes (the view's `changed drive-result` handler), and we hop to media/.
+    let rt_h_exdp    = rt.handle().clone();
+    let client_exdp  = Arc::clone(&http_client);
+    let base_exdp    = http_base.clone();
+    let ui_weak_exdp = ui.as_weak();
+    ui.on_explorer_drive_prep(move |dev, name| {
+        let dev    = dev.to_string();
+        let name   = name.to_string();
+        let client = Arc::clone(&client_exdp);
+        let base   = base_exdp.clone();
+        let uw     = ui_weak_exdp.clone();
+        if let Some(ui) = uw.upgrade() {
+            ui.set_explorer_drive_busy(true);
+            ui.set_explorer_drive_result("".into());
+        }
+        rt_h_exdp.spawn(async move {
+            let resp: Value = match client.post(format!("{base}/api/media/prep"))
+                .json(&serde_json::json!({ "dev": dev, "name": name, "mode": "relabel" }))
+                .timeout(std::time::Duration::from_secs(35))
+                .send().await
+            {
+                Ok(r) => r.json().await.unwrap_or(Value::Null),
+                Err(e) => serde_json::json!({ "ok": false, "error": format!("request failed: {e}") }),
+            };
+            let ok    = resp["ok"].as_bool().unwrap_or(false);
+            let label = resp["label"].as_str().unwrap_or("").to_string();
+            let err   = resp["error"].as_str().unwrap_or("prep failed").to_string();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = uw.upgrade() {
+                    ui.set_explorer_drive_busy(false);
+                    if ok {
+                        ui.set_explorer_drive_result("ok".into());   // view auto-closes the picker
+                        ui.set_status(format!("Drive ready: {label} (in media/)").into());
+                        ui.invoke_explorer_navigate("media".into());  // show the freshly-adopted stick
+                    } else {
+                        ui.set_explorer_drive_result(format!("Couldn't set up the drive: {err}").into());
+                    }
                 }
             }).ok();
         });

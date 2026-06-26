@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, ReaderBlock, ReaderLink, BoardCard } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, BoardCard } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -183,6 +183,9 @@ export component AppWindowFrame inherits Rectangle {
     in property <image>          explorer-preview-image;
     in property <string>         explorer-preview-text;
     in property <bool>           explorer-can-attach;
+    in property <[UsbCandidate]> explorer-drive-candidates;
+    in property <bool>           explorer-drive-busy;
+    in property <string>         explorer-drive-result;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -199,6 +202,8 @@ export component AppWindowFrame inherits Rectangle {
     callback explorer-rename(string, string);      // path, new-name
     callback explorer-delete(string);              // path
     callback explorer-paste(string, string);       // src-path, mode → into current dir
+    callback explorer-drive-scan();                // list adoptable USB sticks
+    callback explorer-drive-prep(string, string);  // dev, name → adopt as exo-workspace
     callback toggle-recording();
     callback stop-turn();
     callback restore-session(int);
@@ -632,6 +637,9 @@ export component AppWindowFrame inherits Rectangle {
             preview-image: root.explorer-preview-image;
             preview-text: root.explorer-preview-text;
             can-attach: root.explorer-can-attach;
+            drive-candidates: root.explorer-drive-candidates;
+            drive-busy: root.explorer-drive-busy;
+            drive-result: root.explorer-drive-result;
             refresh => { root.refresh-explorer(); }
             navigate(p) => { root.explorer-navigate(p); }
             up => { root.explorer-up(); }
@@ -642,6 +650,8 @@ export component AppWindowFrame inherits Rectangle {
             rename(p, n) => { root.explorer-rename(p, n); }
             delete-entry(p) => { root.explorer-delete(p); }
             paste(p, m) => { root.explorer-paste(p, m); }
+            drive-scan => { root.explorer-drive-scan(); }
+            drive-prep(d, n) => { root.explorer-drive-prep(d, n); }
         }
 
         if root.kind == AppKind.face: FaceView {

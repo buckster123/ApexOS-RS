@@ -1,6 +1,6 @@
 import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
-import { ExplorerEntry } from "../types.slint";
+import { ExplorerEntry, UsbCandidate } from "../types.slint";
 
 // ── ExplorerView (📁 Files) ─────────────────────────────────────────────────
 //
@@ -75,6 +75,15 @@ export component ExplorerView {
     property <string> del-path: "";
     property <string> del-name: "";
 
+    // "Use this drive" picker (adopt a USB stick as an exo-workspace). The candidate
+    // list + busy/result are Rust-driven; the open/selection/name form is view-local.
+    in property <[UsbCandidate]> drive-candidates;
+    in property <bool>   drive-busy;       // true while the (≤25s) prep runs
+    in property <string> drive-result;     // "" | "ok" | "err: …" (Rust sets; "ok" auto-closes)
+    property <bool>   drive-open: false;
+    property <string> drive-selected-dev: "";
+    in-out property <string> drive-name: "";
+
     callback refresh();
     callback navigate(string);            // enter dir (rel path)
     callback up();                        // parent dir
@@ -85,6 +94,17 @@ export component ExplorerView {
     callback rename(string, string);      // path, new-name
     callback delete-entry(string);        // path
     callback paste(string, string);       // src-path, mode ("cut"|"copy") → into current dir
+    callback drive-scan();                // (re)list adoptable USB sticks → drive-candidates
+    callback drive-prep(string, string);  // dev, name → relabel + adopt as exo-workspace
+
+    // Rust signals a finished prep via drive-result; "ok" closes the picker + resets it.
+    changed drive-result => {
+        if (root.drive-result == "ok") {
+            root.drive-open = false;
+            root.drive-name = "";
+            root.drive-selected-dev = "";
+        }
+    }
 
     // Open the name prompt in "new folder" mode.
     function open-mkdir() {
@@ -212,6 +232,27 @@ export component ExplorerView {
                             label: "✕";
                             width: 28px;
                             clicked => { root.clip-path = ""; root.clip-name = ""; root.clip-mode = ""; }
+                        }
+                    }
+                }
+
+                // "Use this drive" — adopt a plugged USB stick as an exo-workspace,
+                // no CLI. Full-width + plainly labelled for non-technical users.
+                Rectangle {
+                    height: 38px;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        padding-bottom: 6px;
+                        ExpBtn {
+                            label: "🔌  Use a USB drive";
+                            horizontal-stretch: 1;
+                            clicked => {
+                                root.drive-selected-dev = "";
+                                root.drive-name = "";
+                                root.drive-open = true;
+                                root.drive-scan();
+                            }
                         }
                     }
                 }
@@ -618,6 +659,151 @@ export component ExplorerView {
                         clicked => {
                             root.del-open = false;
                             root.delete-entry(root.del-path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── "Use this drive" picker overlay ─────────────────────────────────────
+    if root.drive-open: Rectangle {
+        background: #000000bb;
+        TouchArea { clicked => { if (!root.drive-busy) { root.drive-open = false; } } }  // backdrop dismiss
+
+        Rectangle {
+            width: 380px;
+            height: dr-col.preferred-height + 28px;
+            background: Palette.surface;
+            border-radius: Palette.radius-lg;
+            border-width: 1px;
+            border-color: Palette.border-hi;
+            drop-shadow-blur: 32px;
+            drop-shadow-color: #000000aa;
+
+            dr-col := VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+
+                Text {
+                    text: "Use a USB drive";
+                    color: Palette.text-bright;
+                    font-size: 15px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Pick a plugged-in USB stick to set it up as an APEX drive — your existing files are kept.";
+                    color: Palette.text-dim;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+
+                // Candidate list — or an empty/rescan state.
+                if root.drive-candidates.length == 0: VerticalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "No set-up-able USB drive found. Plug a FAT/exFAT stick, then Rescan.";
+                        color: Palette.text-dim;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                        horizontal-alignment: center;
+                    }
+                    ExpBtn { label: "Rescan"; clicked => { root.drive-scan(); } }
+                }
+                if root.drive-candidates.length > 0: VerticalLayout {
+                    spacing: 4px;
+                    for c in root.drive-candidates: Rectangle {
+                        height: 40px;
+                        border-radius: Palette.radius;
+                        background: c.dev == root.drive-selected-dev ? Palette.surface-hi : Palette.bg;
+                        border-width: 1px;
+                        border-color: c.dev == root.drive-selected-dev ? Palette.primary : Palette.border;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            Rectangle {                          // radio dot
+                                width: 14px;
+                                height: 14px;
+                                border-radius: 7px;
+                                border-width: 1.5px;
+                                border-color: c.dev == root.drive-selected-dev ? Palette.primary : Palette.border-hi;
+                                y: (parent.height - self.height) / 2;
+                                Rectangle {
+                                    width: 7px;
+                                    height: 7px;
+                                    border-radius: 4px;
+                                    background: Palette.primary;
+                                    visible: c.dev == root.drive-selected-dev;
+                                }
+                            }
+                            Text {
+                                text: c.display;
+                                color: Palette.text;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                        }
+                        TouchArea { clicked => { root.drive-selected-dev = c.dev; } }
+                    }
+                }
+
+                // Name field → becomes the APEX-<name> drive label.
+                Rectangle {
+                    height: 30px;
+                    border-radius: Palette.radius;
+                    background: Palette.bg;
+                    border-width: 1px;
+                    border-color: dn.has-focus ? Palette.primary : Palette.border;
+                    clip: true;
+                    dn := TextInput {
+                        x: 9px;
+                        width: parent.width - 18px;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        single-line: true;
+                        enabled: !root.drive-busy;
+                        font-size: 12px;
+                        color: Palette.text;
+                        selection-background-color: Palette.primary-dim;
+                        text <=> root.drive-name;
+                    }
+                    if root.drive-name == "": Text {
+                        x: 9px;
+                        text: "name this drive (e.g. work) → APEX-work";
+                        color: Palette.text-dim;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                if root.drive-result != "" && root.drive-result != "ok": Text {
+                    text: root.drive-result;
+                    color: #ef6666;
+                    font-size: 10px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    ExpBtn {
+                        label: "CANCEL";
+                        horizontal-stretch: 1;
+                        clicked => { if (!root.drive-busy) { root.drive-open = false; } }
+                    }
+                    ExpBtn {
+                        label: root.drive-busy ? "Setting up…" : "SET UP DRIVE";
+                        strong: root.drive-selected-dev != "" && root.drive-name != "" && !root.drive-busy;
+                        horizontal-stretch: 1;
+                        clicked => {
+                            if (root.drive-selected-dev != "" && root.drive-name != "" && !root.drive-busy) {
+                                root.drive-prep(root.drive-selected-dev, root.drive-name);
+                            }
                         }
                     }
                 }

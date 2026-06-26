@@ -164,8 +164,14 @@ Two behaviours (the user chooses):
 4. The requester **polls `/proc/mounts`** for the new `media/APEX-<name>` mount (≤25s).
    On success the existing plug-notification fires → APEX greets the freshly-adopted stick.
 
-Slice A ships the **relabel** pipeline + endpoints (server-side); the Explorer **button +
-device-picker UI** and the **format/wipe** option are the next two slices.
+**UI (slice A2, ui-slint `explorer_view.slint`):** a full-width **🔌 Use a USB drive**
+button in the Explorer action row opens a picker modal — it `drive-scan`s the candidates
+(radio-select rows: model · size · label/fstype), takes a name (→ `APEX-<name>`), and on
+**SET UP DRIVE** calls `drive-prep` (relabel mode). The picker shows a *Setting up…* busy
+state for the ≤25s prep; Rust drives `drive-busy`/`drive-result` and the view auto-closes
+on `"ok"` (a `changed drive-result` handler) then hops to `media/` to show the adopted
+stick. The candidate list + busy/result are Rust-fed; the open/selection/name form is
+view-local. The **format/wipe** option (blank sticks, destructive confirm) is slice B.
 
 ## Why the systemd sandbox isn't a problem here
 
