@@ -50,6 +50,7 @@
         <span id="agent-name">APEX</span>
       </div>
       <div class="topbar-actions">
+        <button id="files-btn" title="Files">📁</button>
         <button id="new-btn" title="New chat">＋ New</button>
         <button id="logout-btn" title="Log out">⏻</button>
       </div>
@@ -61,6 +62,21 @@
       <button id="cancel-btn" class="cancel-btn hidden" title="Stop the current turn">■</button>
       <textarea id="input" rows="1" placeholder="Message your agent…" autocomplete="off" autocapitalize="sentences"></textarea>
       <button id="send-btn" class="send-btn" title="Send">➤</button>
+    </footer>
+  </div>
+
+  <!-- ── Files (phone-handoff: browse / upload / download the workspace) ───── -->
+  <div id="files" class="files hidden">
+    <header class="files-bar">
+      <button id="files-up" title="Up a folder">↑</button>
+      <div id="files-path" class="files-path">workspace</div>
+      <button id="files-refresh" title="Refresh">⟳</button>
+      <button id="files-close" title="Close">✕</button>
+    </header>
+    <div id="files-msg" class="files-msg hidden"></div>
+    <div id="files-list" class="files-list"></div>
+    <footer class="files-actions">
+      <label class="upload-btn" id="upload-label">⤒ Upload a file<input id="files-upload" type="file" hidden></label>
     </footer>
   </div>
 

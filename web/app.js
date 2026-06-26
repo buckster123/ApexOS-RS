@@ -492,6 +492,88 @@ async function logout() {
   showLogin();
 }
 
+// ── Files (phone-handoff: browse / upload / download the workspace) ───────
+let filesPath = '';   // current dir, "" = workspace root
+
+function openFiles() { $('files').classList.remove('hidden'); loadDir(''); }
+function closeFiles() { $('files').classList.add('hidden'); }
+
+function filesMsg(t) {
+  const el = $('files-msg');
+  if (!t) { el.classList.add('hidden'); el.textContent = ''; return; }
+  el.classList.remove('hidden'); el.textContent = t;
+}
+
+function humanSize(n) {
+  if (!n) return '';
+  const u = ['B', 'KB', 'MB', 'GB']; let i = 0; let v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return i === 0 ? n + ' B' : v.toFixed(1) + ' ' + u[i];
+}
+
+function fileIcon(ext) {
+  ext = (ext || '').toLowerCase();
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'heic'].includes(ext)) return '🖼';
+  if (['mp4', 'webm', 'mov', 'mkv'].includes(ext)) return '🎬';
+  if (['mp3', 'wav', 'ogg', 'flac', 'm4a'].includes(ext)) return '🎵';
+  if (ext === 'pdf') return '📕';
+  if (['zip', 'tar', 'gz'].includes(ext)) return '🗜';
+  return '📄';
+}
+
+async function loadDir(path) {
+  filesPath = path;
+  $('files-path').textContent = path === '' ? 'workspace' : path;
+  filesMsg('');
+  const list = $('files-list');
+  list.textContent = '';
+  let entries = [];
+  try {
+    const r = await api('/api/workspace/list?path=' + encodeURIComponent(path));
+    const data = await r.json();
+    entries = (data && data.entries) || [];
+  } catch (_) { filesMsg('Could not load this folder.'); return; }
+  if (!entries.length) { filesMsg('Empty folder.'); return; }
+  for (const e of entries) {
+    const isDir = e.kind === 'dir';
+    const row = document.createElement('div');
+    row.className = 'file-row' + (isDir ? ' is-dir' : '');
+    const icn = document.createElement('span'); icn.className = 'file-icon'; icn.textContent = isDir ? '📁' : fileIcon(e.ext);
+    const nm = document.createElement('span'); nm.className = 'file-name'; nm.textContent = e.name;
+    const sz = document.createElement('span'); sz.className = 'file-size'; sz.textContent = isDir ? '' : humanSize(e.size);
+    row.appendChild(icn); row.appendChild(nm); row.appendChild(sz);
+    if (isDir) {
+      row.onclick = () => loadDir(e.path);
+    } else {
+      // Direct link — require_token accepts ?token=, so a plain <a download> works on mobile.
+      const dl = document.createElement('a');
+      dl.className = 'file-dl'; dl.textContent = '⤓'; dl.title = 'Download';
+      dl.href = '/api/workspace/download?path=' + encodeURIComponent(e.path) + '&token=' + encodeURIComponent(getToken());
+      dl.setAttribute('download', e.name);
+      row.appendChild(dl);
+    }
+    list.appendChild(row);
+  }
+}
+
+function filesUp() {
+  if (filesPath === '') return;
+  const i = filesPath.lastIndexOf('/');
+  loadDir(i >= 0 ? filesPath.slice(0, i) : '');
+}
+
+async function uploadFile(file) {
+  if (!file) return;
+  const target = (filesPath === '' ? '' : filesPath + '/') + file.name;
+  filesMsg('Uploading ' + file.name + '…');
+  try {
+    const r = await api('/api/workspace/upload?path=' + encodeURIComponent(target), { method: 'POST', body: file });
+    const data = await r.json();
+    if (data && data.ok) { filesMsg(''); loadDir(filesPath); }
+    else { filesMsg('Upload failed: ' + ((data && data.error) || 'unknown')); }
+  } catch (_) { filesMsg('Upload failed — node unreachable.'); }
+}
+
 function wireUI() {
   // PIN keypad
   document.querySelectorAll('#pinpad .keys button').forEach((b) => {
@@ -509,6 +591,13 @@ function wireUI() {
   $('cancel-btn').onclick = cancelTurn;
   $('new-btn').onclick = newChat;
   $('logout-btn').onclick = logout;
+
+  // Files (phone-handoff browser)
+  $('files-btn').onclick = openFiles;
+  $('files-close').onclick = closeFiles;
+  $('files-up').onclick = filesUp;
+  $('files-refresh').onclick = () => loadDir(filesPath);
+  $('files-upload').onchange = (e) => { const f = e.target.files[0]; uploadFile(f); e.target.value = ''; };
 
   // Hardware keyboard PIN entry on desktop
   document.addEventListener('keydown', (e) => {
