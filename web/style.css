@@ -160,3 +160,48 @@ button { font-family:inherit; cursor:pointer; color:var(--text); background:none
   .composer { padding-left:18%; padding-right:18%; }
   .msg, .tool, .thinking { max-width:680px; }
 }
+
+/* ── Files (phone-handoff browser) ───────────────────────────────────────── */
+.files { position:fixed; inset:0; z-index:20; display:flex; flex-direction:column; background:var(--bg); }
+.files-bar {
+  display:flex; align-items:center; gap:8px;
+  padding:calc(10px + var(--safe-t)) 12px 10px; background:var(--surface);
+  border-bottom:1px solid var(--border); flex:0 0 auto;
+}
+.files-bar button {
+  font-size:15px; width:36px; height:36px; border-radius:var(--radius);
+  border:1px solid var(--border); color:var(--text); background:var(--surface-hi);
+}
+.files-bar button:active { background:var(--primary-dim); }
+.files-path {
+  flex:1; font-size:13px; font-weight:600; color:var(--text-bright);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 4px;
+}
+.files-msg { padding:10px 16px; color:var(--text-dim); font-size:12px; }
+.files-list { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:6px 10px; }
+.file-row {
+  display:flex; align-items:center; gap:10px; padding:11px 10px;
+  border-radius:var(--radius); border:1px solid transparent;
+}
+.file-row.is-dir:active { background:var(--surface-hi); }
+.file-icon { font-size:17px; width:22px; text-align:center; }
+.file-name { flex:1; color:var(--text); font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.file-size { color:var(--text-dim); font-size:11px; }
+.file-dl {
+  text-decoration:none; color:var(--primary); font-size:18px; padding:4px 10px;
+  border-radius:var(--radius); border:1px solid var(--border);
+}
+.file-dl:active { background:var(--primary-dim); }
+.files-actions {
+  flex:0 0 auto; padding:12px 16px calc(12px + var(--safe-b));
+  border-top:1px solid var(--border); background:var(--surface);
+}
+.upload-btn {
+  display:block; text-align:center; cursor:pointer;
+  padding:13px; border-radius:var(--radius); font-size:14px; font-weight:600;
+  color:var(--bg); background:var(--primary); box-shadow:var(--glow);
+}
+.upload-btn:active { transform:scale(.98); }
+@media (min-width:760px) {
+  .files-list, .files-actions, .files-msg { max-width:760px; margin-left:auto; margin-right:auto; width:100%; }
+}

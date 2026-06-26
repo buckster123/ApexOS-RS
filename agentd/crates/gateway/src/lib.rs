@@ -292,6 +292,8 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/workspace/images",      get(workspace_images_handler))
         .route("/api/workspace/list",        get(workspace_list_handler))
         .route("/api/workspace/read",        get(workspace_read_handler))
+        .route("/api/workspace/download",    get(workspace_download_handler))
+        .route("/api/workspace/upload",      post(workspace_upload_handler).layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)))
         .route("/api/workspace/mkdir",       post(workspace_mkdir_handler))
         .route("/api/workspace/delete",      post(workspace_delete_handler))
         .route("/api/workspace/rename",      post(workspace_rename_handler))
@@ -4234,6 +4236,78 @@ async fn workspace_read_handler(
     let binary = slice.contains(&0u8);
     let content = if binary { String::new() } else { String::from_utf8_lossy(slice).to_string() };
     Json(serde_json::json!({ "content": content, "truncated": truncated, "binary": binary }))
+}
+
+/// A coarse content-type by extension for the workspace download endpoint.
+fn content_type_for(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png", "jpg" | "jpeg" => "image/jpeg", "gif" => "image/gif",
+        "webp" => "image/webp", "svg" => "image/svg+xml", "bmp" => "image/bmp", "heic" => "image/heic",
+        "pdf" => "application/pdf", "zip" => "application/zip",
+        "txt" | "md" | "log" | "csv" => "text/plain; charset=utf-8",
+        "json" => "application/json; charset=utf-8", "html" | "htm" => "text/html; charset=utf-8",
+        "mp4" => "video/mp4", "webm" => "video/webm", "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg", "wav" => "audio/wav", "ogg" => "audio/ogg", "flac" => "audio/flac", "m4a" => "audio/mp4",
+        _ => "application/octet-stream",
+    }
+}
+
+/// GET /api/workspace/download?path=<rel> — serve a workspace file to the browser/PWA
+/// (the phone-handoff file browser; also inline image preview). Confined to the workspace;
+/// `?token=` is accepted by `require_token`, so a plain `<a download>` link works.
+async fn workspace_download_handler(
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    const CAP: u64 = 256 * 1024 * 1024;
+    let rel = params.get("path").map(|s| s.as_str()).unwrap_or("");
+    let path = match resolve_workspace_path(rel) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let meta = match tokio::fs::metadata(&path).await {
+        Ok(m) => m,
+        Err(e) => return (StatusCode::NOT_FOUND, format!("{e}")).into_response(),
+    };
+    if meta.is_dir() { return (StatusCode::BAD_REQUEST, "is a directory".to_string()).into_response(); }
+    if meta.len() > CAP { return (StatusCode::PAYLOAD_TOO_LARGE, "file too large (>256 MB)".to_string()).into_response(); }
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("read: {e}")).into_response(),
+    };
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    // ASCII-sanitise the filename for the (latin1) Content-Disposition header.
+    let name: String = path.file_name().and_then(|n| n.to_str()).unwrap_or("download")
+        .chars().map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' { c } else { '_' }).collect();
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type_for(&ext).to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\"")),
+        ],
+        bytes,
+    ).into_response()
+}
+
+/// POST /api/workspace/upload?path=<rel-target> (raw body = file bytes) — write an uploaded
+/// file into the workspace (the phone-handoff upload — incl. onto a mounted `media/` stick).
+/// Confined via `resolve_workspace_write_path` (rejects `..`, parent must exist); the route
+/// raises the body limit to 256 MB.
+async fn workspace_upload_handler(
+    Query(params): Query<HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let rel = params.get("path").map(|s| s.as_str()).unwrap_or("");
+    let target = match resolve_workspace_write_path(rel) {
+        Ok(p) => p,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    if body.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "empty upload" }));
+    }
+    match tokio::fs::write(&target, &body).await {
+        Ok(_) => Json(serde_json::json!({ "ok": true, "path": rel, "bytes": body.len() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("write: {e}") })),
+    }
 }
 
 /// Body for the Explorer's confined write ops (mkdir/delete/rename/move/copy).

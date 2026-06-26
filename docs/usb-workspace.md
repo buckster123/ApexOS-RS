@@ -196,10 +196,12 @@ untrusted FS image; deeper untrusted-filesystem hardening is a post-mk1 item.
   `read_file`/`write_file` under it, ⏏ unmounts cleanly; a *normal* USB still goes to
   GNOME (untouched). This is the one hardware-gated leg.
 
-## Deferred (follow-on slices)
+## Status — the loop is closed
 
-Phone-handoff (the PWA workspace file-browser leg) and `apexos-workspace-init` as a
-one-tap Explorer action (fiddly: a blank stick isn't `APEX-*` labeled, so it won't
-auto-mount — it needs a mount→init→relabel dance + a privileged relabel). *(Done: the
-Explorer file verbs, the `eject_media` agent tool, the embodiment "stick mounted" hint,
-the privilege-separated eject, and the plug notification.)*
+The USB exo-workspace is feature-complete: the Explorer **file verbs**, the **`eject_media`**
+agent tool, the embodiment **"stick mounted" hint**, the **privilege-separated eject**, the
+**plug notification**, **"Use this drive"** (relabel + format, which subsumed the old
+"`apexos-workspace-init` as an Explorer action" idea), and the **phone-handoff PWA file
+browser** (browse / upload / download — `docs/web-ui.md`, so a phone reaches a mounted
+stick's files). Remaining work is field validation on real sticks (the one hardware-gated
+leg, like the Pi-only items) — not new features.

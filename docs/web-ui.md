@@ -68,6 +68,26 @@ numbers — see CLAUDE.md "agentd WebSocket protocol"):
 Global status events (sensors/mesh/council/vast) are received but not surfaced in
 this minimal client — the native UI owns them.
 
+## Files — the phone-handoff browser (📁)
+
+The closing leg of the USB exo-workspace loop (`docs/usb-workspace.md`): a phone reaches
+the workspace's files — **including a mounted `media/<label>` stick**, since sticks own-
+mount *under* the workspace. A 📁 button in the topbar opens a full-screen Files panel:
+
+- **Browse** — `GET /api/workspace/list?path=` (the same endpoint the native Explorer
+  uses): tap a folder to descend, ↑ to go up, ⟳ to refresh. Built with `createElement` +
+  `textContent` (XSS-safe), like the chat.
+- **Download** — a per-file `⤓` is a plain `<a download href="/api/workspace/download?path=…&token=…">`.
+  `require_token` accepts `?token=`, so a direct link works on mobile (native save sheet);
+  `workspace_download_handler` is workspace-confined, content-typed by extension, ≤256 MB.
+- **Upload** — a file input → `POST /api/workspace/upload?path=<dir>/<name>` with the
+  **raw File as the body** (no multipart dep); `workspace_upload_handler` confines via
+  `resolve_workspace_write_path` (rejects `..`, parent must exist), the route raises the
+  body limit to 256 MB. So you push a phone photo straight onto the stick, then eject it
+  from the native UI / agent and carry it to another node.
+
+Both endpoints are gated + share the workspace confinement of the file verbs (#196).
+
 ## Deferred (web grows toward native parity)
 
 Voice (mic → `/api/record`, TTS → `/api/speak`), sensors/home dashboard, full
