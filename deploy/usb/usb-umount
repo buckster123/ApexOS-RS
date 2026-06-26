@@ -3,11 +3,14 @@
 #
 #   usb-umount <kernel-dev>        from the udev `remove` event (device gone →
 #                                  resolve the mountpoint from the /run state file)
-#   usb-umount --label APEX-<name> from the UI/agent eject (POST /api/media/eject)
+#   usb-umount --label APEX-<name> from the UI/agent eject — invoked by the root drain
+#                                  service (apexos-usb-eject) that agentd triggers by
+#                                  dropping a request file (agentd can't sudo under
+#                                  NoNewPrivileges, so it never calls this directly)
 #
-# Runs as root: from the systemd unit (ExecStop) or via the narrow sudoers drop-in
-# that lets the agentd user invoke ONLY this script. Hard-confines the target to
-# <workspace>/media/ and the label to APEX-* before unmounting anything.
+# Always runs as root, from a systemd unit (the mount @.service ExecStop, or the eject
+# drain) — never via sudo. Hard-confines the target to <workspace>/media/ and the label
+# to APEX-* before unmounting anything.
 set -euo pipefail
 
 WORKSPACE="$(. /etc/agentd/env 2>/dev/null; echo "${AGENTD_WORKSPACE:-/var/lib/agentd/workspace}")"

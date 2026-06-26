@@ -49,12 +49,30 @@ perms, so the agent couldn't write them. So we mount with `uid=agentd` ourselves
 makes `<workspace>/media`, and reloads udev. Runs on every node (the marker-gate
 keeps it safe everywhere).
 
-## Eject
+## Eject — privilege separation, NOT sudo
 
-`POST /api/media/eject {label}` (gateway) → validates the label (`valid_exo_label`,
-unit-tested: `APEX-*`, sane chars, no `..`) → runs `usb-umount --label` via the narrow
-sudoers (argv, never a shell). Surfaced in the Explorer as a **⏏** affordance on each
-`media/*` stick row (ui-slint); on success it refreshes the view.
+agentd runs as the non-root `agentd` user with **`NoNewPrivileges=true`** (systemd
+hardening), and that flag makes the kernel **block setuid `sudo` entirely** — so a
+sudoers drop-in can *never* let agentd umount (this is why the first eject attempt
+failed in the field). The fix is privilege separation, so agentd never escalates at all:
+
+1. `POST /api/media/eject {label}` (gateway) — or the agent `eject_media` tool — validates
+   the label (`valid_exo_label`: `APEX-*`, sane chars, no `..`), confirms it's mounted, and
+   **drops an empty `APEX-<label>` request file** into the agentd-owned eject dir
+   (`AGENTD_USB_EJECT_DIR`, default `/var/lib/agentd/usb-eject` — under `ReadWritePaths`, so
+   the non-root daemon can write it).
+2. A **path unit** `apexos-usb-eject.path` (root) watches that dir and fires
+   `apexos-usb-eject.service` (root oneshot), whose `usb-eject-drain` removes each request
+   and runs `usb-umount --label` **as root** — the label re-validated by the drain and a
+   third time by `usb-umount`, which hard-confines the target to `<workspace>/media/`.
+3. The requester **polls `/proc/mounts`** (≤8s): success when the mountpoint disappears;
+   otherwise a clear "still mounted — check `journalctl -u apexos-usb-eject`".
+
+So the only thing agentd ever does is write a file in a directory it owns; the umount
+happens entirely in a root service it can't influence beyond the (thrice-validated) label.
+The old `deploy/sudoers.d/apexos-usb` is removed (it was inert under `NoNewPrivileges`).
+Surfaced in the Explorer as a **⏏** affordance on each `media/*` stick row (ui-slint); on
+success it refreshes the view.
 
 ## File operations (the Explorer is a real file manager)
 
@@ -97,9 +115,10 @@ eject it now that I've saved the report?"):
   its label, and that it's read+write like any workspace folder.
 - **`eject_media{label}` tool** (apexos-tools, policy **`allow`**) — the agent's own
   safe-eject: validates the label (`valid_exo_label`, mirrors the gateway + helper) and
-  shells the **same** root `usb-umount` helper the UI ⏏ uses (via the narrow sudoers).
-  Non-destructive (flush + unmount; re-pluggable), confined to `APEX-*` sticks. `allow`
-  because the conversational "want me to eject it?" *is* the confirmation — a second
+  goes through the **same** request-file → root-drain path as the UI ⏏ (see *Eject* above;
+  agentd can't sudo under `NoNewPrivileges`). Non-destructive (flush + unmount;
+  re-pluggable), confined to `APEX-*` sticks. `allow` because the conversational "want me
+  to eject it?" *is* the confirmation — a second
   approval card would be clunky. **Already-deployed nodes need `eject_media = "allow"`
   in their live `/etc/agentd/policy.toml`** (config seeds fresh nodes only) — else it
   gates as `unknown → ask`.

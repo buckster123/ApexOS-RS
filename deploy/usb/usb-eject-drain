@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# apexos usb-eject-drain — process exo-workspace eject REQUESTS dropped by agentd.
+#
+# Why this exists: agentd runs as the non-root `agentd` user with NoNewPrivileges=true
+# (systemd hardening), so the kernel blocks setuid `sudo` — agentd cannot escalate to
+# unmount a stick that root mounted. Privilege separation instead: agentd drops an empty
+# file named after the stick's APEX-<label> into the request dir; the path unit
+# (apexos-usb-eject.path) triggers THIS drain (root), which unmounts each requested
+# stick via the usb-umount helper. The success signal the requester polls is
+# /proc/mounts — the mountpoint disappears. agentd never gains any privilege; it only
+# drops a file in a directory it already owns.
+#
+# Installed by install.sh to /usr/local/lib/apexos/usb-eject-drain. Runs as root
+# (ExecStart of apexos-usb-eject.service).
+set -euo pipefail
+
+REQ_DIR="${AGENTD_USB_EJECT_DIR:-/var/lib/agentd/usb-eject}"
+[[ -d "$REQ_DIR" ]] || exit 0
+
+shopt -s nullglob
+for req in "$REQ_DIR"/APEX-*; do
+  label="$(basename "$req")"
+  # Remove the request FIRST so a stuck/failing umount can't re-trigger the drain in a
+  # loop — the requester learns the outcome from /proc/mounts, not from the request file.
+  rm -f "$req"
+  # usb-umount re-validates the label (APEX-*, safe chars) and hard-confines the target
+  # to <workspace>/media/ before touching anything — defence in depth.
+  /usr/local/lib/apexos/usb-umount --label "$label" \
+    || echo "usb-eject-drain: umount of '$label' failed (stick busy? already gone?)" >&2
+done
+exit 0

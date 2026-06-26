@@ -1,0 +1,13 @@
+[Unit]
+Description=Watch for ApexOS exo-workspace eject requests
+Documentation=file:///usr/local/lib/apexos/usb-eject-drain
+
+[Path]
+# agentd (non-root, NoNewPrivileges) can't sudo/umount, so it drops an APEX-<label>
+# request file here; this fires the root drain service that does the umount on its
+# behalf. The dir is created (agentd-owned) by install.sh before this unit is armed.
+PathExistsGlob=/var/lib/agentd/usb-eject/APEX-*
+Unit=apexos-usb-eject.service
+
+[Install]
+WantedBy=multi-user.target

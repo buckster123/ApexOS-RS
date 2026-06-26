@@ -1,0 +1,10 @@
+[Unit]
+Description=Drain ApexOS exo-workspace eject requests (root umount on agentd's behalf)
+Documentation=file:///usr/local/lib/apexos/usb-eject-drain
+
+[Service]
+# Root oneshot — triggered by apexos-usb-eject.path when agentd drops a request file.
+# Runs UNsandboxed on purpose: it needs to umount under /var/lib/agentd/workspace/media.
+Type=oneshot
+Environment=AGENTD_USB_EJECT_DIR=/var/lib/agentd/usb-eject
+ExecStart=/usr/local/lib/apexos/usb-eject-drain

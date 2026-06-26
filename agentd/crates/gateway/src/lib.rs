@@ -3926,27 +3926,57 @@ fn valid_exo_label(label: &str) -> bool {
         && label.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Is `<workspace>/media/<label>` currently a mountpoint in /proc/mounts? This is the
+/// authoritative success oracle for an eject — when it goes false, the stick is gone.
+/// Shared shape with `mounted_exo_sticks` / the apexos-tools eject tool.
+fn media_mount_present(label: &str) -> bool {
+    let ws = std::env::var("AGENTD_WORKSPACE").ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    let ws_canon = std::fs::canonicalize(&ws).unwrap_or_else(|_| std::path::PathBuf::from(&ws));
+    let target = ws_canon.join("media").join(label);
+    let target_s = target.to_string_lossy();
+    std::fs::read_to_string("/proc/mounts").map(|m| {
+        m.lines().any(|l| l.split_whitespace().nth(1) == Some(target_s.as_ref()))
+    }).unwrap_or(false)
+}
+
 /// POST /api/media/eject {label} — safely unmount an exo-workspace stick (the UI ⏏
-/// affordance / a future agent tool). agentd is non-root, so it shells the umount
-/// helper via the narrow sudoers drop-in (argv, never a shell); the helper itself
-/// hard-confines the mountpoint to `<workspace>/media/`. The label is validated here
-/// AND in the helper (defence in depth).
+/// affordance + the agent `eject_media` tool both land here). agentd runs non-root with
+/// NoNewPrivileges=true, so it CAN'T sudo/umount — instead it drops an APEX-<label>
+/// request file into the (agentd-owned) eject dir, which fires the root drain service
+/// (apexos-usb-eject.path → .service) that does the umount on its behalf. Success is
+/// confirmed by polling /proc/mounts (the mountpoint disappears). The label is validated
+/// here, again by the drain, and a third time by usb-umount (defence in depth).
 async fn media_eject_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let label = body["label"].as_str().unwrap_or("").trim().to_string();
     if !valid_exo_label(&label) {
         return Json(serde_json::json!({ "ok": false, "error": "label must be APEX-<name> (letters, digits, . _ -)" }));
     }
-    let out = tokio::process::Command::new("sudo")
-        .args(["-n", "/usr/local/lib/apexos/usb-umount", "--label", &label])
-        .output().await;
-    match out {
-        Ok(o) if o.status.success() => Json(serde_json::json!({ "ok": true, "label": label })),
-        Ok(o) => Json(serde_json::json!({
-            "ok": false,
-            "error": String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("eject failed").to_string(),
-        })),
-        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("eject helper: {e}") })),
+    match request_eject(&label).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "label": label })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
+}
+
+/// Drop an eject request for `label` and wait (≤8s) for the root drain to unmount it.
+/// Returns Err with a human message if the stick is still mounted after the window
+/// (the drain may have failed — its journal has the reason). Assumes `label` is already
+/// `valid_exo_label`-checked.
+async fn request_eject(label: &str) -> Result<(), String> {
+    if !media_mount_present(label) {
+        return Err(format!("{label} is not mounted"));
+    }
+    let dir = std::env::var("AGENTD_USB_EJECT_DIR")
+        .unwrap_or_else(|_| "/var/lib/agentd/usb-eject".to_string());
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| format!("eject dir: {e}"))?;
+    let req = std::path::Path::new(&dir).join(label);
+    tokio::fs::write(&req, b"").await.map_err(|e| format!("drop eject request: {e}"))?;
+    for _ in 0..16 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if !media_mount_present(label) { return Ok(()); }
+    }
+    Err(format!("{label} still mounted after 8s — the eject service may have failed \
+                 (check: journalctl -u apexos-usb-eject)"))
 }
 
 async fn workspace_list_handler(
