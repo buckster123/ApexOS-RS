@@ -299,6 +299,8 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/workspace/copy",        post(workspace_copy_handler))
         .route("/api/media/eject",        post(media_eject_handler))
         .route("/api/media/plugged",      post(media_plugged_handler))
+        .route("/api/media/candidates",   get(media_candidates_handler))
+        .route("/api/media/prep",         post(media_prep_handler))
         .route("/api/run",                post(run_command_handler))
         .route("/api/snapshot",           get(snapshot_handler))
         .route("/api/sonus/files",        get(sonus_files_handler))
@@ -4010,6 +4012,134 @@ async fn media_plugged_handler(
     Json(serde_json::json!({ "ok": true, "label": label, "notified": notify }))
 }
 
+/// Bytes → a short human size for the device picker ("57.3 GB").
+fn human_bytes(n: u64) -> String {
+    const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64; let mut i = 0;
+    while v >= 1024.0 && i < U.len() - 1 { v /= 1024.0; i += 1; }
+    if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", U[i]) }
+}
+
+/// Relabel-able FAT-family filesystems (slice A "Use this drive" preserves files by
+/// relabelling in place; ext4/btrfs/blank need format mode — slice B).
+fn is_relabelable_fs(fs: &str) -> bool {
+    matches!(fs, "exfat" | "vfat" | "fat" | "fat32" | "msdos")
+}
+
+/// Pure parser for `GET /api/media/candidates`: given `lsblk -J -b …` output, return the
+/// USB partitions that "Use this drive" can adopt — relabel-able FAT/exFAT, on a
+/// USB-transport disk, NOT on the system disk, NOT already an exo-workspace (`APEX-*` /
+/// mounted under `media_root`). The destructive guard still lives in `usb-prep`; this just
+/// decides what to *offer*. Unit-tested with a realistic NVMe-system + USB-stick +
+/// USB-ext4-decoy fixture.
+fn parse_prep_candidates(lsblk: &serde_json::Value, media_root: &str) -> Vec<serde_json::Value> {
+    const SYS_MOUNTS: [&str; 4] = ["/", "/boot", "/boot/firmware", "/boot/efi"];
+    let mut out = Vec::new();
+    let disks = match lsblk["blockdevices"].as_array() { Some(d) => d, None => return out };
+
+    // Does this device or any descendant mount a system path?
+    fn holds_system(dev: &serde_json::Value) -> bool {
+        if let Some(mp) = dev["mountpoint"].as_str() {
+            if SYS_MOUNTS.contains(&mp) { return true; }
+        }
+        dev["children"].as_array().map(|cs| cs.iter().any(holds_system)).unwrap_or(false)
+    }
+
+    for disk in disks {
+        if disk["tran"].as_str() != Some("usb") { continue; }     // USB transport only
+        if holds_system(disk) { continue; }                       // never a system disk
+        let vendor = disk["vendor"].as_str().unwrap_or("").trim();
+        let model  = disk["model"].as_str().unwrap_or("").trim();
+        let display = format!("{vendor} {model}").trim().to_string();
+
+        // A FAT/exFAT filesystem either sits on a partition (the common case) or directly
+        // on the whole disk (no partition table). Collect whichever applies.
+        let parts: Vec<&serde_json::Value> = match disk["children"].as_array() {
+            Some(cs) if !cs.is_empty() => cs.iter().collect(),
+            _ => vec![disk],
+        };
+        for p in parts {
+            let fstype = p["fstype"].as_str().unwrap_or("");
+            if !is_relabelable_fs(fstype) { continue; }
+            let label = p["label"].as_str().unwrap_or("");
+            if label.starts_with("APEX-") { continue; }           // already an exo-workspace
+            let mp = p["mountpoint"].as_str().unwrap_or("");
+            if !mp.is_empty() && mp.starts_with(media_root) { continue; } // already adopted
+            let bytes = p["size"].as_u64().unwrap_or(0);
+            out.push(serde_json::json!({
+                "dev":        p["path"].as_str().unwrap_or(""),
+                "label":      label,
+                "fstype":     fstype,
+                "size":       human_bytes(bytes),
+                "size_bytes": bytes,
+                "model":      display,
+                "mountpoint": mp,
+            }));
+        }
+    }
+    out
+}
+
+/// GET /api/media/candidates — USB sticks the "Use this drive" button can adopt (relabel).
+async fn media_candidates_handler() -> impl IntoResponse {
+    let out = tokio::process::Command::new("lsblk")
+        .args(["-J", "-b", "-o", "NAME,PATH,SIZE,TYPE,MOUNTPOINT,LABEL,FSTYPE,TRAN,MODEL,VENDOR,PKNAME"])
+        .output().await;
+    let lsblk: serde_json::Value = match out {
+        Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).unwrap_or(serde_json::Value::Null),
+        Ok(o) => return Json(serde_json::json!({ "candidates": [], "error": String::from_utf8_lossy(&o.stderr).trim().to_string() })),
+        Err(e) => return Json(serde_json::json!({ "candidates": [], "error": format!("lsblk: {e}") })),
+    };
+    let media_root = {
+        let ws = std::env::var("AGENTD_WORKSPACE").ok().filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+        let ws_canon = std::fs::canonicalize(&ws).unwrap_or_else(|_| std::path::PathBuf::from(&ws));
+        ws_canon.join("media").to_string_lossy().into_owned()
+    };
+    Json(serde_json::json!({ "candidates": parse_prep_candidates(&lsblk, &media_root) }))
+}
+
+/// POST /api/media/prep {dev, name, mode?} — adopt a USB stick as an exo-workspace.
+/// Slice A supports `mode:"relabel"` (default, keeps files); `format` is slice B. agentd
+/// can't touch block devices (NoNewPrivileges), so it drops a prep request for the root
+/// `usb-prep` drain (which re-validates the device — the real safety boundary) and polls
+/// `/proc/mounts` for the new `media/APEX-<name>` mount to appear.
+async fn media_prep_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let dev  = body["dev"].as_str().unwrap_or("").trim().to_string();
+    let mode = body["mode"].as_str().unwrap_or("relabel").trim().to_string();
+    // Sanitise the name → the APEX-<name> label.
+    let raw_name = body["name"].as_str().unwrap_or("").trim();
+    let safe_name: String = raw_name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')).collect();
+    let label = format!("APEX-{safe_name}");
+    if mode != "relabel" {
+        return Json(serde_json::json!({ "ok": false, "error": "only relabel (keep files) is supported yet — format is coming" }));
+    }
+    if safe_name.is_empty() || !valid_exo_label(&label) {
+        return Json(serde_json::json!({ "ok": false, "error": "name must be letters/digits/._- (becomes the APEX-<name> drive label)" }));
+    }
+    if !dev.starts_with("/dev/") || dev.contains("..") {
+        return Json(serde_json::json!({ "ok": false, "error": "bad device path" }));
+    }
+    // Drop the request (3 lines: mode / dev / name) for the root drain.
+    let dir = std::env::var("AGENTD_USB_PREP_DIR").unwrap_or_else(|_| "/var/lib/agentd/usb-prep".to_string());
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return Json(serde_json::json!({ "ok": false, "error": format!("prep dir: {e}") }));
+    }
+    let req = std::path::Path::new(&dir).join(format!("{label}.req"));
+    if let Err(e) = tokio::fs::write(&req, format!("{mode}\n{dev}\n{safe_name}\n")).await {
+        return Json(serde_json::json!({ "ok": false, "error": format!("drop prep request: {e}") }));
+    }
+    // Poll for the new exo-workspace mount (relabel + settle + mount takes a few seconds).
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if media_mount_present(&label) {
+            return Json(serde_json::json!({ "ok": true, "label": label, "mountpoint": format!("media/{label}") }));
+        }
+    }
+    Json(serde_json::json!({ "ok": false, "error": format!(
+        "{label} did not mount within 25s — the prep may have failed (check: journalctl -u apexos-usb-prep)") }))
+}
+
 async fn workspace_list_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -4573,6 +4703,41 @@ mod auth_tests {
         assert!(!valid_exo_label("APEX-a b"));       // space
         assert!(!valid_exo_label("APEX-$(x)"));      // shell-ish chars
         assert!(!valid_exo_label(&format!("APEX-{}", "x".repeat(70)))); // too long
+    }
+
+    #[test]
+    fn prep_candidates_offers_only_safe_usb_fat_sticks() {
+        // Realistic shape: an NVMe system disk, a USB exFAT stick (the one candidate), a
+        // USB ext4 spare drive (not relabel-able → excluded), an already-APEX USB stick
+        // (excluded), and a USB stick already mounted under media/ (excluded).
+        let lsblk = serde_json::json!({ "blockdevices": [
+            { "name": "nvme0n1", "path": "/dev/nvme0n1", "type": "disk", "tran": "nvme", "children": [
+                { "name": "nvme0n1p1", "path": "/dev/nvme0n1p1", "type": "part", "fstype": "vfat", "mountpoint": "/boot/efi", "label": "EFI", "size": 536870912 },
+                { "name": "nvme0n1p2", "path": "/dev/nvme0n1p2", "type": "part", "fstype": "ext4", "mountpoint": "/", "label": null, "size": 511000000000u64 }
+            ]},
+            { "name": "sdb", "path": "/dev/sdb", "type": "disk", "tran": "usb", "vendor": "SanDisk", "model": "Ultra", "children": [
+                { "name": "sdb1", "path": "/dev/sdb1", "type": "part", "fstype": "exfat", "mountpoint": null, "label": "MYSTICK", "size": 61530439680u64 }
+            ]},
+            { "name": "sdc", "path": "/dev/sdc", "type": "disk", "tran": "usb", "vendor": "Seagate", "model": "Backup", "children": [
+                { "name": "sdc1", "path": "/dev/sdc1", "type": "part", "fstype": "ext4", "mountpoint": "/run/media/andre/spare", "label": "spare", "size": 2000000000000u64 }
+            ]},
+            { "name": "sdd", "path": "/dev/sdd", "type": "disk", "tran": "usb", "children": [
+                { "name": "sdd1", "path": "/dev/sdd1", "type": "part", "fstype": "exfat", "mountpoint": "/var/lib/agentd/workspace/media/APEX-config", "label": "APEX-config", "size": 32000000000u64 }
+            ]},
+            { "name": "sde", "path": "/dev/sde", "type": "disk", "tran": "usb", "children": [
+                { "name": "sde1", "path": "/dev/sde1", "type": "part", "fstype": "vfat", "mountpoint": null, "label": "APEX-work", "size": 16000000000u64 }
+            ]}
+        ]});
+        let got = parse_prep_candidates(&lsblk, "/var/lib/agentd/workspace/media");
+        // Exactly one offer: the FAT/exFAT USB stick that isn't system / ext4 / already-APEX / adopted.
+        assert_eq!(got.len(), 1, "got {got:?}");
+        assert_eq!(got[0]["dev"], "/dev/sdb1");
+        assert_eq!(got[0]["label"], "MYSTICK");
+        assert_eq!(got[0]["fstype"], "exfat");
+        assert_eq!(got[0]["model"], "SanDisk Ultra");
+        assert_eq!(got[0]["size"], "57.3 GB");
+        // No system disk, ext4 spare, already-APEX, or media-mounted stick leaked in.
+        for c in &got { assert_ne!(c["dev"], "/dev/nvme0n1p2"); assert_ne!(c["dev"], "/dev/sdc1"); }
     }
 
     #[test]

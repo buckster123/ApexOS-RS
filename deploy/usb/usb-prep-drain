@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# apexos usb-prep-drain — process "Use this drive" prep REQUESTS dropped by agentd.
+#
+# Mirrors usb-eject-drain: agentd (non-root, NoNewPrivileges) can't touch a block device,
+# so it writes a request file and this root drain (triggered by apexos-usb-prep.path) runs
+# usb-prep on its behalf. Each request is a 3-line file: mode / dev / name. usb-prep is the
+# security boundary — it re-validates the device (USB-transport, never the system disk).
+# Runs as root.
+set -euo pipefail
+
+REQ_DIR="${AGENTD_USB_PREP_DIR:-/var/lib/agentd/usb-prep}"
+[[ -d "$REQ_DIR" ]] || exit 0
+
+shopt -s nullglob
+for req in "$REQ_DIR"/*.req; do
+  { read -r mode; read -r dev; read -r name; } < "$req" || true
+  # Remove the request FIRST so a failing prep can't re-trigger the drain forever; the
+  # requester learns the outcome from /proc/mounts (the new media/<label> mount appears).
+  rm -f "$req"
+  [[ -n "${mode:-}" && -n "${dev:-}" && -n "${name:-}" ]] \
+    || { echo "usb-prep-drain: malformed request $req" >&2; continue; }
+  /usr/local/lib/apexos/usb-prep "$mode" "$dev" "$name" \
+    || echo "usb-prep-drain: usb-prep '$mode' '$dev' '$name' failed" >&2
+done
+exit 0
