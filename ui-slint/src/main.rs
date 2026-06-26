@@ -4901,6 +4901,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // eject: safe-unmount an exo-workspace stick (POST /api/media/eject {label}); on
+    // success refresh the Explorer so the now-gone stick disappears from media/.
+    let rt_h_exe    = rt.handle().clone();
+    let client_exe  = Arc::clone(&http_client);
+    let base_exe    = http_base.clone();
+    let ui_weak_exe = ui.as_weak();
+    ui.on_explorer_eject(move |label| {
+        let label  = label.to_string();
+        let client = Arc::clone(&client_exe);
+        let base   = base_exe.clone();
+        let uw     = ui_weak_exe.clone();
+        rt_h_exe.spawn(async move {
+            let ok = match client.post(format!("{base}/api/media/eject"))
+                .json(&serde_json::json!({ "label": label }))
+                .timeout(std::time::Duration::from_secs(15))
+                .send().await
+            {
+                Ok(r) => r.json::<serde_json::Value>().await.ok()
+                    .and_then(|v| v["ok"].as_bool()).unwrap_or(false),
+                Err(_) => false,
+            };
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = uw.upgrade() {
+                    if ok { ui.invoke_refresh_explorer(); }
+                    ui.set_status(if ok { format!("Ejected {label} — safe to remove") }
+                                  else   { format!("Eject failed: {label}") }.into());
+                }
+            }).ok();
+        });
+    });
+
     // select: a file was clicked — load its preview (image from abs path; text via
     // the read endpoint; otherwise binary/no-preview).
     let rt_h_exs    = rt.handle().clone();

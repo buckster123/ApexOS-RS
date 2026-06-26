@@ -31,6 +31,7 @@ export component ExplorerView {
     callback up();                        // parent dir
     callback select(string, string, string);   // path, abs, ext
     callback attach();                    // attach selected image to chat
+    callback eject(string);               // safe-eject an exo-workspace stick (label)
 
     HorizontalLayout {
         // ── Left: entry list ─────────────────────────────────────────────────
@@ -155,6 +156,23 @@ export component ExplorerView {
                                     color: Palette.text-dim;
                                     font-size: 9px;
                                     vertical-alignment: center;
+                                }
+                                // Eject affordance: only on the mounted exo-workspace
+                                // sticks under media/ (the row's own TouchArea handles
+                                // navigation elsewhere; this nested one intercepts).
+                                if root.current-path == "media" && e.kind == "dir": Rectangle {
+                                    width: 24px;
+                                    height: 24px;
+                                    border-radius: Palette.radius;
+                                    background: ej-ta.has-hover ? Palette.surface-hi : transparent;
+                                    Text {
+                                        text: "⏏";
+                                        color: ej-ta.has-hover ? Palette.primary : Palette.text-dim;
+                                        font-size: 13px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    ej-ta := TouchArea { clicked => { root.eject(e.name); } }
                                 }
                             }
                         }

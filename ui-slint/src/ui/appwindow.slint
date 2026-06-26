@@ -228,6 +228,7 @@ export component AppWindow inherits Window {
     callback explorer-up();
     callback explorer-select(string, string, string);  // path, abs, ext
     callback explorer-attach();
+    callback explorer-eject(string);          // safe-eject an exo-workspace stick
     callback sketch-down(float, float);
     callback sketch-move(float, float);
     callback sketch-up();
@@ -792,6 +793,7 @@ export component AppWindow inherits Window {
                         explorer-up => { root.explorer-up(); }
                         explorer-select(p, a, e) => { root.explorer-select(p, a, e); }
                         explorer-attach => { root.explorer-attach(); }
+                        explorer-eject(l) => { root.explorer-eject(l); }
                         stop-turn => { root.stop-turn(); }
                         terminal-send(line) => { root.terminal-send(line); }
                         toggle-recording => { root.toggle-recording(); }

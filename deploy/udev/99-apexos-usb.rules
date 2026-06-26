@@ -1,0 +1,23 @@
+# ApexOS exo-workspace USB sticks — marker-gated claim.
+#
+# A stick is "claimed" by ApexOS only if its filesystem LABEL matches APEX-* (udev
+# reads ID_FS_LABEL without mounting → no probe-mount race). For those, and ONLY
+# those, we tell udisks/GNOME to ignore the device (no double-mount on a desktop)
+# and start a oneshot service that own-mounts it under the agent workspace with
+# agentd ownership. Every other USB is left untouched — GNOME handles it on a
+# desktop, nothing claims it on a kiosk.
+#
+# Installed by install.sh to /etc/udev/rules.d/99-apexos-usb.rules.
+
+# Only partitions/filesystems with an APEX-* label, on USB block devices.
+SUBSYSTEM!="block", GOTO="apexos_usb_end"
+ENV{ID_FS_LABEL}!="APEX-*", GOTO="apexos_usb_end"
+
+# Keep udisks2 (GNOME Files etc.) from auto-mounting our managed sticks.
+ENV{UDISKS_IGNORE}="1"
+
+# Plug → own-mount via the templated service; unplug → unmount cleanup.
+ACTION=="add",    TAG+="systemd", ENV{SYSTEMD_WANTS}+="apexos-usb-mount@$kernel.service"
+ACTION=="remove", RUN+="/usr/local/lib/apexos/usb-umount $kernel"
+
+LABEL="apexos_usb_end"

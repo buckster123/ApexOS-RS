@@ -1,0 +1,14 @@
+# Own-mounts an ApexOS exo-workspace USB stick under the agent workspace.
+# Started by the udev rule (99-apexos-usb.rules) for an APEX-*-labelled device on
+# plug; %i is the kernel device name (e.g. sdb1). Installed by install.sh.
+[Unit]
+Description=ApexOS exo-workspace USB mount (%i)
+# The device must be present for this instance.
+BindsTo=dev-%i.device
+After=dev-%i.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/apexos/usb-mount %i
+ExecStop=/usr/local/lib/apexos/usb-umount %i

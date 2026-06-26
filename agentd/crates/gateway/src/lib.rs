@@ -292,6 +292,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/workspace/images",      get(workspace_images_handler))
         .route("/api/workspace/list",        get(workspace_list_handler))
         .route("/api/workspace/read",        get(workspace_read_handler))
+        .route("/api/media/eject",        post(media_eject_handler))
         .route("/api/run",                post(run_command_handler))
         .route("/api/snapshot",           get(snapshot_handler))
         .route("/api/sonus/files",        get(sonus_files_handler))
@@ -3857,6 +3858,39 @@ async fn workspace_images_handler() -> impl IntoResponse {
 /// app. Returns the entries directly under <workspace>/<path>: directories first,
 /// then files, alpha within each. Confined to the workspace. `path` is
 /// workspace-relative; `abs` lets a co-located UI load image previews directly.
+/// A valid exo-workspace filesystem label: `APEX-` + a sane single component. The
+/// udev rule already gates on `APEX-*`; this re-validates before handing the label
+/// to the (root) umount helper, so a crafted value can't widen the eject target.
+fn valid_exo_label(label: &str) -> bool {
+    label.starts_with("APEX-")
+        && (6..=64).contains(&label.len())   // at least one char after "APEX-"
+        && !label.contains("..")
+        && label.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// POST /api/media/eject {label} — safely unmount an exo-workspace stick (the UI ⏏
+/// affordance / a future agent tool). agentd is non-root, so it shells the umount
+/// helper via the narrow sudoers drop-in (argv, never a shell); the helper itself
+/// hard-confines the mountpoint to `<workspace>/media/`. The label is validated here
+/// AND in the helper (defence in depth).
+async fn media_eject_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let label = body["label"].as_str().unwrap_or("").trim().to_string();
+    if !valid_exo_label(&label) {
+        return Json(serde_json::json!({ "ok": false, "error": "label must be APEX-<name> (letters, digits, . _ -)" }));
+    }
+    let out = tokio::process::Command::new("sudo")
+        .args(["-n", "/usr/local/lib/apexos/usb-umount", "--label", &label])
+        .output().await;
+    match out {
+        Ok(o) if o.status.success() => Json(serde_json::json!({ "ok": true, "label": label })),
+        Ok(o) => Json(serde_json::json!({
+            "ok": false,
+            "error": String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("eject failed").to_string(),
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("eject helper: {e}") })),
+    }
+}
+
 async fn workspace_list_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -4288,6 +4322,21 @@ mod auth_tests {
         let encoded  = "a%20b%2Bc%2Fd";
         let decoded  = percent_encoding::percent_decode_str(encoded).decode_utf8_lossy();
         assert!(tokens_match(&decoded, expected));
+    }
+
+    #[test]
+    fn exo_label_validation() {
+        // Accept: APEX- prefix, sane single component.
+        assert!(valid_exo_label("APEX-mystick"));
+        assert!(valid_exo_label("APEX-work_2024.1"));
+        // Reject: wrong prefix, path-escape, separators, too short/long, bad chars.
+        assert!(!valid_exo_label("mystick"));        // no APEX- prefix
+        assert!(!valid_exo_label("APEX-"));          // empty name
+        assert!(!valid_exo_label("APEX-a/b"));       // path separator
+        assert!(!valid_exo_label("APEX-../etc"));    // traversal
+        assert!(!valid_exo_label("APEX-a b"));       // space
+        assert!(!valid_exo_label("APEX-$(x)"));      // shell-ish chars
+        assert!(!valid_exo_label(&format!("APEX-{}", "x".repeat(70)))); // too long
     }
 }
 

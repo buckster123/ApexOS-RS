@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# apexos usb-mount — own-mount an ApexOS exo-workspace stick UNDER the agent
+# workspace so the Explorer, the agent's FS tools, and the desktop apps all reach
+# it (they confine to AGENTD_WORKSPACE; mounting inside it needs zero code changes).
+#
+# Invoked as root by apexos-usb-mount@.service (triggered by the udev rule on a
+# stick whose filesystem LABEL matches APEX-*). Marker-gated by design: only
+# APEX-* sticks are claimed, so a daily-driver's other USBs are left to the DE.
+#
+#   usb-mount <kernel-dev>        e.g. usb-mount sdb1
+#
+# Safety: mounts noexec,nosuid,nodev; FAT/exFAT get uid/gid=agentd (portable across
+# nodes); the resolved mountpoint is hard-confined to <workspace>/media/.
+set -euo pipefail
+
+DEV_NAME="${1:?usage: usb-mount <kernel-dev>}"
+DEV="/dev/${DEV_NAME}"
+[[ -b "$DEV" ]] || { echo "usb-mount: $DEV is not a block device" >&2; exit 1; }
+
+# Workspace root (where the agent reads/writes) — from agentd's env, default the
+# standard path. This script runs as root, outside agentd's env, so read the file.
+WORKSPACE="$(. /etc/agentd/env 2>/dev/null; echo "${AGENTD_WORKSPACE:-/var/lib/agentd/workspace}")"
+MEDIA_ROOT="${WORKSPACE%/}/media"
+
+LABEL="$(blkid -s LABEL -o value "$DEV" 2>/dev/null || true)"
+FSTYPE="$(blkid -s TYPE -o value "$DEV" 2>/dev/null || true)"
+
+# Claim only ApexOS exo-workspace sticks (defense-in-depth; udev already gated).
+[[ "$LABEL" == APEX-* ]] || { echo "usb-mount: $DEV label '$LABEL' is not APEX-* — not claiming" >&2; exit 0; }
+
+# Sanitise the label → a single path component (no / .. or control chars).
+SAFE_LABEL="$(printf '%s' "$LABEL" | tr -cd 'A-Za-z0-9._-')"
+[[ -n "$SAFE_LABEL" && "$SAFE_LABEL" != *..* ]] || { echo "usb-mount: unsafe label '$LABEL'" >&2; exit 1; }
+MNT="${MEDIA_ROOT}/${SAFE_LABEL}"
+
+# Hard-confine the resolved mountpoint to <workspace>/media/ (never escape).
+case "$MNT" in
+  "${MEDIA_ROOT}/"*) : ;;
+  *) echo "usb-mount: refusing mountpoint $MNT outside $MEDIA_ROOT" >&2; exit 1 ;;
+esac
+
+AGENT_UID="$(id -u agentd 2>/dev/null || echo 0)"
+AGENT_GID="$(id -g agentd 2>/dev/null || echo 0)"
+
+mkdir -p "$MNT"
+
+# Already mounted there? (idempotent — re-trigger / re-plug is a no-op.)
+if mountpoint -q "$MNT"; then
+  echo "usb-mount: $MNT already mounted" >&2
+  exit 0
+fi
+
+case "$FSTYPE" in
+  vfat|exfat|msdos)
+    # FAT-family: no on-disk owners — set them at mount time, so the stick is
+    # portable across nodes whatever agentd's uid is there. umask 0007 = owner+group.
+    mount -t "$FSTYPE" -o "noexec,nosuid,nodev,uid=${AGENT_UID},gid=${AGENT_GID},umask=0007" "$DEV" "$MNT"
+    ;;
+  *)
+    # ext4/btrfs/…: on-disk owners apply; mount safely then best-effort chown the
+    # root so agentd can traverse (existing files keep their owners — the portability
+    # caveat is documented; exFAT is the recommended exo-workspace filesystem).
+    mount -o "noexec,nosuid,nodev" "$DEV" "$MNT"
+    chown "${AGENT_UID}:${AGENT_GID}" "$MNT" 2>/dev/null || true
+    ;;
+esac
+
+# Record dev→mountpoint so usb-umount can clean up on an unplug (the device node is
+# gone by then, so we can't re-derive the label).
+install -d -m 755 /run/apexos-usb
+printf '%s\n' "$MNT" > "/run/apexos-usb/${DEV_NAME}.mnt"
+
+echo "usb-mount: ${DEV} (${FSTYPE:-?}, ${LABEL}) → ${MNT}" >&2

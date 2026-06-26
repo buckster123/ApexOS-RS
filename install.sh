@@ -1043,6 +1043,40 @@ else
   warn "web/ not found in repo — browser/PWA UI not installed"
 fi
 
+# ── USB exo-workspace (removable portable workspace) ──────────────────────────────
+# A USB stick prepared as an ApexOS exo-workspace (filesystem LABEL APEX-*, see
+# docs/usb-workspace.md) is claimed on plug and own-mounted UNDER the agent workspace
+# at <workspace>/media/<label>, so the agent + Explorer + desktop apps reach it.
+# Marker-gated: ONLY APEX-* sticks are claimed — every other USB is left to the DE
+# (desktop) / ignored (kiosk), so this is safe on a daily-driver laptop. Uniform
+# across modes. Provisioned on every node; harmless where no exo-stick is ever used.
+hdr "Installing USB exo-workspace support"
+if [[ -d "$REPO_DIR/deploy/usb" ]]; then
+  # Helper scripts (root-run by the mount unit; usb-umount also via the agentd sudoers).
+  install -Dm 755 "$REPO_DIR/deploy/usb/usb-mount"             /usr/local/lib/apexos/usb-mount
+  install -Dm 755 "$REPO_DIR/deploy/usb/usb-umount"            /usr/local/lib/apexos/usb-umount
+  install -Dm 755 "$REPO_DIR/deploy/usb/apexos-workspace-init" /usr/local/bin/apexos-workspace-init
+  # udev rule (claim APEX-* sticks + defer udisks) + the templated mount service.
+  install -Dm 644 "$REPO_DIR/deploy/udev/99-apexos-usb.rules"  /etc/udev/rules.d/99-apexos-usb.rules
+  install -Dm 644 "$REPO_DIR/deploy/systemd/apexos-usb-mount@.service" /etc/systemd/system/apexos-usb-mount@.service
+  # Narrow sudoers: the non-root agentd user may eject ONLY via the umount helper.
+  if install -Dm 440 "$REPO_DIR/deploy/sudoers.d/apexos-usb" /etc/sudoers.d/apexos-usb \
+     && visudo -cf /etc/sudoers.d/apexos-usb >/dev/null 2>&1; then
+    :
+  else
+    rm -f /etc/sudoers.d/apexos-usb   # never leave a broken sudoers file
+    warn "sudoers drop-in failed validation — UI/agent eject disabled (unplug still works)"
+  fi
+  # The mount target lives under the agent workspace.
+  install -d -o agentd -g agentd /var/lib/agentd/workspace/media 2>/dev/null \
+    || mkdir -p /var/lib/agentd/workspace/media
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  udevadm control --reload >/dev/null 2>&1 || true
+  ok "USB exo-workspace ready (prep a stick: label it APEX-<name> + 'apexos-workspace-init <mnt>')"
+else
+  warn "deploy/usb not found — USB exo-workspace support not installed"
+fi
+
 # ── Occipital (web reading cortex) ───────────────────────────────────────────────
 # The agent's reading cortex — web_search / web_fetch / web_recall / web_save /
 # web_forget — lives in a SEPARATE sibling repo (github.com/buckster123/Occipital-RS),
