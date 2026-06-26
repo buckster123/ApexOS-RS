@@ -480,6 +480,17 @@ pub fn list() -> Value {
                 },
                 "required": ["branch"]
             }
+        },
+        {
+            "name": "eject_media",
+            "description": "Safely eject (unmount) a removable exo-workspace USB stick by its label, so the user can physically pull it out without corrupting it. Offer this when a task that used the stick is finished and the user is done with it — e.g. 'want me to eject it now that I've saved the report?'. The label is the APEX-… folder name under media/ (it's listed in your embodiment block, or run list_dir(\"media\")). Flushes pending writes and unmounts; the stick stays safe to re-plug. Only acts on APEX-* exo-workspace sticks — never a system disk.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "The stick's exo-workspace label, e.g. 'APEX-config' — the folder name under media/" }
+                },
+                "required": ["label"]
+            }
         }
     ])
 }
@@ -506,6 +517,7 @@ pub fn call(name: &str, args: &Value) -> Value {
         "sketch_draw" => sketch_draw(args),
         "screenshot_mirror" => screenshot_mirror(),
         "camera_capture" => camera_capture(args),
+        "eject_media" => eject_media(args),
         "create_dir" => create_dir(args),
         "delete_path" => delete_path(args),
         "http_fetch" => http_fetch(args),
@@ -1322,6 +1334,41 @@ fn camera_capture(args: &Value) -> Value {
         "camera": null,
         "message": "No camera detected on this device — no Pi CSI camera (rpicam) and no working /dev/video* webcam. Attach a camera, or set APEXOS_CAMERA_DEVICE / APEXOS_CAMERA_CMD."
     }))
+}
+
+/// Safely eject a mounted exo-workspace stick by its `APEX-<label>`. Shells the
+/// root umount helper via the narrow sudoers drop-in (the SAME path the UI ⏏
+/// affordance uses); the helper hard-confines the mountpoint to `<workspace>/media/`
+/// and re-validates the label. We validate here too — a clear error for the agent,
+/// and defence in depth. Non-destructive: it just flushes + unmounts.
+fn eject_media(args: &Value) -> Value {
+    let label = args["label"].as_str().unwrap_or("").trim().to_string();
+    if !valid_exo_label(&label) {
+        return tool_error(
+            "label must be an exo-workspace stick (APEX-<name>): letters, digits, . _ - . \
+             See the mounted sticks in your embodiment block, or run list_dir(\"media\").",
+        );
+    }
+    let (_out, err, ok) = cmd_capture("sudo", &["-n", "/usr/local/lib/apexos/usb-umount", "--label", &label]);
+    if ok {
+        tool_ok(json!({
+            "ejected": label,
+            "message": format!("Ejected {label} — safe to physically remove the stick."),
+        }))
+    } else {
+        let detail = err.lines().last().unwrap_or("eject failed").trim();
+        tool_error(format!("eject {label} failed: {detail}"))
+    }
+}
+
+/// A valid exo-workspace filesystem label (mirrors the gateway's `valid_exo_label`):
+/// `APEX-` prefix + a sane single component, length-bounded, no traversal. Kept in
+/// sync with `apexos_gateway::valid_exo_label` + the `usb-umount` helper's own check.
+fn valid_exo_label(label: &str) -> bool {
+    label.starts_with("APEX-")
+        && (6..=64).contains(&label.len())   // at least one char after "APEX-"
+        && !label.contains("..")
+        && label.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 fn camera_ok(path: &Path, backend: &str, device: Option<&str>) -> Value {
@@ -2687,6 +2734,22 @@ mod tests {
     // Serialize tests that mutate AGENTD_WORKSPACE — env vars are process-global
     // and Rust runs tests in parallel by default.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn eject_label_validation_matches_gateway() {
+        // Accept: APEX- prefix, sane single component.
+        assert!(valid_exo_label("APEX-config"));
+        assert!(valid_exo_label("APEX-work_2024.1"));
+        // Reject: wrong prefix, escapes, separators, length, bad chars — so the
+        // sudo umount helper is never handed a crafted/widened target.
+        assert!(!valid_exo_label("config"));            // no APEX- prefix
+        assert!(!valid_exo_label("APEX-"));             // empty name
+        assert!(!valid_exo_label("APEX-a/b"));          // path separator
+        assert!(!valid_exo_label("APEX-../etc"));       // traversal
+        assert!(!valid_exo_label("APEX-a b"));          // space
+        assert!(!valid_exo_label("APEX-$(x)"));         // shell-ish chars
+        assert!(!valid_exo_label(&format!("APEX-{}", "x".repeat(70)))); // too long
+    }
 
     #[test]
     fn disk_usage_skips_pseudo_at_boundary_and_picks_longest_mount() {

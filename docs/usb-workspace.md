@@ -83,6 +83,27 @@ clipboard; **Paste** drops it into the folder in view (cut → move, copy → co
 folder + rename use a name-prompt overlay; delete uses a confirm overlay. A
 drive→workspace move is just Cut on a `media/<label>/…` row → navigate → Paste.
 
+## The agent knows the stick is there, and can eject it itself
+
+Two pieces close the loop so APEX handles the stick conversationally ("want me to
+eject it now that I've saved the report?"):
+
+- **Embodiment hint** — `build_embodiment` (agentd) adds a line listing the sticks
+  mounted under `media/` when any are present: it reads `/proc/mounts` (authoritative —
+  a leftover empty mountpoint after eject doesn't show) via the pure, unit-tested
+  `parse_exo_sticks`. The line is **byte-stable** when nothing changes, so it's safe in
+  the cache-sensitive embodiment block — it only mutates on a real plug/eject (exactly
+  when the cache *should* refresh). So the agent wakes already knowing the stick exists,
+  its label, and that it's read+write like any workspace folder.
+- **`eject_media{label}` tool** (apexos-tools, policy **`allow`**) — the agent's own
+  safe-eject: validates the label (`valid_exo_label`, mirrors the gateway + helper) and
+  shells the **same** root `usb-umount` helper the UI ⏏ uses (via the narrow sudoers).
+  Non-destructive (flush + unmount; re-pluggable), confined to `APEX-*` sticks. `allow`
+  because the conversational "want me to eject it?" *is* the confirmation — a second
+  approval card would be clunky. **Already-deployed nodes need `eject_media = "allow"`
+  in their live `/etc/agentd/policy.toml`** (config seeds fresh nodes only) — else it
+  gates as `unknown → ask`.
+
 ## Why the systemd sandbox isn't a problem here
 
 agentd runs under `ProtectSystem=strict` but with **`PrivateMounts=no`** and the host
@@ -105,6 +126,8 @@ untrusted FS image; deeper untrusted-filesystem hardening is a post-mk1 item.
 
 ## Deferred (follow-on slices)
 
-Phone-handoff (the PWA workspace file-browser leg), an agent-facing `eject_media` tool
-+ a plug *notification* into the root session, an embodiment "exo-workspace mounted"
-hint, and `apexos-workspace-init` as a one-tap Explorer action.
+Phone-handoff (the PWA workspace file-browser leg), a **plug *notification*** into the
+root session (detect the udev `add` → inject a `UserPrompt` so APEX greets a freshly
+plugged stick the way it does a mesh node going dark), and `apexos-workspace-init` as a
+one-tap Explorer action. *(Done: the Explorer file verbs, the `eject_media` agent tool,
+and the embodiment "stick mounted" hint.)*

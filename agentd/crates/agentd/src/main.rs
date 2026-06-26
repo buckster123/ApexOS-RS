@@ -1999,6 +1999,21 @@ async fn build_embodiment(
         None    => "FTS5 keyword search only".to_string(),
     }));
 
+    // Exo-workspace USB sticks own-mounted under media/ (docs/usb-workspace.md). Only
+    // appears when one is plugged → the line is byte-stable otherwise (cache-safe). Tells
+    // the agent the stick is here AND that it can safely eject a finished one itself.
+    {
+        let sticks = mounted_exo_sticks();
+        if !sticks.is_empty() {
+            out.push_str(&format!(
+                "- Exo-workspace stick(s) mounted at media/: {} — portable removable storage \
+                 (read+write like any workspace folder); when the user is done, offer to \
+                 eject_media{{label}} so they can safely unplug it.\n",
+                sticks.join(", "),
+            ));
+        }
+    }
+
     // Extensions on hand — the EDK embodiment gradient (docs/edk.md). High-signal ONLY:
     // we surface an on-hand inventory part iff it grants a capability THIS node currently
     // LACKS (cheap built-in probe) AND its `compat` includes this board. The buyable
@@ -2095,6 +2110,36 @@ fn has_camera() -> bool {
 fn is_raspberry_pi() -> bool {
     std::fs::read_to_string("/proc/device-tree/model")
         .map(|s| s.to_lowercase().contains("raspberry")).unwrap_or(false)
+}
+
+/// Labels of the exo-workspace USB sticks currently mounted at `<workspace>/media/<label>`,
+/// sorted. Reads `/proc/mounts` (authoritative — a leftover empty mountpoint dir after
+/// eject won't show), so it's byte-stable in steady state (safe for the cache-sensitive
+/// embodiment block — it only changes on a real plug/eject). agentd sees host mounts via
+/// `PrivateMounts=no` + the shared root mount.
+fn mounted_exo_sticks() -> Vec<String> {
+    let ws = std::env::var("AGENTD_WORKSPACE").ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    let ws_canon = std::fs::canonicalize(&ws).unwrap_or_else(|_| std::path::PathBuf::from(&ws));
+    let media_prefix = format!("{}/", ws_canon.join("media").to_string_lossy());
+    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    parse_exo_sticks(&mounts, &media_prefix)
+}
+
+/// Pure parse half of `mounted_exo_sticks` (testable without a real mount): the sorted
+/// direct children of `media_prefix` in a `/proc/mounts`-format string. A mount NOT under
+/// media/ (e.g. a DE-mounted stick at /run/media/...) and a deeper path are both excluded.
+fn parse_exo_sticks(mounts: &str, media_prefix: &str) -> Vec<String> {
+    let mut labels: Vec<String> = mounts.lines().filter_map(|line| {
+        // "<dev> <mountpoint> <fstype> <opts> …" — field 1 is the mountpoint. Labels are
+        // APEX-<safe>, so no /proc octal-escaping (\040 etc.) applies to the path tail.
+        let mp = line.split_whitespace().nth(1)?;
+        let rest = mp.strip_prefix(media_prefix)?;
+        (!rest.is_empty() && !rest.contains('/')).then(|| rest.to_string())
+    }).collect();
+    labels.sort();
+    labels.dedup();
+    labels
 }
 
 fn which_on_path(bin: &str) -> bool {
@@ -3050,6 +3095,27 @@ fn vast_swap_target(event: &Event, def: &VastRevertDefaults) -> Option<Inference
 mod tests {
     use super::*;
     use apexos_core::{ContentBlock, Message};
+
+    // ── exo-workspace stick detection (embodiment hint) ──────────────────────
+    #[test]
+    fn parse_exo_sticks_finds_only_media_children() {
+        // Real-shape fixture from apex-3: an exo-workspace stick under media/, a
+        // DE-mounted decoy elsewhere, the loopback root, plus a deeper path and the
+        // bare media dir — only the direct media/ children are stick labels.
+        let mounts = "\
+/dev/sdb1 /var/lib/agentd/workspace/media/APEX-config exfat rw,nosuid,nodev,noexec 0 0
+/dev/sda1 /run/media/andre/ps8s-models ext4 rw,nosuid,nodev 0 0
+/dev/sdc1 /var/lib/agentd/workspace/media/APEX-work exfat rw 0 0
+/dev/root / ext4 rw 0 0
+tmpfs /var/lib/agentd/workspace/media tmpfs rw 0 0
+/dev/sdd1 /var/lib/agentd/workspace/media/APEX-config/deep exfat rw 0 0
+";
+        let prefix = "/var/lib/agentd/workspace/media/";
+        // Sorted, deduped, only the two direct children — decoy/root/bare-media/deep excluded.
+        assert_eq!(parse_exo_sticks(mounts, prefix), vec!["APEX-config", "APEX-work"]);
+        // No sticks → empty (the steady-state, cache-stable case).
+        assert!(parse_exo_sticks("/dev/root / ext4 rw 0 0\n", prefix).is_empty());
+    }
 
     // ── vast.ai inference hot-swap ───────────────────────────────────────────
     fn vast_def() -> VastRevertDefaults {
