@@ -202,8 +202,8 @@ export component AppWindowFrame inherits Rectangle {
     callback explorer-rename(string, string);      // path, new-name
     callback explorer-delete(string);              // path
     callback explorer-paste(string, string);       // src-path, mode → into current dir
-    callback explorer-drive-scan();                // list adoptable USB sticks
-    callback explorer-drive-prep(string, string);  // dev, name → adopt as exo-workspace
+    callback explorer-drive-scan(string);          // mode → list adoptable USB sticks
+    callback explorer-drive-prep(string, string, string); // dev, name, mode → adopt
     callback toggle-recording();
     callback stop-turn();
     callback restore-session(int);
@@ -650,8 +650,8 @@ export component AppWindowFrame inherits Rectangle {
             rename(p, n) => { root.explorer-rename(p, n); }
             delete-entry(p) => { root.explorer-delete(p); }
             paste(p, m) => { root.explorer-paste(p, m); }
-            drive-scan => { root.explorer-drive-scan(); }
-            drive-prep(d, n) => { root.explorer-drive-prep(d, n); }
+            drive-scan(m) => { root.explorer-drive-scan(m); }
+            drive-prep(d, n, m) => { root.explorer-drive-prep(d, n, m); }
         }
 
         if root.kind == AppKind.face: FaceView {

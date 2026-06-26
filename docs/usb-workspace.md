@@ -143,35 +143,38 @@ Two behaviours (the user chooses):
   the marker + `projects/data/notes`, mounts it. **Non-destructive** — existing files
   stay; a wrong pick just renames a volume (recoverable). Works on an already-formatted
   FAT/exFAT stick (the common case).
-- **Format (wipe)** — *slice B* — wipes to a clean exFAT `APEX-<name>` (handles a blank/RAW
-  stick), behind its own destructive confirm.
+- **Format (wipe)** — *slice B* — wipes the stick to a clean exFAT `APEX-<name>` (handles a
+  blank/RAW or non-FAT stick), behind an explicit erase-confirm.
 
 **Privilege-separated, same as the eject** (agentd can't touch block devices under
 `NoNewPrivileges`):
 
-1. `GET /api/media/candidates` lists the prep-able sticks — the **pure, unit-tested**
-   `parse_prep_candidates` over `lsblk -J` returns only FAT/exFAT partitions on a
-   **USB-transport** disk that are **not** the system disk, not already `APEX-*`, not
-   already mounted under `media/`. (So a system/NVMe disk and an ext4 data drive never
-   appear.) This decides what to *offer*.
-2. `POST /api/media/prep {dev, name, mode}` validates, then **drops a 3-line `*.req`**
-   (`mode`/`dev`/`name`) into the agentd-owned `AGENTD_USB_PREP_DIR`
-   (`/var/lib/agentd/usb-prep`).
+1. `GET /api/media/candidates?mode=relabel|format` lists the prep-able sticks — the
+   **pure, unit-tested** `parse_prep_candidates` over `lsblk -J`, always restricted to a
+   **USB-transport** disk that is **not** the system disk and **not** the active `media/`
+   mount. `relabel` offers only FAT/exFAT that isn't already `APEX-*` (so a system/NVMe
+   disk *and* an ext4 data drive never appear); `format` offers the broader wipeable set
+   (any fstype, incl. blank). This decides what to *offer*.
+2. `POST /api/media/prep {dev, name, mode}` validates (incl. the **≤6-char name** — exFAT/
+   FAT labels cap at 11, and `APEX-` eats 5), then **drops a 3-line `*.req`**
+   (`mode`/`dev`/`name`) into the agentd-owned `AGENTD_USB_PREP_DIR` (`/var/lib/agentd/usb-prep`).
 3. The root `apexos-usb-prep.path`→`.service` drain runs **`usb-prep`** — **the security
    boundary**: it independently re-validates the device (USB-transport, and **never** the
-   disk holding `/` or `/boot`) before unmounting → relabelling → `usb-mount` →
+   disk holding `/` or `/boot`) before unmount → **relabel** (`exfatlabel`/`fatlabel`, keeps
+   files) **or format** (`wipefs` + `mkfs.exfat`, erases) → `usb-mount` →
    `apexos-workspace-init`. agentd's offer-list is convenience; this gate is what protects.
 4. The requester **polls `/proc/mounts`** for the new `media/APEX-<name>` mount (≤25s).
    On success the existing plug-notification fires → APEX greets the freshly-adopted stick.
 
-**UI (slice A2, ui-slint `explorer_view.slint`):** a full-width **🔌 Use a USB drive**
-button in the Explorer action row opens a picker modal — it `drive-scan`s the candidates
-(radio-select rows: model · size · label/fstype), takes a name (→ `APEX-<name>`), and on
-**SET UP DRIVE** calls `drive-prep` (relabel mode). The picker shows a *Setting up…* busy
-state for the ≤25s prep; Rust drives `drive-busy`/`drive-result` and the view auto-closes
-on `"ok"` (a `changed drive-result` handler) then hops to `media/` to show the adopted
-stick. The candidate list + busy/result are Rust-fed; the open/selection/name form is
-view-local. The **format/wipe** option (blank sticks, destructive confirm) is slice B.
+**UI (ui-slint `explorer_view.slint`):** a full-width **🔌 Use a USB drive** button in the
+Explorer action row opens a picker modal with a **Keep my files / Erase & format** toggle
+(switching re-`drive-scan`s — the wipeable set is broader). Radio-select a candidate
+(model · size · label/fstype/blank), name it (→ `APEX-<name>`, ≤6 chars), then:
+**SET UP DRIVE** (relabel) preps directly, **ERASE & SET UP** (format) goes through a
+red **erase-confirm overlay** naming the exact device first. A *Setting up…* busy state
+covers the ≤25s prep; Rust drives `drive-busy`/`drive-result` and the view auto-closes on
+`"ok"` (a `changed drive-result` handler) then hops to `media/`. Candidate list + busy/
+result are Rust-fed; the open/mode/selection/name form is view-local.
 
 ## Why the systemd sandbox isn't a problem here
 

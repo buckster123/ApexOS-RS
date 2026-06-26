@@ -3088,10 +3088,12 @@ async fn workspace_op(client: &reqwest::Client, base_url: &str, endpoint: &str, 
     }
 }
 
-/// GET /api/media/candidates → the USB sticks the "Use this drive" picker can adopt.
-/// Rust pre-formats each into a single display line ("SanDisk Ultra · 57.3 GB · LABEL (exfat)").
-async fn fetch_drive_candidates(client: &reqwest::Client, base_url: &str) -> Vec<UsbCandidate> {
+/// GET /api/media/candidates?mode= → the USB sticks the "Use this drive" picker can adopt
+/// (`relabel` = keep-files set; `format` = the broader wipeable set). Rust pre-formats each
+/// into one display line ("SanDisk Ultra · 57.3 GB · MYSTICK (exfat)" / "… · blank").
+async fn fetch_drive_candidates(client: &reqwest::Client, base_url: &str, mode: &str) -> Vec<UsbCandidate> {
     let body: Value = match client.get(format!("{base_url}/api/media/candidates"))
+        .query(&[("mode", mode)])
         .timeout(std::time::Duration::from_secs(10))
         .send().await
     {
@@ -3103,10 +3105,13 @@ async fn fetch_drive_candidates(client: &reqwest::Client, base_url: &str) -> Vec
         let size  = c["size"].as_str().unwrap_or("");
         let label = c["label"].as_str().unwrap_or("");
         let fs    = c["fstype"].as_str().unwrap_or("");
+        let blank = c["blank"].as_bool().unwrap_or(false);
         let mut parts: Vec<String> = Vec::new();
         if !model.is_empty() { parts.push(model.to_string()); }
         if !size.is_empty()  { parts.push(size.to_string()); }
-        parts.push(if label.is_empty() { format!("(unlabeled · {fs})") } else { format!("{label} · {fs}") });
+        parts.push(if blank { "blank".to_string() }
+                   else if label.is_empty() { format!("unlabeled · {fs}") }
+                   else { format!("{label} · {fs}") });
         UsbCandidate {
             dev:     c["dev"].as_str().unwrap_or("").into(),
             display: parts.join("  ·  ").into(),
@@ -5109,11 +5114,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt_h_exds    = rt.handle().clone();
     let client_exds  = Arc::clone(&http_client);
     let base_exds    = http_base.clone();
-    ui.on_explorer_drive_scan(move || {
+    ui.on_explorer_drive_scan(move |mode| {
         let client = Arc::clone(&client_exds);
         let base   = base_exds.clone();
+        let mode   = mode.to_string();
         rt_h_exds.spawn(async move {
-            let items = fetch_drive_candidates(&client, &base).await;
+            let items = fetch_drive_candidates(&client, &base, &mode).await;
             slint::invoke_from_event_loop(move || replace_drive_candidates(items)).ok();
         });
     });
@@ -5125,9 +5131,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_exdp  = Arc::clone(&http_client);
     let base_exdp    = http_base.clone();
     let ui_weak_exdp = ui.as_weak();
-    ui.on_explorer_drive_prep(move |dev, name| {
+    ui.on_explorer_drive_prep(move |dev, name, mode| {
         let dev    = dev.to_string();
         let name   = name.to_string();
+        let mode   = mode.to_string();
         let client = Arc::clone(&client_exdp);
         let base   = base_exdp.clone();
         let uw     = ui_weak_exdp.clone();
@@ -5137,7 +5144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         rt_h_exdp.spawn(async move {
             let resp: Value = match client.post(format!("{base}/api/media/prep"))
-                .json(&serde_json::json!({ "dev": dev, "name": name, "mode": "relabel" }))
+                .json(&serde_json::json!({ "dev": dev, "name": name, "mode": mode }))
                 .timeout(std::time::Duration::from_secs(35))
                 .send().await
             {
@@ -5151,7 +5158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(ui) = uw.upgrade() {
                     ui.set_explorer_drive_busy(false);
                     if ok {
-                        ui.set_explorer_drive_result("ok".into());   // view auto-closes the picker
+                        ui.set_explorer_drive_result("ok".into());   // view auto-closes the picker + confirm
                         ui.set_status(format!("Drive ready: {label} (in media/)").into());
                         ui.invoke_explorer_navigate("media".into());  // show the freshly-adopted stick
                     } else {
