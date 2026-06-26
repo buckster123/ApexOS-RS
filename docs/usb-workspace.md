@@ -56,6 +56,33 @@ unit-tested: `APEX-*`, sane chars, no `..`) → runs `usb-umount --label` via th
 sudoers (argv, never a shell). Surfaced in the Explorer as a **⏏** affordance on each
 `media/*` stick row (ui-slint); on success it refreshes the view.
 
+## File operations (the Explorer is a real file manager)
+
+Because an `APEX-*` stick is **GNOME-ignored by design** (the udev `UDISKS_IGNORE`),
+the **Explorer (📁 Files) is the on-ApexOS path for moving work on and off the stick**
+— so it carries the full verb set, not just read+navigate+preview:
+
+| Verb | Endpoint (gated, confined) | Notes |
+|------|----------------------------|-------|
+| New folder | `POST /api/workspace/mkdir {path}` | single level under an existing dir |
+| Rename | `POST /api/workspace/rename {path, name}` | `name` is one safe component (no `/`, `..`) |
+| Delete | `POST /api/workspace/delete {path}` | file or recursive dir; refuses the workspace root |
+| Move | `POST /api/workspace/move {src, dest}` | `dest` = target **dir** (keeps basename); cross-device (workspace ⇄ stick) falls back to copy+remove (EXDEV) |
+| Copy | `POST /api/workspace/copy {src, dest}` | recursive for a folder |
+
+All five resolve through the **same `resolve_workspace_path` / `resolve_workspace_write_path`**
+confinement the read endpoints + agent FS tools use — both ends of a move/copy are
+workspace-confined, names are validated (`safe_component`, unit-tested), `..`/absolute
+escapes and name collisions are rejected, and a mounted stick's *mountpoint* can't be
+deleted (it's busy — eject first). The verbs are UI-only (the agent already has
+`write_file`/`delete_path`); no new agent tool or policy rule.
+
+**UI (ui-slint `explorer_view.slint`):** an action row (**+ Folder**, **Paste**) + a
+per-row **⋮** menu (Rename / Cut / Copy / Delete). Cut/Copy load a view-local
+clipboard; **Paste** drops it into the folder in view (cut → move, copy → copy). New
+folder + rename use a name-prompt overlay; delete uses a confirm overlay. A
+drive→workspace move is just Cut on a `media/<label>/…` row → navigate → Paste.
+
 ## Why the systemd sandbox isn't a problem here
 
 agentd runs under `ProtectSystem=strict` but with **`PrivateMounts=no`** and the host

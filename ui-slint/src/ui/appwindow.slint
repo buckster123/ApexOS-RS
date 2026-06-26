@@ -229,6 +229,10 @@ export component AppWindow inherits Window {
     callback explorer-select(string, string, string);  // path, abs, ext
     callback explorer-attach();
     callback explorer-eject(string);          // safe-eject an exo-workspace stick
+    callback explorer-mkdir(string);          // create folder (name) in current dir
+    callback explorer-rename(string, string); // path, new-name
+    callback explorer-delete(string);         // path
+    callback explorer-paste(string, string);  // src-path, mode → into current dir
     callback sketch-down(float, float);
     callback sketch-move(float, float);
     callback sketch-up();
@@ -794,6 +798,10 @@ export component AppWindow inherits Window {
                         explorer-select(p, a, e) => { root.explorer-select(p, a, e); }
                         explorer-attach => { root.explorer-attach(); }
                         explorer-eject(l) => { root.explorer-eject(l); }
+                        explorer-mkdir(n) => { root.explorer-mkdir(n); }
+                        explorer-rename(p, n) => { root.explorer-rename(p, n); }
+                        explorer-delete(p) => { root.explorer-delete(p); }
+                        explorer-paste(p, m) => { root.explorer-paste(p, m); }
                         stop-turn => { root.stop-turn(); }
                         terminal-send(line) => { root.terminal-send(line); }
                         toggle-recording => { root.toggle-recording(); }

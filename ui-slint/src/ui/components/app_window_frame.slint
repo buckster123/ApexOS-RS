@@ -195,6 +195,10 @@ export component AppWindowFrame inherits Rectangle {
     callback explorer-select(string, string, string); // path, abs, ext
     callback explorer-attach();
     callback explorer-eject(string);               // safe-eject an exo-workspace stick
+    callback explorer-mkdir(string);               // create folder (name) in current dir
+    callback explorer-rename(string, string);      // path, new-name
+    callback explorer-delete(string);              // path
+    callback explorer-paste(string, string);       // src-path, mode → into current dir
     callback toggle-recording();
     callback stop-turn();
     callback restore-session(int);
@@ -634,6 +638,10 @@ export component AppWindowFrame inherits Rectangle {
             select(p, a, e) => { root.explorer-select(p, a, e); }
             attach => { root.explorer-attach(); }
             eject(l) => { root.explorer-eject(l); }
+            mkdir(n) => { root.explorer-mkdir(n); }
+            rename(p, n) => { root.explorer-rename(p, n); }
+            delete-entry(p) => { root.explorer-delete(p); }
+            paste(p, m) => { root.explorer-paste(p, m); }
         }
 
         if root.kind == AppKind.face: FaceView {
