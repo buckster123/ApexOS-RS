@@ -103,9 +103,19 @@ drive→workspace move is just Cut on a `media/<label>/…` row → navigate →
 
 ## The agent knows the stick is there, and can eject it itself
 
-Two pieces close the loop so APEX handles the stick conversationally ("want me to
-eject it now that I've saved the report?"):
+Three pieces close the loop so APEX handles the stick conversationally ("I see APEX-work
+is in — want me to pick up the project?" … "want me to eject it now that I've saved the
+report?"):
 
+- **Plug notification** — the `usb-mount` helper, right after a successful mount,
+  best-effort POSTs `{label}` to `POST /api/media/plugged` (loopback + the shared token
+  from agentd's env). The gateway injects a **root-session greeting** so APEX speaks up
+  *the moment the stick lands*, rather than waiting for its next turn's embodiment block —
+  mirrors the mesh-beacon `MESH_BEACON_NOTIFY_AGENT` pathway. Default ON;
+  **`AGENTD_USB_NOTIFY_AGENT=0`** silences it (the embodiment hint still surfaces the
+  stick passively). Best-effort: if agentd is down the notify just fails and the mount
+  is unaffected. (Re-triggering an already-mounted stick is a no-op, so no duplicate
+  greetings.)
 - **Embodiment hint** — `build_embodiment` (agentd) adds a line listing the sticks
   mounted under `media/` when any are present: it reads `/proc/mounts` (authoritative —
   a leftover empty mountpoint after eject doesn't show) via the pure, unit-tested
@@ -145,8 +155,8 @@ untrusted FS image; deeper untrusted-filesystem hardening is a post-mk1 item.
 
 ## Deferred (follow-on slices)
 
-Phone-handoff (the PWA workspace file-browser leg), a **plug *notification*** into the
-root session (detect the udev `add` → inject a `UserPrompt` so APEX greets a freshly
-plugged stick the way it does a mesh node going dark), and `apexos-workspace-init` as a
-one-tap Explorer action. *(Done: the Explorer file verbs, the `eject_media` agent tool,
-and the embodiment "stick mounted" hint.)*
+Phone-handoff (the PWA workspace file-browser leg) and `apexos-workspace-init` as a
+one-tap Explorer action (fiddly: a blank stick isn't `APEX-*` labeled, so it won't
+auto-mount — it needs a mount→init→relabel dance + a privileged relabel). *(Done: the
+Explorer file verbs, the `eject_media` agent tool, the embodiment "stick mounted" hint,
+the privilege-separated eject, and the plug notification.)*

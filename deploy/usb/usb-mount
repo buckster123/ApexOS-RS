@@ -71,3 +71,20 @@ install -d -m 755 /run/apexos-usb
 printf '%s\n' "$MNT" > "/run/apexos-usb/${DEV_NAME}.mnt"
 
 echo "usb-mount: ${DEV} (${FSTYPE:-?}, ${LABEL}) → ${MNT}" >&2
+
+# Best-effort: tell agentd a stick just landed so APEX can greet it proactively (the
+# embodiment block already lists it on the next turn — this is the live, the-moment-you-
+# plug-it nudge). agentd may be down / the call may fail → never let that fail the mount.
+# Loopback + the shared token from agentd's env (this runs as root, outside that env).
+notify_agentd() {
+  local token bind port
+  token="$(. /etc/agentd/env 2>/dev/null; echo "${AGENTD_TOKEN:-}")"
+  bind="$(. /etc/agentd/env 2>/dev/null; echo "${AGENTD_BIND:-127.0.0.1:8787}")"
+  port="${bind##*:}"; [[ "$port" =~ ^[0-9]+$ ]] || port=8787
+  [[ -n "$token" ]] || return 0   # no token → no LAN bind → nothing to notify
+  curl -fsS -m 4 -o /dev/null \
+    -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" \
+    -d "{\"label\":\"${SAFE_LABEL}\"}" \
+    "http://127.0.0.1:${port}/api/media/plugged" 2>/dev/null || true
+}
+notify_agentd || true
