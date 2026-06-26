@@ -4027,13 +4027,14 @@ fn is_relabelable_fs(fs: &str) -> bool {
 }
 
 /// Pure parser for `GET /api/media/candidates`: given `lsblk -J -b …` output, return the
-/// USB partitions that "Use this drive" can adopt — relabel-able FAT/exFAT, on a
-/// USB-transport disk, NOT on the system disk, NOT already an exo-workspace (`APEX-*` /
-/// mounted under `media_root`). The destructive guard still lives in `usb-prep`; this just
-/// decides what to *offer*. Unit-tested with a realistic NVMe-system + USB-stick +
-/// USB-ext4-decoy fixture.
-fn parse_prep_candidates(lsblk: &serde_json::Value, media_root: &str) -> Vec<serde_json::Value> {
+/// USB sticks "Use this drive" can adopt, on a USB-transport disk, NOT the system disk, NOT
+/// the active exo-workspace mount. `mode="relabel"` offers only relabel-able FAT/exFAT that
+/// isn't already `APEX-*` (keeps files); `mode="format"` offers ANY wipeable device incl.
+/// blank/ext4/etc. (it'll be erased). The destructive guard still lives in `usb-prep`; this
+/// just decides what to *offer*. Unit-tested for both modes with a realistic fixture.
+fn parse_prep_candidates(lsblk: &serde_json::Value, media_root: &str, mode: &str) -> Vec<serde_json::Value> {
     const SYS_MOUNTS: [&str; 4] = ["/", "/boot", "/boot/firmware", "/boot/efi"];
+    let format = mode == "format";
     let mut out = Vec::new();
     let disks = match lsblk["blockdevices"].as_array() { Some(d) => d, None => return out };
 
@@ -4052,24 +4053,32 @@ fn parse_prep_candidates(lsblk: &serde_json::Value, media_root: &str) -> Vec<ser
         let model  = disk["model"].as_str().unwrap_or("").trim();
         let display = format!("{vendor} {model}").trim().to_string();
 
-        // A FAT/exFAT filesystem either sits on a partition (the common case) or directly
-        // on the whole disk (no partition table). Collect whichever applies.
+        // A filesystem sits on a partition (the common case) or, on a blank/superfloppy disk,
+        // directly on the disk. A disk WITH partitions only ever yields its partitions (never
+        // the whole disk → format won't clobber a partition table into a superfloppy).
         let parts: Vec<&serde_json::Value> = match disk["children"].as_array() {
             Some(cs) if !cs.is_empty() => cs.iter().collect(),
             _ => vec![disk],
         };
         for p in parts {
             let fstype = p["fstype"].as_str().unwrap_or("");
-            if !is_relabelable_fs(fstype) { continue; }
             let label = p["label"].as_str().unwrap_or("");
-            if label.starts_with("APEX-") { continue; }           // already an exo-workspace
             let mp = p["mountpoint"].as_str().unwrap_or("");
-            if !mp.is_empty() && mp.starts_with(media_root) { continue; } // already adopted
+            // Never offer the active exo-workspace mount (don't relabel/wipe the live workspace).
+            if !mp.is_empty() && mp.starts_with(media_root) { continue; }
+            if !format {
+                // Relabel: only FAT/exFAT, and not already an exo-workspace.
+                if !is_relabelable_fs(fstype) { continue; }
+                if label.starts_with("APEX-") { continue; }
+            }
+            // Format: any wipeable device qualifies (incl. blank fstype / ext4 / an unmounted
+            // old APEX stick) — the erase-confirm + the usb-prep gate are the protection.
             let bytes = p["size"].as_u64().unwrap_or(0);
             out.push(serde_json::json!({
                 "dev":        p["path"].as_str().unwrap_or(""),
                 "label":      label,
                 "fstype":     fstype,
+                "blank":      fstype.is_empty(),
                 "size":       human_bytes(bytes),
                 "size_bytes": bytes,
                 "model":      display,
@@ -4080,8 +4089,15 @@ fn parse_prep_candidates(lsblk: &serde_json::Value, media_root: &str) -> Vec<ser
     out
 }
 
-/// GET /api/media/candidates — USB sticks the "Use this drive" button can adopt (relabel).
-async fn media_candidates_handler() -> impl IntoResponse {
+/// GET /api/media/candidates?mode=relabel|format — USB sticks the "Use this drive" button
+/// can adopt. `relabel` (default) = keep files; `format` = the broader wipeable set.
+async fn media_candidates_handler(
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let mode = match params.get("mode").map(|s| s.as_str()) {
+        Some("format") => "format",
+        _ => "relabel",
+    };
     let out = tokio::process::Command::new("lsblk")
         .args(["-J", "-b", "-o", "NAME,PATH,SIZE,TYPE,MOUNTPOINT,LABEL,FSTYPE,TRAN,MODEL,VENDOR,PKNAME"])
         .output().await;
@@ -4096,14 +4112,15 @@ async fn media_candidates_handler() -> impl IntoResponse {
         let ws_canon = std::fs::canonicalize(&ws).unwrap_or_else(|_| std::path::PathBuf::from(&ws));
         ws_canon.join("media").to_string_lossy().into_owned()
     };
-    Json(serde_json::json!({ "candidates": parse_prep_candidates(&lsblk, &media_root) }))
+    Json(serde_json::json!({ "candidates": parse_prep_candidates(&lsblk, &media_root, mode) }))
 }
 
 /// POST /api/media/prep {dev, name, mode?} — adopt a USB stick as an exo-workspace.
-/// Slice A supports `mode:"relabel"` (default, keeps files); `format` is slice B. agentd
-/// can't touch block devices (NoNewPrivileges), so it drops a prep request for the root
-/// `usb-prep` drain (which re-validates the device — the real safety boundary) and polls
-/// `/proc/mounts` for the new `media/APEX-<name>` mount to appear.
+/// `mode:"relabel"` (default) keeps files; `mode:"format"` WIPES the stick to a fresh
+/// exFAT (the UI gates that behind an erase-confirm). agentd can't touch block devices
+/// (NoNewPrivileges), so it drops a prep request for the root `usb-prep` drain (which
+/// re-validates the device — the real safety boundary) and polls `/proc/mounts` for the
+/// new `media/APEX-<name>` mount to appear.
 async fn media_prep_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let dev  = body["dev"].as_str().unwrap_or("").trim().to_string();
     let mode = body["mode"].as_str().unwrap_or("relabel").trim().to_string();
@@ -4111,11 +4128,16 @@ async fn media_prep_handler(Json(body): Json<serde_json::Value>) -> impl IntoRes
     let raw_name = body["name"].as_str().unwrap_or("").trim();
     let safe_name: String = raw_name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')).collect();
     let label = format!("APEX-{safe_name}");
-    if mode != "relabel" {
-        return Json(serde_json::json!({ "ok": false, "error": "only relabel (keep files) is supported yet — format is coming" }));
+    if mode != "relabel" && mode != "format" {
+        return Json(serde_json::json!({ "ok": false, "error": "mode must be 'relabel' (keep files) or 'format' (wipe)" }));
+    }
+    // exFAT/FAT volume labels cap at 11 chars (mkfs.exfat/exfatlabel ERROR beyond it), so the
+    // name (after APEX-) can be at most 6 chars.
+    if safe_name.len() > 6 {
+        return Json(serde_json::json!({ "ok": false, "error": "name too long — max 6 characters (drive labels are short)" }));
     }
     if safe_name.is_empty() || !valid_exo_label(&label) {
-        return Json(serde_json::json!({ "ok": false, "error": "name must be letters/digits/._- (becomes the APEX-<name> drive label)" }));
+        return Json(serde_json::json!({ "ok": false, "error": "name must be 1–6 of letters/digits/._- (becomes the APEX-<name> drive label)" }));
     }
     if !dev.starts_with("/dev/") || dev.contains("..") {
         return Json(serde_json::json!({ "ok": false, "error": "bad device path" }));
@@ -4726,18 +4748,33 @@ mod auth_tests {
             ]},
             { "name": "sde", "path": "/dev/sde", "type": "disk", "tran": "usb", "children": [
                 { "name": "sde1", "path": "/dev/sde1", "type": "part", "fstype": "vfat", "mountpoint": null, "label": "APEX-work", "size": 16000000000u64 }
-            ]}
+            ]},
+            // A truly-blank USB disk (no partition table, no filesystem).
+            { "name": "sdf", "path": "/dev/sdf", "type": "disk", "tran": "usb", "vendor": "Generic", "model": "Flash", "fstype": null, "mountpoint": null, "label": null, "size": 8000000000u64 }
         ]});
-        let got = parse_prep_candidates(&lsblk, "/var/lib/agentd/workspace/media");
-        // Exactly one offer: the FAT/exFAT USB stick that isn't system / ext4 / already-APEX / adopted.
-        assert_eq!(got.len(), 1, "got {got:?}");
-        assert_eq!(got[0]["dev"], "/dev/sdb1");
-        assert_eq!(got[0]["label"], "MYSTICK");
-        assert_eq!(got[0]["fstype"], "exfat");
-        assert_eq!(got[0]["model"], "SanDisk Ultra");
-        assert_eq!(got[0]["size"], "57.3 GB");
-        // No system disk, ext4 spare, already-APEX, or media-mounted stick leaked in.
-        for c in &got { assert_ne!(c["dev"], "/dev/nvme0n1p2"); assert_ne!(c["dev"], "/dev/sdc1"); }
+        let media = "/var/lib/agentd/workspace/media";
+
+        // RELABEL: exactly one offer — the FAT/exFAT USB stick that isn't system / ext4 /
+        // already-APEX / adopted / blank.
+        let rel = parse_prep_candidates(&lsblk, media, "relabel");
+        assert_eq!(rel.len(), 1, "relabel got {rel:?}");
+        assert_eq!(rel[0]["dev"], "/dev/sdb1");
+        assert_eq!(rel[0]["label"], "MYSTICK");
+        assert_eq!(rel[0]["model"], "SanDisk Ultra");
+        assert_eq!(rel[0]["size"], "57.3 GB");
+
+        // FORMAT: any wipeable USB device — the exFAT stick, the ext4 spare, the unmounted
+        // APEX stick, AND the blank disk — but NEVER the system disk or the ACTIVE media mount.
+        let fmt = parse_prep_candidates(&lsblk, media, "format");
+        let devs: std::collections::HashSet<&str> = fmt.iter().map(|c| c["dev"].as_str().unwrap()).collect();
+        assert_eq!(devs.len(), 4, "format got {fmt:?}");
+        assert!(devs.contains("/dev/sdb1"));   // exfat
+        assert!(devs.contains("/dev/sdc1"));   // ext4 spare — wipeable
+        assert!(devs.contains("/dev/sde1"));   // unmounted old APEX stick — wipeable
+        assert!(devs.contains("/dev/sdf"));    // blank disk — wipeable (offered as the whole disk)
+        assert!(!devs.contains("/dev/nvme0n1p2")); // system disk — never
+        assert!(!devs.contains("/dev/sdd1"));      // active media mount — never
+        assert_eq!(fmt.iter().find(|c| c["dev"] == "/dev/sdf").unwrap()["blank"], true);
     }
 
     #[test]

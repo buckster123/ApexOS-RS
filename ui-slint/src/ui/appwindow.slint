@@ -236,8 +236,8 @@ export component AppWindow inherits Window {
     callback explorer-rename(string, string); // path, new-name
     callback explorer-delete(string);         // path
     callback explorer-paste(string, string);  // src-path, mode → into current dir
-    callback explorer-drive-scan();            // list adoptable USB sticks
-    callback explorer-drive-prep(string, string); // dev, name → adopt as exo-workspace
+    callback explorer-drive-scan(string);      // mode → list adoptable USB sticks
+    callback explorer-drive-prep(string, string, string); // dev, name, mode → adopt
     callback sketch-down(float, float);
     callback sketch-move(float, float);
     callback sketch-up();
@@ -810,8 +810,8 @@ export component AppWindow inherits Window {
                         explorer-rename(p, n) => { root.explorer-rename(p, n); }
                         explorer-delete(p) => { root.explorer-delete(p); }
                         explorer-paste(p, m) => { root.explorer-paste(p, m); }
-                        explorer-drive-scan => { root.explorer-drive-scan(); }
-                        explorer-drive-prep(d, n) => { root.explorer-drive-prep(d, n); }
+                        explorer-drive-scan(m) => { root.explorer-drive-scan(m); }
+                        explorer-drive-prep(d, n, m) => { root.explorer-drive-prep(d, n, m); }
                         stop-turn => { root.stop-turn(); }
                         terminal-send(line) => { root.terminal-send(line); }
                         toggle-recording => { root.toggle-recording(); }

@@ -23,7 +23,9 @@ NAME="${3:?usage: usb-prep <relabel|format> <dev> <name>}"
 SAFE_NAME="$(printf '%s' "$NAME" | tr -cd 'A-Za-z0-9._-')"
 [[ -n "$SAFE_NAME" && "$SAFE_NAME" != *..* ]] || { echo "usb-prep: unsafe name '$NAME'" >&2; exit 1; }
 LABEL="APEX-${SAFE_NAME}"
-[[ "${#LABEL}" -le 64 ]] || { echo "usb-prep: name too long" >&2; exit 1; }
+# exFAT/FAT volume labels max out at 11 chars (exfatlabel/mkfs.exfat ERROR beyond it, not
+# truncate), so APEX- (5) leaves 6 for the name. The gateway enforces this too.
+[[ "${#LABEL}" -le 11 ]] || { echo "usb-prep: name too long (max 6 chars after APEX-)" >&2; exit 1; }
 
 # ── Resolve + HARD-GATE the device (never trust the caller) ──────────────────
 [[ -b "$DEV" ]] || { echo "usb-prep: $DEV is not a block device" >&2; exit 1; }
@@ -62,7 +64,13 @@ case "$MODE" in
     esac
     ;;
   format)
-    echo "usb-prep: format mode is not enabled in this build (slice B)" >&2; exit 1
+    # DESTRUCTIVE — wipe the device to a fresh exFAT exo-workspace. The hard device
+    # gate above (USB transport, never the system disk) already ran; the UI adds an
+    # explicit erase-confirm. Works on a partition (sdb1) or a blank/whole disk (sdb,
+    # superfloppy) — mkfs.exfat formats whatever $DEV is.
+    command -v mkfs.exfat >/dev/null 2>&1 || { echo "usb-prep: mkfs.exfat not found (install exfatprogs)" >&2; exit 1; }
+    wipefs -a "$DEV" >&2 2>/dev/null || true
+    mkfs.exfat -n "$LABEL" "$DEV" >&2 || { echo "usb-prep: mkfs.exfat failed on $DEV" >&2; exit 1; }
     ;;
   *) echo "usb-prep: unknown mode '$MODE'" >&2; exit 1 ;;
 esac
