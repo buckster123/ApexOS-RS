@@ -36,6 +36,11 @@ mode = "suggest"
 # Camera eyes: read-only "look", same vision flow as screenshot_mirror. Allowed so
 # APEX can see fluidly; privacy-conscious operators may set this to "ask".
 "camera_capture"     = "allow"
+# Eject an exo-workspace USB stick: non-destructive (safe unmount), confined to
+# APEX-* sticks + validated by the sudo umount helper. Allowed so APEX can offer
+# "want me to eject it?" and follow through in one breath — the conversational ask
+# is the real confirmation; a second approval card would be clunky.
+"eject_media"        = "allow"
 "gpio_read"          = "allow"
 "gpio_info"          = "allow"
 "gpio_write"         = "ask"
