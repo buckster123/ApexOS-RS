@@ -133,6 +133,40 @@ report?"):
   in their live `/etc/agentd/policy.toml`** (config seeds fresh nodes only) — else it
   gates as `unknown → ask`.
 
+## "Use this drive" — adopt a stick as an exo-workspace (no CLI)
+
+So a non-technical user can dedicate a USB stick without `exfatlabel`/`gparded`/CLI, the
+Explorer offers a one-tap **"Use this drive"** (a stick → an `APEX-<name>` exo-workspace).
+Two behaviours (the user chooses):
+
+- **Relabel (default, keeps files)** — renames the stick's volume to `APEX-<name>`, writes
+  the marker + `projects/data/notes`, mounts it. **Non-destructive** — existing files
+  stay; a wrong pick just renames a volume (recoverable). Works on an already-formatted
+  FAT/exFAT stick (the common case).
+- **Format (wipe)** — *slice B* — wipes to a clean exFAT `APEX-<name>` (handles a blank/RAW
+  stick), behind its own destructive confirm.
+
+**Privilege-separated, same as the eject** (agentd can't touch block devices under
+`NoNewPrivileges`):
+
+1. `GET /api/media/candidates` lists the prep-able sticks — the **pure, unit-tested**
+   `parse_prep_candidates` over `lsblk -J` returns only FAT/exFAT partitions on a
+   **USB-transport** disk that are **not** the system disk, not already `APEX-*`, not
+   already mounted under `media/`. (So a system/NVMe disk and an ext4 data drive never
+   appear.) This decides what to *offer*.
+2. `POST /api/media/prep {dev, name, mode}` validates, then **drops a 3-line `*.req`**
+   (`mode`/`dev`/`name`) into the agentd-owned `AGENTD_USB_PREP_DIR`
+   (`/var/lib/agentd/usb-prep`).
+3. The root `apexos-usb-prep.path`→`.service` drain runs **`usb-prep`** — **the security
+   boundary**: it independently re-validates the device (USB-transport, and **never** the
+   disk holding `/` or `/boot`) before unmounting → relabelling → `usb-mount` →
+   `apexos-workspace-init`. agentd's offer-list is convenience; this gate is what protects.
+4. The requester **polls `/proc/mounts`** for the new `media/APEX-<name>` mount (≤25s).
+   On success the existing plug-notification fires → APEX greets the freshly-adopted stick.
+
+Slice A ships the **relabel** pipeline + endpoints (server-side); the Explorer **button +
+device-picker UI** and the **format/wipe** option are the next two slices.
+
 ## Why the systemd sandbox isn't a problem here
 
 agentd runs under `ProtectSystem=strict` but with **`PrivateMounts=no`** and the host

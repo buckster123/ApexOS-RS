@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# apexos usb-prep — turn a USB stick into an ApexOS exo-workspace ("Use this drive").
+#
+# Privilege-separated like the eject: agentd (non-root, NoNewPrivileges) can't touch a
+# block device, so it drops a prep request and the root apexos-usb-prep drain runs THIS.
+# Never invoked via sudo.
+#
+#   usb-prep relabel <dev> <name>   relabel <dev>'s volume to APEX-<name> (KEEPS files),
+#                                   write the marker + layout, mount it as an exo-workspace
+#   usb-prep format  <dev> <name>   [slice B] wipe <dev> to a clean exFAT APEX-<name>
+#
+# SAFETY — this is the security boundary. agentd passes a device path, so we re-validate
+# it here and NEVER trust it: the device MUST sit on a USB-transport disk and MUST NOT be
+# (or sit on) the system disk holding / or /boot. Relabel is non-destructive (a wrong pick
+# just renames a volume + adds folders — recoverable); format (slice B) is gated harder.
+set -euo pipefail
+
+MODE="${1:?usage: usb-prep <relabel|format> <dev> <name>}"
+DEV="${2:?usage: usb-prep <relabel|format> <dev> <name>}"
+NAME="${3:?usage: usb-prep <relabel|format> <dev> <name>}"
+
+# ── Name → APEX-<label> (single safe component, bounded) ─────────────────────
+SAFE_NAME="$(printf '%s' "$NAME" | tr -cd 'A-Za-z0-9._-')"
+[[ -n "$SAFE_NAME" && "$SAFE_NAME" != *..* ]] || { echo "usb-prep: unsafe name '$NAME'" >&2; exit 1; }
+LABEL="APEX-${SAFE_NAME}"
+[[ "${#LABEL}" -le 64 ]] || { echo "usb-prep: name too long" >&2; exit 1; }
+
+# ── Resolve + HARD-GATE the device (never trust the caller) ──────────────────
+[[ -b "$DEV" ]] || { echo "usb-prep: $DEV is not a block device" >&2; exit 1; }
+DEV_NAME="$(basename "$DEV")"                                  # e.g. sdb1
+PARENT="$(lsblk -no PKNAME "$DEV" 2>/dev/null | head -1)"      # e.g. sdb (empty if $DEV is a disk)
+DISK="${PARENT:-$DEV_NAME}"                                    # the top-level disk
+
+# (1) Transport must be USB — never an internal SATA/NVMe/MMC bus.
+TRAN="$(lsblk -dno TRAN "/dev/${DISK}" 2>/dev/null | head -1)"
+[[ "$TRAN" == "usb" ]] || { echo "usb-prep: REFUSING $DEV — disk /dev/$DISK is not USB (TRAN='${TRAN:-?}')" >&2; exit 1; }
+
+# (2) The disk must not hold a system mount (/, /boot, /boot/firmware).
+for m in / /boot /boot/firmware; do
+  src="$(findmnt -no SOURCE --target "$m" 2>/dev/null || true)"
+  [[ -n "$src" ]] || continue
+  sdisk="$(lsblk -no PKNAME "$src" 2>/dev/null | head -1)"; sdisk="${sdisk:-$(basename "$src")}"
+  [[ "$sdisk" != "$DISK" ]] || { echo "usb-prep: REFUSING $DEV — /dev/$DISK holds the system mount $m" >&2; exit 1; }
+done
+
+# ── Unmount the device wherever it's currently mounted (e.g. a DE auto-mount) ─
+while read -r mp; do
+  [[ -n "$mp" ]] || continue
+  echo "usb-prep: unmounting $DEV from $mp" >&2
+  umount "$DEV" 2>/dev/null || umount -l "$DEV" 2>/dev/null || true
+done < <(findmnt -nro TARGET --source "$DEV" 2>/dev/null || true)
+
+FSTYPE="$(blkid -s TYPE -o value "$DEV" 2>/dev/null || true)"
+
+case "$MODE" in
+  relabel)
+    case "$FSTYPE" in
+      exfat)          exfatlabel "$DEV" "$LABEL" >&2 ;;
+      vfat|msdos|fat) fatlabel   "$DEV" "$LABEL" >&2 ;;   # NB: FAT labels uppercase, ≤11 chars
+      "") echo "usb-prep: $DEV has no filesystem — needs format mode (slice B) for a fresh exo-workspace" >&2; exit 1 ;;
+      *)  echo "usb-prep: filesystem '$FSTYPE' can't be relabelled in place — needs format mode" >&2; exit 1 ;;
+    esac
+    ;;
+  format)
+    echo "usb-prep: format mode is not enabled in this build (slice B)" >&2; exit 1
+    ;;
+  *) echo "usb-prep: unknown mode '$MODE'" >&2; exit 1 ;;
+esac
+
+# ── Mount as an exo-workspace + write the marker/layout ──────────────────────
+# Re-probe so blkid/usb-mount see the new label (a relabel doesn't emit an add uevent).
+udevadm trigger --settle --action=change "$DEV" 2>/dev/null || true
+/usr/local/lib/apexos/usb-mount "$DEV_NAME"
+
+WORKSPACE="$(. /etc/agentd/env 2>/dev/null; echo "${AGENTD_WORKSPACE:-/var/lib/agentd/workspace}")"
+MNT="${WORKSPACE%/}/media/${LABEL}"
+if [[ -d "$MNT" ]] && mountpoint -q "$MNT"; then
+  /usr/local/bin/apexos-workspace-init "$MNT" "$SAFE_NAME" >&2 || true
+  echo "usb-prep: $DEV is now exo-workspace $LABEL at $MNT" >&2
+else
+  echo "usb-prep: relabelled $DEV → $LABEL but the mount did not appear at $MNT" >&2; exit 1
+fi
+exit 0

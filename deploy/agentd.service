@@ -33,6 +33,8 @@ Environment=AGENTD_HARDWARE_WISHLIST=/var/lib/agentd/hardware-wishlist.md
 # Where agentd drops USB eject-request files for the root drain service (it can't
 # sudo under NoNewPrivileges) — under ReadWritePaths so the non-root daemon can write.
 Environment=AGENTD_USB_EJECT_DIR=/var/lib/agentd/usb-eject
+# Likewise for "Use this drive" prep requests (relabel/format a stick → exo-workspace).
+Environment=AGENTD_USB_PREP_DIR=/var/lib/agentd/usb-prep
 EnvironmentFile=-/etc/agentd/env
 
 NoNewPrivileges=true

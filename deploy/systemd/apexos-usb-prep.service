@@ -1,0 +1,10 @@
+[Unit]
+Description=Prepare a USB stick as an ApexOS exo-workspace (root, on agentd's behalf)
+Documentation=file:///usr/local/lib/apexos/usb-prep-drain
+
+[Service]
+# Root oneshot — triggered by apexos-usb-prep.path when agentd drops a prep request.
+# Runs UNsandboxed on purpose: it relabels + mounts a block device under the workspace.
+Type=oneshot
+Environment=AGENTD_USB_PREP_DIR=/var/lib/agentd/usb-prep
+ExecStart=/usr/local/lib/apexos/usb-prep-drain

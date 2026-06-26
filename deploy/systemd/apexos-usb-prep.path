@@ -1,0 +1,13 @@
+[Unit]
+Description=Watch for ApexOS "Use this drive" prep requests
+Documentation=file:///usr/local/lib/apexos/usb-prep-drain
+
+[Path]
+# agentd (non-root, NoNewPrivileges) can't touch block devices, so it drops a *.req file
+# here (mode/dev/name); this fires the root drain that runs usb-prep. Dir is created
+# (agentd-owned) by install.sh before this unit is armed.
+PathExistsGlob=/var/lib/agentd/usb-prep/*.req
+Unit=apexos-usb-prep.service
+
+[Install]
+WantedBy=multi-user.target
