@@ -292,6 +292,11 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/workspace/images",      get(workspace_images_handler))
         .route("/api/workspace/list",        get(workspace_list_handler))
         .route("/api/workspace/read",        get(workspace_read_handler))
+        .route("/api/workspace/mkdir",       post(workspace_mkdir_handler))
+        .route("/api/workspace/delete",      post(workspace_delete_handler))
+        .route("/api/workspace/rename",      post(workspace_rename_handler))
+        .route("/api/workspace/move",        post(workspace_move_handler))
+        .route("/api/workspace/copy",        post(workspace_copy_handler))
         .route("/api/media/eject",        post(media_eject_handler))
         .route("/api/run",                post(run_command_handler))
         .route("/api/snapshot",           get(snapshot_handler))
@@ -1501,6 +1506,59 @@ fn resolve_workspace_write_path(path: &str) -> Result<std::path::PathBuf, String
     let parent_str = parent.map(|d| d.to_string_lossy().into_owned()).unwrap_or_else(|| ".".to_string());
     let parent_canon = resolve_workspace_path(&parent_str)?;
     Ok(parent_canon.join(name))
+}
+
+/// A single safe path component for a rename/new-folder name: non-empty, not a
+/// traversal token, no separator. The agent FS tools confine the same way
+/// (`apexos-confine`); this is the gateway-side gate for the Explorer's write ops.
+fn safe_component(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\0')
+}
+
+/// Recursively copy `src` → `dst` (a file or a whole directory tree). Used by the
+/// Explorer copy endpoint and as the cross-device fallback for move (EXDEV).
+/// Symlinks are followed (`std::fs::copy` copies the target's bytes) — exo-workspace
+/// trees don't carry links, and following keeps the copy self-contained.
+fn copy_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.is_dir() {
+        std::fs::create_dir(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(src, dst).map(|_| ())
+    }
+}
+
+/// Resolve a move/copy: the existing, workspace-confined `src` and the target path
+/// inside the existing, workspace-confined `dest` directory (target keeps src's
+/// basename). Rejects a non-existent/non-dir destination, a name collision, and
+/// moving a directory into itself or one of its own descendants.
+fn resolve_move_target(src: &str, dest: &str) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    if src.trim().is_empty() {
+        return Err("no source".to_string());
+    }
+    let src_canon = resolve_workspace_path(src)?;
+    let dest_dir = resolve_workspace_path(dest)?;
+    if !dest_dir.is_dir() {
+        return Err("destination is not a directory".to_string());
+    }
+    let name = src_canon.file_name().ok_or_else(|| "source has no name".to_string())?;
+    if dest_dir == src_canon || dest_dir.starts_with(&src_canon) {
+        return Err("cannot move a folder into itself".to_string());
+    }
+    let target = dest_dir.join(name);
+    if target.exists() {
+        return Err("a file or folder with that name already exists here".to_string());
+    }
+    Ok((src_canon, target))
 }
 
 /// Run raw user-attached image refs through the vision shim, returning prepared
@@ -3965,6 +4023,123 @@ async fn workspace_read_handler(
     Json(serde_json::json!({ "content": content, "truncated": truncated, "binary": binary }))
 }
 
+/// Body for the Explorer's confined write ops (mkdir/delete/rename/move/copy).
+/// Fields are op-specific; all are optional so one struct serves every endpoint.
+#[derive(Deserialize)]
+struct WorkspaceOpBody {
+    #[serde(default)] path: String,   // delete target / new-folder path
+    #[serde(default)] name: String,   // rename: the new basename
+    #[serde(default)] src:  String,   // move/copy: source (workspace-relative)
+    #[serde(default)] dest: String,   // move/copy: destination directory
+}
+
+/// POST /api/workspace/mkdir {path} — create a new folder under the workspace.
+/// `path` is workspace-relative; the parent must already exist (single-level new
+/// folder). Confined exactly like the agent FS tools.
+async fn workspace_mkdir_handler(Json(body): Json<WorkspaceOpBody>) -> impl IntoResponse {
+    let target = match resolve_workspace_write_path(&body.path) {
+        Ok(p) => p,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    if target.exists() {
+        return Json(serde_json::json!({ "ok": false, "error": "already exists" }));
+    }
+    match tokio::fs::create_dir(&target).await {
+        Ok(_) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("mkdir: {e}") })),
+    }
+}
+
+/// POST /api/workspace/delete {path} — remove a file or directory (recursive).
+/// Refuses the workspace root itself; a mounted exo-workspace stick's mountpoint
+/// fails naturally (EBUSY) — eject it first.
+async fn workspace_delete_handler(Json(body): Json<WorkspaceOpBody>) -> impl IntoResponse {
+    let target = match resolve_workspace_path(&body.path) {
+        Ok(p) => p,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    if resolve_workspace_path("").map(|root| root == target).unwrap_or(false) {
+        return Json(serde_json::json!({ "ok": false, "error": "refusing to delete the workspace root" }));
+    }
+    let is_dir = tokio::fs::metadata(&target).await.map(|m| m.is_dir()).unwrap_or(false);
+    let res = if is_dir {
+        tokio::fs::remove_dir_all(&target).await
+    } else {
+        tokio::fs::remove_file(&target).await
+    };
+    match res {
+        Ok(_) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("delete: {e}") })),
+    }
+}
+
+/// POST /api/workspace/rename {path, name} — rename an entry in place. `name` is a
+/// single safe component (no separator / traversal); the target stays in the same
+/// (already-confined) parent directory.
+async fn workspace_rename_handler(Json(body): Json<WorkspaceOpBody>) -> impl IntoResponse {
+    let from = match resolve_workspace_path(&body.path) {
+        Ok(p) => p,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    let name = body.name.trim();
+    if !safe_component(name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid name (no /, .. and not empty)" }));
+    }
+    let Some(parent) = from.parent() else {
+        return Json(serde_json::json!({ "ok": false, "error": "cannot rename the workspace root" }));
+    };
+    let to = parent.join(name);
+    if to.exists() {
+        return Json(serde_json::json!({ "ok": false, "error": "already exists" }));
+    }
+    match tokio::fs::rename(&from, &to).await {
+        Ok(_) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("rename: {e}") })),
+    }
+}
+
+/// POST /api/workspace/move {src, dest} — move `src` into the `dest` directory
+/// (keeps the basename). Same-filesystem → `rename`; a cross-device move (EXDEV,
+/// e.g. workspace ⇄ a mounted exo-workspace stick) falls back to recursive copy +
+/// remove. Both ends are workspace-confined.
+async fn workspace_move_handler(Json(body): Json<WorkspaceOpBody>) -> impl IntoResponse {
+    let (src, target) = match resolve_move_target(&body.src, &body.dest) {
+        Ok(t) => t,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    let res = tokio::task::spawn_blocking(move || {
+        match std::fs::rename(&src, &target) {
+            Ok(_) => Ok(()),
+            // EXDEV (18): cross-device link — copy then remove the source.
+            Err(e) if e.raw_os_error() == Some(18) => {
+                copy_recursive(&src, &target)?;
+                if src.is_dir() { std::fs::remove_dir_all(&src) } else { std::fs::remove_file(&src) }
+            }
+            Err(e) => Err(e),
+        }
+    }).await;
+    match res {
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": format!("move: {e}") })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("move task: {e}") })),
+    }
+}
+
+/// POST /api/workspace/copy {src, dest} — copy `src` into the `dest` directory
+/// (recursive for a folder; keeps the basename). Both ends are workspace-confined.
+async fn workspace_copy_handler(Json(body): Json<WorkspaceOpBody>) -> impl IntoResponse {
+    let (src, target) = match resolve_move_target(&body.src, &body.dest) {
+        Ok(t) => t,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    let res = tokio::task::spawn_blocking(move || copy_recursive(&src, &target)).await;
+    match res {
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": format!("copy: {e}") })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("copy task: {e}") })),
+    }
+}
+
 #[derive(Deserialize)]
 struct AudioPathBody {
     path: String,
@@ -4337,6 +4512,21 @@ mod auth_tests {
         assert!(!valid_exo_label("APEX-a b"));       // space
         assert!(!valid_exo_label("APEX-$(x)"));      // shell-ish chars
         assert!(!valid_exo_label(&format!("APEX-{}", "x".repeat(70)))); // too long
+    }
+
+    #[test]
+    fn safe_component_validation() {
+        // Accept: a normal single basename for a rename / new folder.
+        assert!(safe_component("notes"));
+        assert!(safe_component("my file.txt"));   // spaces are fine in a name
+        assert!(safe_component(".hidden"));        // leading dot is a valid name
+        // Reject: empty, traversal tokens, separators, NUL.
+        assert!(!safe_component(""));
+        assert!(!safe_component("."));
+        assert!(!safe_component(".."));
+        assert!(!safe_component("a/b"));           // path separator escapes the dir
+        assert!(!safe_component("../etc"));         // traversal
+        assert!(!safe_component("a\0b"));           // NUL byte
     }
 }
 

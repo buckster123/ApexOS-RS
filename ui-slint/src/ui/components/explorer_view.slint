@@ -4,13 +4,40 @@ import { ExplorerEntry } from "../types.slint";
 
 // ── ExplorerView (📁 Files) ─────────────────────────────────────────────────
 //
-// A workspace file browser: navigate directories, preview files. Left pane = the
-// entry list (dirs first), right pane = a preview (image / text / info). The
-// "Attach" action stages an image into the chat composer (reuses the 🖼 picker
-// flow). Reads /api/workspace/{list,read}; image previews load from the absolute
-// path (UI + agentd are co-located on the kiosk / desktop).
+// A real workspace file explorer: navigate directories, preview files, AND the
+// file verbs — new folder, rename, delete, and cut/copy → paste (move/copy,
+// incl. drive⇄workspace across the mounted exo-workspace sticks under media/).
+// Left pane = the entry list (dirs first) + an action row; right pane = a preview
+// (image / text / info). Reads /api/workspace/{list,read}; writes go through the
+// confined /api/workspace/{mkdir,rename,delete,move,copy} endpoints in Rust.
+// The clipboard + the three overlays (entry menu, name prompt, delete confirm)
+// are view-local; only the network verbs cross into Rust.
 //
 // preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
+
+// A small button used in the action row and the entry-action menu.
+component ExpBtn inherits Rectangle {
+    in property <string> label;
+    in property <bool> danger: false;
+    in property <bool> strong: false;
+    callback clicked();
+    height: 28px;
+    border-radius: Palette.radius;
+    background: ta.has-hover ? (root.danger ? #ef4444 : (root.strong ? Palette.primary : Palette.surface-hi))
+              : (root.strong ? Palette.primary-dim : Palette.bg);
+    border-width: 1px;
+    border-color: root.danger ? #ef444477 : (root.strong ? Palette.primary : Palette.border);
+    animate background { duration: 120ms; }
+    ta := TouchArea { clicked => { root.clicked(); } }
+    Text {
+        text: root.label;
+        color: (root.danger && ta.has-hover) || root.strong ? Palette.bg : Palette.text;
+        font-size: 10px;
+        font-weight: root.strong ? 700 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
 
 export component ExplorerView {
     preferred-height: 0px;
@@ -26,12 +53,68 @@ export component ExplorerView {
     in property <string> preview-text;
     in property <bool>   can-attach;      // selected is an image
 
+    // Clipboard (view-local): the cut/copied entry, awaiting a paste.
+    in-out property <string> clip-path: "";
+    in-out property <string> clip-name: "";
+    in-out property <string> clip-mode: "";   // "cut" | "copy" | ""
+
+    // Per-entry action menu (view-local overlay).
+    property <bool>   menu-open: false;
+    property <string> menu-path: "";
+    property <string> menu-name: "";
+
+    // Name prompt — shared by New-folder + Rename (view-local overlay).
+    property <bool>   name-open: false;
+    property <string> name-mode: "";       // "mkdir" | "rename"
+    property <string> name-title: "";
+    in-out property <string> name-value: "";
+    property <string> name-target: "";     // path being renamed
+
+    // Delete confirm (view-local overlay).
+    property <bool>   del-open: false;
+    property <string> del-path: "";
+    property <string> del-name: "";
+
     callback refresh();
     callback navigate(string);            // enter dir (rel path)
     callback up();                        // parent dir
     callback select(string, string, string);   // path, abs, ext
     callback attach();                    // attach selected image to chat
     callback eject(string);               // safe-eject an exo-workspace stick (label)
+    callback mkdir(string);               // create a folder (name) in the current dir
+    callback rename(string, string);      // path, new-name
+    callback delete-entry(string);        // path
+    callback paste(string, string);       // src-path, mode ("cut"|"copy") → into current dir
+
+    // Open the name prompt in "new folder" mode.
+    function open-mkdir() {
+        root.menu-open = false;
+        root.name-mode = "mkdir";
+        root.name-title = "New folder";
+        root.name-value = "";
+        root.name-target = "";
+        root.name-open = true;
+    }
+    // Open the name prompt in "rename" mode for a given entry.
+    function open-rename(p: string, n: string) {
+        root.menu-open = false;
+        root.name-mode = "rename";
+        root.name-title = "Rename";
+        root.name-value = n;
+        root.name-target = p;
+        root.name-open = true;
+    }
+    // Confirm the name prompt (Create / Rename).
+    function commit-name() {
+        if (root.name-value == "") { return; }
+        if (root.name-mode == "mkdir") {
+            root.mkdir(root.name-value);
+        } else if (root.name-mode == "rename") {
+            root.rename(root.name-target, root.name-value);
+        }
+        root.name-open = false;
+        root.name-value = "";
+    }
 
     HorizontalLayout {
         // ── Left: entry list ─────────────────────────────────────────────────
@@ -98,6 +181,43 @@ export component ExplorerView {
 
                 Rectangle { height: 1px; background: Palette.border; }
 
+                // Action row: new folder + paste (paste shows only with a clipboard).
+                Rectangle {
+                    height: 40px;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        spacing: 6px;
+
+                        ExpBtn {
+                            label: "+ Folder";
+                            horizontal-stretch: 1;
+                            clicked => { root.open-mkdir(); }
+                        }
+                        if root.clip-path != "": ExpBtn {
+                            label: (root.clip-mode == "cut" ? "Move ▸ " : "Paste ▸ ") + root.clip-name;
+                            strong: true;
+                            horizontal-stretch: 2;
+                            clicked => {
+                                root.paste(root.clip-path, root.clip-mode);
+                                // Cut empties the clipboard; copy stays for paste-to-many.
+                                if (root.clip-mode == "cut") {
+                                    root.clip-path = ""; root.clip-name = ""; root.clip-mode = "";
+                                }
+                            }
+                        }
+                        if root.clip-path != "": ExpBtn {
+                            label: "✕";
+                            width: 28px;
+                            clicked => { root.clip-path = ""; root.clip-name = ""; root.clip-mode = ""; }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
                 // ScrollView (not Flickable): drag-able scrollbar — linuxkms has
                 // no scroll-wheel events on the kiosk.
                 ScrollView {
@@ -124,7 +244,8 @@ export component ExplorerView {
                             background: e.path == root.selected-path ? Palette.surface-hi
                                       : (row-ta.has-hover ? Palette.surface-hi : transparent);
                             border-width: 1px;
-                            border-color: e.path == root.selected-path ? Palette.primary : transparent;
+                            border-color: e.path == root.selected-path ? Palette.primary
+                                        : (e.path == root.clip-path ? Palette.primary-dim : transparent);
                             row-ta := TouchArea {
                                 clicked => {
                                     if (e.kind == "dir") {
@@ -136,7 +257,7 @@ export component ExplorerView {
                             }
                             HorizontalLayout {
                                 padding-left: 8px;
-                                padding-right: 8px;
+                                padding-right: 6px;
                                 spacing: 8px;
                                 Text {
                                     text: e.glyph;
@@ -145,7 +266,8 @@ export component ExplorerView {
                                 }
                                 Text {
                                     text: e.name;
-                                    color: Palette.text;
+                                    color: e.path == root.clip-path && root.clip-mode == "cut"
+                                         ? Palette.text-dim : Palette.text;
                                     font-size: 12px;
                                     vertical-alignment: center;
                                     horizontal-stretch: 1;
@@ -157,9 +279,11 @@ export component ExplorerView {
                                     font-size: 9px;
                                     vertical-alignment: center;
                                 }
-                                // Eject affordance: only on the mounted exo-workspace
-                                // sticks under media/ (the row's own TouchArea handles
-                                // navigation elsewhere; this nested one intercepts).
+                                // Trailing affordance. A mounted exo-workspace stick
+                                // (a dir directly under media/) gets the eject ⏏; every
+                                // other entry gets the ⋮ action menu (rename/cut/copy/
+                                // delete). The row's own TouchArea handles nav/select;
+                                // these nested ones intercept.
                                 if root.current-path == "media" && e.kind == "dir": Rectangle {
                                     width: 24px;
                                     height: 24px;
@@ -173,6 +297,26 @@ export component ExplorerView {
                                         vertical-alignment: center;
                                     }
                                     ej-ta := TouchArea { clicked => { root.eject(e.name); } }
+                                }
+                                if !(root.current-path == "media" && e.kind == "dir"): Rectangle {
+                                    width: 24px;
+                                    height: 24px;
+                                    border-radius: Palette.radius;
+                                    background: mn-ta.has-hover ? Palette.surface-hi : transparent;
+                                    Text {
+                                        text: "⋮";
+                                        color: mn-ta.has-hover ? Palette.primary : Palette.text-dim;
+                                        font-size: 15px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    mn-ta := TouchArea {
+                                        clicked => {
+                                            root.menu-path = e.path;
+                                            root.menu-name = e.name;
+                                            root.menu-open = true;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -288,6 +432,192 @@ export component ExplorerView {
                             color: Palette.text;
                             font-size: 12px;
                             wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Entry action menu overlay ───────────────────────────────────────────
+    if root.menu-open: Rectangle {
+        background: #000000bb;
+        TouchArea { clicked => { root.menu-open = false; } }   // backdrop dismiss
+
+        Rectangle {
+            width: 240px;
+            height: menu-col.preferred-height + 28px;
+            background: Palette.surface;
+            border-radius: Palette.radius-lg;
+            border-width: 1px;
+            border-color: Palette.border-hi;
+            drop-shadow-blur: 32px;
+            drop-shadow-color: #000000aa;
+
+            menu-col := VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+                Text {
+                    text: root.menu-name;
+                    color: Palette.text-bright;
+                    font-size: 12px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+                ExpBtn {
+                    label: "Rename";
+                    clicked => { root.open-rename(root.menu-path, root.menu-name); }
+                }
+                ExpBtn {
+                    label: "Cut";
+                    clicked => {
+                        root.clip-path = root.menu-path; root.clip-name = root.menu-name; root.clip-mode = "cut";
+                        root.menu-open = false;
+                    }
+                }
+                ExpBtn {
+                    label: "Copy";
+                    clicked => {
+                        root.clip-path = root.menu-path; root.clip-name = root.menu-name; root.clip-mode = "copy";
+                        root.menu-open = false;
+                    }
+                }
+                ExpBtn {
+                    label: "Delete";
+                    danger: true;
+                    clicked => {
+                        root.del-path = root.menu-path; root.del-name = root.menu-name;
+                        root.menu-open = false;
+                        root.del-open = true;
+                    }
+                }
+                ExpBtn {
+                    label: "Cancel";
+                    clicked => { root.menu-open = false; }
+                }
+            }
+        }
+    }
+
+    // ── Name prompt overlay (new folder / rename) ───────────────────────────
+    if root.name-open: Rectangle {
+        background: #000000bb;
+        TouchArea { clicked => { root.name-open = false; } }   // backdrop dismiss
+
+        Rectangle {
+            width: 300px;
+            height: name-col.preferred-height + 28px;
+            background: Palette.surface;
+            border-radius: Palette.radius-lg;
+            border-width: 1px;
+            border-color: Palette.border-hi;
+            drop-shadow-blur: 32px;
+            drop-shadow-color: #000000aa;
+
+            name-col := VerticalLayout {
+                padding: 16px;
+                spacing: 14px;
+                Text {
+                    text: root.name-title;
+                    color: Palette.text-bright;
+                    font-size: 14px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Rectangle {
+                    height: 30px;
+                    border-radius: Palette.radius;
+                    background: Palette.bg;
+                    border-width: 1px;
+                    border-color: nf.has-focus ? Palette.primary : Palette.border;
+                    clip: true;
+                    nf := TextInput {
+                        x: 9px;
+                        width: parent.width - 18px;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        single-line: true;
+                        font-size: 12px;
+                        color: Palette.text;
+                        selection-background-color: Palette.primary-dim;
+                        text <=> root.name-value;
+                        init => { self.focus(); }
+                        accepted => { root.commit-name(); }
+                    }
+                    if root.name-value == "": Text {
+                        x: 9px;
+                        text: root.name-mode == "mkdir" ? "folder name…" : "new name…";
+                        color: Palette.text-dim;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    ExpBtn {
+                        label: "CANCEL";
+                        horizontal-stretch: 1;
+                        clicked => { root.name-open = false; root.name-value = ""; }
+                    }
+                    ExpBtn {
+                        label: root.name-mode == "mkdir" ? "CREATE" : "RENAME";
+                        strong: root.name-value != "";
+                        horizontal-stretch: 1;
+                        clicked => { root.commit-name(); }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Delete confirm overlay ──────────────────────────────────────────────
+    if root.del-open: Rectangle {
+        background: #000000bb;
+        TouchArea { clicked => { root.del-open = false; } }    // backdrop dismiss
+
+        Rectangle {
+            width: 300px;
+            height: del-col.preferred-height + 28px;
+            background: Palette.surface;
+            border-radius: Palette.radius-lg;
+            border-width: 1px;
+            border-color: Palette.border-hi;
+            drop-shadow-blur: 32px;
+            drop-shadow-color: #000000aa;
+
+            del-col := VerticalLayout {
+                padding: 18px;
+                spacing: 14px;
+                Text {
+                    text: "Delete \"" + root.del-name + "\"?";
+                    color: Palette.text-bright;
+                    font-size: 14px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    text: "This permanently removes it from the workspace. A folder is deleted with everything inside it.";
+                    color: Palette.text-dim;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    ExpBtn {
+                        label: "CANCEL";
+                        horizontal-stretch: 1;
+                        clicked => { root.del-open = false; }
+                    }
+                    ExpBtn {
+                        label: "DELETE";
+                        danger: true;
+                        horizontal-stretch: 1;
+                        clicked => {
+                            root.del-open = false;
+                            root.delete-entry(root.del-path);
                         }
                     }
                 }

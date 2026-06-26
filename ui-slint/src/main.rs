@@ -3055,6 +3055,23 @@ async fn fetch_explorer_list(client: &reqwest::Client, base_url: &str, path: &st
     }).collect()
 }
 
+/// POST a confined workspace write op (mkdir/delete/rename/move/copy). Returns
+/// (ok, error) — `error` is the server's message on failure, "" on success.
+async fn workspace_op(client: &reqwest::Client, base_url: &str, endpoint: &str, body: Value) -> (bool, String) {
+    match client.post(format!("{base_url}/api/workspace/{endpoint}"))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send().await
+    {
+        Ok(r) => {
+            let v: Value = r.json().await.unwrap_or(Value::Null);
+            let ok = v["ok"].as_bool().unwrap_or(false);
+            (ok, v["error"].as_str().unwrap_or("").to_string())
+        }
+        Err(e) => (false, format!("request failed: {e}")),
+    }
+}
+
 /// GET /api/workspace/read?path= → (content, binary). Empty + binary=true on a
 /// non-text file; empty + false on error.
 async fn fetch_explorer_read(client: &reqwest::Client, base_url: &str, path: &str) -> (String, bool) {
@@ -4927,6 +4944,115 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if ok { ui.invoke_refresh_explorer(); }
                     ui.set_status(if ok { format!("Ejected {label} — safe to remove") }
                                   else   { format!("Eject failed: {label}") }.into());
+                }
+            }).ok();
+        });
+    });
+
+    // mkdir: create a new folder in the current directory (POST /api/workspace/mkdir).
+    let rt_h_exmk    = rt.handle().clone();
+    let client_exmk  = Arc::clone(&http_client);
+    let base_exmk    = http_base.clone();
+    let ui_weak_exmk = ui.as_weak();
+    ui.on_explorer_mkdir(move |name| {
+        let name   = name.to_string();
+        let client = Arc::clone(&client_exmk);
+        let base   = base_exmk.clone();
+        let uw     = ui_weak_exmk.clone();
+        let cur    = uw.upgrade().map(|ui| ui.get_explorer_current_path().to_string()).unwrap_or_default();
+        let path   = if cur.is_empty() { name.clone() } else { format!("{cur}/{name}") };
+        rt_h_exmk.spawn(async move {
+            let (ok, err) = workspace_op(&client, &base, "mkdir", serde_json::json!({ "path": path })).await;
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = uw.upgrade() {
+                    if ok { ui.invoke_refresh_explorer(); }
+                    ui.set_status(if ok { format!("Created folder {name}") }
+                                  else   { format!("New folder failed: {err}") }.into());
+                }
+            }).ok();
+        });
+    });
+
+    // rename: rename an entry in place (POST /api/workspace/rename {path, name}).
+    let rt_h_exrn    = rt.handle().clone();
+    let client_exrn  = Arc::clone(&http_client);
+    let base_exrn    = http_base.clone();
+    let ui_weak_exrn = ui.as_weak();
+    ui.on_explorer_rename(move |path, name| {
+        let path   = path.to_string();
+        let name   = name.to_string();
+        let client = Arc::clone(&client_exrn);
+        let base   = base_exrn.clone();
+        let uw     = ui_weak_exrn.clone();
+        rt_h_exrn.spawn(async move {
+            let (ok, err) = workspace_op(&client, &base, "rename", serde_json::json!({ "path": path, "name": name })).await;
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = uw.upgrade() {
+                    if ok { ui.invoke_refresh_explorer(); }
+                    ui.set_status(if ok { format!("Renamed to {name}") }
+                                  else   { format!("Rename failed: {err}") }.into());
+                }
+            }).ok();
+        });
+    });
+
+    // delete: remove a file/folder (POST /api/workspace/delete {path}); clears the
+    // preview if the deleted entry was the one on show.
+    let rt_h_exdl    = rt.handle().clone();
+    let client_exdl  = Arc::clone(&http_client);
+    let base_exdl    = http_base.clone();
+    let ui_weak_exdl = ui.as_weak();
+    ui.on_explorer_delete(move |path| {
+        let path   = path.to_string();
+        let name   = path.rsplit('/').next().unwrap_or(&path).to_string();
+        let client = Arc::clone(&client_exdl);
+        let base   = base_exdl.clone();
+        let uw     = ui_weak_exdl.clone();
+        rt_h_exdl.spawn(async move {
+            let (ok, err) = workspace_op(&client, &base, "delete", serde_json::json!({ "path": path })).await;
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = uw.upgrade() {
+                    if ok {
+                        ui.invoke_refresh_explorer();
+                        if ui.get_explorer_selected_path().to_string() == path {
+                            ui.set_explorer_selected_path("".into());
+                            ui.set_explorer_selected_name("".into());
+                            ui.set_explorer_selected_info("".into());
+                            ui.set_explorer_preview_kind("none".into());
+                            ui.set_explorer_preview_text("".into());
+                            ui.set_explorer_can_attach(false);
+                        }
+                    }
+                    ui.set_status(if ok { format!("Deleted {name}") }
+                                  else   { format!("Delete failed: {err}") }.into());
+                }
+            }).ok();
+        });
+    });
+
+    // paste: move (cut) or copy the clipboard entry into the current directory
+    // (POST /api/workspace/{move,copy} {src, dest}). dest = the folder in view.
+    let rt_h_expt    = rt.handle().clone();
+    let client_expt  = Arc::clone(&http_client);
+    let base_expt    = http_base.clone();
+    let ui_weak_expt = ui.as_weak();
+    ui.on_explorer_paste(move |src, mode| {
+        let src      = src.to_string();
+        let mode     = mode.to_string();
+        let name     = src.rsplit('/').next().unwrap_or(&src).to_string();
+        let client   = Arc::clone(&client_expt);
+        let base     = base_expt.clone();
+        let uw        = ui_weak_expt.clone();
+        let dest     = uw.upgrade().map(|ui| ui.get_explorer_current_path().to_string()).unwrap_or_default();
+        let endpoint = if mode == "cut" { "move" } else { "copy" };
+        let verb     = if mode == "cut" { "Moved" } else { "Copied" };
+        rt_h_expt.spawn(async move {
+            let (ok, err) = workspace_op(&client, &base, endpoint, serde_json::json!({ "src": src, "dest": dest })).await;
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = uw.upgrade() {
+                    if ok { ui.invoke_refresh_explorer(); }
+                    ui.set_status(if ok { format!("{verb} {name}") }
+                                  else   { format!("Paste failed: {err}") }.into());
                 }
             }).ok();
         });
