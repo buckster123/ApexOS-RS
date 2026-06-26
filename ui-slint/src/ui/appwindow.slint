@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, BoardCard } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, UsbCandidate, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, BoardCard } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { IdentityWizard } from "components/identity_wizard.slint";
 import { ImagePicker } from "components/image_picker.slint";
@@ -134,6 +134,9 @@ export component AppWindow inherits Window {
     in-out property <image>          explorer-preview-image;
     in-out property <string>         explorer-preview-text: "";
     in-out property <bool>           explorer-can-attach: false;
+    in-out property <[UsbCandidate]> explorer-drive-candidates;
+    in-out property <bool>           explorer-drive-busy: false;
+    in-out property <string>         explorer-drive-result: "";
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id /
@@ -233,6 +236,8 @@ export component AppWindow inherits Window {
     callback explorer-rename(string, string); // path, new-name
     callback explorer-delete(string);         // path
     callback explorer-paste(string, string);  // src-path, mode → into current dir
+    callback explorer-drive-scan();            // list adoptable USB sticks
+    callback explorer-drive-prep(string, string); // dev, name → adopt as exo-workspace
     callback sketch-down(float, float);
     callback sketch-move(float, float);
     callback sketch-up();
@@ -788,6 +793,9 @@ export component AppWindow inherits Window {
                         explorer-preview-image: root.explorer-preview-image;
                         explorer-preview-text: root.explorer-preview-text;
                         explorer-can-attach: root.explorer-can-attach;
+                        explorer-drive-candidates: root.explorer-drive-candidates;
+                        explorer-drive-busy: root.explorer-drive-busy;
+                        explorer-drive-result: root.explorer-drive-result;
 
                         send-message(t) => { root.send-message(t); }
                         attach-image => { root.refresh-workspace-images(); root.image-picker-open = true; }
@@ -802,6 +810,8 @@ export component AppWindow inherits Window {
                         explorer-rename(p, n) => { root.explorer-rename(p, n); }
                         explorer-delete(p) => { root.explorer-delete(p); }
                         explorer-paste(p, m) => { root.explorer-paste(p, m); }
+                        explorer-drive-scan => { root.explorer-drive-scan(); }
+                        explorer-drive-prep(d, n) => { root.explorer-drive-prep(d, n); }
                         stop-turn => { root.stop-turn(); }
                         terminal-send(line) => { root.terminal-send(line); }
                         toggle-recording => { root.toggle-recording(); }

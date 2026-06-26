@@ -280,6 +280,13 @@ export struct ExplorerEntry {
     glyph:      string,   // icon (Rust maps dir/ext → emoji)
 }
 
+// One USB stick the "Use this drive" picker can adopt (GET /api/media/candidates).
+export struct UsbCandidate {
+    dev:     string,   // /dev/sdX1 (passed back to prep)
+    display: string,   // "SanDisk Ultra · 57.3 GB · MYSTICK (exfat)" — Rust pre-formats
+    label:   string,   // current volume label ("" if none)
+}
+
 // One drawn stroke in the Sketchpad (🎨). Rust owns the points; `commands` is
 // an SVG path string in canvas-pixel coords (rendered by a Path with a viewbox
 // matching the canvas). The same strokes are posted to /api/sketch for APEX.
