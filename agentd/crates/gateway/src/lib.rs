@@ -298,6 +298,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/workspace/move",        post(workspace_move_handler))
         .route("/api/workspace/copy",        post(workspace_copy_handler))
         .route("/api/media/eject",        post(media_eject_handler))
+        .route("/api/media/plugged",      post(media_plugged_handler))
         .route("/api/run",                post(run_command_handler))
         .route("/api/snapshot",           get(snapshot_handler))
         .route("/api/sonus/files",        get(sonus_files_handler))
@@ -3977,6 +3978,36 @@ async fn request_eject(label: &str) -> Result<(), String> {
     }
     Err(format!("{label} still mounted after 8s — the eject service may have failed \
                  (check: journalctl -u apexos-usb-eject)"))
+}
+
+/// POST /api/media/plugged {label} — the `usb-mount` helper calls this (loopback +
+/// token) right after own-mounting an `APEX-*` stick, so the agent learns the stick
+/// landed *the moment it's plugged* rather than waiting for its next turn's embodiment
+/// block. Mirrors the mesh-beacon notify: injects a root-session prompt so APEX can
+/// greet the stick proactively, unless `AGENTD_USB_NOTIFY_AGENT=0`.
+async fn media_plugged_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let label = body["label"].as_str().unwrap_or("").trim().to_string();
+    if !valid_exo_label(&label) {
+        return Json(serde_json::json!({ "ok": false, "error": "label must be APEX-<name>" }));
+    }
+    // Default ON; AGENTD_USB_NOTIFY_AGENT=0/false/off silences the proactive greeting.
+    let notify = std::env::var("AGENTD_USB_NOTIFY_AGENT")
+        .map(|v| { let v = v.to_lowercase(); v != "0" && v != "false" && v != "off" })
+        .unwrap_or(true);
+    if notify {
+        let text = format!(
+            "🔌 A USB exo-workspace stick **{label}** was just plugged in and mounted at \
+             `media/{label}` — portable storage you read + write like any workspace folder. \
+             If André's about to work from it, take a quick look and offer to pick up where \
+             its files leave off; when he's done with it you can `eject_media` it (label \
+             \"{label}\") so it's safe to unplug."
+        );
+        state.bus.emit(Event::UserPrompt { session: SessionId(0), text, images: vec![] }).await;
+    }
+    Json(serde_json::json!({ "ok": true, "label": label, "notified": notify }))
 }
 
 async fn workspace_list_handler(
