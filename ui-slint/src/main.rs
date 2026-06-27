@@ -479,31 +479,6 @@ fn board_turn_done() {
     board_push_recent("Turn complete".into(), String::new(), "DONE", board_color(148, 163, 184));
 }
 
-fn kind_ordinal(k: AppKind) -> i32 {
-    match k {
-        AppKind::Chat => 0,
-        AppKind::System => 1,
-        AppKind::Sensor => 2,
-        AppKind::Sessions => 3,
-        AppKind::Settings => 4,
-        AppKind::Terminal => 5,
-        AppKind::Council => 6,
-        AppKind::EventLog => 7,
-        AppKind::Mesh => 8,
-        AppKind::Inference => 9,
-        AppKind::AudioEditor => 10,
-        AppKind::Sonus => 11,
-        AppKind::Notes => 12,
-        AppKind::Face => 13,
-        AppKind::Sketchpad => 14,
-        AppKind::Web => 15,
-        AppKind::Calculator => 16,
-        AppKind::Explorer => 17,
-        AppKind::Occipital => 18,
-        AppKind::Board => 19,
-    }
-}
-
 fn kind_from_ordinal(o: i32) -> AppKind {
     match o {
         1 => AppKind::System,
@@ -1195,15 +1170,12 @@ fn face_window_visible() -> bool {
     })
 }
 
-/// Move a window to the top of the z-order (end of the model) and mark it
-/// focused. Returns the focused window's kind ordinal (or -1 if not found).
+/// Move a window to the top of the z-order (end of the model) and mark it focused.
 fn wm_focus(ui: &AppWindow, model: &Rc<slint::VecModel<WindowDesc>>, id: i32) {
     if let Some(i) = wm_index_by_id(model, id) {
         let d = model.remove(i);
-        let kind = d.kind;
         model.push(d);
         ui.set_focused_id(id);
-        ui.set_focused_kind(kind_ordinal(kind));
     }
 }
 
@@ -1213,13 +1185,11 @@ fn wm_refocus_top(ui: &AppWindow, model: &Rc<slint::VecModel<WindowDesc>>) {
         if let Some(d) = model.row_data(i) {
             if !d.minimized {
                 ui.set_focused_id(d.id);
-                ui.set_focused_kind(kind_ordinal(d.kind));
                 return;
             }
         }
     }
     ui.set_focused_id(0);
-    ui.set_focused_kind(-1);
 }
 
 fn wm_update_row(model: &Rc<slint::VecModel<WindowDesc>>, id: i32, f: impl FnOnce(&mut WindowDesc)) {
@@ -1375,10 +1345,14 @@ async fn run_terminal_ws(
 
 /// Spawn the terminal WS task on first Terminal-window launch (once).
 fn start_terminal(rt: &tokio::runtime::Handle, url: &str, ui_weak: slint::Weak<AppWindow>) {
-    if TERM_STARTED.with(|c| { let v = c.get(); c.set(true); v }) {
+    if TERM_STARTED.with(|c| c.get()) {
         return;
     }
+    // Latch STARTED only once we actually hold the receiver and spawn the task.
+    // Setting it before this guard bricked the terminal: if TERM_RX was ever None
+    // (already taken / not yet seeded) STARTED stayed true with no task and no retry.
     if let Some(rx) = TERM_RX.with(|r| r.borrow_mut().take()) {
+        TERM_STARTED.with(|c| c.set(true));
         rt.spawn(run_terminal_ws(url.to_string(), ui_weak, rx));
     }
 }
@@ -5066,7 +5040,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(ui) = uw.upgrade() {
                     if ok {
                         ui.invoke_refresh_explorer();
-                        if ui.get_explorer_selected_path().to_string() == path {
+                        if path == ui.get_explorer_selected_path().as_str() {
                             ui.set_explorer_selected_path("".into());
                             ui.set_explorer_selected_name("".into());
                             ui.set_explorer_selected_info("".into());

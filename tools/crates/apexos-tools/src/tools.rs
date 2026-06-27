@@ -2475,17 +2475,35 @@ fn gpio_sysfs_base() -> u32 {
         .unwrap_or(0)
 }
 
-// Export a GPIO via sysfs and return its path, or an error string.
-fn gpio_sysfs_export(gpio: u32) -> Result<String, String> {
+/// Export a GPIO via sysfs. Returns `(path, newly_exported)` — `newly_exported`
+/// is true only when this call created the export (the pin wasn't already up), so
+/// a caller can clean up exactly what it opened and leave a pin already in use alone.
+fn gpio_sysfs_export(gpio: u32) -> Result<(String, bool), String> {
     let sysfs_n = gpio_sysfs_base() + gpio;
     let path = format!("/sys/class/gpio/gpio{}", sysfs_n);
-    if !std::path::Path::new(&path).exists() {
+    let already = std::path::Path::new(&path).exists();
+    if !already {
         std::fs::write("/sys/class/gpio/export", sysfs_n.to_string())
             .map_err(|e| format!("export GPIO {}: {}", gpio, e))?;
         // Small settle delay after export
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    Ok(path)
+    Ok((path, !already))
+}
+
+/// Release a GPIO sysfs export (best-effort — cleanup, never the operation's result).
+fn gpio_sysfs_unexport(gpio: u32) {
+    let sysfs_n = gpio_sysfs_base() + gpio;
+    let _ = std::fs::write("/sys/class/gpio/unexport", sysfs_n.to_string());
+}
+
+/// Max pulse width. A "pulse" is a brief signal; the MCP server dispatches tools on
+/// a single synchronous thread, so an unbounded `duration_ms` would block every other
+/// tool call for that long. Clamp it.
+const GPIO_PULSE_MAX_MS: u64 = 5_000;
+
+fn clamp_pulse_ms(raw: u64) -> u64 {
+    raw.min(GPIO_PULSE_MAX_MS)
 }
 
 fn gpio_info() -> Value {
@@ -2538,8 +2556,9 @@ fn gpio_write(args: &Value) -> Value {
     if let Some(reason) = gpio_reserved_check(gpio) {
         return tool_error(format!("GPIO {} is reserved: {}", gpio, reason));
     }
+    // gpio_write leaves the pin exported on purpose — the driven value must persist.
     let path = match gpio_sysfs_export(gpio) {
-        Ok(p) => p,
+        Ok((p, _)) => p,
         Err(e) => return tool_error(e),
     };
     if let Err(e) = std::fs::write(format!("{}/direction", path), "out") {
@@ -2556,23 +2575,33 @@ fn gpio_pulse(args: &Value) -> Value {
         Some(n) => n as u32,
         None => return tool_error("gpio required"),
     };
-    let duration_ms = args["duration_ms"].as_u64().unwrap_or(100);
+    let duration_ms = clamp_pulse_ms(args["duration_ms"].as_u64().unwrap_or(100));
     if let Some(reason) = gpio_reserved_check(gpio) {
         return tool_error(format!("GPIO {} is reserved: {}", gpio, reason));
     }
-    let path = match gpio_sysfs_export(gpio) {
+    let (path, newly_exported) = match gpio_sysfs_export(gpio) {
         Ok(p) => p,
         Err(e) => return tool_error(e),
     };
-    let dir_path = format!("{}/direction", path);
     let val_path = format!("{}/value", path);
-    if let Err(e) = std::fs::write(&dir_path, "out") {
-        return tool_error(format!("set direction: {}", e));
+    // Drive high → hold → drive low, propagating any write failure (a swallowed
+    // "drive low" error could leave the pin stuck high while reporting success).
+    let result: Result<(), String> = (|| {
+        std::fs::write(format!("{}/direction", path), "out")
+            .map_err(|e| format!("set direction: {}", e))?;
+        std::fs::write(&val_path, "1").map_err(|e| format!("drive high: {}", e))?;
+        std::thread::sleep(std::time::Duration::from_millis(duration_ms));
+        std::fs::write(&val_path, "0").map_err(|e| format!("drive low: {}", e))?;
+        Ok(())
+    })();
+    // Release the export iff we created it (don't disturb a pin held by gpio_write).
+    if newly_exported {
+        gpio_sysfs_unexport(gpio);
     }
-    let _ = std::fs::write(&val_path, "1");
-    std::thread::sleep(std::time::Duration::from_millis(duration_ms));
-    let _ = std::fs::write(&val_path, "0");
-    tool_ok(json!({ "gpio": gpio, "duration_ms": duration_ms, "ok": true }))
+    match result {
+        Ok(()) => tool_ok(json!({ "gpio": gpio, "duration_ms": duration_ms, "ok": true })),
+        Err(e) => tool_error(e),
+    }
 }
 
 // Find the sysfs pwmchipN path and channel for a given BCM GPIO.
@@ -2778,6 +2807,17 @@ mod tests {
         assert!(!valid_exo_label("APEX-a b"));          // space
         assert!(!valid_exo_label("APEX-$(x)"));         // shell-ish chars
         assert!(!valid_exo_label(&format!("APEX-{}", "x".repeat(70)))); // too long
+    }
+
+    #[test]
+    fn clamp_pulse_ms_bounds_the_blocking_window() {
+        // Normal pulses pass through; an oversized one is capped so it can't block
+        // the single synchronous MCP dispatch thread for an unbounded time.
+        assert_eq!(clamp_pulse_ms(100), 100);
+        assert_eq!(clamp_pulse_ms(GPIO_PULSE_MAX_MS), GPIO_PULSE_MAX_MS);
+        assert_eq!(clamp_pulse_ms(GPIO_PULSE_MAX_MS + 1), GPIO_PULSE_MAX_MS);
+        assert_eq!(clamp_pulse_ms(u64::MAX), GPIO_PULSE_MAX_MS);
+        assert_eq!(clamp_pulse_ms(0), 0);
     }
 
     #[test]

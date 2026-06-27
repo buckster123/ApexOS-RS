@@ -139,11 +139,10 @@ export component AppWindow inherits Window {
     in-out property <string>         explorer-drive-result: "";
 
     // ── Window manager (G2) ─────────────────────────────────────────────
-    // Rust owns the set; model order = z-order (last on top). focused-id /
-    // focused-kind are Rust-maintained for chrome highlight + dock state.
+    // Rust owns the set; model order = z-order (last on top). focused-id is
+    // Rust-maintained for chrome highlight + dock state.
     in-out property <[WindowDesc]>   windows;
     in-out property <int>            focused-id: 0;
-    in-out property <int>            focused-kind: -1;   // AppKind ordinal of focused window
     // Taskbar (G3) — bottom-bar state. start-menu / notif-center popups land in
     // G3b / G3c; the toggles already drive the Start/tray button highlight.
     in-out property <bool>           start-menu-open: false;
