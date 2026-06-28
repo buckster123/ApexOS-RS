@@ -29,6 +29,9 @@ members = [
     # ── Native UI ─────────────────────────────────────────────────────────────
     "ui-slint",
 ]
+# apex-tts (Kokoro TTS sidecar) is its OWN workspace — it pins a different `ort` rc
+# than cerebro's fastembed, so it must resolve independently. Built by install.sh.
+exclude = ["tools/crates/apex-tts"]
 resolver = "2"
 
 [workspace.dependencies]

@@ -1,0 +1,33 @@
+# apex-tts — Kokoro-82M neural TTS sidecar.
+#
+# A standalone workspace ON PURPOSE: its own Cargo.lock lets it pin `ort` to the
+# rc tts-rs was built against (rc.10), independent of the main workspace where
+# cerebro's fastembed pins a *different*, incompatible ort rc. Two ONNX stacks,
+# two locks, zero version war. The gateway talks to this over loopback HTTP.
+[package]
+name = "apex-tts"
+version = "0.1.0"
+edition = "2021"
+
+# Empty table → this crate is its own workspace root (separate Cargo.lock),
+# excluded from the ApexOS-RS workspace (see the root Cargo.toml `exclude`).
+[workspace]
+
+[dependencies]
+# Kokoro TTS (MIT). lib name = `tts_rs`. Requires espeak-ng on PATH (phonemizer).
+tts-rs     = { version = "2026.2", features = ["kokoro"] }
+# tts-rs targets ort rc.11 specifically: rc.10 has `Session::inputs` as a method
+# (tts-rs calls it so), rc.12 made `ort::Error` generic (breaks tts-rs). Its
+# declared `^rc.10` is too loose — pin the exact working rc, frozen in our lock.
+# `download-binaries` fetches a prebuilt onnxruntime (incl. linux-aarch64 → Pi).
+ort        = { version = "=2.0.0-rc.11", features = ["download-binaries"] }
+# Minimal synchronous HTTP server — fits the blocking, one-at-a-time synth path
+# (tts-rs errors are !Send, so an async server would fight us).
+tiny_http  = "0.12"
+hound      = "3.5"        # build the WAV response in-memory
+serde_json = "1"
+log        = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 2             # keep the onnxruntime-heavy build kind to low-RAM Pis
