@@ -347,7 +347,8 @@ for arg in "$@"; do
     --no-cerebro-api)      NO_CEREBRO_API=true; NO_CEREBRO_API_CLI=true ;;
     --no-sensor)           NO_SENSOR=true; NO_SENSOR_CLI=true ;;
     --no-occipital)        NO_OCCIPITAL=true; NO_OCCIPITAL_CLI=true ;;
-    --no-voice)            NO_VOICE=true; NO_VOICE_CLI=true ;;
+    --no-voice)            NO_VOICE=true;  NO_VOICE_CLI=true ;;
+    --voice)               NO_VOICE=false; NO_VOICE_CLI=true ;;
     --api-key=*)           API_KEY="${arg#*=}"; API_KEY_SRC="--api-key flag" ;;
     --openrouter-key=*)    OPENROUTER_KEY="${arg#*=}" ;;
     --tier=*)              TIER="${arg#*=}"; TIER_CLI=true ;;
@@ -1146,6 +1147,63 @@ if ! $NO_OCCIPITAL; then
   fi
 fi
 
+# ── Voice (Kokoro TTS sidecar) ────────────────────────────────────────────────
+# apex-tts: the Kokoro-82M neural voice that replaces robotic piper for /api/speak.
+# A workspace-EXCLUDED crate (its own Cargo.lock pins a different ort rc than
+# cerebro's fastembed — see tools/crates/apex-tts/Cargo.toml), so it's built
+# separately here, like occipital. Voice is opt-in (default OFF): the TUI add-on,
+# a boot/USB APEXOS_VOICE=1, or --voice. Best-effort — a build/download failure
+# WARNS and continues; /api/speak then falls back to espeak-ng, so the node still
+# talks. This is what finally makes the long-inert --no-voice/voice flag *do* something.
+VOICE_INSTALLED=false
+if ! $NO_VOICE; then
+  hdr "Voice (Kokoro TTS)"
+  KOKORO_DIR=/var/lib/agentd/kokoro
+  KOKORO_MODEL_URL="${KOKORO_MODEL_URL:-https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx}"
+  KOKORO_VOICES_URL="${KOKORO_VOICES_URL:-https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin}"
+
+  voice_provision() {
+    ensure_bootstrap_deps                              # git/curl/ca-certs (idempotent)
+    # espeak-ng is BOTH Kokoro's phonemizer (apex-tts shells it) and the final
+    # /api/speak fallback — needed either way.
+    apt-get install -y --no-install-recommends espeak-ng >/dev/null 2>&1 \
+      || warn "espeak-ng install failed — Kokoro phonemization + the TTS fallback need it"
+
+    info "Building apex-tts (Kokoro sidecar; pulls onnxruntime — first build is heavy) …"
+    # Excluded crate → build by its own manifest. NOT --locked (pinned ort lives in
+    # its own lock; a foreign onnxruntime fetch shouldn't fail on a lock nicety).
+    sudo -u "$BUILD_USER" "$CARGO" build --release \
+      --manifest-path "$REPO_DIR/tools/crates/apex-tts/Cargo.toml" 2>&1 \
+      | grep --line-buffered -E "(^[[:space:]]*Compiling (apex-tts|tts-rs|ort)|Finished|^error)" || true
+    local bin="$REPO_DIR/tools/crates/apex-tts/target/release/apex-tts"
+    [[ -x "$bin" ]] || { warn "apex-tts build produced no binary"; return 1; }
+    install -m 755 "$bin" /usr/local/bin/apex-tts
+    install -d -o agentd -g agentd "$KOKORO_DIR"
+
+    # Fetch the int8 model (~92MB) + voices (~28MB) if absent (idempotent; atomic via .tmp).
+    local onnx="$KOKORO_DIR/kokoro-v1.0.int8.onnx" voices="$KOKORO_DIR/voices-v1.0.bin"
+    if [[ ! -f "$onnx" ]]; then
+      info "Downloading Kokoro model (~92MB) …"
+      curl -fSL --retry 3 -o "$onnx.tmp" "$KOKORO_MODEL_URL" \
+        && mv "$onnx.tmp" "$onnx" || { rm -f "$onnx.tmp"; warn "Kokoro model download failed"; return 1; }
+    fi
+    if [[ ! -f "$voices" ]]; then
+      info "Downloading Kokoro voices (~28MB) …"
+      curl -fSL --retry 3 -o "$voices.tmp" "$KOKORO_VOICES_URL" \
+        && mv "$voices.tmp" "$voices" || { rm -f "$voices.tmp"; warn "Kokoro voices download failed"; return 1; }
+    fi
+    chown -R agentd:agentd "$KOKORO_DIR" 2>/dev/null || true
+    ok "apex-tts → /usr/local/bin/apex-tts (Kokoro model in $KOKORO_DIR)"
+    return 0
+  }
+
+  if voice_provision; then
+    VOICE_INSTALLED=true
+  else
+    warn "Voice not installed — /api/speak uses espeak-ng; apexos-update retries"
+  fi
+fi
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 hdr "Configuration"
 
@@ -1344,12 +1402,16 @@ install_svc apex-sensor-bridge
 # The root KMS/DRM kiosk service is kiosk-mode only; desktop mode launches the UI
 # as a user-session winit window (the .desktop launcher above), never this service.
 ! $NO_UI && ! $IS_DESKTOP && install_svc apexos-rs-ui  || true
+# apex-tts only when voice provisioned (binary + model present) — else the service
+# would crash-loop on a missing model.
+$VOICE_INSTALLED && install_svc apex-tts || true
 
 systemctl daemon-reload
 
 systemctl enable agentd apex-sensor-bridge
 ! $NO_CEREBRO_API && systemctl enable cerebro-api  || true
 ! $NO_UI && ! $IS_DESKTOP && systemctl enable apexos-rs-ui || true
+$VOICE_INSTALLED && systemctl enable --now apex-tts || true
 
 ok "Services enabled"
 
