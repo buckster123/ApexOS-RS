@@ -1,0 +1,32 @@
+[Unit]
+Description=apex-tts — Kokoro-82M neural TTS sidecar (loopback :8770)
+After=network.target
+# NOT Requires/Wants agentd: this is an independent synth service the gateway
+# *calls* over loopback. If it's down, /api/speak falls back to espeak-ng — so it
+# must not be lifecycle-coupled to agentd (mirrors the apexos-rs-ui Wants-not-Requires lesson).
+
+[Service]
+Type=simple
+User=agentd
+Group=agentd
+ExecStart=/usr/local/bin/apex-tts
+Restart=always
+RestartSec=10
+Environment=KOKORO_DIR=/var/lib/agentd/kokoro
+Environment=APEX_TTS_ADDR=127.0.0.1:8770
+EnvironmentFile=-/etc/agentd/env
+
+# Sandbox — runs as the agentd uid, so without this it could write everything agentd
+# can. It only reads the Kokoro model under /var/lib/agentd/kokoro and shells the
+# system espeak-ng (the Kokoro phonemizer, reachable under ProtectSystem=strict which
+# keeps /usr read-only-but-readable). ort writes its optimized-graph cache there too,
+# so the kokoro dir is the one writable path. Loopback bind ⇒ keep the host network
+# (PrivateNetwork would hide 127.0.0.1 from the gateway).
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agentd/kokoro
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

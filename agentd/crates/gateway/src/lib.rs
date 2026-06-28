@@ -2421,6 +2421,29 @@ async fn transcribe_handler(body: axum::body::Bytes) -> impl IntoResponse {
     }
 }
 
+/// Ask the apex-tts (Kokoro) sidecar to synthesize `text`, returning WAV bytes.
+/// `None` if the sidecar is unreachable / errored — on a voice-off node the
+/// loopback connection is refused ~instantly, so the caller falls back cheaply.
+async fn tts_sidecar_wav(text: &str) -> Option<Vec<u8>> {
+    let url = std::env::var("APEX_TTS_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8770/synth".to_string());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .ok()?;
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "text": text }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let bytes = resp.bytes().await.ok()?;
+    (!bytes.is_empty()).then(|| bytes.to_vec())
+}
+
 async fn speak_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let text = match body["text"].as_str() {
         Some(t) if !t.trim().is_empty() => t.to_string(),
@@ -2428,12 +2451,26 @@ async fn speak_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse
     };
 
     tokio::spawn(async move {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros();
+        let wav = format!("/tmp/apex_speak_{stamp}.wav");
+
+        // 1. apex-tts (Kokoro) sidecar — the default neural voice.
+        if let Some(bytes) = tts_sidecar_wav(&text).await {
+            if tokio::fs::write(&wav, &bytes).await.is_ok() {
+                let _ = tokio::process::Command::new("aplay")
+                    .args(["-q", &wav])
+                    .output()
+                    .await;
+                let _ = tokio::fs::remove_file(&wav).await;
+                return;
+            }
+        }
+
+        // 2. piper (legacy external binary) if configured.
         if let Ok(model) = std::env::var("PIPER_MODEL") {
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros();
-            let wav = format!("/tmp/apex_speak_{stamp}.wav");
             if let Ok(mut child) = tokio::process::Command::new("piper")
                 .args(["--model", &model, "--output_file", &wav])
                 .stdin(std::process::Stdio::piped())
@@ -2446,14 +2483,18 @@ async fn speak_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse
                 let _ = child.wait().await;
                 let _ = tokio::process::Command::new("aplay")
                     .args(["-q", &wav])
-                    .output().await;
+                    .output()
+                    .await;
                 let _ = tokio::fs::remove_file(&wav).await;
+                return;
             }
-        } else {
-            let _ = tokio::process::Command::new("espeak-ng")
-                .args(["-a", "100", "-s", "150", &text])
-                .output().await;
         }
+
+        // 3. espeak-ng — always-available final fallback.
+        let _ = tokio::process::Command::new("espeak-ng")
+            .args(["-a", "100", "-s", "150", &text])
+            .output()
+            .await;
     });
 
     StatusCode::OK.into_response()
