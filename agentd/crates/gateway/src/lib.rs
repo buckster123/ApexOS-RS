@@ -2421,6 +2421,65 @@ async fn transcribe_handler(body: axum::body::Bytes) -> impl IntoResponse {
     }
 }
 
+// ── TTS backend selection (AGENTD_VOICE_BACKEND) ───────────────────────────────
+// Voice slice 2: one knob, `AGENTD_VOICE_BACKEND` = auto|local|api|off, mirroring
+// CEREBRO_VISION_BACKEND. `local` = the Kokoro apex-tts sidecar, `api` = cloud TTS
+// (ElevenLabs / OpenAI, picked by AGENTD_TTS_API or whichever key is set), `off` =
+// silent, `auto` = local first (free/offline) → api → piper → espeak. espeak-ng is
+// always the final fallback, so a node always talks. Default `auto` deliberately
+// prefers the free local voice over paid API spend (the operator opts into `api`).
+
+/// One ordered TTS attempt. The handler tries them in turn until one speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TtsStep {
+    Local,      // apex-tts Kokoro sidecar
+    ElevenLabs, // cloud API
+    OpenAi,     // cloud API
+    Piper,      // legacy external binary
+    Espeak,     // always-available fallback
+}
+
+/// Pure: resolve the ordered fallback plan from config + key availability.
+/// `backend` = AGENTD_VOICE_BACKEND, `tts_api` = AGENTD_TTS_API (empty → auto-by-key).
+fn tts_plan(backend: &str, tts_api: &str, has_elevenlabs: bool, has_openai: bool) -> Vec<TtsStep> {
+    let api_step = || -> Option<TtsStep> {
+        match tts_api.trim().to_ascii_lowercase().as_str() {
+            "elevenlabs" | "eleven" | "11labs" => has_elevenlabs.then_some(TtsStep::ElevenLabs),
+            "openai" | "oai" => has_openai.then_some(TtsStep::OpenAi),
+            // auto-by-key: prefer ElevenLabs (quality/latency), else OpenAI.
+            _ if has_elevenlabs => Some(TtsStep::ElevenLabs),
+            _ if has_openai => Some(TtsStep::OpenAi),
+            _ => None,
+        }
+    };
+    match backend.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" | "0" | "false" | "disabled" => vec![],
+        "local" => vec![TtsStep::Local, TtsStep::Piper, TtsStep::Espeak],
+        "api" => {
+            let mut v = Vec::new();
+            if let Some(s) = api_step() {
+                v.push(s);
+            }
+            v.push(TtsStep::Espeak);
+            v
+        }
+        // auto (and anything unknown): local first, then api, then the fallbacks.
+        _ => {
+            let mut v = vec![TtsStep::Local];
+            if let Some(s) = api_step() {
+                v.push(s);
+            }
+            v.push(TtsStep::Piper);
+            v.push(TtsStep::Espeak);
+            v
+        }
+    }
+}
+
+fn env_nonempty(name: &str) -> bool {
+    std::env::var(name).map(|v| !v.trim().is_empty()).unwrap_or(false)
+}
+
 /// Ask the apex-tts (Kokoro) sidecar to synthesize `text`, returning WAV bytes.
 /// `None` if the sidecar is unreachable / errored — on a voice-off node the
 /// loopback connection is refused ~instantly, so the caller falls back cheaply.
@@ -2444,6 +2503,170 @@ async fn tts_sidecar_wav(text: &str) -> Option<Vec<u8>> {
     (!bytes.is_empty()).then(|| bytes.to_vec())
 }
 
+/// Play WAV bytes on the device speakers via aplay. Returns true if it played.
+async fn play_wav_bytes(bytes: &[u8]) -> bool {
+    let path = format!("/tmp/apex_speak_{}.wav", speak_stamp());
+    if tokio::fs::write(&path, bytes).await.is_err() {
+        return false;
+    }
+    let ok = tokio::process::Command::new("aplay")
+        .args(["-q", &path])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let _ = tokio::fs::remove_file(&path).await;
+    ok
+}
+
+/// Play raw little-endian 16-bit mono PCM at `rate` Hz via aplay (no WAV header).
+async fn play_pcm_bytes(bytes: &[u8], rate: u32) -> bool {
+    let path = format!("/tmp/apex_speak_{}.pcm", speak_stamp());
+    if tokio::fs::write(&path, bytes).await.is_err() {
+        return false;
+    }
+    let rate_s = rate.to_string();
+    let ok = tokio::process::Command::new("aplay")
+        .args(["-q", "-f", "S16_LE", "-r", &rate_s, "-c", "1", &path])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let _ = tokio::fs::remove_file(&path).await;
+    ok
+}
+
+fn speak_stamp() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros()
+}
+
+async fn speak_local(text: &str) -> bool {
+    match tts_sidecar_wav(text).await {
+        Some(bytes) => play_wav_bytes(&bytes).await,
+        None => false,
+    }
+}
+
+/// ElevenLabs TTS → raw pcm_24000 → aplay. Needs ELEVENLABS_API_KEY.
+async fn speak_elevenlabs(text: &str) -> bool {
+    let Ok(key) = std::env::var("ELEVENLABS_API_KEY") else { return false };
+    if key.trim().is_empty() {
+        return false;
+    }
+    let voice = std::env::var("ELEVENLABS_VOICE_ID")
+        .unwrap_or_else(|_| "21m00Tcm4TlvDq8ikWAM".to_string()); // "Rachel" default
+    let model =
+        std::env::var("ELEVENLABS_MODEL").unwrap_or_else(|_| "eleven_flash_v2_5".to_string());
+    let url = format!(
+        "https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=pcm_24000"
+    );
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    else {
+        return false;
+    };
+    let resp = client
+        .post(&url)
+        .header("xi-api-key", key)
+        .json(&serde_json::json!({ "text": text, "model_id": model }))
+        .send()
+        .await;
+    let resp = match resp {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            eprintln!("[voice] elevenlabs HTTP {}", r.status());
+            return false;
+        }
+        Err(e) => {
+            eprintln!("[voice] elevenlabs request failed: {e}");
+            return false;
+        }
+    };
+    match resp.bytes().await {
+        Ok(b) if !b.is_empty() => play_pcm_bytes(&b, 24000).await,
+        _ => false,
+    }
+}
+
+/// OpenAI TTS → wav → aplay. Needs OPENAI_API_KEY (a real api.openai.com key — the
+/// routing OAI key may be OpenRouter, which doesn't serve /v1/audio/speech).
+async fn speak_openai(text: &str) -> bool {
+    let Ok(key) = std::env::var("OPENAI_API_KEY") else { return false };
+    if key.trim().is_empty() {
+        return false;
+    }
+    let model =
+        std::env::var("OPENAI_TTS_MODEL").unwrap_or_else(|_| "gpt-4o-mini-tts".to_string());
+    let voice = std::env::var("OPENAI_TTS_VOICE").unwrap_or_else(|_| "alloy".to_string());
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    else {
+        return false;
+    };
+    let resp = client
+        .post("https://api.openai.com/v1/audio/speech")
+        .bearer_auth(key)
+        .json(&serde_json::json!({
+            "model": model, "input": text, "voice": voice, "response_format": "wav"
+        }))
+        .send()
+        .await;
+    let resp = match resp {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            eprintln!("[voice] openai HTTP {}", r.status());
+            return false;
+        }
+        Err(e) => {
+            eprintln!("[voice] openai request failed: {e}");
+            return false;
+        }
+    };
+    match resp.bytes().await {
+        Ok(b) if !b.is_empty() => play_wav_bytes(&b).await,
+        _ => false,
+    }
+}
+
+async fn speak_piper(text: &str) -> bool {
+    let Ok(model) = std::env::var("PIPER_MODEL") else { return false };
+    let wav = format!("/tmp/apex_speak_{}.wav", speak_stamp());
+    let Ok(mut child) = tokio::process::Command::new("piper")
+        .args(["--model", &model, "--output_file", &wav])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(text.as_bytes()).await;
+    }
+    let _ = child.wait().await;
+    let ok = tokio::process::Command::new("aplay")
+        .args(["-q", &wav])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let _ = tokio::fs::remove_file(&wav).await;
+    ok
+}
+
+async fn speak_espeak(text: &str) -> bool {
+    tokio::process::Command::new("espeak-ng")
+        .args(["-a", "100", "-s", "150", text])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 async fn speak_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let text = match body["text"].as_str() {
         Some(t) if !t.trim().is_empty() => t.to_string(),
@@ -2451,53 +2674,53 @@ async fn speak_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse
     };
 
     tokio::spawn(async move {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros();
-        let wav = format!("/tmp/apex_speak_{stamp}.wav");
-
-        // 1. apex-tts (Kokoro) sidecar — the default neural voice.
-        if let Some(bytes) = tts_sidecar_wav(&text).await {
-            if tokio::fs::write(&wav, &bytes).await.is_ok() {
-                let _ = tokio::process::Command::new("aplay")
-                    .args(["-q", &wav])
-                    .output()
-                    .await;
-                let _ = tokio::fs::remove_file(&wav).await;
+        let backend = std::env::var("AGENTD_VOICE_BACKEND").unwrap_or_default();
+        let tts_api = std::env::var("AGENTD_TTS_API").unwrap_or_default();
+        let plan = tts_plan(
+            &backend,
+            &tts_api,
+            env_nonempty("ELEVENLABS_API_KEY"),
+            env_nonempty("OPENAI_API_KEY"),
+        );
+        for step in plan {
+            let spoke = match step {
+                TtsStep::Local => speak_local(&text).await,
+                TtsStep::ElevenLabs => speak_elevenlabs(&text).await,
+                TtsStep::OpenAi => speak_openai(&text).await,
+                TtsStep::Piper => speak_piper(&text).await,
+                TtsStep::Espeak => speak_espeak(&text).await,
+            };
+            if spoke {
                 return;
             }
         }
-
-        // 2. piper (legacy external binary) if configured.
-        if let Ok(model) = std::env::var("PIPER_MODEL") {
-            if let Ok(mut child) = tokio::process::Command::new("piper")
-                .args(["--model", &model, "--output_file", &wav])
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = child.stdin.take() {
-                    use tokio::io::AsyncWriteExt;
-                    let _ = stdin.write_all(text.as_bytes()).await;
-                }
-                let _ = child.wait().await;
-                let _ = tokio::process::Command::new("aplay")
-                    .args(["-q", &wav])
-                    .output()
-                    .await;
-                let _ = tokio::fs::remove_file(&wav).await;
-                return;
-            }
-        }
-
-        // 3. espeak-ng — always-available final fallback.
-        let _ = tokio::process::Command::new("espeak-ng")
-            .args(["-a", "100", "-s", "150", &text])
-            .output()
-            .await;
     });
 
     StatusCode::OK.into_response()
+}
+
+#[cfg(test)]
+mod voice_plan_tests {
+    use super::{tts_plan, TtsStep};
+
+    #[test]
+    fn plan_resolves_backend_and_keys() {
+        use TtsStep::*;
+        // off → silence regardless of keys
+        assert_eq!(tts_plan("off", "", true, true), Vec::<TtsStep>::new());
+        // local → never hits the API, even with keys
+        assert_eq!(tts_plan("local", "", true, true), vec![Local, Piper, Espeak]);
+        // auto → local first, then api (ElevenLabs preferred), then fallbacks
+        assert_eq!(tts_plan("auto", "", true, true), vec![Local, ElevenLabs, Piper, Espeak]);
+        assert_eq!(tts_plan("", "", false, true), vec![Local, OpenAi, Piper, Espeak]); // default auto, only OpenAI key
+        assert_eq!(tts_plan("auto", "", false, false), vec![Local, Piper, Espeak]); // no keys → no api step
+        // api → api first then espeak (explicit choice doesn't fall back to local)
+        assert_eq!(tts_plan("api", "", true, true), vec![ElevenLabs, Espeak]);
+        assert_eq!(tts_plan("api", "openai", true, true), vec![OpenAi, Espeak]); // explicit provider override
+        assert_eq!(tts_plan("api", "", false, false), vec![Espeak]); // api wanted but no key → espeak only
+        // explicit provider with no matching key → no api step
+        assert_eq!(tts_plan("api", "elevenlabs", false, true), vec![Espeak]);
+    }
 }
 
 // ── PTY terminal ─────────────────────────────────────────────────────────────
