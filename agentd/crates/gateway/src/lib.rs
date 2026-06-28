@@ -2332,32 +2332,181 @@ async fn record_stop_handler() -> impl IntoResponse {
     // Small yield so arecord flushes its WAV header
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
+    let r = transcribe_wav(SERVER_WAV).await;
+    let _ = tokio::fs::remove_file(SERVER_WAV).await;
+    match r {
+        Ok(text) => Json(serde_json::json!({ "text": text })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+// ── Voice: STT backend selection (AGENTD_STT_BACKEND) ──────────────────────────
+// Voice slice 3: STT mirrors the TTS selector. AGENTD_STT_BACKEND = auto|local|api|off.
+// `local` = whisper-cpp (existing), `api` = cloud (OpenAI / ElevenLabs Scribe), `off`
+// = disabled, `auto` = local first (free/offline) → api. Unlike TTS there's no trivial
+// always-on fallback, so an empty plan / all-failed returns an honest error.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SttStep {
+    Local,      // whisper-cpp
+    OpenAi,     // cloud API
+    ElevenLabs, // cloud API (Scribe)
+}
+
+/// Pure: resolve the ordered STT plan from config + key availability.
+fn stt_plan(backend: &str, stt_api: &str, has_openai: bool, has_elevenlabs: bool) -> Vec<SttStep> {
+    let api_step = || -> Option<SttStep> {
+        match stt_api.trim().to_ascii_lowercase().as_str() {
+            "openai" | "oai" => has_openai.then_some(SttStep::OpenAi),
+            "elevenlabs" | "eleven" | "11labs" | "scribe" => {
+                has_elevenlabs.then_some(SttStep::ElevenLabs)
+            }
+            // auto-by-key: prefer OpenAI (whisper is the canonical STT), else Scribe.
+            _ if has_openai => Some(SttStep::OpenAi),
+            _ if has_elevenlabs => Some(SttStep::ElevenLabs),
+            _ => None,
+        }
+    };
+    match backend.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" | "0" | "false" | "disabled" => vec![],
+        "local" => vec![SttStep::Local],
+        "api" => api_step().into_iter().collect(),
+        // auto (and unknown): local first, then api if a key is set.
+        _ => {
+            let mut v = vec![SttStep::Local];
+            if let Some(s) = api_step() {
+                v.push(s);
+            }
+            v
+        }
+    }
+}
+
+/// Transcribe a 16 kHz mono WAV at `wav_path`, trying the configured STT plan in
+/// order. Returns the text, or an error string if every backend in the plan failed.
+async fn transcribe_wav(wav_path: &str) -> Result<String, String> {
+    let backend = std::env::var("AGENTD_STT_BACKEND").unwrap_or_default();
+    let stt_api = std::env::var("AGENTD_STT_API").unwrap_or_default();
+    let plan = stt_plan(
+        &backend,
+        &stt_api,
+        env_nonempty("OPENAI_API_KEY"),
+        env_nonempty("ELEVENLABS_API_KEY"),
+    );
+    if plan.is_empty() {
+        return Err("STT disabled (AGENTD_STT_BACKEND=off, or no backend available)".into());
+    }
+    let mut last_err = String::from("no STT backend available");
+    for step in plan {
+        let r = match step {
+            SttStep::Local => stt_whispercpp(wav_path).await,
+            SttStep::OpenAi => stt_cloud_openai(wav_path).await,
+            SttStep::ElevenLabs => stt_cloud_elevenlabs(wav_path).await,
+        };
+        match r {
+            Ok(text) => return Ok(text),
+            Err(e) => {
+                eprintln!("[voice] stt {step:?} failed: {e}");
+                last_err = e;
+            }
+        }
+    }
+    Err(last_err)
+}
+
+/// Local whisper-cpp. A missing binary/model surfaces as an Err so the plan can
+/// fall through to a cloud backend.
+async fn stt_whispercpp(wav_path: &str) -> Result<String, String> {
     let model = std::env::var("WHISPER_MODEL")
         .unwrap_or_else(|_| "/var/lib/agentd/whisper/ggml-tiny.en.bin".into());
-    let bin = std::env::var("WHISPER_BIN")
-        .unwrap_or_else(|_| "/usr/local/bin/whisper-cpp".into());
-
+    let bin = std::env::var("WHISPER_BIN").unwrap_or_else(|_| "/usr/local/bin/whisper-cpp".into());
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::process::Command::new(&bin)
-            .args(["-m", &model, "-f", SERVER_WAV, "-nt", "-l", "en", "--no-prints"])
+            .args(["-m", &model, "-f", wav_path, "-nt", "-l", "en", "--no-prints"])
             .output(),
-    ).await;
-    let _ = tokio::fs::remove_file(SERVER_WAV).await;
-
+    )
+    .await;
     match result {
-        Ok(Ok(out)) => {
+        Ok(Ok(out)) if out.status.success() => {
             let raw = String::from_utf8_lossy(&out.stdout);
-            let text = raw.lines()
+            Ok(raw
+                .lines()
                 .map(|l| l.trim())
                 .filter(|l| !l.is_empty() && *l != "[BLANK_AUDIO]")
                 .collect::<Vec<_>>()
-                .join(" ");
-            Json(serde_json::json!({ "text": text })).into_response()
+                .join(" "))
         }
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("whisper: {e}")).into_response(),
-        Err(_)     => (StatusCode::GATEWAY_TIMEOUT, "whisper timed out").into_response(),
+        Ok(Ok(out)) => Err(format!(
+            "whisper-cpp exited: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Ok(Err(e)) => Err(format!("whisper-cpp: {e}")),
+        Err(_) => Err("whisper-cpp timed out".into()),
     }
+}
+
+/// OpenAI transcription (`/v1/audio/transcriptions`, multipart). OPENAI_API_KEY must
+/// be a real api.openai.com key (the routing OAI key may be OpenRouter).
+async fn stt_cloud_openai(wav_path: &str) -> Result<String, String> {
+    let key = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .ok_or("no OPENAI_API_KEY")?;
+    let model = std::env::var("OPENAI_STT_MODEL").unwrap_or_else(|_| "whisper-1".into());
+    let bytes = tokio::fs::read(wav_path).await.map_err(|e| format!("read wav: {e}"))?;
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name("audio.wav")
+        .mime_str("audio/wav")
+        .map_err(|e| e.to_string())?;
+    let form = reqwest::multipart::Form::new().part("file", part).text("model", model);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post("https://api.openai.com/v1/audio/transcriptions")
+        .bearer_auth(key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("openai request: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("openai HTTP {}", resp.status()));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| format!("openai json: {e}"))?;
+    Ok(v["text"].as_str().unwrap_or_default().trim().to_string())
+}
+
+/// ElevenLabs Scribe (`/v1/speech-to-text`, multipart). Reuses ELEVENLABS_API_KEY.
+async fn stt_cloud_elevenlabs(wav_path: &str) -> Result<String, String> {
+    let key = std::env::var("ELEVENLABS_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .ok_or("no ELEVENLABS_API_KEY")?;
+    let model = std::env::var("ELEVENLABS_STT_MODEL").unwrap_or_else(|_| "scribe_v2".into());
+    let bytes = tokio::fs::read(wav_path).await.map_err(|e| format!("read wav: {e}"))?;
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name("audio.wav")
+        .mime_str("audio/wav")
+        .map_err(|e| e.to_string())?;
+    let form = reqwest::multipart::Form::new().part("file", part).text("model_id", model);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post("https://api.elevenlabs.io/v1/speech-to-text")
+        .header("xi-api-key", key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("elevenlabs request: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("elevenlabs HTTP {}", resp.status()));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| format!("elevenlabs json: {e}"))?;
+    Ok(v["text"].as_str().unwrap_or_default().trim().to_string())
 }
 
 // ── Voice: STT + TTS ─────────────────────────────────────────────────────────
@@ -2393,31 +2542,34 @@ async fn transcribe_handler(body: axum::body::Bytes) -> impl IntoResponse {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("ffmpeg failed: {stderr}")).into_response();
     }
 
-    let model = std::env::var("WHISPER_MODEL")
-        .unwrap_or_else(|_| "/var/lib/agentd/whisper/ggml-tiny.en.bin".into());
-    let bin = std::env::var("WHISPER_BIN")
-        .unwrap_or_else(|_| "/usr/local/bin/whisper-cpp".into());
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        tokio::process::Command::new(&bin)
-            .args(["-m", &model, "-f", &tmp_wav, "-nt", "-l", "en", "--no-prints"])
-            .output(),
-    ).await;
+    let r = transcribe_wav(&tmp_wav).await;
     let _ = tokio::fs::remove_file(&tmp_wav).await;
+    match r {
+        Ok(text) => Json(serde_json::json!({ "text": text })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
 
-    match result {
-        Ok(Ok(out)) => {
-            let raw = String::from_utf8_lossy(&out.stdout);
-            let text = raw.lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-            Json(serde_json::json!({ "text": text })).into_response()
-        }
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("whisper: {e}")).into_response(),
-        Err(_)     => (StatusCode::GATEWAY_TIMEOUT, "whisper timed out (30s)").into_response(),
+#[cfg(test)]
+mod stt_plan_tests {
+    use super::{stt_plan, SttStep};
+
+    #[test]
+    fn plan_resolves_backend_and_keys() {
+        use SttStep::*;
+        // off → empty
+        assert_eq!(stt_plan("off", "", true, true), Vec::<SttStep>::new());
+        // local → whisper-cpp only, never cloud
+        assert_eq!(stt_plan("local", "", true, true), vec![Local]);
+        // auto → local first, then api (OpenAI preferred for STT)
+        assert_eq!(stt_plan("auto", "", true, true), vec![Local, OpenAi]);
+        assert_eq!(stt_plan("", "", false, true), vec![Local, ElevenLabs]); // default auto, only ElevenLabs
+        assert_eq!(stt_plan("auto", "", false, false), vec![Local]); // no keys → local only
+        // api → cloud only
+        assert_eq!(stt_plan("api", "", true, true), vec![OpenAi]);
+        assert_eq!(stt_plan("api", "elevenlabs", true, true), vec![ElevenLabs]); // explicit override
+        assert_eq!(stt_plan("api", "", false, false), Vec::<SttStep>::new()); // api wanted, no key
+        assert_eq!(stt_plan("api", "openai", false, true), Vec::<SttStep>::new()); // explicit, no matching key
     }
 }
 
