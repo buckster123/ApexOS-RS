@@ -9,11 +9,35 @@
 | Direction | Backend | How |
 |-----------|---------|-----|
 | **STT** (speech→text) | `whisper-cpp` binary | `arecord` → `whisper-cpp` (`/api/record/*`, `/api/transcribe`) |
-| **TTS** (text→speech) | **Kokoro-82M** (neural) → espeak-ng | `/api/speak` → `apex-tts` sidecar → `aplay`; piper/espeak fallback |
+| **TTS** (text→speech) | **Kokoro-82M** local *or* cloud API (ElevenLabs/OpenAI) → espeak-ng | `/api/speak`, backend per `AGENTD_VOICE_BACKEND` |
 
 Voice is **opt-in** (default off). Enable at install: the TUI add-on, a boot/USB
 `APEXOS_VOICE=1`, or `--voice`. Disable with `--no-voice`. The choice persists in
-`/etc/agentd/install.conf`, so `apexos-update` keeps it.
+`/etc/agentd/install.conf`, so `apexos-update` keeps it. (Voice-enable installs the
+local Kokoro path; the cloud API backends need only a key in `/etc/agentd/env` — no
+build, so they work on a voice-off node too.)
+
+## Backend selection (`AGENTD_VOICE_BACKEND`)
+
+One knob picks the TTS path, mirroring `CEREBRO_VISION_BACKEND`:
+
+| `AGENTD_VOICE_BACKEND` | Plan (tried in order, first that speaks wins) |
+|------------------------|-----------------------------------------------|
+| `auto` *(default)* | Kokoro local → cloud API → piper → espeak-ng |
+| `local` | Kokoro local → piper → espeak-ng (never the paid API) |
+| `api` | cloud API → espeak-ng (forces cloud) |
+| `off` | silent |
+
+`auto` deliberately prefers the **free local** voice — set `api` on a node where you
+want cloud quality (e.g. the desktop). espeak-ng is always the final fallback, so a node
+always talks. The plan resolver `tts_plan` is pure + unit-tested.
+
+**Cloud provider** = `AGENTD_TTS_API` (`elevenlabs`|`openai`), or auto-picked by whichever
+key is present (ElevenLabs preferred):
+- **ElevenLabs** — `ELEVENLABS_API_KEY` (+ optional `ELEVENLABS_VOICE_ID`, `ELEVENLABS_MODEL`).
+  Flash model, 75 ms, requests `pcm_24000` → `aplay`.
+- **OpenAI** — `OPENAI_API_KEY` (a *real* api.openai.com key — the routing `OAI_API_KEY`
+  may be OpenRouter, which doesn't serve `/v1/audio/speech`), `gpt-4o-mini-tts`, wav → `aplay`.
 
 ## Why Kokoro, why a sidecar
 
@@ -69,20 +93,25 @@ and also the final `/api/speak` fallback. install.sh installs it when voice is e
 
 | Var | Default | Purpose |
 |-----|---------|---------|
+| `AGENTD_VOICE_BACKEND` | `auto` | gateway: `auto`\|`local`\|`api`\|`off` TTS backend |
+| `AGENTD_TTS_API` | auto-by-key | gateway: `elevenlabs`\|`openai` cloud provider |
+| `ELEVENLABS_API_KEY` | unset | gateway: ElevenLabs auth (enables the cloud API path) |
+| `ELEVENLABS_VOICE_ID` / `ELEVENLABS_MODEL` | Rachel / `eleven_flash_v2_5` | gateway: ElevenLabs voice + model |
+| `OPENAI_API_KEY` | unset | gateway: **real** api.openai.com key for OpenAI TTS |
+| `OPENAI_TTS_MODEL` / `OPENAI_TTS_VOICE` | `gpt-4o-mini-tts` / `alloy` | gateway: OpenAI TTS model + voice |
 | `KOKORO_DIR` | `/var/lib/agentd/kokoro` | apex-tts: model dir (`*.onnx` + `voices-v1.0.bin`) |
 | `APEX_TTS_ADDR` | `127.0.0.1:8770` | apex-tts: loopback bind |
 | `APEX_TTS_URL` | `http://127.0.0.1:8770/synth` | gateway: where to reach the sidecar |
 | `KOKORO_MODEL_URL` / `KOKORO_VOICES_URL` | thewh1teagle release | install.sh: model download sources |
-| `PIPER_MODEL` | unset | gateway: legacy piper voice (2nd fallback, if set) |
+| `PIPER_MODEL` | unset | gateway: legacy piper voice (a fallback, if set) |
 | `WHISPER_MODEL` / `WHISPER_BIN` | `…/ggml-tiny.en.bin` / `whisper-cpp` | STT model + binary |
 
-## Roadmap (this is slice 1)
+## Roadmap
 
-All future slices converge on a tiered `AGENTD_VOICE_BACKEND=auto|local|api|off` selector
-(mirroring `CEREBRO_VISION_BACKEND`):
-
-1. ✅ **Kokoro local TTS** (this) — replace robotic piper, offline, the quality win.
-2. **STT modernization** — `whisper-rs` / Candle Whisper as a crate (drop the external binary).
-3. **API backend** — ElevenLabs Flash (75 ms, $50/M chars) / OpenAI TTS + Deepgram/OpenAI STT,
-   for realtime studio quality on net-connected nodes.
-4. **Tier selector** — `auto`: Nano → api/off, Micro+ → local Kokoro, Pro → GPU/api.
+1. ✅ **Kokoro local TTS** — replace robotic piper, offline, the quality win (the `local` backend).
+2. ✅ **TTS backend selector + cloud API** — `AGENTD_VOICE_BACKEND=auto|local|api|off` + ElevenLabs
+   Flash / OpenAI TTS for realtime studio quality on net-connected nodes.
+3. **STT modernization** — `whisper-rs` / Candle Whisper as a crate (drop the external binary),
+   and a cloud STT option (Deepgram / OpenAI) under the same backend idea.
+4. **UI + key onboarding** — a Settings backend selector (like PROMPT CACHE / SENSOR ALERTS),
+   `GET`/`POST /api/voice`, and install.sh ElevenLabs/OpenAI key prompting.
