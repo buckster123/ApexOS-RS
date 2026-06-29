@@ -1,0 +1,29 @@
+[Unit]
+Description=apex-stt — local Whisper speech-to-text sidecar (loopback :8771)
+After=network.target
+# NOT Requires/Wants agentd: an independent transcription service the gateway
+# *calls* over loopback. If it's down, STT falls through to whisper-cpp / cloud, so
+# it must not be lifecycle-coupled to agentd (mirrors apex-tts).
+
+[Service]
+Type=simple
+User=agentd
+Group=agentd
+ExecStart=/usr/local/bin/apex-stt
+Restart=always
+RestartSec=10
+Environment=WHISPER_MODEL=/var/lib/agentd/whisper/ggml-base.en.bin
+Environment=APEX_STT_ADDR=127.0.0.1:8771
+EnvironmentFile=-/etc/agentd/env
+
+# Sandbox — runs as the agentd uid. It only reads the Whisper model under
+# /var/lib/agentd/whisper; that dir is writable for any whisper.cpp scratch.
+# Loopback bind ⇒ keep the host network (PrivateNetwork would hide 127.0.0.1).
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agentd/whisper
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
