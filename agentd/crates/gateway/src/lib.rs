@@ -2399,7 +2399,7 @@ async fn transcribe_wav(wav_path: &str) -> Result<String, String> {
     let mut last_err = String::from("no STT backend available");
     for step in plan {
         let r = match step {
-            SttStep::Local => stt_whispercpp(wav_path).await,
+            SttStep::Local => stt_local(wav_path).await,
             SttStep::OpenAi => stt_cloud_openai(wav_path).await,
             SttStep::ElevenLabs => stt_cloud_elevenlabs(wav_path).await,
         };
@@ -2412,6 +2412,42 @@ async fn transcribe_wav(wav_path: &str) -> Result<String, String> {
         }
     }
     Err(last_err)
+}
+
+/// Local STT: the apex-stt (Whisper) sidecar first, then a hand-installed whisper-cpp
+/// binary. Both failing surfaces an Err so the plan can fall through to cloud.
+async fn stt_local(wav_path: &str) -> Result<String, String> {
+    match stt_sidecar(wav_path).await {
+        Ok(text) => Ok(text),
+        Err(sidecar_err) => match stt_whispercpp(wav_path).await {
+            Ok(text) => Ok(text),
+            Err(cpp_err) => Err(format!("apex-stt: {sidecar_err}; whisper-cpp: {cpp_err}")),
+        },
+    }
+}
+
+/// POST the WAV to the apex-stt sidecar. `Err` if unreachable (voice-off node refuses
+/// the loopback connection ~instantly) or it errored.
+async fn stt_sidecar(wav_path: &str) -> Result<String, String> {
+    let url = std::env::var("APEX_STT_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8771/transcribe".to_string());
+    let bytes = tokio::fs::read(wav_path).await.map_err(|e| format!("read wav: {e}"))?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(&url)
+        .header("content-type", "audio/wav")
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|e| format!("apex-stt request: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("apex-stt HTTP {}", resp.status()));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| format!("apex-stt json: {e}"))?;
+    Ok(v["text"].as_str().unwrap_or_default().trim().to_string())
 }
 
 /// Local whisper-cpp. A missing binary/model surfaces as an Err so the plan can

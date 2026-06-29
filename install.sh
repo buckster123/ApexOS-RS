@@ -1155,7 +1155,7 @@ fi
 # a boot/USB APEXOS_VOICE=1, or --voice. Best-effort — a build/download failure
 # WARNS and continues; /api/speak then falls back to espeak-ng, so the node still
 # talks. This is what finally makes the long-inert --no-voice/voice flag *do* something.
-VOICE_INSTALLED=false
+VOICE_INSTALLED=false; STT_INSTALLED=false
 if ! $NO_VOICE; then
   hdr "Voice (Kokoro TTS)"
   KOKORO_DIR=/var/lib/agentd/kokoro
@@ -1201,6 +1201,40 @@ if ! $NO_VOICE; then
     VOICE_INSTALLED=true
   else
     warn "Voice not installed — /api/speak uses espeak-ng; apexos-update retries"
+  fi
+
+  # Local STT (apex-stt Whisper sidecar) — independent of the TTS build above, so a
+  # failure of one doesn't sink the other. whisper.cpp has no ort, so its excluded
+  # workspace is purely for build isolation + a resident model.
+  WHISPER_DIR=/var/lib/agentd/whisper
+  WHISPER_GGML_URL="${WHISPER_GGML_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin}"
+
+  stt_provision() {
+    info "Building apex-stt (Whisper sidecar; compiles whisper.cpp — heavy first build) …"
+    sudo -u "$BUILD_USER" "$CARGO" build --release \
+      --manifest-path "$REPO_DIR/tools/crates/apex-stt/Cargo.toml" 2>&1 \
+      | grep --line-buffered -E "(^[[:space:]]*Compiling (apex-stt|whisper-rs)|Finished|^error)" || true
+    local bin="$REPO_DIR/tools/crates/apex-stt/target/release/apex-stt"
+    [[ -x "$bin" ]] || { warn "apex-stt build produced no binary"; return 1; }
+    install -m 755 "$bin" /usr/local/bin/apex-stt
+    install -d -o agentd -g agentd "$WHISPER_DIR"
+
+    # Fetch the ggml model (base.en ~148MB) if absent (idempotent; atomic via .tmp).
+    local model="$WHISPER_DIR/ggml-base.en.bin"
+    if [[ ! -f "$model" ]]; then
+      info "Downloading Whisper model (base.en, ~148MB) …"
+      curl -fSL --retry 3 -o "$model.tmp" "$WHISPER_GGML_URL" \
+        && mv "$model.tmp" "$model" || { rm -f "$model.tmp"; warn "Whisper model download failed"; return 1; }
+    fi
+    chown -R agentd:agentd "$WHISPER_DIR" 2>/dev/null || true
+    ok "apex-stt → /usr/local/bin/apex-stt (Whisper model in $WHISPER_DIR)"
+    return 0
+  }
+
+  if stt_provision; then
+    STT_INSTALLED=true
+  else
+    warn "Local STT not installed — /api/transcribe needs whisper-cpp or cloud STT; apexos-update retries"
   fi
 fi
 
@@ -1405,6 +1439,7 @@ install_svc apex-sensor-bridge
 # apex-tts only when voice provisioned (binary + model present) — else the service
 # would crash-loop on a missing model.
 $VOICE_INSTALLED && install_svc apex-tts || true
+$STT_INSTALLED   && install_svc apex-stt || true
 
 systemctl daemon-reload
 
@@ -1412,6 +1447,7 @@ systemctl enable agentd apex-sensor-bridge
 ! $NO_CEREBRO_API && systemctl enable cerebro-api  || true
 ! $NO_UI && ! $IS_DESKTOP && systemctl enable apexos-rs-ui || true
 $VOICE_INSTALLED && systemctl enable --now apex-tts || true
+$STT_INSTALLED   && systemctl enable --now apex-stt || true
 
 ok "Services enabled"
 

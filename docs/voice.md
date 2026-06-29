@@ -42,15 +42,21 @@ key is present (ElevenLabs preferred):
 ### STT backend (`AGENTD_STT_BACKEND`)
 
 The STT side mirrors it: `auto|local|api|off`, resolved by the pure, unit-tested `stt_plan`.
-`local` = whisper-cpp; `api` = cloud (OpenAI `/v1/audio/transcriptions` or ElevenLabs Scribe
-`/v1/speech-to-text`, both multipart, both returning a `text` field); `auto` = local first,
-then api if a key is set. Unlike TTS there's no trivial always-on fallback, so an empty/all-failed
-plan returns an honest error. Provider = `AGENTD_STT_API` (`openai`|`elevenlabs`) or auto-by-key
-(**OpenAI preferred** — whisper is the canonical STT). `/api/record/*` and `/api/transcribe` both
-route through the shared `transcribe_wav` (a missing local whisper-cpp surfaces as an error → the
-plan falls through to cloud). *Note: whisper-cpp itself isn't installed by install.sh yet — until
-the local STT modernization slice, `local` works only where a whisper-cpp binary is present; set
-`AGENTD_STT_BACKEND=api` + a key for cloud STT.*
+`local` = the **apex-stt Whisper sidecar** (then a hand-installed whisper-cpp binary as a fallback);
+`api` = cloud (OpenAI `/v1/audio/transcriptions` or ElevenLabs Scribe `/v1/speech-to-text`, both
+multipart, both returning a `text` field); `auto` = local first, then api if a key is set. Unlike
+TTS there's no trivial always-on fallback, so an empty/all-failed plan returns an honest error.
+Provider = `AGENTD_STT_API` (`openai`|`elevenlabs`) or auto-by-key (**OpenAI preferred** — whisper
+is the canonical STT). `/api/record/*` and `/api/transcribe` both route through the shared
+`transcribe_wav` (which posts the 16 kHz mono WAV to apex-stt; if that's down it tries whisper-cpp,
+then cloud).
+
+**apex-stt** (`tools/crates/apex-stt`) is the STT twin of apex-tts: a workspace-excluded
+`tiny_http` server that loads a Whisper ggml model once via [`whisper-rs`](https://crates.io/crates/whisper-rs)
+(whisper.cpp; CPU by default, GPU features available for the Pro tier) and answers `POST /transcribe`
+(a WAV body) with `{text}`. Excluded purely for build isolation — whisper.cpp has no `ort`, so no
+version war (unlike the TTS sidecar). install.sh builds it + fetches `ggml-base.en.bin` (~148 MB,
+override `WHISPER_GGML_URL`) into `/var/lib/agentd/whisper` when voice is enabled.
 
 ## Why Kokoro, why a sidecar
 
@@ -116,6 +122,10 @@ and also the final `/api/speak` fallback. install.sh installs it when voice is e
 | `AGENTD_STT_API` | auto-by-key | gateway: cloud STT provider `openai`\|`elevenlabs` (OpenAI preferred) |
 | `OPENAI_STT_MODEL` | `whisper-1` | gateway: OpenAI transcription model |
 | `ELEVENLABS_STT_MODEL` | `scribe_v2` | gateway: ElevenLabs Scribe STT model |
+| `APEX_STT_ADDR` | `127.0.0.1:8771` | apex-stt: loopback bind |
+| `APEX_STT_URL` | `http://127.0.0.1:8771/transcribe` | gateway: where local STT reaches apex-stt |
+| `WHISPER_GGML_URL` | ggerganov base.en | install.sh: Whisper ggml model download source |
+| `WHISPER_LANG` | `en` | apex-stt: language hint |
 | `KOKORO_DIR` | `/var/lib/agentd/kokoro` | apex-tts: model dir (`*.onnx` + `voices-v1.0.bin`) |
 | `APEX_TTS_ADDR` | `127.0.0.1:8770` | apex-tts: loopback bind |
 | `APEX_TTS_URL` | `http://127.0.0.1:8770/synth` | gateway: where to reach the sidecar |
@@ -128,8 +138,9 @@ and also the final `/api/speak` fallback. install.sh installs it when voice is e
 1. ✅ **Kokoro local TTS** — replace robotic piper, offline, the quality win (the `local` backend).
 2. ✅ **TTS backend selector + cloud API** — `AGENTD_VOICE_BACKEND=auto|local|api|off` + ElevenLabs
    Flash / OpenAI TTS for realtime studio quality on net-connected nodes.
-3. ◑ **STT selector + cloud STT** — `AGENTD_STT_BACKEND` + OpenAI / ElevenLabs Scribe (done).
-   *Remaining:* local STT modernization — `whisper-rs` / Candle Whisper as a crate (or an
-   apex-stt sidecar), so `local` works without a hand-installed whisper-cpp binary.
-4. **UI + key onboarding** — a Settings backend selector (like PROMPT CACHE / SENSOR ALERTS),
-   `GET`/`POST /api/voice`, and install.sh ElevenLabs/OpenAI key prompting.
+3. ✅ **STT selector + cloud STT** — `AGENTD_STT_BACKEND` + OpenAI / ElevenLabs Scribe.
+4. ✅ **Local STT** — the `apex-stt` Whisper sidecar (whisper-rs), so `local` STT works out of
+   the box (install.sh builds it + fetches the ggml model), no hand-installed whisper-cpp needed.
+5. **UI + key onboarding** — a Settings backend selector (like PROMPT CACHE / SENSOR ALERTS),
+   `GET`/`POST /api/voice`, install.sh ElevenLabs/OpenAI key prompting, and GPU-feature builds
+   (`whisper-rs` cuda/metal/vulkan) on the Pro tier.
