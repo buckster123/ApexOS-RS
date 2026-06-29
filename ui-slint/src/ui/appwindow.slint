@@ -48,6 +48,9 @@ export component AppWindow inherits Window {
     in-out property <string>         settings-cache-ttl: "5m";
     // Sensor-alert sensitivity profile, surfaced in Settings + set via /api/sensors/config.
     in-out property <string>         settings-sensor-profile: "standard";
+    // Voice backend (auto/local/api/off), surfaced in Settings + set via /api/voice.
+    in-out property <string>         settings-voice-backend: "auto";
+    in-out property <bool>           settings-voice-api-available: false;
     // Login default-profile (slice 3e): the logged-in human's name + whether they're
     // this device's auto-login default; set/cleared via the Settings LOGIN section.
     in-out property <string>         settings-login-user-name: "";
@@ -200,6 +203,7 @@ export component AppWindow inherits Window {
     callback save-soul(string);
     callback set-policy(string);
     callback set-model(string);
+    callback set-voice-backend(string);
     callback set-cache(bool, bool, string);
     callback set-sensor-profile(string);
     callback set-default-login(bool);
@@ -602,6 +606,8 @@ export component AppWindow inherits Window {
                         cache-conversation: root.settings-cache-conversation;
                         cache-ttl: root.settings-cache-ttl;
                         sensor-profile: root.settings-sensor-profile;
+                        voice-backend: root.settings-voice-backend;
+                        voice-api-available: root.settings-voice-api-available;
                         login-user-name: root.settings-login-user-name;
                         login-is-default: root.settings-login-is-default;
                         save-soul(text) => { root.save-soul(text); }
@@ -609,6 +615,7 @@ export component AppWindow inherits Window {
                         set-model(id) => { root.set-model(id); }
                         set-cache(e, c, t) => { root.set-cache(e, c, t); }
                         set-sensor-profile(p) => { root.set-sensor-profile(p); }
+                        set-voice-backend(p) => { root.set-voice-backend(p); }
                         set-default-login(b) => { root.set-default-login(b); }
                         refresh => { root.refresh-settings(); }
                     }
@@ -721,6 +728,8 @@ export component AppWindow inherits Window {
                         cache-conversation: root.settings-cache-conversation;
                         cache-ttl: root.settings-cache-ttl;
                         sensor-profile: root.settings-sensor-profile;
+                        voice-backend: root.settings-voice-backend;
+                        voice-api-available: root.settings-voice-api-available;
                         login-user-name: root.settings-login-user-name;
                         login-is-default: root.settings-login-is-default;
                         terminal-text: root.terminal-text;
@@ -829,6 +838,7 @@ export component AppWindow inherits Window {
                         set-model(id) => { root.set-model(id); }
                         set-cache(e, c, t) => { root.set-cache(e, c, t); }
                         set-sensor-profile(p) => { root.set-sensor-profile(p); }
+                        set-voice-backend(p) => { root.set-voice-backend(p); }
                         set-default-login(b) => { root.set-default-login(b); }
                         refresh-settings => { root.refresh-settings(); }
                         refresh-events(types, hours) => { root.refresh-events(types, hours); }

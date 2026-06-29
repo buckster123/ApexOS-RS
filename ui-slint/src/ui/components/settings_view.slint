@@ -25,6 +25,9 @@ export component SettingsView {
     in property <string>         cache-ttl: "5m";
     // Sensor-alert sensitivity profile (standard / smoker / kitchen / workshop).
     in property <string>         sensor-profile: "standard";
+    // Voice backend (auto / local / api / off), live-tuned via /api/voice.
+    in property <string>         voice-backend: "auto";
+    in property <bool>           voice-api-available: false;
     // Login default-profile (slice 3e): the logged-in human's name ("" for the
     // device-token / admin path) and whether they're this device's auto-login default.
     in property <string>         login-user-name: "";
@@ -37,6 +40,7 @@ export component SettingsView {
     // (enabled, cache_conversation, ttl) — full desired state each tap.
     callback set-cache(bool, bool, string);
     callback set-sensor-profile(string);
+    callback set-voice-backend(string);
     callback refresh();
 
     VerticalLayout {
@@ -426,6 +430,57 @@ export component SettingsView {
 
                     Text {
                         text: "Raises the air-quality + thermal alert floor for a noisy environment so routine activity (a cigarette, cooking, soldering) doesn't trigger an autonomous alert — a sustained, hotter real event still does.";
+                        color: Palette.text-dim;
+                        font-size: 10px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // ── Voice backend ──────────────────────────────────────────
+                VerticalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: "VOICE";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 2px;
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        Text { text: "Speech backend (TTS + STT)"; color: Palette.text-dim; font-size: 10px; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            for opt in ["auto", "local", "api", "off"]: Rectangle {
+                                width: 84px;
+                                height: 32px;
+                                border-radius: Palette.radius;
+                                background: root.voice-backend == opt ? Palette.primary-dim : Palette.surface;
+                                border-width: 1px;
+                                border-color: root.voice-backend == opt ? Palette.primary : Palette.border;
+                                animate background   { duration: 150ms; }
+                                animate border-color { duration: 150ms; }
+                                TouchArea {
+                                    clicked => { root.set-voice-backend(opt); }
+                                }
+                                Text {
+                                    text: opt;
+                                    color: root.voice-backend == opt ? Palette.primary : Palette.text-dim;
+                                    font-size: 9px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: root.voice-api-available
+                            ? "local = on-device Kokoro/Whisper (offline, free). api = cloud (ElevenLabs/OpenAI) for more natural voice on light devices. auto = local first, then api. A cloud API key is configured."
+                            : "local = on-device Kokoro/Whisper (offline, free). api = cloud (needs an ElevenLabs/OpenAI key in /etc/agentd/env — none set yet). auto = local first, then api. off = silent.";
                         color: Palette.text-dim;
                         font-size: 10px;
                         wrap: word-wrap;
