@@ -29,9 +29,10 @@ members = [
     # ── Native UI ─────────────────────────────────────────────────────────────
     "ui-slint",
 ]
-# apex-tts (Kokoro TTS sidecar) is its OWN workspace — it pins a different `ort` rc
-# than cerebro's fastembed, so it must resolve independently. Built by install.sh.
-exclude = ["tools/crates/apex-tts"]
+# apex-tts (Kokoro TTS) + apex-stt (Whisper STT) are their OWN workspaces — apex-tts
+# pins a different `ort` rc than cerebro's fastembed (must resolve independently), and
+# both keep heavy ML/C++ builds off the main workspace. Built separately by install.sh.
+exclude = ["tools/crates/apex-tts", "tools/crates/apex-stt"]
 resolver = "2"
 
 [workspace.dependencies]

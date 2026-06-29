@@ -1,0 +1,28 @@
+# apex-stt — local Whisper speech-to-text sidecar.
+#
+# Mirrors apex-tts: a standalone workspace (own Cargo.lock) so its whisper.cpp C++
+# build stays out of the main `cargo build --workspace` and off the Nano/low-RAM
+# builds. No `ort` here (whisper.cpp/ggml is self-contained), so no version-war —
+# the sidecar shape is for build isolation + a resident model, not dep decoupling.
+# The gateway POSTs a 16 kHz mono WAV; this returns {text}.
+[package]
+name = "apex-stt"
+version = "0.1.0"
+edition = "2021"
+
+# Empty table → its own workspace root (separate Cargo.lock), excluded from the
+# ApexOS-RS workspace (see the root Cargo.toml `exclude`). Built by install.sh.
+[workspace]
+
+[dependencies]
+# Whisper.cpp Rust binding (ggml). CPU by default; cuda/metal/vulkan are opt-in
+# features for the Pro tier later. Runs well on a Pi CPU.
+whisper-rs = "0.16"
+tiny_http  = "0.12"        # minimal synchronous HTTP server (serial synth)
+hound      = "3.5"         # decode the incoming WAV → i16 samples
+serde_json = "1"
+log        = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 2              # keep the whisper.cpp build kind to low-RAM Pis
