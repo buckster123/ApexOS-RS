@@ -319,6 +319,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/council/{id}/butt-in",  post(council_butt_in_handler))
         .route("/api/capabilities",       get(capabilities_handler))
         .route("/api/sensors/config",     get(sensor_config_get_handler).post(sensor_config_post_handler))
+        .route("/api/voice",              get(get_voice_handler).post(set_voice_handler))
         .route("/api/spawn",              post(spawn_handler))
         .route("/api/mesh/file",          post(mesh_file_handler).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/api/mesh/nodes",         get(mesh_nodes_handler))
@@ -2385,11 +2386,10 @@ fn stt_plan(backend: &str, stt_api: &str, has_openai: bool, has_elevenlabs: bool
 /// Transcribe a 16 kHz mono WAV at `wav_path`, trying the configured STT plan in
 /// order. Returns the text, or an error string if every backend in the plan failed.
 async fn transcribe_wav(wav_path: &str) -> Result<String, String> {
-    let backend = std::env::var("AGENTD_STT_BACKEND").unwrap_or_default();
-    let stt_api = std::env::var("AGENTD_STT_API").unwrap_or_default();
+    let cfg = voice_config_snapshot();
     let plan = stt_plan(
-        &backend,
-        &stt_api,
+        &cfg.stt_backend,
+        &cfg.stt_api,
         env_nonempty("OPENAI_API_KEY"),
         env_nonempty("ELEVENLABS_API_KEY"),
     );
@@ -2607,6 +2607,101 @@ mod stt_plan_tests {
         assert_eq!(stt_plan("api", "", false, false), Vec::<SttStep>::new()); // api wanted, no key
         assert_eq!(stt_plan("api", "openai", false, true), Vec::<SttStep>::new()); // explicit, no matching key
     }
+}
+
+// ── Runtime voice config (live-tunable via /api/voice + the Settings UI) ───────
+// Voice slice 5: the env vars (AGENTD_VOICE_BACKEND / _TTS_API / _STT_BACKEND /
+// _STT_API) seed a process-global that the Settings UI retunes live, persisted to
+// AGENTD_VOICE_CONFIG. Same shape as the sensor-profile / prompt-cache live knobs.
+// Empty string = the plan-resolver default (auto backend / auto-by-key provider),
+// so an unset/default node is byte-identical to the pre-slice env behaviour.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct VoiceConfig {
+    #[serde(default)]
+    voice_backend: String, // auto|local|api|off  (TTS)
+    #[serde(default)]
+    tts_api: String, // elevenlabs|openai|"" (auto-by-key)
+    #[serde(default)]
+    stt_backend: String, // auto|local|api|off  (STT)
+    #[serde(default)]
+    stt_api: String, // openai|elevenlabs|"" (auto-by-key)
+}
+
+static VOICE_CONFIG: OnceLock<std::sync::RwLock<VoiceConfig>> = OnceLock::new();
+
+fn voice_config_path() -> String {
+    std::env::var("AGENTD_VOICE_CONFIG").unwrap_or_else(|_| "/var/lib/agentd/voice_config.json".into())
+}
+
+fn voice_config_cell() -> &'static std::sync::RwLock<VoiceConfig> {
+    VOICE_CONFIG.get_or_init(|| {
+        // Persisted file wins (the operator's live choice survives restart); else seed
+        // from /etc/agentd/env so a fresh node honours its configured defaults.
+        let cfg = std::fs::read_to_string(voice_config_path())
+            .ok()
+            .and_then(|s| serde_json::from_str::<VoiceConfig>(&s).ok())
+            .unwrap_or_else(|| VoiceConfig {
+                voice_backend: std::env::var("AGENTD_VOICE_BACKEND").unwrap_or_default(),
+                tts_api: std::env::var("AGENTD_TTS_API").unwrap_or_default(),
+                stt_backend: std::env::var("AGENTD_STT_BACKEND").unwrap_or_default(),
+                stt_api: std::env::var("AGENTD_STT_API").unwrap_or_default(),
+            });
+        std::sync::RwLock::new(cfg)
+    })
+}
+
+fn voice_config_snapshot() -> VoiceConfig {
+    voice_config_cell().read().map(|c| c.clone()).unwrap_or_default()
+}
+
+fn voice_backend_valid(s: &str) -> bool {
+    matches!(s, "auto" | "local" | "api" | "off")
+}
+
+async fn get_voice_handler() -> impl IntoResponse {
+    let c = voice_config_snapshot();
+    let or_auto = |s: String| if s.is_empty() { "auto".to_string() } else { s };
+    Json(serde_json::json!({
+        "voice_backend": or_auto(c.voice_backend),
+        "tts_api":       c.tts_api,
+        "stt_backend":   or_auto(c.stt_backend),
+        "stt_api":       c.stt_api,
+        "has_elevenlabs": env_nonempty("ELEVENLABS_API_KEY"),
+        "has_openai":     env_nonempty("OPENAI_API_KEY"),
+        "backends":      ["auto", "local", "api", "off"],
+    }))
+}
+
+async fn set_voice_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    {
+        let Ok(mut c) = voice_config_cell().write() else {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "voice config lock poisoned").into_response();
+        };
+        // Backends are validated against the known set; providers are free-form (the
+        // plan resolvers treat any unknown value as auto-by-key, so they can't misfire).
+        if let Some(v) = body["voice_backend"].as_str() {
+            if voice_backend_valid(v) {
+                c.voice_backend = v.to_string();
+            }
+        }
+        if let Some(v) = body["stt_backend"].as_str() {
+            if voice_backend_valid(v) {
+                c.stt_backend = v.to_string();
+            }
+        }
+        if let Some(v) = body["tts_api"].as_str() {
+            c.tts_api = v.to_string();
+        }
+        if let Some(v) = body["stt_api"].as_str() {
+            c.stt_api = v.to_string();
+        }
+        // Persist best-effort (in-memory change is already live for the next turn).
+        let _ = std::fs::write(
+            voice_config_path(),
+            serde_json::to_string_pretty(&*c).unwrap_or_default(),
+        );
+    }
+    get_voice_handler().await.into_response()
 }
 
 // ── TTS backend selection (AGENTD_VOICE_BACKEND) ───────────────────────────────
@@ -2862,11 +2957,10 @@ async fn speak_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse
     };
 
     tokio::spawn(async move {
-        let backend = std::env::var("AGENTD_VOICE_BACKEND").unwrap_or_default();
-        let tts_api = std::env::var("AGENTD_TTS_API").unwrap_or_default();
+        let cfg = voice_config_snapshot();
         let plan = tts_plan(
-            &backend,
-            &tts_api,
+            &cfg.voice_backend,
+            &cfg.tts_api,
             env_nonempty("ELEVENLABS_API_KEY"),
             env_nonempty("OPENAI_API_KEY"),
         );

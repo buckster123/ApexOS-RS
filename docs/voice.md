@@ -126,6 +126,7 @@ and also the final `/api/speak` fallback. install.sh installs it when voice is e
 | `APEX_STT_URL` | `http://127.0.0.1:8771/transcribe` | gateway: where local STT reaches apex-stt |
 | `WHISPER_GGML_URL` | ggerganov base.en | install.sh: Whisper ggml model download source |
 | `WHISPER_LANG` | `en` | apex-stt: language hint |
+| `AGENTD_VOICE_CONFIG` | `/var/lib/agentd/voice_config.json` | gateway: persisted live voice config (`/api/voice`) |
 | `KOKORO_DIR` | `/var/lib/agentd/kokoro` | apex-tts: model dir (`*.onnx` + `voices-v1.0.bin`) |
 | `APEX_TTS_ADDR` | `127.0.0.1:8770` | apex-tts: loopback bind |
 | `APEX_TTS_URL` | `http://127.0.0.1:8770/synth` | gateway: where to reach the sidecar |
@@ -141,6 +142,18 @@ and also the final `/api/speak` fallback. install.sh installs it when voice is e
 3. ✅ **STT selector + cloud STT** — `AGENTD_STT_BACKEND` + OpenAI / ElevenLabs Scribe.
 4. ✅ **Local STT** — the `apex-stt` Whisper sidecar (whisper-rs), so `local` STT works out of
    the box (install.sh builds it + fetches the ggml model), no hand-installed whisper-cpp needed.
-5. **UI + key onboarding** — a Settings backend selector (like PROMPT CACHE / SENSOR ALERTS),
-   `GET`/`POST /api/voice`, install.sh ElevenLabs/OpenAI key prompting, and GPU-feature builds
-   (`whisper-rs` cuda/metal/vulkan) on the Pro tier.
+5. ◑ **Settings UI selector** — a native **VOICE** chip row (auto/local/api/off) in Settings,
+   backed by `GET`/`POST /api/voice` (a process-global `VoiceConfig` seeded from env, retuned
+   live, persisted to `AGENTD_VOICE_CONFIG`). One chip drives both TTS + STT; power users can
+   split `tts_api`/`stt_api` via the endpoint. *Remaining:* install.sh ElevenLabs/OpenAI key
+   prompting, GPU-feature `whisper-rs` builds (cuda/metal/vulkan) on the Pro tier, and a web-UI
+   settings page.
+
+## Runtime config (`/api/voice`)
+
+The four selectors are **live-tunable** without a restart, mirroring `/api/cache` and
+`/api/sensors/config`. `GET /api/voice` returns the current `{voice_backend, tts_api,
+stt_backend, stt_api, has_elevenlabs, has_openai, backends}`; `POST` with any subset updates +
+persists them. The env vars seed it on first run; the persisted file (`AGENTD_VOICE_CONFIG`,
+default `/var/lib/agentd/voice_config.json`) then wins, so an operator's live choice survives
+restart. `speak_handler` / `transcribe_wav` read this config, not the env directly.

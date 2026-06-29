@@ -2556,16 +2556,19 @@ struct SettingsData {
     cache_conversation: bool,
     cache_ttl:          String,
     sensor_profile:     String,
+    voice_backend:        String,
+    voice_api_available:  bool,
 }
 
-// Fetch /api/status, /api/soul, /api/models, /api/cache, /api/sensors/config in parallel.
+// Fetch /api/status, /api/soul, /api/models, /api/cache, /api/sensors/config, /api/voice in parallel.
 async fn fetch_settings(client: &reqwest::Client, base_url: &str) -> SettingsData {
-    let (status, soul, models_resp, cache, sensors) = tokio::join!(
+    let (status, soul, models_resp, cache, sensors, voice) = tokio::join!(
         json_get(client, format!("{base_url}/api/status")),
         json_get(client, format!("{base_url}/api/soul")),
         json_get(client, format!("{base_url}/api/models")),
         json_get(client, format!("{base_url}/api/cache")),
         json_get(client, format!("{base_url}/api/sensors/config")),
+        json_get(client, format!("{base_url}/api/voice")),
     );
     let models: Vec<ModelItem> = models_resp["models"]
         .as_array()
@@ -2587,6 +2590,9 @@ async fn fetch_settings(client: &reqwest::Client, base_url: &str) -> SettingsDat
         cache_conversation: cache["cache_conversation"].as_bool().unwrap_or(true),
         cache_ttl:          cache["ttl"].as_str().unwrap_or("5m").to_string(),
         sensor_profile:     sensors["profile"].as_str().unwrap_or("standard").to_string(),
+        voice_backend:       voice["voice_backend"].as_str().unwrap_or("auto").to_string(),
+        voice_api_available: voice["has_elevenlabs"].as_bool().unwrap_or(false)
+            || voice["has_openai"].as_bool().unwrap_or(false),
     }
 }
 
@@ -4495,6 +4501,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_settings_cache_conversation(data.cache_conversation);
                     ui.set_settings_cache_ttl(data.cache_ttl.into());
                     ui.set_settings_sensor_profile(data.sensor_profile.into());
+                    ui.set_settings_voice_backend(data.voice_backend.into());
+                    ui.set_settings_voice_api_available(data.voice_api_available);
                     LOGIN_ME.with(|m| *m.borrow_mut() = me_id);
                     ui.set_settings_login_user_name(me_name.into());
                     ui.set_settings_login_is_default(is_default);
@@ -5509,6 +5517,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(false);
             if ok { notify(ToastKind::Info, "Sensor profile updated"); }
             else  { notify(ToastKind::Error, "Failed to update sensor profile"); }
+        });
+    });
+
+    // ── voice-backend callback ────────────────────────────────────────────────
+    let rt_h_voice    = rt.handle().clone();
+    let client_voice  = Arc::clone(&http_client);
+    let base_voice    = http_base.clone();
+    let ui_weak_voice = ui.as_weak();
+    ui.on_set_voice_backend(move |backend| {
+        let b = backend.to_string();
+        // Optimistic: reflect the selection immediately.
+        if let Some(ui) = ui_weak_voice.upgrade() {
+            ui.set_settings_voice_backend(b.clone().into());
+        }
+        let client = Arc::clone(&client_voice);
+        let base   = base_voice.clone();
+        rt_h_voice.spawn(async move {
+            // One chip drives both TTS + STT backends (the common case); power users
+            // can split them via /api/voice's tts_api/stt_api fields directly.
+            let ok = client.post(format!("{base}/api/voice"))
+                .json(&serde_json::json!({ "voice_backend": b, "stt_backend": b }))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok { notify(ToastKind::Info, "Voice backend updated"); }
+            else  { notify(ToastKind::Error, "Failed to update voice backend"); }
         });
     });
 
