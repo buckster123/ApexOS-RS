@@ -314,6 +314,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/record/stop",        post(record_stop_handler))
         .route("/api/wake",               post(wake_handler))
         .route("/api/speak",              post(speak_handler))
+        .route("/api/tts",                post(tts_handler))
         .route("/api/council",               get(council_list_handler).post(council_start_handler))
         .route("/api/council/{id}",          get(council_detail_handler))
         .route("/api/council/{id}/butt-in",  post(council_butt_in_handler))
@@ -2802,21 +2803,28 @@ async fn play_wav_bytes(bytes: &[u8]) -> bool {
     ok
 }
 
-/// Play raw little-endian 16-bit mono PCM at `rate` Hz via aplay (no WAV header).
-async fn play_pcm_bytes(bytes: &[u8], rate: u32) -> bool {
-    let path = format!("/tmp/apex_speak_{}.pcm", speak_stamp());
-    if tokio::fs::write(&path, bytes).await.is_err() {
-        return false;
-    }
-    let rate_s = rate.to_string();
-    let ok = tokio::process::Command::new("aplay")
-        .args(["-q", "-f", "S16_LE", "-r", &rate_s, "-c", "1", &path])
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    let _ = tokio::fs::remove_file(&path).await;
-    ok
+/// Wrap raw little-endian PCM in a minimal WAV container, so every TTS backend
+/// yields a self-describing WAV — uniform for both aplay and client-side playback.
+fn pcm_to_wav(pcm: &[u8], sample_rate: u32, channels: u16, bits: u16) -> Vec<u8> {
+    let byte_rate = sample_rate * channels as u32 * (bits as u32 / 8);
+    let block_align = channels * (bits / 8);
+    let data_len = pcm.len() as u32;
+    let mut w = Vec::with_capacity(44 + pcm.len());
+    w.extend_from_slice(b"RIFF");
+    w.extend_from_slice(&(36 + data_len).to_le_bytes());
+    w.extend_from_slice(b"WAVE");
+    w.extend_from_slice(b"fmt ");
+    w.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+    w.extend_from_slice(&1u16.to_le_bytes()); // format = PCM
+    w.extend_from_slice(&channels.to_le_bytes());
+    w.extend_from_slice(&sample_rate.to_le_bytes());
+    w.extend_from_slice(&byte_rate.to_le_bytes());
+    w.extend_from_slice(&block_align.to_le_bytes());
+    w.extend_from_slice(&bits.to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&data_len.to_le_bytes());
+    w.extend_from_slice(pcm);
+    w
 }
 
 fn speak_stamp() -> u128 {
@@ -2826,71 +2834,52 @@ fn speak_stamp() -> u128 {
         .as_micros()
 }
 
-async fn speak_local(text: &str) -> bool {
-    match tts_sidecar_wav(text).await {
-        Some(bytes) => play_wav_bytes(&bytes).await,
-        None => false,
-    }
+// Each backend produces a self-describing WAV (Some) or None. speak_handler plays
+// them server-side (aplay); /api/tts returns them for client-side playback.
+
+/// Local Kokoro via the apex-tts sidecar — already returns a WAV.
+async fn tts_local_wav(text: &str) -> Option<Vec<u8>> {
+    tts_sidecar_wav(text).await
 }
 
-/// ElevenLabs TTS → raw pcm_24000 → aplay. Needs ELEVENLABS_API_KEY.
-async fn speak_elevenlabs(text: &str) -> bool {
-    let Ok(key) = std::env::var("ELEVENLABS_API_KEY") else { return false };
-    if key.trim().is_empty() {
-        return false;
-    }
+/// ElevenLabs TTS → raw pcm_24000 → wrapped WAV. Needs ELEVENLABS_API_KEY.
+async fn tts_elevenlabs_wav(text: &str) -> Option<Vec<u8>> {
+    let key = std::env::var("ELEVENLABS_API_KEY").ok().filter(|k| !k.trim().is_empty())?;
     let voice = std::env::var("ELEVENLABS_VOICE_ID")
         .unwrap_or_else(|_| "21m00Tcm4TlvDq8ikWAM".to_string()); // "Rachel" default
     let model =
         std::env::var("ELEVENLABS_MODEL").unwrap_or_else(|_| "eleven_flash_v2_5".to_string());
-    let url = format!(
-        "https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=pcm_24000"
-    );
-    let Ok(client) = reqwest::Client::builder()
+    let url =
+        format!("https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=pcm_24000");
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-    else {
-        return false;
-    };
+        .ok()?;
     let resp = client
         .post(&url)
         .header("xi-api-key", key)
         .json(&serde_json::json!({ "text": text, "model_id": model }))
         .send()
-        .await;
-    let resp = match resp {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => {
-            eprintln!("[voice] elevenlabs HTTP {}", r.status());
-            return false;
-        }
-        Err(e) => {
-            eprintln!("[voice] elevenlabs request failed: {e}");
-            return false;
-        }
-    };
-    match resp.bytes().await {
-        Ok(b) if !b.is_empty() => play_pcm_bytes(&b, 24000).await,
-        _ => false,
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        eprintln!("[voice] elevenlabs HTTP {}", resp.status());
+        return None;
     }
+    let pcm = resp.bytes().await.ok()?;
+    (!pcm.is_empty()).then(|| pcm_to_wav(&pcm, 24000, 1, 16))
 }
 
-/// OpenAI TTS → wav → aplay. Needs OPENAI_API_KEY (a real api.openai.com key — the
-/// routing OAI key may be OpenRouter, which doesn't serve /v1/audio/speech).
-async fn speak_openai(text: &str) -> bool {
-    let Ok(key) = std::env::var("OPENAI_API_KEY") else { return false };
-    if key.trim().is_empty() {
-        return false;
-    }
-    let model =
-        std::env::var("OPENAI_TTS_MODEL").unwrap_or_else(|_| "gpt-4o-mini-tts".to_string());
+/// OpenAI TTS → wav. Needs OPENAI_API_KEY (a real api.openai.com key — the routing
+/// OAI key may be OpenRouter, which doesn't serve /v1/audio/speech).
+async fn tts_openai_wav(text: &str) -> Option<Vec<u8>> {
+    let key = std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.trim().is_empty())?;
+    let model = std::env::var("OPENAI_TTS_MODEL").unwrap_or_else(|_| "gpt-4o-mini-tts".to_string());
     let voice = std::env::var("OPENAI_TTS_VOICE").unwrap_or_else(|_| "alloy".to_string());
-    let Ok(client) = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-    else {
-        return false;
-    };
+        .ok()?;
     let resp = client
         .post("https://api.openai.com/v1/audio/speech")
         .bearer_auth(key)
@@ -2898,87 +2887,104 @@ async fn speak_openai(text: &str) -> bool {
             "model": model, "input": text, "voice": voice, "response_format": "wav"
         }))
         .send()
-        .await;
-    let resp = match resp {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => {
-            eprintln!("[voice] openai HTTP {}", r.status());
-            return false;
-        }
-        Err(e) => {
-            eprintln!("[voice] openai request failed: {e}");
-            return false;
-        }
-    };
-    match resp.bytes().await {
-        Ok(b) if !b.is_empty() => play_wav_bytes(&b).await,
-        _ => false,
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        eprintln!("[voice] openai HTTP {}", resp.status());
+        return None;
     }
+    let b = resp.bytes().await.ok()?;
+    (!b.is_empty()).then(|| b.to_vec())
 }
 
-async fn speak_piper(text: &str) -> bool {
-    let Ok(model) = std::env::var("PIPER_MODEL") else { return false };
+/// Legacy piper external binary → wav file → bytes (if PIPER_MODEL is set).
+async fn tts_piper_wav(text: &str) -> Option<Vec<u8>> {
+    let model = std::env::var("PIPER_MODEL").ok()?;
     let wav = format!("/tmp/apex_speak_{}.wav", speak_stamp());
-    let Ok(mut child) = tokio::process::Command::new("piper")
+    let mut child = tokio::process::Command::new("piper")
         .args(["--model", &model, "--output_file", &wav])
         .stdin(std::process::Stdio::piped())
         .spawn()
-    else {
-        return false;
-    };
+        .ok()?;
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
         let _ = stdin.write_all(text.as_bytes()).await;
     }
     let _ = child.wait().await;
-    let ok = tokio::process::Command::new("aplay")
-        .args(["-q", &wav])
+    let bytes = tokio::fs::read(&wav).await.ok();
+    let _ = tokio::fs::remove_file(&wav).await;
+    bytes.filter(|b| !b.is_empty())
+}
+
+/// espeak-ng → wav file → bytes (the always-available final fallback). `-w` writes
+/// a WAV instead of playing, so even the fallback can be returned to a client.
+async fn tts_espeak_wav(text: &str) -> Option<Vec<u8>> {
+    let wav = format!("/tmp/apex_speak_{}.wav", speak_stamp());
+    let ok = tokio::process::Command::new("espeak-ng")
+        .args(["-a", "100", "-s", "150", "-w", &wav, text])
         .output()
         .await
         .map(|o| o.status.success())
         .unwrap_or(false);
+    let bytes = if ok { tokio::fs::read(&wav).await.ok() } else { None };
     let _ = tokio::fs::remove_file(&wav).await;
-    ok
+    bytes.filter(|b| !b.is_empty())
 }
 
-async fn speak_espeak(text: &str) -> bool {
-    tokio::process::Command::new("espeak-ng")
-        .args(["-a", "100", "-s", "150", text])
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// Resolve the TTS plan (AGENTD_VOICE_BACKEND) → the first backend's audio as WAV
+/// bytes. Shared by /api/speak (server-side play) and /api/tts (client-side return).
+async fn tts_synth_wav(text: &str) -> Option<Vec<u8>> {
+    let cfg = voice_config_snapshot();
+    let plan = tts_plan(
+        &cfg.voice_backend,
+        &cfg.tts_api,
+        env_nonempty("ELEVENLABS_API_KEY"),
+        env_nonempty("OPENAI_API_KEY"),
+    );
+    for step in plan {
+        let wav = match step {
+            TtsStep::Local => tts_local_wav(text).await,
+            TtsStep::ElevenLabs => tts_elevenlabs_wav(text).await,
+            TtsStep::OpenAi => tts_openai_wav(text).await,
+            TtsStep::Piper => tts_piper_wav(text).await,
+            TtsStep::Espeak => tts_espeak_wav(text).await,
+        };
+        if wav.is_some() {
+            return wav;
+        }
+    }
+    None
 }
 
+/// POST /api/speak {text} — synthesize and play on THIS device's speakers (kiosk /
+/// headless, where agentd owns the audio). Fire-and-forget.
 async fn speak_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let text = match body["text"].as_str() {
         Some(t) if !t.trim().is_empty() => t.to_string(),
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
-
     tokio::spawn(async move {
-        let cfg = voice_config_snapshot();
-        let plan = tts_plan(
-            &cfg.voice_backend,
-            &cfg.tts_api,
-            env_nonempty("ELEVENLABS_API_KEY"),
-            env_nonempty("OPENAI_API_KEY"),
-        );
-        for step in plan {
-            let spoke = match step {
-                TtsStep::Local => speak_local(&text).await,
-                TtsStep::ElevenLabs => speak_elevenlabs(&text).await,
-                TtsStep::OpenAi => speak_openai(&text).await,
-                TtsStep::Piper => speak_piper(&text).await,
-                TtsStep::Espeak => speak_espeak(&text).await,
-            };
-            if spoke {
-                return;
-            }
+        if let Some(wav) = tts_synth_wav(&text).await {
+            play_wav_bytes(&wav).await;
         }
     });
-
     StatusCode::OK.into_response()
+}
+
+/// POST /api/tts {text} → audio/wav bytes for CLIENT-side playback (desktop / web /
+/// phone, where the audio belongs to the user's session, not agentd). Same backend
+/// selection as /api/speak, but returns the WAV instead of playing it server-side.
+async fn tts_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let text = match body["text"].as_str() {
+        Some(t) if !t.trim().is_empty() => t.to_string(),
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    match tts_synth_wav(&text).await {
+        Some(wav) => {
+            ([(axum::http::header::CONTENT_TYPE, "audio/wav")], wav).into_response()
+        }
+        None => (StatusCode::SERVICE_UNAVAILABLE, "no TTS backend available").into_response(),
+    }
 }
 
 #[cfg(test)]

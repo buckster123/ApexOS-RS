@@ -2526,6 +2526,56 @@ async fn stop_and_transcribe(client: &reqwest::Client, base_url: &str) -> String
     }
 }
 
+// Client-side TTS: fetch the synthesized WAV from /api/tts and play it on THIS
+// machine's audio. ui-slint runs in the user's session (desktop) or as root with
+// ALSA (kiosk), so its `aplay` reaches the local speakers — unlike agentd, which
+// runs as the sandboxed `agentd` user and can't reach a desktop's PipeWire session.
+// Falls back to server-side /api/speak if the fetch or local playback fails.
+async fn speak_text(client: &reqwest::Client, base: &str, text: String) {
+    let wav = async {
+        let r = client
+            .post(format!("{base}/api/tts"))
+            .json(&serde_json::json!({ "text": &text }))
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        let b = r.bytes().await.ok()?;
+        (!b.is_empty()).then(|| b.to_vec())
+    }
+    .await;
+
+    if let Some(bytes) = wav {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros();
+        let path = format!("/tmp/apex_tts_{stamp}.wav");
+        if tokio::fs::write(&path, &bytes).await.is_ok() {
+            let played = tokio::process::Command::new("aplay")
+                .args(["-q", &path])
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            let _ = tokio::fs::remove_file(&path).await;
+            if played {
+                return;
+            }
+        }
+    }
+    // Fallback: server-side playback (kiosk/headless where agentd owns the audio).
+    let _ = client
+        .post(format!("{base}/api/speak"))
+        .json(&serde_json::json!({ "text": text }))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+}
+
 // Context shared between the WS task and dispatch_event.
 struct DispatchCtx {
     rt_handle:   tokio::runtime::Handle,
@@ -5910,10 +5960,7 @@ fn dispatch_event(
                         });
                         if !text.is_empty() {
                             rt_h.spawn(async move {
-                                client.post(format!("{base}/api/speak"))
-                                    .json(&serde_json::json!({"text": text}))
-                                    .timeout(std::time::Duration::from_secs(5))
-                                    .send().await.ok();
+                                speak_text(&client, &base, text).await;
                             });
                         }
                     }
