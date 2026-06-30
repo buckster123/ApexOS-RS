@@ -17,6 +17,26 @@ Voice is **opt-in** (default off). Enable at install: the TUI add-on, a boot/USB
 local Kokoro path; the cloud API backends need only a key in `/etc/agentd/env` — no
 build, so they work on a voice-off node too.)
 
+## Where the audio I/O runs (server-side vs client-side)
+
+This is the load-bearing distinction, learned the hard way on a desktop laptop:
+
+- **Kiosk / headless:** agentd *is* the audio owner (no competing login session), so it
+  can play/record directly — `/api/speak` runs `aplay` in agentd, `/api/record/*` runs
+  `arecord`. **Server-side audio.**
+- **Desktop (a personal laptop):** audio belongs to the **logged-in user's PipeWire
+  session** (`/run/user/<uid>`, `0700`). agentd runs as the sandboxed `agentd` *system*
+  user, which **cannot reach that session** — `aplay`/`arecord` as agentd hit a wall (raw
+  ALSA = "device busy" because PipeWire holds the card; ALSA "default" routes through the
+  user's PipeWire, unreachable). So server-side voice is silent/deaf on a desktop.
+
+**Fix: client-side voice.** The UI (ui-slint) runs *in the user's session* (or as root on
+the kiosk), so *it* can reach the audio. TTS: the UI fetches synthesized audio from
+**`POST /api/tts`** (→ WAV bytes; same backend selection as `/api/speak` but returns the
+audio instead of playing it) and plays it locally (`aplay`), falling back to `/api/speak`
+if that fails. This keeps **agentd fully sandboxed** (no security change) and works on
+desktop + (later) web/PWA/phone. STT capture moves to the UI similarly (next slice).
+
 ## Backend selection (`AGENTD_VOICE_BACKEND`)
 
 One knob picks the TTS path, mirroring `CEREBRO_VISION_BACKEND`:
@@ -148,6 +168,10 @@ and also the final `/api/speak` fallback. install.sh installs it when voice is e
    split `tts_api`/`stt_api` via the endpoint. *Remaining:* install.sh ElevenLabs/OpenAI key
    prompting, GPU-feature `whisper-rs` builds (cuda/metal/vulkan) on the Pro tier, and a web-UI
    settings page.
+6. ◑ **Client-side voice** — `POST /api/tts` returns WAV bytes; ui-slint plays them locally
+   (`aplay` in the user's session) instead of server-side `/api/speak`, so TTS works on a
+   desktop. *Remaining:* client-side STT capture (the UI records the mic → `/api/transcribe`,
+   replacing server-side `/api/record/*`), then the web/PWA equivalent (getUserMedia + Web Audio).
 
 ## Runtime config (`/api/voice`)
 
