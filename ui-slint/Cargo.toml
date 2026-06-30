@@ -24,6 +24,9 @@ glow = "0.17"
 # Surfaces Slint/femtovg/linuxkms backend `log` output to the journal (defaults to
 # warn) so GL/DRM faults are captured instead of vanishing into a silent exit.
 env_logger = "0.11"
+# Client-side mic capture: SIGINT the local arecord on stop so it finalizes the WAV
+# header cleanly (Child::kill would SIGKILL → truncated header).
+libc = "0.2"
 
 [build-dependencies]
 slint-build = "1"

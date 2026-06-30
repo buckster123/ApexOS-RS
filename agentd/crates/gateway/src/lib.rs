@@ -309,7 +309,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/sonus/stream",       get(sonus_stream_handler))
         .route("/api/sonus/play",         post(sonus_play_handler))
         .route("/api/sonus/stop",         post(sonus_stop_handler))
-        .route("/api/transcribe",         post(transcribe_handler))
+        .route("/api/transcribe",         post(transcribe_handler).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)))
         .route("/api/record/start",       post(record_start_handler))
         .route("/api/record/stop",        post(record_stop_handler))
         .route("/api/wake",               post(wake_handler))

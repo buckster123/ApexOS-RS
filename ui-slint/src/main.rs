@@ -2508,10 +2508,64 @@ async fn delete_one(client: &reqwest::Client, base_url: &str, id: u64) -> bool {
     }
 }
 
-// POST /api/record/stop → run whisper → return transcribed text (or empty on error).
-async fn stop_and_transcribe(client: &reqwest::Client, base_url: &str) -> String {
+// Client-side mic capture. Like client-side TTS, the UI records in the user's
+// session (a local `arecord`), so it reaches the mic — unlike agentd's server-side
+// /api/record/* (the sandboxed agentd user can't reach a desktop's PipeWire). The
+// captured WAV is POSTed to /api/transcribe (which runs the STT backend plan).
+const MIC_WAV: &str = "/tmp/apex_mic_capture.wav";
+
+fn mic_recorder() -> &'static std::sync::Mutex<Option<tokio::process::Child>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<Option<tokio::process::Child>>> =
+        std::sync::OnceLock::new();
+    R.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Start a local arecord capturing 16 kHz mono WAV. Returns true on spawn success.
+/// Capture device defaults to ALSA "default" (the user session's mic); override with
+/// ALSA_CAPTURE_DEVICE. A 120 s cap guards against a forgotten recording.
+fn mic_record_start() -> bool {
+    if let Ok(mut g) = mic_recorder().lock() {
+        if let Some(mut c) = g.take() {
+            let _ = c.start_kill();
+        }
+    }
+    let _ = std::fs::remove_file(MIC_WAV);
+    let mut cmd = tokio::process::Command::new("arecord");
+    if let Ok(dev) = std::env::var("ALSA_CAPTURE_DEVICE") {
+        if !dev.trim().is_empty() {
+            cmd.args(["-D", &dev]);
+        }
+    }
+    cmd.args(["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-d", "120", MIC_WAV]);
+    cmd.kill_on_drop(true);
+    match cmd.spawn() {
+        Ok(child) => {
+            if let Ok(mut g) = mic_recorder().lock() {
+                *g = Some(child);
+            }
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Stop arecord (SIGINT → clean WAV header) and transcribe via /api/transcribe.
+async fn mic_stop_and_transcribe(client: &reqwest::Client, base_url: &str) -> String {
+    let child = mic_recorder().lock().ok().and_then(|mut g| g.take());
+    let Some(mut child) = child else { return String::new() };
+    // SIGINT (not kill/SIGKILL) so arecord finalizes the WAV header before exit.
+    if let Some(pid) = child.id() {
+        unsafe { libc::kill(pid as i32, libc::SIGINT); }
+    }
+    let _ = child.wait().await;
+    let Ok(bytes) = tokio::fs::read(MIC_WAV).await else { return String::new() };
+    let _ = tokio::fs::remove_file(MIC_WAV).await;
+    if bytes.is_empty() {
+        return String::new();
+    }
     match client
-        .post(format!("{base_url}/api/record/stop"))
+        .post(format!("{base_url}/api/transcribe"))
+        .body(bytes)
         .timeout(std::time::Duration::from_secs(35))
         .send()
         .await
@@ -4468,12 +4522,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rt_h   = rt_h_rec.clone();
         if !currently_recording {
             rt_h.spawn(async move {
-                let ok = client
-                    .post(format!("{base}/api/record/start"))
-                    .timeout(std::time::Duration::from_secs(8))
-                    .send().await
-                    .map(|r| r.status().is_success())
-                    .unwrap_or(false);
+                let ok = mic_record_start();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_w.upgrade() {
                         if ok { ui.set_recording(true); ui.set_face_state("listening".into()); }
@@ -4483,7 +4532,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         } else {
             rt_h.spawn(async move {
-                let text = stop_and_transcribe(&client, &base).await;
+                let text = mic_stop_and_transcribe(&client, &base).await;
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_w.upgrade() {
                         ui.set_recording(false);
@@ -5972,8 +6021,6 @@ fn dispatch_event(
         Event::WakeTriggered => {
             // Wake word detected — switch to chat and auto-start recording
             let rt_h   = ctx.rt_handle.clone();
-            let client = Arc::clone(&ctx.http_client);
-            let base   = ctx.http_base.clone();
             let ui_w1  = ui_weak.clone();
             let ui_w2  = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
@@ -5982,12 +6029,7 @@ fn dispatch_event(
                     if !ui.get_recording() {
                         ui.set_current_view(0);
                         rt_h.spawn(async move {
-                            let ok = client
-                                .post(format!("{base}/api/record/start"))
-                                .timeout(std::time::Duration::from_secs(8))
-                                .send().await
-                                .map(|r| r.status().is_success())
-                                .unwrap_or(false);
+                            let ok = mic_record_start();
                             slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = ui_w2.upgrade() {
                                     if ok { ui.set_recording(true); ui.set_face_state("listening".into()); }
