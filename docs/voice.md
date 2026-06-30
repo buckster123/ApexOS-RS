@@ -8,8 +8,8 @@
 
 | Direction | Backend | How |
 |-----------|---------|-----|
-| **STT** (speech→text) | whisper-cpp local *or* cloud (OpenAI / ElevenLabs Scribe) | `/api/record/*`, `/api/transcribe`, backend per `AGENTD_STT_BACKEND` |
-| **TTS** (text→speech) | **Kokoro-82M** local *or* cloud API (ElevenLabs/OpenAI) → espeak-ng | `/api/speak`, backend per `AGENTD_VOICE_BACKEND` |
+| **STT** (speech→text) | whisper (apex-stt) local *or* cloud (OpenAI / ElevenLabs Scribe) | UI records → `/api/transcribe` (client-side); `/api/record/*` (server-side); backend per `AGENTD_STT_BACKEND` |
+| **TTS** (text→speech) | **Kokoro-82M** local *or* cloud API (ElevenLabs/OpenAI) → espeak-ng | UI plays `/api/tts` (client-side); `/api/speak` (server-side); backend per `AGENTD_VOICE_BACKEND` |
 
 Voice is **opt-in** (default off). Enable at install: the TUI add-on, a boot/USB
 `APEXOS_VOICE=1`, or `--voice`. Disable with `--no-voice`. The choice persists in
@@ -31,11 +31,18 @@ This is the load-bearing distinction, learned the hard way on a desktop laptop:
   user's PipeWire, unreachable). So server-side voice is silent/deaf on a desktop.
 
 **Fix: client-side voice.** The UI (ui-slint) runs *in the user's session* (or as root on
-the kiosk), so *it* can reach the audio. TTS: the UI fetches synthesized audio from
-**`POST /api/tts`** (→ WAV bytes; same backend selection as `/api/speak` but returns the
-audio instead of playing it) and plays it locally (`aplay`), falling back to `/api/speak`
-if that fails. This keeps **agentd fully sandboxed** (no security change) and works on
-desktop + (later) web/PWA/phone. STT capture moves to the UI similarly (next slice).
+the kiosk), so *it* can reach the audio. Both directions:
+- **TTS:** the UI fetches synthesized audio from **`POST /api/tts`** (→ WAV bytes; same
+  backend selection as `/api/speak` but returns the audio instead of playing it) and plays
+  it locally (`aplay`), falling back to `/api/speak`.
+- **STT:** the UI records the mic with a local **`arecord`** (16 kHz mono WAV, SIGINT on stop
+  so the header finalizes cleanly) and POSTs the WAV to **`/api/transcribe`** (which runs the
+  STT backend plan), instead of the server-side `/api/record/*`. Override the capture device
+  with `ALSA_CAPTURE_DEVICE` (defaults to the session's ALSA "default").
+
+This keeps **agentd fully sandboxed** (no security change) and works on desktop + (later)
+web/PWA/phone. *Wake-word detection is still server-side (agentd listening), so it remains a
+kiosk feature for now; the manual mic button is the desktop path.*
 
 ## Backend selection (`AGENTD_VOICE_BACKEND`)
 
@@ -168,10 +175,11 @@ and also the final `/api/speak` fallback. install.sh installs it when voice is e
    split `tts_api`/`stt_api` via the endpoint. *Remaining:* install.sh ElevenLabs/OpenAI key
    prompting, GPU-feature `whisper-rs` builds (cuda/metal/vulkan) on the Pro tier, and a web-UI
    settings page.
-6. ◑ **Client-side voice** — `POST /api/tts` returns WAV bytes; ui-slint plays them locally
-   (`aplay` in the user's session) instead of server-side `/api/speak`, so TTS works on a
-   desktop. *Remaining:* client-side STT capture (the UI records the mic → `/api/transcribe`,
-   replacing server-side `/api/record/*`), then the web/PWA equivalent (getUserMedia + Web Audio).
+6. ✅ **Client-side voice (native UI)** — TTS: `POST /api/tts` returns WAV bytes, ui-slint plays
+   them locally (`aplay`). STT: ui-slint records the mic (`arecord`) → `/api/transcribe`. Both
+   run in the user's session, so desktop voice works while agentd stays sandboxed. (Wake-word is
+   still server-side → kiosk-only for now.) *Remaining:* the web/PWA equivalent (getUserMedia +
+   Web Audio), install.sh ElevenLabs/OpenAI key onboarding, GPU-feature `whisper-rs` builds.
 
 ## Runtime config (`/api/voice`)
 
