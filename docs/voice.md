@@ -178,8 +178,14 @@ and also the final `/api/speak` fallback. install.sh installs it when voice is e
 6. ✅ **Client-side voice (native UI)** — TTS: `POST /api/tts` returns WAV bytes, ui-slint plays
    them locally (`aplay`). STT: ui-slint records the mic (`arecord`) → `/api/transcribe`. Both
    run in the user's session, so desktop voice works while agentd stays sandboxed. (Wake-word is
-   still server-side → kiosk-only for now.) *Remaining:* the web/PWA equivalent (getUserMedia +
-   Web Audio), install.sh ElevenLabs/OpenAI key onboarding, GPU-feature `whisper-rs` builds.
+   still server-side → kiosk-only for now.)
+7. ✅ **Web/PWA voice** — the `web/` client: a 🔊 toggle speaks replies (fetch `/api/tts` → play
+   the WAV blob; works over plain HTTP) and a 🎤 button records (`MediaRecorder` webm →
+   `/api/transcribe`). **The mic is gated on a secure context** — browsers only allow
+   `getUserMedia` on **HTTPS or localhost**, so over `http://<LAN-IP>:8787` (the phone case) the
+   mic button is hidden; TTS still works. Full phone mic needs the node served over TLS.
+   *Remaining:* install.sh ElevenLabs/OpenAI key onboarding, GPU-feature `whisper-rs` builds, and
+   (for phone mic) an HTTPS option.
 
 ## Runtime config (`/api/voice`)
 
