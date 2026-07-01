@@ -36,6 +36,10 @@ const S = {
   closing: false,            // true while logging out — suppresses reconnect
   pinUser: null,             // {id,name} mid-PIN-entry
   pinBuf: '',
+  tts: false,                // speak agent replies (client-side playback)
+  gotAgentText: false,       // did this turn produce agent text (→ worth speaking)?
+  recording: false,          // mic capture in progress
+  rec: null,                 // MediaRecorder
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -244,6 +248,7 @@ function onEvent(m) {
       break;
     case 'agent_text':
       appendAgentText(m.delta || '');
+      S.gotAgentText = true;
       setBusy(true);
       break;
     case 'agent_thinking':
@@ -264,6 +269,8 @@ function onEvent(m) {
     case 'turn_complete':
       S.openBubble = null;
       setBusy(false);
+      if (S.tts && S.gotAgentText) speakWeb(lastAgentText());
+      S.gotAgentText = false;
       break;
     case 'error':
       if (m.message) sysLine(m.message, true);
@@ -467,7 +474,81 @@ function sendPrompt() {
   userMsg(text);
   send({ type: 'user_prompt', text });
   ta.value = ''; ta.style.height = 'auto';
+  S.gotAgentText = false;
   setBusy(true);
+}
+
+// ── Voice (client-side, like the native UI) ───────────────────────────────────
+// TTS plays in the browser (works over plain HTTP). STT needs getUserMedia, which
+// browsers gate to a secure context (HTTPS or localhost) — so the mic button is
+// hidden over http://<LAN-IP> and the node would need TLS for phone mic capture.
+
+function lastAgentText() {
+  const bubbles = messagesEl().querySelectorAll('.msg.agent');
+  const last = bubbles[bubbles.length - 1];
+  return last ? (last._raw || last.textContent || '').trim() : '';
+}
+
+// Fetch synthesized audio from /api/tts and play it in the browser.
+async function speakWeb(text) {
+  if (!text) return;
+  try {
+    const r = await api('/api/tts', { method: 'POST', body: JSON.stringify({ text }) });
+    if (!r.ok) return;
+    const blob = await r.blob();
+    if (!blob.size) return;
+    const audio = new Audio(URL.createObjectURL(blob));
+    audio.onended = () => URL.revokeObjectURL(audio.src);
+    await audio.play();
+  } catch (_) { /* autoplay can be blocked until a user gesture — ignore */ }
+}
+
+function toggleTts() {
+  S.tts = !S.tts;
+  updateVoiceUI();
+}
+
+const micAvailable = () =>
+  window.isSecureContext && navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
+
+// Record the mic (MediaRecorder → webm) and POST to /api/transcribe → prompt.
+async function micToggle() {
+  if (S.recording) { if (S.rec) S.rec.stop(); return; }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (_) {
+    sysLine('Microphone unavailable (needs HTTPS or localhost)', true);
+    return;
+  }
+  const chunks = [];
+  const rec = new MediaRecorder(stream);
+  S.rec = rec;
+  rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  rec.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    S.recording = false; S.rec = null; updateVoiceUI();
+    const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
+    if (!blob.size) return;
+    try {
+      const r = await api('/api/transcribe', {
+        method: 'POST', body: blob, headers: { 'Content-Type': blob.type || 'audio/webm' },
+      });
+      if (!r.ok) return;
+      const j = await r.json();
+      const text = (j.text || '').trim();
+      if (text) { $('input').value = text; sendPrompt(); }
+    } catch (_) { /* network error — silent */ }
+  };
+  rec.start();
+  S.recording = true; updateVoiceUI();
+}
+
+function updateVoiceUI() {
+  const tts = $('tts-btn');
+  if (tts) tts.classList.toggle('voice-on', S.tts);
+  const mic = $('mic-btn');
+  if (mic) mic.classList.toggle('voice-rec', S.recording);
 }
 
 function newChat() {
@@ -591,6 +672,12 @@ function wireUI() {
   $('cancel-btn').onclick = cancelTurn;
   $('new-btn').onclick = newChat;
   $('logout-btn').onclick = logout;
+
+  // Voice: TTS always (audio playback needs no secure context); mic only where
+  // getUserMedia is allowed (HTTPS / localhost), otherwise hide the button.
+  $('tts-btn').onclick = toggleTts;
+  if (micAvailable()) $('mic-btn').onclick = micToggle;
+  else $('mic-btn').classList.add('hidden');
 
   // Files (phone-handoff browser)
   $('files-btn').onclick = openFiles;

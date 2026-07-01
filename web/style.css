@@ -153,6 +153,14 @@ button { font-family:inherit; cursor:pointer; color:var(--text); background:none
 .send-btn:disabled { opacity:.4; }
 .send-btn:active:not(:disabled) { transform:scale(.92); }
 .cancel-btn { background:#ff5f5722; color:var(--danger); border:1px solid #ff5f5744; font-size:13px; }
+.voice-btn {
+  flex:0 0 auto; width:44px; height:44px; border-radius:50%; font-size:18px;
+  display:flex; align-items:center; justify-content:center;
+  background:var(--surface-hi); border:1px solid var(--border); color:var(--text);
+}
+.voice-btn:active { transform:scale(.92); }
+.voice-btn.voice-on { background:var(--primary-dim); border-color:var(--primary); }   /* TTS speaking replies */
+.voice-btn.voice-rec { background:#ff5f5722; border-color:#ff5f5744; color:var(--danger); animation:blink 1s steps(2) infinite; }  /* mic recording */
 
 /* Desktop niceties */
 @media (min-width:760px) {
