@@ -302,6 +302,12 @@ pub enum Event {
     /// `session`). `from_node` = the sending peer's node_id; `session` = where it
     /// landed (the peer's own thread); `preview` = a short body excerpt.
     MeshMessage    { from_node: String, session: SessionId, preview: String },
+    /// A memory arrived from a mesh peer over the federation relay and was
+    /// imported into this node's Cerebro with stamped provenance tags
+    /// (colony-federation Slice 1). Session-less/global in `event_session` —
+    /// every client sees that knowledge landed. `memory_id` = the id in THIS
+    /// node's store (a provenance-stamped copy, not the sender's id).
+    MeshMemoryShared { from_node: String, memory_id: String, preview: String },
     /// A new _apexos._tcp node seen via mDNS that isn't in peers.toml yet.
     PeerSeen       { node_id: String, ip: String },
     /// A peer was successfully added to peers.toml (bootstrap complete or manual add).

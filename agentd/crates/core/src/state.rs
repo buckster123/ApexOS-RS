@@ -119,6 +119,7 @@ impl SystemState {
 
             // Mesh: peer registry managed by gateway; state is a no-op.
             Event::MeshMessage    { .. } => {}
+            Event::MeshMemoryShared { .. } => {}
             Event::PeerSeen       { .. } => {}
             Event::PeerRegistered { .. } => {}
             Event::PeerLost       { .. } => {}

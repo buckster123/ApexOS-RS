@@ -157,3 +157,45 @@ impl McpClient {
             .map_err(|_| anyhow!("MCP writer task is gone"))
     }
 }
+
+/// Unwrap a plugin `ToolOutput.content` into the tool's JSON payload. MCP tools
+/// return a content array (`[{"type":"text","text":"<json>"}]`); direct callers
+/// (the federation relay, workers) want the object back. Falls through to the
+/// value itself when it's already a bare object (non-MCP virtual tools).
+pub fn tool_output_json(content: &Value) -> Option<Value> {
+    if let Some(arr) = content.as_array() {
+        for item in arr {
+            if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(s) = item.get("text").and_then(|t| t.as_str()) {
+                    if let Ok(v) = serde_json::from_str::<Value>(s) {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+        return None;
+    }
+    if let Some(s) = content.as_str() {
+        return serde_json::from_str::<Value>(s).ok();
+    }
+    content.is_object().then(|| content.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_output_json_unwraps_mcp_content_array() {
+        let content = json!([{ "type": "text", "text": "{\"id\":\"mem_1\",\"content\":\"x\"}" }]);
+        assert_eq!(tool_output_json(&content).unwrap()["id"], "mem_1");
+    }
+
+    #[test]
+    fn tool_output_json_accepts_bare_object_and_json_string() {
+        assert_eq!(tool_output_json(&json!({"id": "mem_2"})).unwrap()["id"], "mem_2");
+        assert_eq!(tool_output_json(&json!("{\"id\":\"mem_3\"}")).unwrap()["id"], "mem_3");
+        assert!(tool_output_json(&json!([{ "type": "text", "text": "not json" }])).is_none());
+        assert!(tool_output_json(&json!(42)).is_none());
+    }
+}

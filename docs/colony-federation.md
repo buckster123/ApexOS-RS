@@ -87,26 +87,35 @@ which is why the colony's #8/#9/#11/#10 all collapse into this arc.
 
 Cheap → foundational → dividend. One slice = one PR; each unlocks the next.
 
-### Slice 1 — Memory relay (push)  ·  *the keystone primitive*
+### Slice 1 — Memory relay (push)  ·  *the keystone primitive*  ·  ✅ shipped (2026-07-02)
 
-What apex3 improvised with a file, done natively with memory semantics.
+What apex3 improvised with a file, done natively with memory semantics. As built:
 
 - **Tool** (supervisor virtual tool, mirrors `mesh_file_send`):
-  `mesh_memory_send(node, memory_id, note?)` — reads the memory from the **caller's own scope**
-  (scope-checked: you can only send what you can read), serializes the full record
-  (content · type · tags · concepts · salience · valence), POSTs to the peer.
-- **Endpoint** (gateway, token-gated): `POST /api/mesh/memory` — validates + size-caps (~256 KB),
-  imports via DirectCall `memory_store` into the **receiver's node-agent space** with
-  **stamped** provenance metadata `{origin_node, origin_memory_id, federated_at}` + tags
-  `colony` · `from:<node>`; the sender's `note` (why this matters) rides as context. Returns
-  `{ok, memory_id}`.
-- **Receiver awareness:** a global `Event::MeshMemoryShared{from_node, preview}` (mirrors
-  `MeshMessage`) so the receiving agent + board know knowledge arrived — silent accretion is
-  how stores rot.
-- **Policy:** `mesh_memory_send = "allow"` (peer-registry-bounded; strictly *less* potent than
-  the already-allowed a2a prompt injection — this lands as data, not instruction).
-- **Effort:** Low–Medium. **Acceptance:** apex1 sends a thermal-calibration memory to apex2;
-  it appears in apex2's recall with `from:apex1` provenance; apex2's agent is notified.
+  `mesh_memory_send(node, memory_id, note?)` — reads the memory **scope-checked from the
+  caller's own space** (`get_memory` with the system-stamped `agent_id`: you can only send
+  what you can read), rejects >60k-char content (a memory is knowledge, never silently
+  truncated), POSTs the record to the peer.
+- **Endpoint** (gateway, token-gated): `POST /api/mesh/memory` (256 KB route cap) —
+  `from` must name a **registered peer**; the pure, unit-tested
+  `mesh::federated_remember_args` validates + stamps provenance as tags
+  (`colony` · `from:<node>` · `origin:<sender id>` — **sender-supplied provenance-shaped
+  tags are stripped**, so the stamp is always the receiver's), preserves type/salience/tags
+  (invalid type → auto-classify, salience clamped), and appends the sender's `note` as an
+  attributed suffix. Import runs Cerebro `remember` (so the receiver's dedup/classification
+  pipeline still applies) via an agentd-side ToolProxy worker — the `ConsolidateReq` seam;
+  DirectCall honors the explicit **node-agent space**, default-private. `federated_at` ≡
+  the copy's `created_at`; provenance-as-tags keeps per-origin cleanup one filter away.
+- **Receiver awareness:** a global `Event::MeshMemoryShared{from_node, memory_id, preview}`
+  (mirrors `MeshMessage`) so the receiving agent + board know knowledge arrived — silent
+  accretion is how stores rot. (The ui-slint toast is deferred to the arc's UI slice; the
+  typed event broadcasts now and wildcard arms pass it through.)
+- **Policy:** `mesh_memory_send = "allow"` seeded in config/policy.toml (peer-registry-
+  bounded; strictly *less* potent than the already-allowed a2a prompt injection — this
+  lands as data, not instruction). **Live nodes patch or evolve the rule in.**
+- **Acceptance (the colony field test):** apex1 sends a thermal-calibration memory to
+  apex2; it appears in apex2's recall with `from:apex1` provenance; apex2's agent is
+  notified.
 
 ### Slice 2 — Federated recall (pull)
 

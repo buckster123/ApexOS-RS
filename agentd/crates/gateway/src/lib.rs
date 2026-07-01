@@ -51,6 +51,17 @@ pub struct ConsolidateReq {
     pub reply:      tokio::sync::oneshot::Sender<serde_json::Value>,
 }
 
+/// An inbound federated memory import (colony-federation Slice 1). The gateway's
+/// `/api/mesh/memory` handler validates + provenance-stamps the payload into ready
+/// `remember` args (the pure `mesh::federated_remember_args`), then sends this to
+/// the agentd-side worker that owns the Cerebro ToolProxy (unavailable here at
+/// GatewayState build time — same seam as `ConsolidateReq`). `reply` carries the
+/// stored memory's JSON on success, or an error string.
+pub struct MeshMemoryReq {
+    pub args:  serde_json::Value,
+    pub reply: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+}
+
 /// A blocking cross-node sub-agent spawn (colony-mesh Slice 3). The gateway's
 /// `/api/spawn` handler sends this to the agentd spawn worker (which owns the turn
 /// engine); `reply` carries the result JSON (`{ok, output}` or `{ok:false, error}`).
@@ -140,6 +151,9 @@ pub struct GatewayState {
     /// turn engine). The `/api/spawn` handler sends a `SpawnReq` and awaits its
     /// oneshot reply. See `spawn_handler` + the worker in `spawn_agent_router`.
     pub spawn_tx:           tokio::sync::mpsc::Sender<SpawnReq>,
+    /// Federated memory imports → the agentd-side worker owning the Cerebro
+    /// ToolProxy (colony-federation Slice 1). See `mesh_memory_handler`.
+    pub mesh_memory_tx:     tokio::sync::mpsc::Sender<MeshMemoryReq>,
     /// This node's structured capability snapshot (senses/tools/tier), refreshed by
     /// agentd's embodiment loop and served at `GET /api/capabilities` for mesh
     /// capability discovery (colony-mesh Slice 2).
@@ -323,6 +337,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/voice",              get(get_voice_handler).post(set_voice_handler))
         .route("/api/spawn",              post(spawn_handler))
         .route("/api/mesh/file",          post(mesh_file_handler).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
+        .route("/api/mesh/memory",        post(mesh_memory_handler).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
         .route("/api/mesh/nodes",         get(mesh_nodes_handler))
         .route("/api/mesh/peers",         get(mesh_peers_get_handler).post(mesh_peers_post_handler))
         .route("/api/mesh/peers/{id}",    delete(mesh_peers_delete_handler))
@@ -3361,6 +3376,55 @@ async fn mesh_file_handler(
     match tokio::fs::write(&target, &body).await {
         Ok(_)  => Json(serde_json::json!({ "ok": true, "path": dest, "bytes": body.len() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("write: {e}") })),
+    }
+}
+
+/// POST /api/mesh/memory — receive a memory from a mesh peer (token-gated) and
+/// import it into THIS node's Cerebro (colony-federation Slice 1). `from` must
+/// name a registered peer (the bearer token proves trust; `from` names which
+/// peer). Validation + the provenance stamp (`colony` / `from:<node>` /
+/// `origin:<id>` tags — forged provenance stripped) are the pure
+/// `mesh::federated_remember_args`; the import runs in the agentd worker owning
+/// the Cerebro ToolProxy. On success a global `MeshMemoryShared` event tells
+/// every client knowledge landed. The sender is `mesh_memory_send` (supervisor
+/// virtual tool).
+async fn mesh_memory_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let from = match body["from"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(f) if state.peer_registry.read().await.contains(f) => f.to_string(),
+        Some(f) => {
+            return Json(serde_json::json!({
+                "ok": false, "error": format!("'{f}' is not a registered peer on this node")
+            }))
+        }
+        None => return Json(serde_json::json!({ "ok": false, "error": "missing 'from'" })),
+    };
+
+    // Import into the receiving node's own agent space, default-private.
+    let agent_id = apexos_core::node_agent_id();
+    let (args, preview) = match mesh::federated_remember_args(&from, &agent_id, &body) {
+        Ok(v)  => v,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if state.mesh_memory_tx.send(MeshMemoryReq { args, reply: reply_tx }).await.is_err() {
+        return Json(serde_json::json!({ "ok": false, "error": "memory import worker unavailable" }));
+    }
+    match reply_rx.await {
+        Ok(Ok(stored)) => {
+            let memory_id = stored["id"].as_str().unwrap_or("").to_string();
+            state.bus.emit(Event::MeshMemoryShared {
+                from_node: from.clone(),
+                memory_id: memory_id.clone(),
+                preview,
+            }).await;
+            Json(serde_json::json!({ "ok": true, "memory_id": memory_id, "from": from }))
+        }
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e })),
+        Err(_)     => Json(serde_json::json!({ "ok": false, "error": "import reply dropped" })),
     }
 }
 

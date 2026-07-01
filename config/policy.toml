@@ -61,6 +61,12 @@ mode = "suggest"
 "send_to_agent"    = "allow"
 "list_mesh_peers"  = "allow"
 "mesh_file_send"   = "allow"
+# mesh_memory_send: share ONE of the caller's own memories with a peer's Cerebro
+# (colony federation, docs/colony-federation.md). Same trust basis as mesh a2a —
+# registered peer + bearer token — and strictly less potent than the already-
+# allowed prompt injection: it lands as provenance-stamped DATA in the peer's
+# store (tagged colony/from:<node>, one tag-filter from cleanup), not instruction.
+"mesh_memory_send" = "allow"
 "mesh_capabilities" = "allow"   # read-only peer capability query
 # agent_spawn: delegate a sub-task to a focused sub-agent (local) or a mesh PEER
 # (cross-node, blocking). Bounded — local by max sub-agent depth, cross-node by a
