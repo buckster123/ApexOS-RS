@@ -959,6 +959,23 @@ impl Supervisor {
             return;
         }
 
+        // Virtual tool: mesh_recall — federated recall over a peer's (or all
+        // peers') SHARED-visibility memories via their token-gated
+        // POST /api/mesh/recall (colony-federation Slice 2). Read-only; private
+        // memories never cross (the peer answers with the shared_only scope).
+        if call.tool == "mesh_recall" {
+            let node    = call.args["node"].as_str().map(str::to_owned);
+            let query   = call.args["query"].as_str().unwrap_or("").to_owned();
+            let limit   = call.args["limit"].as_u64();
+            let call_id = call.id;
+            let bus     = self.bus.clone();
+            tokio::spawn(async move {
+                let output = mesh_recall(node.as_deref(), &query, limit).await;
+                bus.emit(Event::ToolResult { session, call: call_id, output }).await;
+            });
+            return;
+        }
+
         // Virtual tool: mesh_capabilities — query a peer's (or all peers') live
         // senses/tools/tier via their GET /api/capabilities. Capability discovery.
         if call.tool == "mesh_capabilities" {
@@ -2243,6 +2260,63 @@ async fn fetch_peer_capabilities(node: &str) -> serde_json::Value {
                 .unwrap_or_else(|_| serde_json::json!({ "node": node, "error": "unparseable response" })),
         Ok(r)  => serde_json::json!({ "node": node, "error": format!("status {}", r.status()) }),
         Err(e) => serde_json::json!({ "node": node, "error": e.to_string() }),
+    }
+}
+
+/// Query one peer's shared-visibility memories via its token-gated
+/// `POST /api/mesh/recall`. Never errors hard — a failure becomes
+/// `{node, error}` so an all-peers sweep returns partial results.
+async fn fetch_peer_recall(node: &str, query: &str, limit: Option<u64>) -> serde_json::Value {
+    let (ws_url, token) = match find_peer(node).await {
+        Some(p) => p,
+        None    => return serde_json::json!({ "node": node, "error": "not in peers.toml" }),
+    };
+    let http_base = ws_url.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1);
+    let mut req = reqwest::Client::new()
+        .post(format!("{http_base}/api/mesh/recall"))
+        .json(&serde_json::json!({
+            "from":  apexos_core::node_id(),
+            "query": query,
+            "limit": limit,
+        }))
+        .timeout(std::time::Duration::from_secs(15));
+    if let Some(t) = token.as_deref() {
+        req = req.bearer_auth(t);
+    }
+    match req.send().await {
+        Ok(r) if r.status().is_success() => {
+            let v = r.json::<serde_json::Value>().await
+                .unwrap_or_else(|_| serde_json::json!({ "error": "unparseable response" }));
+            if v["ok"].as_bool() == Some(true) {
+                serde_json::json!({ "node": node, "count": v["count"], "hits": v["hits"] })
+            } else {
+                serde_json::json!({ "node": node, "error": v["error"] })
+            }
+        }
+        Ok(r)  => serde_json::json!({ "node": node, "error": format!("status {}", r.status()) }),
+        Err(e) => serde_json::json!({ "node": node, "error": e.to_string() }),
+    }
+}
+
+/// `mesh_recall(query, node?, limit?)`: federated recall over peers'
+/// shared-visibility memories (colony-federation Slice 2). Results stay
+/// GROUPED per peer — scores from different stores/embedders aren't
+/// comparable, so no cross-peer rank merge is pretended.
+async fn mesh_recall(node: Option<&str>, query: &str, limit: Option<u64>) -> ToolOutput {
+    if query.trim().is_empty() {
+        return ToolOutput { ok: false, content: serde_json::json!("mesh_recall: missing 'query'") };
+    }
+    match node {
+        Some(n) if !n.is_empty() => {
+            ToolOutput { ok: true, content: fetch_peer_recall(n, query, limit).await }
+        }
+        _ => {
+            let mut out = Vec::new();
+            for id in list_peer_ids().await {
+                out.push(fetch_peer_recall(&id, query, limit).await);
+            }
+            ToolOutput { ok: true, content: serde_json::json!(out) }
+        }
     }
 }
 

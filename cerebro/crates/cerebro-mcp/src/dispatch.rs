@@ -163,7 +163,16 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let query = args["query"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("query is required"))?;
             let k     = args["top_k"].as_u64().unwrap_or(10) as usize;
-            let scope = agent_scope(args);
+            // visibility:"shared" → the federation scope: ONLY shared memories
+            // (narrower than any agent scope — private never matches, and
+            // private nodes don't even influence the spread). Used by a node
+            // answering a mesh peer's query; safe for any caller (it can only
+            // narrow what they'd otherwise see).
+            let scope = if args["visibility"].as_str() == Some("shared") {
+                VisibilityScope::shared_only()
+            } else {
+                agent_scope(args)
+            };
             let results = brain.recall(query, k, scope).await?;
             let out: Vec<Value> = results.into_iter()
                 .map(|(node, score)| json!({ "memory": node, "score": score }))

@@ -148,8 +148,10 @@ impl CerebroCortex {
         // if the caller can see it, so another agent's private/thread memories
         // can't shape the activations of nodes we *do* return. Global scope
         // (agent_id == None) short-circuits to all-visible, matching Python's
-        // `agent_id is None` path in `_check_access`.
-        let visible_nodes: HashMap<NodeIndex, bool> = if scope.agent_id.is_none() {
+        // `agent_id is None` path in `_check_access` — but NOT the shared-only
+        // federation scope, where private nodes must not even influence the
+        // spread (can_access below enforces it per node).
+        let visible_nodes: HashMap<NodeIndex, bool> = if scope.agent_id.is_none() && !scope.shared_only {
             storage.graph.index.values().map(|&idx| (idx, true)).collect()
         } else {
             let all_ids: Vec<MemoryId> = storage.graph.index.keys().cloned().collect();
