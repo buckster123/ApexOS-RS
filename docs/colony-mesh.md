@@ -129,11 +129,11 @@ dark mid-thermal-alert, I need to know. Silence and 'everything fine' look ident
 | # | Item | Why deferred | Revisit when |
 |---|------|--------------|--------------|
 | #5  | NATS / async pub-sub | New transport daemon + dep; at 2 nodes HTTP req/resp + the existing event broadcast + polling cover it. Pub/sub's win is fan-out at scale. | 3+ nodes, or capability-polling proves too chatty |
-| #8/#9 | Cross-cerebro federation / write | Needs transport between two separate cerebros; partly exists via `share_memory` (same instance). | After mesh file relay (#7) lands the transport pattern |
+| #8/#9 | ~~Cross-cerebro federation / write~~ | **PROMOTED** → the [colony-federation charter](colony-federation.md) (colony deliberation 2026-07-01: unanimous #1) | — |
 | #15 | mTLS / zero-trust | Per-peer bearer tokens already gate cross-node calls; mTLS is the upgrade for *untrusted networks*. | Before adding an untrusted-network node |
-| #11 | Distributed `dream_run` | Depends on cross-node memory primitives. | After #8/#9 |
-| #10 | Procedure replication | Depends on capability advertisement (#3). | After Slice 2 |
-| #13 | Collective sensor fusion | apex2 thermal/IAQ now live; needs capability routing. | After Slice 2 + sensor head validated |
+| #11 | ~~Distributed `dream_run`~~ | **PROMOTED** → federation charter Slice 3 (dream digest exchange; colony's #2, "one arc with A") | — |
+| #10 | ~~Procedure replication~~ | **PROMOTED** → federation charter Slice 4 (colony's #3) | — |
+| #13 | Collective sensor fusion | Colony deliberation parked it as **arc+2**: coverage ≠ architecture; wants federation first so *context* propagates, not raw readings. | After the federation arc + sensor head validated |
 | #14 | Cloud bridge via spine | Edge → spine → Vast.ai → result back. | After the agent_spawn keystone (Slice 3) |
 | #16–18 | Pi Zero sensor nodes · GPU node · agent mobility | Expansion / endgame; agent mobility (`federateWith`) is "5+ nodes". | When the colony grows |
 | #1/#2/#12 | Watchdog heartbeat · redundant scheduling · soul.md constitution anchor | Heartbeat is mostly wiring (`schedule_task`+`send_to_agent`+`notify`); scheduling is low; the constitution anchor is **soul-level / agent-self-evolved**, not substrate. | Opportunistic / agent-driven |
