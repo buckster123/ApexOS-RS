@@ -169,13 +169,14 @@ APEX assimilated the substrate-update letter (prompt caching + self-update + git
 
 ### Occipital — living knowledge hub (web cortex)
 
-- **Occipital → living, LLM-curated knowledge hub** *(Top 10 #10, André 2026-06-23)* — today Occipital is fetch + recall (web_search / web_fetch / web_recall, semantic on Micro+); grow it into a **living knowledge base the colony curates and reasons over**, not just a page cache. Candidate powers (pick a first slice, then iterate):
-  - **LLM curation on ingest** — summarize a fetched page, extract key claims/entities, auto-tag, and dedup against what's already stored (so recall returns distilled knowledge, not raw HTML).
-  - **Relate + surface** — link related pages (shared entities/topics), so a recall can walk neighbours; periodic "what did I read about X" digests.
+- ◑ **SLICE 1 DONE — Occipital → living, LLM-curated knowledge hub** *(Top 10 #10, André 2026-06-23)* — grow the web cortex from fetch + recall into a **living knowledge base the colony curates and reasons over**. **Slice 1 (the distillation layer) shipped 2026-07-01** (Occipital-RS PR #1 = Phase 10 + the ApexOS wiring PR): the **`web_distill`** tool curates a cached page into summary/key-points/entities/tags via a tiered LLM backend (`OCCIPITAL_CURATE_BACKEND` = auto|ollama|anthropic|off — local-first, haiku fallback, mirrors `describe_image`); a `distillations` store + `distill_fts` make curated terms keyword-findable **even on Nano**; `web_recall` returns the distilled summary + tags (`distilled: true`) instead of a raw snippet; re-asks on unchanged content are hash-gated free; sweeps are bounded (≤10) + fail-soft. Explicit-only — nothing spends tokens on its own. `config/policy.toml` now seeds `allow` for all six `web_*` tools (they previously gated `unknown → ask` on suggest-mode fresh installs); **live nodes need the rules patched**. Remaining slices (pick next):
+  - **Auto-curation** — distill-on-ingest (background, budget-guarded) + semantic dedup against what's already stored.
+  - **Relate + surface** — link related pages (shared entities/topics), neighbour walks; periodic "what did I read about X" digests.
+  - **Reader window distill card** — render `kind:"distill"` in the ui-slint follow-along (passes through un-rendered today).
   - **`ingest_file`** (the last cerebro-mcp stub) as the file → knowledge on-ramp, mirroring the web on-ramp.
-  - **Scale:** the noted refinement — brute-force `all_embeddings()` cosine → **sqlite-vec ANN index** (the same vec0 path cerebro uses), so recall stays fast as the corpus grows.
-  - **Freshness / re-read** — re-fetch + re-summarize stale entries; track source provenance + fetch time.
-  Lives in the standalone **Occipital-RS** sibling repo (`docs/occipital.md`); ApexOS wires the tools + the ui-slint reader. Sequence behind the higher-value robustness/onboarding items, but it's the colony's path from "can read the web" to "has a mind about it." **[medium]**
+  - **Scale:** brute-force `all_embeddings()` cosine → **sqlite-vec ANN index** (the same vec0 path cerebro uses).
+  - **Freshness / re-read** — re-fetch + re-distill stale entries; provenance is in place (`model`, `distilled_at`, `content_hash`).
+  Lives in the standalone **Occipital-RS** sibling repo (`docs/occipital.md` §1b); ApexOS wires the tools + the ui-slint reader. The colony's path from "can read the web" to "has a mind about it." **[medium]**
 
 ### Storage & workspaces (André's notes #4/#5, captured 2026-06-16)
 
