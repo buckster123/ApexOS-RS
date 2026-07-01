@@ -7,6 +7,7 @@ use council_handler::spawn_council_handler;
 mod health;
 mod self_update;
 mod consolidate;
+mod dream_digest;
 mod evolution;
 mod goal;
 mod sensor_config;
@@ -1699,9 +1700,19 @@ fn spawn_nightly_dream(proxy: ToolProxy) {
                 .to_std()
                 .unwrap_or(std::time::Duration::from_secs(3600));
             tokio::time::sleep(wait).await;
-            let args = serde_json::json!({ "agent_id": apexos_core::node_agent_id() });
+            let agent_id = apexos_core::node_agent_id();
+            let dream_started_at = chrono::Utc::now().to_rfc3339();
+            let args = serde_json::json!({ "agent_id": agent_id });
             match proxy.call("dream_run", args).await {
-                Ok(out) if out.ok => eprintln!("[dream] nightly dream_run complete"),
+                Ok(out) if out.ok => {
+                    eprintln!("[dream] nightly dream_run complete");
+                    // Dream digest exchange (colony-federation Slice 3): share
+                    // tonight's newly-born schemas/consolidations with the
+                    // colony. Fail-soft — never an error path into this loop.
+                    if dream_digest::digest_enabled() {
+                        dream_digest::push_dream_digest(&proxy, &agent_id, &dream_started_at).await;
+                    }
+                }
                 Ok(out)           => eprintln!("[dream] dream_run not ok: {:?}", out.content),
                 Err(e)            => eprintln!("[dream] dream_run error: {e}"),
             }
