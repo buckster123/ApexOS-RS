@@ -96,6 +96,21 @@ mode = "suggest"
 "git_reset"    = "ask"
 "git_merge"    = "ask"
 
+# Occipital (web cortex) plugin tools ------------------------------------------
+# Reading the web is the plugin's whole purpose and it is polite by construction
+# (per-domain rate limit, robots, honest UA, read-through cache) — gating each
+# fetch behind suggest-mode's "unknown -> ask" fallthrough stalls autonomous
+# reading on approvals no one is watching. save/forget only touch Occipital's own
+# cache DB. web_distill spends LLM tokens (local Ollama free; API = a haiku call
+# per page) but is bounded (<=10 pages/call) and explicit-only — comparable trust
+# to describe_image. Operators can tighten any of these to "ask".
+"web_search"  = "allow"
+"web_fetch"   = "allow"
+"web_recall"  = "allow"
+"web_save"    = "allow"
+"web_forget"  = "allow"
+"web_distill" = "allow"
+
 # Cerebro plugin tools --------------------------------------------------------
 "remember"     = "allow"
 "recall"       = "allow"

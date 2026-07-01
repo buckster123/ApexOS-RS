@@ -6,8 +6,8 @@ reader-mode · read-through cache · semantic recall · decay) behind MCP/CLI/RE
 member of this workspace — it ships and versions independently, exactly like Cerebro did before the
 distro absorbed it. ApexOS-RS consumes it two ways, both **additive** (no agentd changes):
 
-1. **As an MCP plugin** — register `occipital-mcp` so APEX gains five tools:
-   `web_search` · `web_fetch` · `web_recall` · `web_save` · `web_forget`.
+1. **As an MCP plugin** — register `occipital-mcp` so APEX gains six tools:
+   `web_search` · `web_fetch` · `web_recall` · `web_save` · `web_forget` · `web_distill`.
 2. **As a follow-along reader window** — ui-slint renders each `web_fetch`/`web_search` result live,
    so a human watches the agent read (see *Follow-along window* below).
 
@@ -73,6 +73,52 @@ Env (in the plugin's `[plugin.env]`):
 | `OCCIPITAL_SEARXNG_URL` | self-hosted SearXNG endpoint (otherwise DuckDuckGo HTML) |
 
 Full env list: Occipital's `docs/build-roadmap.md`. Without any key, search uses DuckDuckGo HTML.
+
+### Policy rules
+
+`config/policy.toml` seeds explicit `allow` rules for all six `web_*` tools — without them a
+suggest-mode node gates every web read behind the `unknown → ask` fallthrough (the standing
+policy gotcha). **Already-deployed nodes need the rules added to their live
+`/etc/agentd/policy.toml`** (config only seeds fresh installs) — or APEX
+`propose_evolution{update_policy_rule}`s them.
+
+## 1b. The knowledge hub — LLM curation (`web_distill`)
+
+Occipital Phase 10 (ApexOS BACKLOG Top-10 #10, slice 1): the cache grows a **distillation
+layer**. `web_distill` curates an already-read page into knowledge — a 2–4 sentence
+**summary**, **key points**, **entities**, and **topic tags** — via a tiered LLM backend that
+mirrors Cerebro's `describe_image` exactly:
+
+| `OCCIPITAL_CURATE_BACKEND` | Behaviour |
+|---------------------------|-----------|
+| `auto` (default) | local/LAN Ollama first, Anthropic API fallback when `ANTHROPIC_API_KEY` is present |
+| `ollama` | only `OCCIPITAL_CURATE_URL` (default `localhost:11434`, LAN-swappable) · model `OCCIPITAL_CURATE_MODEL` (default `llama3.2`) |
+| `anthropic` | only the API — model `OCCIPITAL_CURATE_API_MODEL` (default `claude-haiku-4-5`) |
+| `off` | `web_distill` returns an honest error |
+
+No plugin-env change is needed for the API fallback: plugins inherit agentd's environment
+(`spawn_plugin` overlays `[plugin.env]` without clearing), so `ANTHROPIC_API_KEY` from
+`/etc/agentd/env` already reaches occipital-mcp — the same way cerebro-mcp's `describe_image`
+gets it.
+
+What it changes for the agent:
+
+- `web_distill {url}` — distill that page (fetched first if uncached). A re-ask on unchanged
+  content (hash-gated) is **free** — no LLM call.
+- `web_distill {}` — sweep a bounded batch (default 3, ≤10) of never-distilled /
+  content-changed pages; per-page fail-soft, returns a `remaining` count. Cron-able via the
+  CLI (`occipital distill`) for a nightly consolidation pass later.
+- `web_recall` now returns a distilled page as its **summary + tags** (`distilled: true`)
+  instead of a raw-body snippet — recall serves knowledge, not HTML dregs. Distilled
+  tags/entities/key-points are FTS-indexed, so **Nano keyword recall finds pages by curated
+  terms too** (no embeddings needed).
+- The `kind:"distill"` tool payload is *not* rendered by the reader window yet (its
+  `occipital_payload()` matches `page|results|recall` only, so it passes through harmlessly);
+  a distill card is a follow-on UI slice.
+
+**Distillation is explicit-only** — nothing spends tokens behind the operator's back;
+auto-distill-on-ingest (budget-guarded), semantic dedup/relate, digests, and the sqlite-vec
+ANN index are the follow-on slices tracked in `BACKLOG.md` #10 + Occipital's roadmap.
 
 ## 2. Follow-along reader window (9b/9c)
 
