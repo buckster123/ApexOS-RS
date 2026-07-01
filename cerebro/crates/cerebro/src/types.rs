@@ -126,13 +126,23 @@ pub enum DreamPhase {
 #[derive(Debug, Clone)]
 pub struct VisibilityScope {
     pub agent_id: Option<AgentId>,
+    /// Restrict to `visibility='shared'` memories ONLY — the scope for
+    /// federation / public surfaces (e.g. a mesh peer querying this node).
+    /// Strictly NARROWER than `global()` (the unrestricted admin view):
+    /// private and thread memories never match, whoever owns them.
+    pub shared_only: bool,
 }
 
 impl VisibilityScope {
-    pub fn global() -> Self { Self { agent_id: None } }
-    pub fn for_agent(id: AgentId) -> Self { Self { agent_id: Some(id) } }
+    pub fn global() -> Self { Self { agent_id: None, shared_only: false } }
+    pub fn for_agent(id: AgentId) -> Self { Self { agent_id: Some(id), shared_only: false } }
+    /// The federation scope: only `visibility='shared'` memories are visible.
+    pub fn shared_only() -> Self { Self { agent_id: None, shared_only: true } }
 
     pub fn can_access(&self, visibility: Visibility, node_agent_id: Option<&AgentId>) -> bool {
+        if self.shared_only {
+            return matches!(visibility, Visibility::Shared);
+        }
         match visibility {
             Visibility::Shared  => true,
             Visibility::Private => self.agent_id.as_ref() == node_agent_id,
@@ -142,6 +152,9 @@ impl VisibilityScope {
 
     /// SQL fragment — mirrors Python _scope_sql()
     pub fn sql_filter(&self) -> (&'static str, Vec<String>) {
+        if self.shared_only {
+            return ("visibility='shared'", vec![]);
+        }
         match &self.agent_id {
             None     => ("1=1", vec![]),
             Some(id) => (

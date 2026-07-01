@@ -260,6 +260,37 @@ pub fn federated_remember_args(
     Ok((args, preview))
 }
 
+/// Max snippet length in a federated recall hit — a peer gets enough to judge
+/// relevance, never the full store row (charter: bounded hits, no dumps).
+const FED_HIT_SNIPPET_CHARS: usize = 300;
+
+/// Shape a local `recall` result (an array of `{memory, score}`) into the
+/// bounded hit list a federated query returns: memory_id · snippet ·
+/// memory_type · tags · salience · score. Pure — unit-tested; anything
+/// non-conforming in the input is skipped, and `cap` bounds the count.
+pub fn federated_recall_hits(recall_out: &serde_json::Value, cap: usize) -> Vec<serde_json::Value> {
+    let Some(arr) = recall_out.as_array() else { return Vec::new() };
+    arr.iter()
+        .filter_map(|entry| {
+            let mem = entry.get("memory")?;
+            let content = mem["content"].as_str()?;
+            if content.trim().is_empty() {
+                return None;
+            }
+            let snippet: String = content.chars().take(FED_HIT_SNIPPET_CHARS).collect();
+            Some(serde_json::json!({
+                "memory_id":   mem["id"],
+                "snippet":     snippet,
+                "memory_type": mem["memory_type"],
+                "tags":        mem["tags"],
+                "salience":    mem["salience"],
+                "score":       entry["score"],
+            }))
+        })
+        .take(cap)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +444,28 @@ mod tests {
             "memory": {"content": "c"}});
         let (args, _) = federated_remember_args("apex1", "APEX", &noted).unwrap();
         assert!(args["content"].as_str().unwrap().contains("[note from apex1]: calibration"));
+    }
+
+    #[test]
+    fn federated_recall_hits_are_bounded_snippets() {
+        let recall_out = serde_json::json!([
+            { "memory": { "id": "mem_1", "content": "x".repeat(1000),
+                          "memory_type": "semantic", "tags": ["colony"], "salience": 0.9 },
+              "score": 0.83 },
+            { "memory": { "id": "mem_2", "content": "short one",
+                          "memory_type": "procedural", "tags": [], "salience": 0.5 },
+              "score": 0.61 },
+            { "not-a-memory": true },                       // skipped, not fatal
+            { "memory": { "id": "mem_3", "content": "over the cap" }, "score": 0.4 },
+        ]);
+        let hits = federated_recall_hits(&recall_out, 2);
+        assert_eq!(hits.len(), 2, "cap applied");
+        assert_eq!(hits[0]["memory_id"], "mem_1");
+        assert_eq!(hits[0]["snippet"].as_str().unwrap().chars().count(), 300, "snippet bounded");
+        assert_eq!(hits[0]["score"], 0.83);
+        assert_eq!(hits[1]["memory_id"], "mem_2");
+        assert_eq!(hits[1]["snippet"], "short one");
+        // Junk input degrades to empty, never panics.
+        assert!(federated_recall_hits(&serde_json::json!("nope"), 5).is_empty());
     }
 }

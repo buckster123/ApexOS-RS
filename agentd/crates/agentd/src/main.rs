@@ -479,10 +479,10 @@ async fn main() -> anyhow::Result<()> {
         let proxy = tool_proxy.clone();
         tokio::spawn(async move {
             while let Some(req) = mesh_memory_rx.recv().await {
-                let result = match proxy.call("remember", req.args).await {
+                let result = match proxy.call(&req.tool, req.args).await {
                     Ok(out) if out.ok => apexos_plugins::tool_output_json(&out.content)
-                        .ok_or_else(|| "unparseable remember result".to_string()),
-                    Ok(out) => Err(format!("remember rejected: {}", out.content)),
+                        .ok_or_else(|| format!("unparseable {} result", req.tool)),
+                    Ok(out) => Err(format!("{} rejected: {}", req.tool, out.content)),
                     Err(e)  => Err(e.to_string()),
                 };
                 let _ = req.reply.send(result);
@@ -1849,6 +1849,7 @@ async fn gather_tools(
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());
     tools.push(mesh_memory_send_spec());
+    tools.push(mesh_recall_spec());
     tools.push(mesh_capabilities_spec());
     tools.push(query_event_log_spec());
     tools.push(list_mesh_peers_spec());
@@ -2617,6 +2618,36 @@ fn mesh_memory_send_spec() -> ToolSpec {
                 }
             },
             "required": ["node", "memory_id"]
+        }),
+    }
+}
+
+fn mesh_recall_spec() -> ToolSpec {
+    ToolSpec {
+        name:        "mesh_recall".into(),
+        description: "Ask the colony what it knows: federated recall over mesh peers' \
+                      SHARED-visibility memories (their private memories never cross). \
+                      Returns bounded hits (snippet · type · tags · salience · score) \
+                      grouped per peer — scores aren't comparable across nodes. Peers \
+                      publish knowledge by marking memories shared (share_memory). \
+                      Omit `node` to sweep all peers. Read-only, no peer LLM turn.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type":        "string",
+                    "description": "What to recall from the colony's shared knowledge."
+                },
+                "node": {
+                    "type":        "string",
+                    "description": "Ask one specific peer (a registered node_id); omit to sweep all."
+                },
+                "limit": {
+                    "type":        "integer",
+                    "description": "Max hits per peer (default 5, max 10)."
+                }
+            },
+            "required": ["query"]
         }),
     }
 }

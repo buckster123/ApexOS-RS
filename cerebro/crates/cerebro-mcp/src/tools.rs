@@ -46,7 +46,8 @@ fn tool_schema(name: &str) -> Value {
                 "properties": {
                     "query":    { "type": "string", "description": "Search query text" },
                     "top_k":   { "type": "integer", "description": "Max results to return (default: 10)" },
-                    "agent_id": { "type": "string", "description": "Filter to this agent's memories" }
+                    "agent_id": { "type": "string", "description": "Filter to this agent's memories" },
+                    "visibility": { "type": "string", "enum": ["shared"], "description": "Restrict to shared-visibility memories ONLY (the federation scope; narrower than any agent scope)" }
                 },
                 "required": ["query"]
             }

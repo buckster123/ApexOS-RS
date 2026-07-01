@@ -117,23 +117,33 @@ What apex3 improvised with a file, done natively with memory semantics. As built
   apex2; it appears in apex2's recall with `from:apex1` provenance; apex2's agent is
   notified.
 
-### Slice 2 — Federated recall (pull)
+### Slice 2 — Federated recall (pull)  ·  ✅ shipped (2026-07-02)
 
-"Ask the colony what it knows" — without spending a peer LLM turn.
+"Ask the colony what it knows" — without spending a peer LLM turn. As built:
 
-- **Tool:** `mesh_recall(query, node?, limit?)` — queries one peer (or sweeps all, fail-soft,
-  breaker-guarded), merges results with `from_node` provenance, ranked per-peer (scores are not
-  comparable across embedders/stores — present grouped, don't pretend a global ranking).
-- **Endpoint** (gateway, token-gated): `POST /api/mesh/recall` — runs local cerebro `recall`
-  restricted to **`Visibility::Shared`** (principle 3; needs the small generic
-  shared-only-scope recall path in cerebro). Returns bounded hits (content snippet · type ·
-  tags · salience), never full-store dumps.
-- **The deliberate consequence:** `share_memory` (existing, same-instance) becomes the
+- **Cerebro (generic):** `VisibilityScope` gained a `shared_only` flag +
+  `VisibilityScope::shared_only()` constructor — enforced at **all three** recall touch
+  points: the SQL candidate filter (`visibility='shared'`), `can_access`, **and** the
+  spreading-activation visibility map (the `agent_id: None` all-visible short-circuit is
+  bypassed for shared_only, so private nodes don't even *influence* the spread).
+  Integration-tested: owner scope sees shared + own private; the federation scope sees only
+  shared. The MCP `recall` tool honors `visibility:"shared"` (safe for any caller — it can
+  only narrow).
+- **Endpoint** (gateway, token-gated): `POST /api/mesh/recall` — `from` ∈ peer registry;
+  limit clamped 1–10 (default 5); runs local `recall{visibility:"shared"}` via the shared
+  federation ToolProxy worker (`MeshMemoryReq` generalized with a `tool` field). Hits are
+  BOUNDED by the pure, unit-tested `mesh::federated_recall_hits` — snippet ≤300 chars ·
+  type · tags · salience · score, never full-store dumps.
+- **Tool:** `mesh_recall(query, node?, limit?)` — one peer or an all-peers sweep, fail-soft
+  per peer (`{node, error}` partial results, 15s timeout); results stay **grouped per peer**
+  (scores aren't comparable across embedders/stores — no pretended global ranking).
+- **The deliberate consequence:** `share_memory` (existing, same-instance) is now the
   agent's *publish* act — flipping a memory to shared is what makes it colony-queryable. The
   soul-level convention ("what should I publish?") is the agents' to evolve, not substrate.
-- **Policy:** `mesh_recall = "allow"` (read-only over deliberately-shared memories).
-- **Effort:** Medium. **Acceptance:** apex3 asks `mesh_recall("BME688 gas baseline")` and gets
-  apex1's shared calibration knowledge without apex1's LLM running.
+- **Policy:** `mesh_recall = "allow"` seeded (read-only over deliberately-shared memories).
+  **Live nodes patch or evolve the rule in.**
+- **Acceptance (the colony field test):** apex3 asks `mesh_recall("BME688 gas baseline")`
+  and gets apex1's shared calibration knowledge without apex1's LLM running.
 
 ### Slice 3 — Dream digest exchange  ·  *distributed dream_run v1 (the F dividend)*
 

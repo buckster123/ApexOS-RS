@@ -67,6 +67,10 @@ mode = "suggest"
 # allowed prompt injection: it lands as provenance-stamped DATA in the peer's
 # store (tagged colony/from:<node>, one tag-filter from cleanup), not instruction.
 "mesh_memory_send" = "allow"
+# mesh_recall: federated READ over peers' shared-visibility memories (private
+# never crosses — the peer answers with the shared_only scope). Read-only, no
+# peer LLM turn, bounded hits.
+"mesh_recall"      = "allow"
 "mesh_capabilities" = "allow"   # read-only peer capability query
 # agent_spawn: delegate a sub-task to a focused sub-agent (local) or a mesh PEER
 # (cross-node, blocking). Bounded — local by max sub-agent depth, cross-node by a

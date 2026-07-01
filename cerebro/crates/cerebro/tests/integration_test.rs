@@ -34,6 +34,21 @@ mod types_roundtrip {
     }
 
     #[test]
+    fn visibility_scope_shared_only_is_the_narrowest() {
+        let fed = VisibilityScope::shared_only();
+        let (sql, params) = fed.sql_filter();
+        assert_eq!(sql, "visibility='shared'");
+        assert!(params.is_empty());
+        let owner = AgentId("APEX".into());
+        assert!(fed.can_access(Visibility::Shared, None));
+        assert!(!fed.can_access(Visibility::Private, Some(&owner)), "private never matches");
+        assert!(!fed.can_access(Visibility::Thread, None), "thread never matches");
+        // Sanity: global stays the unrestricted admin view, agent scope unchanged.
+        assert_eq!(VisibilityScope::global().sql_filter().0, "1=1");
+        assert!(VisibilityScope::for_agent(owner.clone()).can_access(Visibility::Private, Some(&owner)));
+    }
+
+    #[test]
     fn link_type_all_variants_with_weights() {
         let cases = [
             (LinkType::Causal,      0.9),
@@ -981,7 +996,7 @@ mod cortex_pipeline {
         config::Config,
         cortex::CerebroCortex,
         models::AssociativeLink,
-        types::{LinkType, VisibilityScope},
+        types::{AgentId, LinkType, Visibility, VisibilityScope},
     };
     use tempfile::TempDir;
 
@@ -1033,6 +1048,35 @@ mod cortex_pipeline {
         assert!(!results.is_empty(), "recall should return at least one result");
         assert_eq!(results[0].0.id, node.id, "remembered node should rank first");
         assert!(results[0].1 > 0.0, "recall score should be positive");
+    }
+
+    #[tokio::test]
+    async fn shared_only_scope_hides_private_memories() {
+        // The federation scope (colony-federation Slice 2): a mesh peer's query
+        // must see ONLY visibility=shared — private never crosses the wire.
+        let (cortex, _dir) = make_cortex().await;
+        let apex = AgentId("APEX".into());
+        // Agent-scoped remember → Private; global remember → Shared.
+        cortex.remember(
+            "sqlite calibration detail this node keeps to itself",
+            None, None, None, VisibilityScope::for_agent(apex.clone()),
+        ).await.unwrap();
+        let published = cortex.remember(
+            "sqlite calibration wisdom published for the colony",
+            None, None, None, VisibilityScope::global(),
+        ).await.unwrap();
+
+        // The owning agent sees both…
+        let own = cortex.recall("sqlite calibration", 5, VisibilityScope::for_agent(apex))
+            .await.unwrap();
+        assert_eq!(own.len(), 2, "owner scope sees shared + own private");
+
+        // …the federation scope sees only the published one.
+        let fed = cortex.recall("sqlite calibration", 5, VisibilityScope::shared_only())
+            .await.unwrap();
+        assert_eq!(fed.len(), 1, "shared_only hides private");
+        assert_eq!(fed[0].0.id, published.id);
+        assert_eq!(fed[0].0.visibility, Visibility::Shared);
     }
 
     #[tokio::test]
