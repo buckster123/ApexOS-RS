@@ -182,6 +182,84 @@ pub fn parse_avahi_output(raw: &str) -> Vec<(String, String)> {
     results
 }
 
+// ── federation memory relay (colony-federation Slice 1) ─────────────────────
+
+/// Bounds on an inbound federated memory — a memory is distilled knowledge, not
+/// a blob. Content over the cap is rejected (never silently truncated).
+pub const FED_MEMORY_MAX_CHARS: usize = 60_000;
+const FED_NOTE_MAX_CHARS: usize = 500;
+const FED_MAX_TAGS: usize = 16;
+const FED_TAG_MAX_CHARS: usize = 48;
+
+/// Build the local-Cerebro `remember` args (and a board preview) for a memory
+/// arriving from mesh peer `from_node`. Pure — all validation + the provenance
+/// stamping happens here, unit-tested; the handler is IO glue.
+///
+/// Provenance is SYSTEM-stamped as tags (`colony` · `from:<node>` ·
+/// `origin:<sender memory id>`) — the sender cannot forge or omit them, and a
+/// peer's imports stay one tag-filter away from bulk cleanup. The memory lands
+/// in `agent_id`'s space (the receiving node's own agent), default-private;
+/// sharing it onward is the receiving agent's call.
+pub fn federated_remember_args(
+    from_node: &str,
+    agent_id: &str,
+    body: &serde_json::Value,
+) -> Result<(serde_json::Value, String), String> {
+    let mem = &body["memory"];
+    let content = mem["content"].as_str().map(str::trim).unwrap_or("");
+    if content.is_empty() {
+        return Err("memory.content (non-empty string) required".into());
+    }
+    if content.chars().count() > FED_MEMORY_MAX_CHARS {
+        return Err(format!("memory.content exceeds the {FED_MEMORY_MAX_CHARS}-char cap"));
+    }
+
+    // Sender tags survive (bounded + cleaned) — but any provenance-SHAPED tag
+    // the sender supplied is stripped outright, so the stamp appended below is
+    // always ours: a peer can't forge `from:`/`origin:` provenance.
+    let mut tags: Vec<String> = mem["tags"].as_array()
+        .map(|a| a.iter()
+            .filter_map(|t| t.as_str())
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty() && t.chars().count() <= FED_TAG_MAX_CHARS)
+            .filter(|t| t != "colony" && !t.starts_with("from:") && !t.starts_with("origin:"))
+            .take(FED_MAX_TAGS)
+            .collect())
+        .unwrap_or_default();
+    tags.push("colony".into());
+    tags.push(format!("from:{from_node}"));
+    if let Some(origin) = body["origin_memory_id"].as_str().filter(|s| !s.trim().is_empty()) {
+        tags.push(format!("origin:{}", origin.trim()));
+    }
+
+    // The sender's optional "why this matters" rides as an attributed suffix.
+    let mut full = content.to_string();
+    if let Some(note) = body["note"].as_str().map(str::trim).filter(|n| !n.is_empty()) {
+        let note: String = note.chars().take(FED_NOTE_MAX_CHARS).collect();
+        full.push_str(&format!("\n\n[note from {from_node}]: {note}"));
+    }
+
+    let mut args = serde_json::json!({
+        "content":  full,
+        "agent_id": agent_id,
+        "tags":     tags,
+    });
+    // Type + salience are preserved when valid, else dropped (auto-classified).
+    if let Some(t) = mem["memory_type"].as_str() {
+        if ["episodic", "semantic", "procedural", "affective", "prospective", "schematic"]
+            .contains(&t)
+        {
+            args["memory_type"] = serde_json::json!(t);
+        }
+    }
+    if let Some(s) = mem["salience"].as_f64() {
+        args["salience"] = serde_json::json!(s.clamp(0.0, 1.0));
+    }
+
+    let preview: String = content.chars().take(120).collect();
+    Ok((args, preview))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +350,68 @@ mod tests {
             assert_eq!(c.len(), 6, "code {c:?} must be 6 chars");
             assert!(c.chars().all(|ch| ch.is_ascii_digit()), "code {c:?} must be all digits");
         }
+    }
+
+    // ── federation memory relay ─────────────────────────────────────────────
+
+    #[test]
+    fn federated_import_stamps_provenance_and_preserves_fields() {
+        let body = serde_json::json!({
+            "from": "apex1", "origin_memory_id": "mem_abc",
+            "memory": {
+                "content": "BME688 gas baseline drifts for ~48h after power-on.",
+                "memory_type": "semantic",
+                "tags": ["sensors", "bme688"],
+                "salience": 0.8,
+            },
+        });
+        let (args, preview) = federated_remember_args("apex1", "APEX", &body).unwrap();
+        assert_eq!(args["agent_id"], "APEX");
+        assert_eq!(args["memory_type"], "semantic");
+        assert_eq!(args["salience"], 0.8);
+        let tags: Vec<&str> = args["tags"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+        assert!(tags.contains(&"sensors") && tags.contains(&"bme688"), "sender tags survive");
+        assert!(tags.contains(&"colony") && tags.contains(&"from:apex1") && tags.contains(&"origin:mem_abc"),
+            "provenance stamped: {tags:?}");
+        assert!(preview.starts_with("BME688"));
+    }
+
+    #[test]
+    fn federated_import_strips_forged_provenance_tags() {
+        let body = serde_json::json!({
+            "from": "apex2",
+            "memory": {
+                "content": "x",
+                "tags": ["from:apex1", "origin:mem_fake", "colony", "real-tag"],
+            },
+        });
+        let (args, _) = federated_remember_args("apex2", "APEX", &body).unwrap();
+        let tags: Vec<&str> = args["tags"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+        assert!(tags.contains(&"from:apex2"), "our stamp present");
+        assert!(!tags.contains(&"from:apex1"), "forged from: stripped");
+        assert!(!tags.contains(&"origin:mem_fake"), "forged origin: stripped");
+        assert_eq!(tags.iter().filter(|t| **t == "colony").count(), 1, "single colony tag");
+        assert!(tags.contains(&"real-tag"));
+    }
+
+    #[test]
+    fn federated_import_validates_and_bounds() {
+        // Missing/empty content rejected.
+        assert!(federated_remember_args("a", "APEX", &serde_json::json!({"memory": {}})).is_err());
+        // Over-cap content rejected, not truncated.
+        let huge = serde_json::json!({"memory": {"content": "x".repeat(FED_MEMORY_MAX_CHARS + 1)}});
+        assert!(federated_remember_args("a", "APEX", &huge).is_err());
+        // Invalid memory_type + out-of-range salience are dropped/clamped.
+        let odd = serde_json::json!({"memory": {
+            "content": "c", "memory_type": "not-a-type", "salience": 7.5 }});
+        let (args, _) = federated_remember_args("a", "APEX", &odd).unwrap();
+        assert!(args["memory_type"].is_null(), "bad type dropped (auto-classify)");
+        assert_eq!(args["salience"], 1.0, "salience clamped");
+        // The note rides as an attributed suffix.
+        let noted = serde_json::json!({
+            "from": "apex1", "note": "calibration context for your sensor work",
+            "memory": {"content": "c"}});
+        let (args, _) = federated_remember_args("apex1", "APEX", &noted).unwrap();
+        assert!(args["content"].as_str().unwrap().contains("[note from apex1]: calibration"));
     }
 }

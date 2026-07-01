@@ -935,6 +935,30 @@ impl Supervisor {
             return;
         }
 
+        // Virtual tool: mesh_memory_send — share one of the caller's own memories
+        // with a peer's Cerebro (colony-federation Slice 1). Reads the memory
+        // scope-checked from the caller's OWN space (get_memory with the caller's
+        // system-stamped agent_id — you can only send what you can read), POSTs
+        // the record to the peer's token-gated /api/mesh/memory; the RECEIVER
+        // stamps provenance (colony / from:<node> / origin:<id> tags) on import.
+        if call.tool == "mesh_memory_send" {
+            let node      = call.args["node"].as_str().map(str::to_owned);
+            let memory_id = call.args["memory_id"].as_str().unwrap_or("").to_owned();
+            let note      = call.args["note"].as_str().map(str::to_owned);
+            let call_id   = call.id;
+            let bus       = self.bus.clone();
+            let agent_id  = apexos_core::resolve_agent_id(&self.session_bindings, session);
+            // A proxy back into this supervisor for the local get_memory read —
+            // safe here because the DirectCall arm replies from a spawned task.
+            let proxy = ToolProxy::new(self.sv_tx.clone());
+            tokio::spawn(async move {
+                let output =
+                    mesh_memory_send(&proxy, node.as_deref(), &agent_id, &memory_id, note.as_deref()).await;
+                bus.emit(Event::ToolResult { session, call: call_id, output }).await;
+            });
+            return;
+        }
+
         // Virtual tool: mesh_capabilities — query a peer's (or all peers') live
         // senses/tools/tier via their GET /api/capabilities. Capability discovery.
         if call.tool == "mesh_capabilities" {
@@ -2093,6 +2117,96 @@ async fn mesh_file_send(node: Option<&str>, agent_id: &str, path: &str, dest: Op
             }
         }
         Err(e) => err(format!("mesh_file_send: {e}")),
+    }
+}
+
+/// Cap on a federated memory's content (chars). A memory is distilled knowledge,
+/// not a blob — oversized content is rejected, never silently truncated.
+const MESH_MEMORY_MAX_CHARS: usize = 60_000;
+
+/// `mesh_memory_send(node, memory_id, note?)`: read one of the caller's own
+/// memories and relay it to a peer's Cerebro (colony-federation Slice 1).
+async fn mesh_memory_send(
+    proxy: &ToolProxy,
+    node: Option<&str>,
+    agent_id: &str,
+    memory_id: &str,
+    note: Option<&str>,
+) -> ToolOutput {
+    let err = |m: String| ToolOutput { ok: false, content: serde_json::json!(m) };
+    let node = match node {
+        Some(n) if !n.is_empty() => n,
+        _ => return err("mesh_memory_send: missing 'node'".into()),
+    };
+    if memory_id.is_empty() {
+        return err("mesh_memory_send: missing 'memory_id'".into());
+    }
+
+    // Scope-checked read from the caller's OWN memory space (agent_id is the
+    // system-stamped caller identity, not model-supplied).
+    let mem = match proxy
+        .call("get_memory", serde_json::json!({ "memory_id": memory_id, "agent_id": agent_id }))
+        .await
+    {
+        Ok(out) if out.ok => match crate::mcp::tool_output_json(&out.content) {
+            Some(v) => v,
+            None => return err("mesh_memory_send: unparseable get_memory result".into()),
+        },
+        Ok(out) => return err(format!("mesh_memory_send: get_memory: {}", out.content)),
+        Err(e)  => return err(format!("mesh_memory_send: get_memory: {e}")),
+    };
+    let content = mem["content"].as_str().unwrap_or("");
+    if content.trim().is_empty() {
+        return err(format!("mesh_memory_send: memory {memory_id} has no content"));
+    }
+    if content.chars().count() > MESH_MEMORY_MAX_CHARS {
+        return err(format!(
+            "mesh_memory_send: memory {memory_id} exceeds the {MESH_MEMORY_MAX_CHARS}-char relay cap"
+        ));
+    }
+
+    let body = serde_json::json!({
+        "from":             apexos_core::node_id(),
+        "origin_memory_id": memory_id,
+        "note":             note,
+        "memory": {
+            "content":     content,
+            "memory_type": mem["type"].as_str().or(mem["memory_type"].as_str()),
+            "tags":        mem["tags"].clone(),
+            "salience":    mem["salience"].clone(),
+        },
+    });
+
+    let (ws_url, token) = match find_peer(node).await {
+        Some(p) => p,
+        None    => return err(format!("mesh_memory_send: peer '{node}' not found in peers.toml")),
+    };
+    let http_base = ws_url.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1);
+    let mut req = reqwest::Client::new()
+        .post(format!("{http_base}/api/mesh/memory"))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(30));
+    if let Some(t) = token.as_deref() {
+        req = req.bearer_auth(t);
+    }
+    match req.send().await {
+        Ok(r) => {
+            let status = r.status();
+            let v = r.json::<serde_json::Value>().await.ok();
+            let ok = status.is_success() && v.as_ref().and_then(|b| b["ok"].as_bool()) == Some(true);
+            if ok {
+                ToolOutput { ok: true, content: serde_json::json!({
+                    "status":         "shared",
+                    "node":           node,
+                    "peer_memory_id": v.as_ref().and_then(|b| b["memory_id"].as_str()).unwrap_or(""),
+                }) }
+            } else {
+                let detail = v.as_ref().and_then(|b| b["error"].as_str())
+                    .unwrap_or(if token.is_none() { "no token stored for peer" } else { "delivery failed" });
+                err(format!("mesh_memory_send: {detail} (status {status})"))
+            }
+        }
+        Err(e) => err(format!("mesh_memory_send: {e}")),
     }
 }
 

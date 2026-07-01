@@ -294,6 +294,13 @@ async fn main() -> anyhow::Result<()> {
     let (consolidate_tx, mut consolidate_rx) =
         tokio::sync::mpsc::channel::<ConsolidateReq>(8);
 
+    // Federated memory imports (colony-federation Slice 1): the gateway's
+    // /api/mesh/memory handler sends validated, provenance-stamped `remember`
+    // args; a small worker (spawned below, once the ToolProxy exists) stores
+    // them in the local Cerebro and replies on the oneshot.
+    let (mesh_memory_tx, mut mesh_memory_rx) =
+        tokio::sync::mpsc::channel::<apexos_gateway::MeshMemoryReq>(16);
+
     // Capability advertisement (colony-mesh Slice 2): a structured snapshot of this
     // node's senses/tools/tier, refreshed by spawn_embodiment_refresher and served
     // at GET /api/capabilities so peers can ask "which node has thermal/GPU?".
@@ -346,6 +353,7 @@ async fn main() -> anyhow::Result<()> {
         mesh_unread_path:     mesh_unread_path.clone(),
         consolidate_tx:       consolidate_tx.clone(),
         spawn_tx:             spawn_tx.clone(),
+        mesh_memory_tx:       mesh_memory_tx.clone(),
         capabilities:         Arc::clone(&capabilities_arc),
         vast_state:           vast_state.clone(),
         session_bindings:     Arc::clone(&session_bindings),
@@ -462,6 +470,25 @@ async fn main() -> anyhow::Result<()> {
     let health_proxy  = tool_proxy.clone();   // boot-health Cerebro reachability probe
     let self_update_proxy = tool_proxy.clone(); // apply_daemon_update: session_save + resume intention
     let goal_proxy = tool_proxy.clone();        // goal driver: episode_start/end wrapping each goal
+
+    // Federated-memory import worker (colony-federation Slice 1) — the gateway's
+    // /api/mesh/memory handler validated + provenance-stamped the args; this just
+    // stores them via the local Cerebro `remember` (DirectCall honors the explicit
+    // node-agent space) and hands back the stored memory JSON.
+    {
+        let proxy = tool_proxy.clone();
+        tokio::spawn(async move {
+            while let Some(req) = mesh_memory_rx.recv().await {
+                let result = match proxy.call("remember", req.args).await {
+                    Ok(out) if out.ok => apexos_plugins::tool_output_json(&out.content)
+                        .ok_or_else(|| "unparseable remember result".to_string()),
+                    Ok(out) => Err(format!("remember rejected: {}", out.content)),
+                    Err(e)  => Err(e.to_string()),
+                };
+                let _ = req.reply.send(result);
+            }
+        });
+    }
 
     // Session-consolidation worker — owns the provider + ToolProxy the gateway
     // can't reach at build time. Drains consolidate_rx: LLM summary + Cerebro
@@ -1821,6 +1848,7 @@ async fn gather_tools(
     tools.push(goal::goal_cancel_spec());
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());
+    tools.push(mesh_memory_send_spec());
     tools.push(mesh_capabilities_spec());
     tools.push(query_event_log_spec());
     tools.push(list_mesh_peers_spec());
@@ -2559,6 +2587,36 @@ fn mesh_file_send_spec() -> ToolSpec {
                 }
             },
             "required": ["node", "path"]
+        }),
+    }
+}
+
+fn mesh_memory_send_spec() -> ToolSpec {
+    ToolSpec {
+        name:        "mesh_memory_send".into(),
+        description: "Share one of your own memories with a mesh peer's Cerebro \
+                      (colony federation). The peer imports a provenance-stamped copy \
+                      (tagged colony · from:<you> · origin:<id>) into its own space and \
+                      its agent is notified — stores stay separate, knowledge travels. \
+                      Use it to hand a peer a discovery, calibration, or lesson it \
+                      lacks; add a short note saying why it matters.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "node": {
+                    "type":        "string",
+                    "description": "Target mesh node_id (a registered peer)."
+                },
+                "memory_id": {
+                    "type":        "string",
+                    "description": "The id of YOUR memory to share (from recall/get_memory)."
+                },
+                "note": {
+                    "type":        "string",
+                    "description": "Optional one-line 'why this matters' for the receiving agent."
+                }
+            },
+            "required": ["node", "memory_id"]
         }),
     }
 }
