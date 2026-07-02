@@ -653,6 +653,52 @@ impl SqliteStore {
         Ok(results)
     }
 
+    /// Exact-tag lookup: memories carrying **every** tag in `tags` (AND), scoped,
+    /// newest first. Matches the exact quoted string inside the stored tags-JSON
+    /// (`%"<tag>"%`, LIKE-escaped) — precise where FTS/vector recall is fuzzy.
+    /// The provenance query: `["from:apex1", "origin:mem_x"]` finds a prior
+    /// federated import; `["from:apex1"]` lists everything a peer ever sent.
+    pub async fn find_by_tags(
+        &self,
+        scope: &VisibilityScope,
+        tags: &[String],
+        limit: usize,
+    ) -> Result<Vec<MemoryNode>> {
+        if tags.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().await;
+        let (scope_sql, scope_params) = scope.sql_filter();
+
+        let tag_clause = "AND tags LIKE ? ESCAPE '\\' ".repeat(tags.len());
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM memories \
+             WHERE {scope_sql} AND deleted_at IS NULL {tag_clause} \
+             ORDER BY created_at DESC LIMIT ?"
+        );
+        // The exact tag string, quoted as it appears inside the JSON array, with
+        // LIKE metacharacters escaped so a tag can't wildcard the match.
+        let patterns: Vec<String> = tags.iter()
+            .map(|t| {
+                let escaped = t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+                format!("%\"{escaped}\"%")
+            })
+            .collect();
+        let limit_val = limit as i64;
+        let mut dyn_params: Vec<&dyn rusqlite::ToSql> = Vec::new();
+        for s in &scope_params { dyn_params.push(s); }
+        for p in &patterns { dyn_params.push(p); }
+        dyn_params.push(&limit_val);
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(dyn_params.as_slice(), row_to_raw)?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?.into_memory_node()?);
+        }
+        Ok(results)
+    }
+
     // -----------------------------------------------------------------------
     // Link CRUD
     // -----------------------------------------------------------------------

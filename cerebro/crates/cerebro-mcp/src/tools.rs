@@ -409,6 +409,20 @@ fn tool_schema(name: &str) -> Value {
             }
         }),
 
+        "find_by_tags" => json!({
+            "name": "find_by_tags",
+            "description": "Find memories carrying EVERY given tag (exact match, AND). Precise where recall is fuzzy — use it for provenance queries (e.g. tags [\"from:apex1\"] lists everything a peer sent; add \"origin:<id>\" to find one specific federated import).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tags":     { "anyOf": [{"type":"array","items":{"type":"string"}},{"type":"string"}], "description": "Tag(s) that must ALL be present" },
+                    "limit":    { "type": "integer", "description": "Max results (default: 20)" },
+                    "agent_id": { "type": "string" }
+                },
+                "required": ["tags"]
+            }
+        }),
+
         "delete_tag" => json!({
             "name": "delete_tag",
             "description": "Remove a tag from all memories.",
@@ -935,6 +949,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "audit_summary",
     "query_audit",
     "list_tags",
+    "find_by_tags",
     "delete_tag",
     "rename_tag",
     "merge_tags",

@@ -245,15 +245,24 @@ pub fn federated_remember_args(
         "tags":     tags,
     });
     // Type + salience are preserved when valid, else dropped (auto-classified).
+    let mut memory_type = None;
     if let Some(t) = mem["memory_type"].as_str() {
         if ["episodic", "semantic", "procedural", "affective", "prospective", "schematic"]
             .contains(&t)
         {
             args["memory_type"] = serde_json::json!(t);
+            memory_type = Some(t);
         }
     }
-    if let Some(s) = mem["salience"].as_f64() {
-        args["salience"] = serde_json::json!(s.clamp(0.0, 1.0));
+    // PROCEDURES re-earn their fitness locally (colony-federation Slice 4): the
+    // sender's salience is part of its darwin signal, earned on a different
+    // embodiment — so it is dropped and the local pipeline assigns fresh. The
+    // origin track record rides in the note as *context*, never as stats.
+    let is_procedure = memory_type == Some("procedural");
+    if !is_procedure {
+        if let Some(s) = mem["salience"].as_f64() {
+            args["salience"] = serde_json::json!(s.clamp(0.0, 1.0));
+        }
     }
 
     let preview: String = content.chars().take(120).collect();
@@ -444,6 +453,27 @@ mod tests {
             "memory": {"content": "c"}});
         let (args, _) = federated_remember_args("apex1", "APEX", &noted).unwrap();
         assert!(args["content"].as_str().unwrap().contains("[note from apex1]: calibration"));
+    }
+
+    #[test]
+    fn federated_procedure_import_drops_sender_salience() {
+        // A procedure's fitness is re-earned per node (Slice 4): the sender's
+        // salience never rides in; other types keep it (clamped).
+        let proc = serde_json::json!({
+            "from": "apex3",
+            "memory": { "content": "1. do X  2. verify Y", "memory_type": "procedural",
+                        "tags": ["procedure"], "salience": 0.95 },
+        });
+        let (args, _) = federated_remember_args("apex3", "APEX", &proc).unwrap();
+        assert_eq!(args["memory_type"], "procedural");
+        assert!(args["salience"].is_null(), "sender fitness dropped — re-earned locally");
+
+        let sem = serde_json::json!({
+            "from": "apex3",
+            "memory": { "content": "c", "memory_type": "semantic", "salience": 0.95 },
+        });
+        let (args, _) = federated_remember_args("apex3", "APEX", &sem).unwrap();
+        assert_eq!(args["salience"], 0.95, "non-procedures keep sender salience");
     }
 
     #[test]

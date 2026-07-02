@@ -1413,3 +1413,64 @@ mod db_compat {
         assert_eq!(mem2.visibility,  cerebro::types::Visibility::Private);
     }
 }
+
+// =============================================================================
+// find_by_tags — exact-tag provenance lookup (colony-federation Slice 4)
+// =============================================================================
+
+#[cfg(test)]
+mod find_by_tags {
+    use cerebro::{
+        config::Config,
+        cortex::CerebroCortex,
+        types::VisibilityScope,
+    };
+    use tempfile::TempDir;
+
+    async fn make_cortex() -> (CerebroCortex, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            db_path:       dir.path().join("test.db"),
+            anthropic_key: None,
+            embed_model:   "".into(),
+        };
+        let cortex = CerebroCortex::new(config).await.unwrap();
+        (cortex, dir)
+    }
+
+    #[tokio::test]
+    async fn finds_by_exact_tags_and_requires_all() {
+        let (cortex, _dir) = make_cortex().await;
+        let imported = cortex.remember(
+            "a federated calibration memory from a peer node",
+            None, Some(vec!["colony".into(), "from:apex1".into(), "origin:mem_x".into()]),
+            None, VisibilityScope::global(),
+        ).await.unwrap();
+        cortex.remember(
+            "another memory from the same peer, different origin",
+            None, Some(vec!["colony".into(), "from:apex1".into(), "origin:mem_y".into()]),
+            None, VisibilityScope::global(),
+        ).await.unwrap();
+
+        let storage = cortex.storage.read().await;
+        // Both provenance tags → exactly the one import.
+        let hits = storage.sqlite.find_by_tags(
+            &VisibilityScope::global(),
+            &["from:apex1".into(), "origin:mem_x".into()], 10,
+        ).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, imported.id);
+        // Per-peer sweep: one tag → both.
+        let hits = storage.sqlite.find_by_tags(
+            &VisibilityScope::global(), &["from:apex1".into()], 10,
+        ).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        // A tag that exists nowhere → empty; exactness: substring must NOT match.
+        assert!(storage.sqlite.find_by_tags(
+            &VisibilityScope::global(), &["from:apex".into()], 10,
+        ).await.unwrap().is_empty(), "exact tag match, not substring");
+        assert!(storage.sqlite.find_by_tags(
+            &VisibilityScope::global(), &[], 10,
+        ).await.unwrap().is_empty(), "empty tags → empty, no full scan");
+    }
+}

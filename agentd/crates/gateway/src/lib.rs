@@ -3412,6 +3412,31 @@ async fn mesh_memory_handler(
         Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
 
+    // Origin dedup (Slice 4): a re-send of the same origin memory from the same
+    // peer must not duplicate — the provenance tags stamped on every import are
+    // the natural key, and `find_by_tags` is the exact lookup (recall would be
+    // fuzzy under embeddings). Fail-open: if the probe errors, import anyway
+    // (a duplicate is recoverable; a lost memory isn't).
+    if let Some(origin) = body["origin_memory_id"].as_str().filter(|s| !s.trim().is_empty()) {
+        let probe = serde_json::json!({
+            "tags":     [format!("from:{from}"), format!("origin:{}", origin.trim())],
+            "limit":    1,
+            "agent_id": agent_id,
+        });
+        let (ptx, prx) = tokio::sync::oneshot::channel();
+        let preq = MeshMemoryReq { tool: "find_by_tags".into(), args: probe, reply: ptx };
+        if state.mesh_memory_tx.send(preq).await.is_ok() {
+            if let Ok(Ok(found)) = prx.await {
+                if let Some(existing) = found.as_array().and_then(|a| a.first()) {
+                    let memory_id = existing["id"].as_str().unwrap_or("").to_string();
+                    return Json(serde_json::json!({
+                        "ok": true, "memory_id": memory_id, "from": from, "duplicate": true,
+                    }));
+                }
+            }
+        }
+    }
+
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let req = MeshMemoryReq { tool: "remember".into(), args, reply: reply_tx };
     if state.mesh_memory_tx.send(req).await.is_err() {

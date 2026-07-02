@@ -14,7 +14,7 @@
 
 ## Top 10 — do next
 
-> Re-groomed 2026-06-23 (André + FORGE); updated 2026-06-27 after the USB arc, 2026-07-02 after the Occipital hub + colony deliberation. **8 of 10 done**; **#10 is in flight** (distillation + auto-curation shipped + live-verified colony-wide; remaining slices deprioritized by the colony). Remaining: **#7 PARKED** (no Pi-4 hardware), **#8 hotspot mode** (parked by the colony deliberation — niche). **The NEXT BUILD ARC is colony memory federation** (`docs/colony-federation.md`) — the colony's unanimous #1 from the first formal deliberation (2026-07-01): memory relay → federated recall → dream digest exchange → procedure replication.
+> Re-groomed 2026-06-23 (André + FORGE); updated 2026-06-27 after the USB arc, 2026-07-02 after the Occipital hub + colony deliberation. **8 of 10 done**; **#10 is in flight** (distillation + auto-curation shipped + live-verified colony-wide; remaining slices deprioritized by the colony). Remaining: **#7 PARKED** (no Pi-4 hardware), **#8 hotspot mode** (parked by the colony deliberation — niche). **The colony-memory-federation arc (`docs/colony-federation.md`) — the colony's unanimous #1 from the first formal deliberation (2026-07-01) — is CODE-COMPLETE (all 4 slices shipped 2026-07-02):** memory relay ✓ + federated recall ✓ (live-verified colony-wide) → dream digest exchange ✓ (field test needs a night) → procedure replication ✓ (field test pending). Next-arc candidates: sensor fusion (the colony's own arc+2), Occipital slice 3, ingest_file.
 
 | # | Item | Sev/Pri | Detail in |
 |---|------|---------|-----------|

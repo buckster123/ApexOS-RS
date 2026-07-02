@@ -11,7 +11,7 @@ mod transport;
 use transport::{Frame, StdioTransport};
 
 /// cerebro-mcp — MCP-over-stdio server exposing the CerebroCortex tool surface:
-/// 66 advertised tools (63 functional + 3 deferred Tier-7 stubs).
+/// 67 advertised tools (64 functional + 3 deferred Tier-7 stubs).
 /// Drop-in replacement for `python -m cerebrocortex.mcp` in plugins.toml.
 #[tokio::main]
 async fn main() -> Result<()> {
