@@ -145,23 +145,32 @@ What apex3 improvised with a file, done natively with memory semantics. As built
 - **Acceptance (the colony field test):** apex3 asks `mesh_recall("BME688 gas baseline")`
   and gets apex1's shared calibration knowledge without apex1's LLM running.
 
-### Slice 3 — Dream digest exchange  ·  *distributed dream_run v1 (the F dividend)*
+### Slice 3 — Dream digest exchange  ·  *distributed dream_run v1 (the F dividend)*  ·  ✅ shipped (2026-07-02)
 
 "A colony that sleeps together thinks better" — without merged dreaming (endgame, deferred).
+As built (`agentd/src/dream_digest.rs`):
 
-- **Mechanism:** after the nightly daemon-driven `dream_run` completes, agentd assembles a
-  bounded **dream digest** from the dream report — newly formed schemas + top consolidated
-  semantic memories (caps: N items, K bytes) — and pushes it to each peer through the Slice-1
-  relay (one memory per digest item, provenance-stamped as usual, tagged `dream-digest`).
-- **Receiving side:** digests land as semantic memories with provenance; the *receiving* node's
-  own next dream folds them in — consolidation stays local, insight travels. This is the
-  correct v1 reading of "distributed dream_run": exchange the *products* of sleep, not the
-  process.
-- **Knobs:** `COLONY_DREAM_DIGEST=1|0` (default ON once the arc ships — it's the point),
-  `COLONY_DREAM_DIGEST_MAX` (items, default ~5). Staggered crons already exist per-node.
-- **Effort:** Medium (mostly agentd glue around the existing dream report + Slice 1).
-  **Acceptance:** apex2's 03:00 dream forms a schema; by morning apex1 recalls it with
-  `from:apex2 · dream-digest` provenance.
+- **Mechanism:** after the nightly daemon-driven `dream_run` completes, agentd selects the
+  **schematic + semantic memories born during the dream window** (the `DreamReport` carries
+  counts, not ids — so the digest assembles from `export_memories` filtered by
+  `created_at > dream_start`; schemas first, salience order preserved) and pushes each to
+  every registered peer through the Slice-1 relay (`mesh_memory_send` reused with a
+  `dream-digest` extra tag on top of the receiver's usual provenance stamp).
+- **Two invariants (the pure, unit-tested `digest_candidates`):**
+  - **The echo-guard** — memories tagged `colony` / `from:*` / `dream-digest` (federated
+    imports) are NEVER candidates, so knowledge propagates one hop per genuine
+    consolidation and the colony can't ping-pong an item into amplification.
+  - **The window is the dedup** — only this dream's creations qualify; a night's digest
+    can't re-send last night's items.
+- **Receiving side:** digests land with provenance, default-private; the *receiving* node's
+  own next dream folds them in — consolidation stays local, insight travels. The *products*
+  of sleep, not the process.
+- **Knobs:** `COLONY_DREAM_DIGEST=0` disables (default ON — it's the point);
+  `COLONY_DREAM_DIGEST_MAX` items/night (default 5). Daemon-driven like `dream_run` itself
+  (no LLM turn, no approval gate; fail-soft — never an error path into the dream loop).
+  No new policy rule needed.
+- **Acceptance (the colony field test):** apex2's 03:00 dream forms a schema; by morning
+  apex1 recalls it with `from:apex2 · dream-digest` provenance.
 
 ### Slice 4 — Procedure replication  ·  *the B dividend*
 

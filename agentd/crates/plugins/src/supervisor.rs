@@ -953,7 +953,7 @@ impl Supervisor {
             let proxy = ToolProxy::new(self.sv_tx.clone());
             tokio::spawn(async move {
                 let output =
-                    mesh_memory_send(&proxy, node.as_deref(), &agent_id, &memory_id, note.as_deref()).await;
+                    mesh_memory_send(&proxy, node.as_deref(), &agent_id, &memory_id, note.as_deref(), &[]).await;
                 bus.emit(Event::ToolResult { session, call: call_id, output }).await;
             });
             return;
@@ -2143,12 +2143,16 @@ const MESH_MEMORY_MAX_CHARS: usize = 60_000;
 
 /// `mesh_memory_send(node, memory_id, note?)`: read one of the caller's own
 /// memories and relay it to a peer's Cerebro (colony-federation Slice 1).
-async fn mesh_memory_send(
+/// `extra_tags` ride with the memory's own tags (the dream-digest pusher marks
+/// its items `dream-digest`); the agent-facing virtual tool passes none.
+/// Pub: the agentd dream-digest task (Slice 3) reuses this exact sender.
+pub async fn mesh_memory_send(
     proxy: &ToolProxy,
     node: Option<&str>,
     agent_id: &str,
     memory_id: &str,
     note: Option<&str>,
+    extra_tags: &[String],
 ) -> ToolOutput {
     let err = |m: String| ToolOutput { ok: false, content: serde_json::json!(m) };
     let node = match node {
@@ -2182,6 +2186,10 @@ async fn mesh_memory_send(
         ));
     }
 
+    let mut tags: Vec<String> = mem["tags"].as_array()
+        .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+    tags.extend(extra_tags.iter().cloned());
     let body = serde_json::json!({
         "from":             apexos_core::node_id(),
         "origin_memory_id": memory_id,
@@ -2189,7 +2197,7 @@ async fn mesh_memory_send(
         "memory": {
             "content":     content,
             "memory_type": mem["type"].as_str().or(mem["memory_type"].as_str()),
-            "tags":        mem["tags"].clone(),
+            "tags":        tags,
             "salience":    mem["salience"].clone(),
         },
     });
@@ -2228,7 +2236,7 @@ async fn mesh_memory_send(
 }
 
 /// All peer node_ids in peers.toml (for an all-peers capability sweep).
-async fn list_peer_ids() -> Vec<String> {
+pub async fn list_peer_ids() -> Vec<String> {
     #[derive(serde::Deserialize)]
     struct PeersFile { #[serde(default)] peer: Vec<PeerEntry> }
     #[derive(serde::Deserialize)]
