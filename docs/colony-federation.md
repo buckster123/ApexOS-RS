@@ -172,21 +172,33 @@ As built (`agentd/src/dream_digest.rs`):
 - **Acceptance (the colony field test):** apex2's 03:00 dream forms a schema; by morning
   apex1 recalls it with `from:apex2 · dream-digest` provenance.
 
-### Slice 4 — Procedure replication  ·  *the B dividend*
+### Slice 4 — Procedure replication  ·  *the B dividend*  ·  ✅ shipped (2026-07-02) — **the arc is code-complete**
 
-Skill learned once, owned by all — with honesty about earned trust.
+Skill learned once, owned by all — with honesty about earned trust. As built:
 
-- **Mechanism:** procedures are memories, so the Slice-1 relay already moves them; this slice
-  adds the **semantics**: `mesh_procedure_send(node, procedure_id)` exports content + the
-  sender's outcome stats *as provenance context*, but the receiver imports with **fresh local
-  darwin stats** — a skill's Wilson score is re-earned per node (different embodiment, different
-  truth; apex1's GPIO procedure may not survive on camera-only apex2). Content-hash dedup on
-  import (re-sends update provenance, not duplicate).
-- **Optional sweep:** `mesh_procedures(node?)` — list peers' shared procedures (names + tags
-  only) so an agent can pull what looks useful.
-- **Effort:** Low–Medium on top of Slice 1. **Acceptance:** a procedure stored on apex3
-  replicates to apex1, shows up in `find_relevant_procedures` there, and re-earns its stats
-  through local `record_procedure_outcome`.
+- **Tool:** `mesh_procedure_send(node, procedure_id, note?)` — a thin procedure-aware wrapper
+  over the Slice-1 relay: scope-checked read, validates the memory is actually `procedural`
+  (honest error pointing at `mesh_memory_send` otherwise), and renders the origin's
+  `metadata.outcomes` ledger into the note as **context** (pure, tested `track_record_note`:
+  *"origin track record: 5 win(s) / 1 loss(es)"*) — never as stats.
+- **Fresh fitness on import** (receiver side, `federated_remember_args`): a procedural
+  import **drops the sender's salience** (fitness earned on a different embodiment — apex1's
+  GPIO procedure may not survive on camera-only apex2) and `remember` starts an empty
+  outcomes ledger by construction — trust is re-earned locally via
+  `record_procedure_outcome`. Non-procedure imports keep sender salience as before.
+- **Origin dedup — ALL federated imports, not just procedures:** the provenance tags stamped
+  on every import (`from:<node>` + `origin:<id>`) are the natural key; the import handler
+  pre-checks them via the new **generic cerebro `find_by_tags`** tool (exact-tag AND lookup,
+  LIKE-escaped — precise where recall is fuzzy under embeddings) and answers a re-send with
+  `{ok, memory_id, duplicate: true}` instead of storing a copy. Fail-open: a probe error
+  imports anyway (a duplicate is recoverable; a lost memory isn't). `find_by_tags` doubles
+  as the promised per-origin query (`["from:apex1"]` = everything a peer ever sent).
+- **Deferred:** `mesh_procedures(node?)` listing — `mesh_recall` already covers discovery
+  (procedures are memories; hits carry the `procedure` tag). Add only if the colony asks.
+- **Policy:** `mesh_procedure_send = "allow"` seeded. **Live nodes patch or evolve it in.**
+- **Acceptance (the colony field test):** a procedure stored on apex3 replicates to apex1,
+  shows up in `find_relevant_procedures` there, and re-earns its stats through local
+  `record_procedure_outcome`; a re-send returns `duplicate: true`.
 
 ---
 

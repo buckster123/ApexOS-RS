@@ -1860,6 +1860,7 @@ async fn gather_tools(
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());
     tools.push(mesh_memory_send_spec());
+    tools.push(mesh_procedure_send_spec());
     tools.push(mesh_recall_spec());
     tools.push(mesh_capabilities_spec());
     tools.push(query_event_log_spec());
@@ -2629,6 +2630,36 @@ fn mesh_memory_send_spec() -> ToolSpec {
                 }
             },
             "required": ["node", "memory_id"]
+        }),
+    }
+}
+
+fn mesh_procedure_send_spec() -> ToolSpec {
+    ToolSpec {
+        name:        "mesh_procedure_send".into(),
+        description: "Replicate one of your PROCEDURES to a mesh peer — a skill learned \
+                      once, owned by all. The peer imports the steps with FRESH fitness \
+                      (your salience and win/loss ledger don't transfer — trust is \
+                      re-earned on their embodiment via record_procedure_outcome); your \
+                      track record rides along as context in the note. Re-sends dedup \
+                      (no duplicates). For non-procedure memories use mesh_memory_send.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "node": {
+                    "type":        "string",
+                    "description": "Target mesh node_id (a registered peer)."
+                },
+                "procedure_id": {
+                    "type":        "string",
+                    "description": "The id of YOUR procedure (from list_procedures / find_relevant_procedures)."
+                },
+                "note": {
+                    "type":        "string",
+                    "description": "Optional context for the receiving agent (when/why this skill applies)."
+                }
+            },
+            "required": ["node", "procedure_id"]
         }),
     }
 }

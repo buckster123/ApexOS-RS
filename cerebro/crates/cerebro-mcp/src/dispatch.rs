@@ -529,6 +529,28 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             Ok(json!(tags))
         }
 
+        "find_by_tags" => {
+            let tags = coerce_str_list(&args["tags"]);
+            if tags.is_empty() {
+                return Err(anyhow::anyhow!("tags (non-empty) required"));
+            }
+            let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 200) as usize;
+            let scope = agent_scope(args);
+            let nodes = brain.storage.read().await.sqlite
+                .find_by_tags(&scope, &tags, limit).await?;
+            let out: Vec<Value> = nodes.into_iter()
+                .map(|n| json!({
+                    "id":          n.id,
+                    "content":     n.content.chars().take(200).collect::<String>(),
+                    "memory_type": n.memory_type,
+                    "tags":        n.tags,
+                    "salience":    n.salience,
+                    "created_at":  n.created_at,
+                }))
+                .collect();
+            Ok(json!(out))
+        }
+
         "delete_tag" => {
             let tag   = args["tag"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("tag is required"))?;
@@ -1156,7 +1178,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
 
         // Deferred Tier-7 tools (ingest_file) and any unknown name. C-RS-007:
         // these are still advertised in tools/list (surface parity with Python's
-        // 66) but must NOT return a success payload — that reads as "it worked."
+        // 67) but must NOT return a success payload — that reads as "it worked."
         // Return an honest not-implemented error so callers can branch on it.
         _ => Err(anyhow::anyhow!("tool not implemented: {name}")),
     }
@@ -1389,12 +1411,12 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_echoes_id_and_contains_66_tools() {
+    fn tools_list_echoes_id_and_contains_67_tools() {
         let req  = json!({"jsonrpc":"2.0","id":42,"method":"tools/list","params":{}});
         let resp = tools_list(&req);
         assert_eq!(resp["id"], 42, "id must be echoed");
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 66);
+        assert_eq!(tools.len(), 67);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"remember"));
         assert!(names.contains(&"recall"));

@@ -959,6 +959,29 @@ impl Supervisor {
             return;
         }
 
+        // Virtual tool: mesh_procedure_send — replicate one of the caller's own
+        // PROCEDURES to a peer (colony-federation Slice 4). Validates the memory
+        // is procedural, attaches the origin track record (metadata.outcomes) to
+        // the note as CONTEXT, then rides the Slice-1 relay — the receiver
+        // imports with fresh local darwin stats (salience dropped, ledger empty):
+        // a skill's trust is re-earned per node.
+        if call.tool == "mesh_procedure_send" {
+            let node         = call.args["node"].as_str().map(str::to_owned);
+            let procedure_id = call.args["procedure_id"].as_str().unwrap_or("").to_owned();
+            let note         = call.args["note"].as_str().map(str::to_owned);
+            let call_id      = call.id;
+            let bus          = self.bus.clone();
+            let agent_id     = apexos_core::resolve_agent_id(&self.session_bindings, session);
+            let proxy        = ToolProxy::new(self.sv_tx.clone());
+            tokio::spawn(async move {
+                let output = mesh_procedure_send(
+                    &proxy, node.as_deref(), &agent_id, &procedure_id, note.as_deref(),
+                ).await;
+                bus.emit(Event::ToolResult { session, call: call_id, output }).await;
+            });
+            return;
+        }
+
         // Virtual tool: mesh_recall — federated recall over a peer's (or all
         // peers') SHARED-visibility memories via their token-gated
         // POST /api/mesh/recall (colony-federation Slice 2). Read-only; private
@@ -2271,6 +2294,61 @@ async fn fetch_peer_capabilities(node: &str) -> serde_json::Value {
     }
 }
 
+/// Render a procedure's origin track record (`metadata.outcomes`) as note
+/// context for the receiving agent — evidence about where the skill came from,
+/// never imported as stats (fitness is re-earned per node). Pure.
+fn track_record_note(outcomes: &serde_json::Value, user_note: Option<&str>) -> Option<String> {
+    let s = outcomes["successes"].as_u64().unwrap_or(0);
+    let f = outcomes["failures"].as_u64().unwrap_or(0);
+    let record = (s + f > 0).then(|| format!("origin track record: {s} win(s) / {f} loss(es)"));
+    match (user_note.map(str::trim).filter(|n| !n.is_empty()), record) {
+        (Some(n), Some(r)) => Some(format!("{n} · {r}")),
+        (Some(n), None)    => Some(n.to_string()),
+        (None, Some(r))    => Some(r),
+        (None, None)       => None,
+    }
+}
+
+/// `mesh_procedure_send(node, procedure_id, note?)`: replicate one of the
+/// caller's own procedures to a peer (colony-federation Slice 4). Thin
+/// procedure-aware wrapper over the Slice-1 relay: validates the memory is
+/// procedural and attaches the origin track record to the note. The receiver's
+/// import path drops sender salience for procedures + starts an empty outcomes
+/// ledger — the skill re-earns its trust on the new embodiment.
+async fn mesh_procedure_send(
+    proxy: &ToolProxy,
+    node: Option<&str>,
+    agent_id: &str,
+    procedure_id: &str,
+    note: Option<&str>,
+) -> ToolOutput {
+    let err = |m: String| ToolOutput { ok: false, content: serde_json::json!(m) };
+    if procedure_id.is_empty() {
+        return err("mesh_procedure_send: missing 'procedure_id'".into());
+    }
+    // Scope-checked read — also the type gate + the track-record source.
+    let mem = match proxy
+        .call("get_memory", serde_json::json!({ "memory_id": procedure_id, "agent_id": agent_id }))
+        .await
+    {
+        Ok(out) if out.ok => match crate::mcp::tool_output_json(&out.content) {
+            Some(v) => v,
+            None => return err("mesh_procedure_send: unparseable get_memory result".into()),
+        },
+        Ok(out) => return err(format!("mesh_procedure_send: get_memory: {}", out.content)),
+        Err(e)  => return err(format!("mesh_procedure_send: get_memory: {e}")),
+    };
+    let mtype = mem["memory_type"].as_str().or(mem["type"].as_str()).unwrap_or("");
+    if mtype != "procedural" {
+        return err(format!(
+            "mesh_procedure_send: {procedure_id} is '{mtype}', not a procedure — \
+             use mesh_memory_send for other memory types"
+        ));
+    }
+    let full_note = track_record_note(&mem["metadata"]["outcomes"], note);
+    mesh_memory_send(proxy, node, agent_id, procedure_id, full_note.as_deref(), &[]).await
+}
+
 /// Query one peer's shared-visibility memories via its token-gated
 /// `POST /api/mesh/recall`. Never errors hard — a failure becomes
 /// `{node, error}` so an all-peers sweep returns partial results.
@@ -2431,6 +2509,23 @@ async fn mesh_agent_spawn(node: &str, prompt: &str, system: Option<&str>, timeou
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn track_record_note_composes_context() {
+        // With a ledger: the record renders; a user note leads.
+        let outcomes = serde_json::json!({ "successes": 5, "failures": 1 });
+        assert_eq!(
+            track_record_note(&outcomes, Some("gpio reset dance")).unwrap(),
+            "gpio reset dance · origin track record: 5 win(s) / 1 loss(es)"
+        );
+        assert_eq!(
+            track_record_note(&outcomes, None).unwrap(),
+            "origin track record: 5 win(s) / 1 loss(es)"
+        );
+        // Untested procedure (empty/no ledger): only the user note, or nothing.
+        assert_eq!(track_record_note(&serde_json::json!({}), Some("new skill")).unwrap(), "new skill");
+        assert!(track_record_note(&serde_json::json!(null), None).is_none());
+    }
 
     #[test]
     fn circuit_breaker_trips_after_3_failures_and_resets_on_success() {

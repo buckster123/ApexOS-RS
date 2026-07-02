@@ -67,6 +67,10 @@ mode = "suggest"
 # allowed prompt injection: it lands as provenance-stamped DATA in the peer's
 # store (tagged colony/from:<node>, one tag-filter from cleanup), not instruction.
 "mesh_memory_send" = "allow"
+# mesh_procedure_send: replicate a procedure to a peer — the Slice-1 relay with
+# procedure semantics (fresh fitness on import, track record as note context,
+# origin dedup). Same trust basis as mesh_memory_send.
+"mesh_procedure_send" = "allow"
 # mesh_recall: federated READ over peers' shared-visibility memories (private
 # never crosses — the peer answers with the shared_only scope). Read-only, no
 # peer LLM turn, bounded hits.
