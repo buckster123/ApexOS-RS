@@ -1674,6 +1674,26 @@ fn last_user_text(history: &[Message]) -> Option<String> {
     })
 }
 
+/// How long the nightly loop waits for `dream_run` to finish
+/// (`AGENTD_DREAM_TIMEOUT_SECS`, 60s floor, default 30 min). A dream is ~a
+/// minute today but scales with store size + LLM budgets. The dispatched tool
+/// runs to completion regardless — this is only the caller's patience, and the
+/// digest push is gated on the result arriving (the old fixed 10s ToolProxy
+/// timeout abandoned every ~50s successful dream at 03:00:10, so the nightly
+/// dream logged as failed and the colony dream digest never fired).
+fn dream_run_timeout() -> std::time::Duration {
+    parse_dream_timeout(std::env::var("AGENTD_DREAM_TIMEOUT_SECS").ok().as_deref())
+}
+
+/// Pure timeout resolver (unit-tested): a valid ≥60s value wins; anything else
+/// (absent, unparseable, or below the 60s floor) falls back to the 1800s default.
+fn parse_dream_timeout(raw: Option<&str>) -> std::time::Duration {
+    raw.and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n >= 60)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(1800))
+}
+
 /// Nightly autonomous memory consolidation: call `dream_run` directly via the
 /// ToolProxy on a cron (default 03:00 UTC daily), scoped to this node's agent
 /// identity — no LLM turn, can't be skipped by the agent. Disabled when
@@ -1703,7 +1723,7 @@ fn spawn_nightly_dream(proxy: ToolProxy) {
             let agent_id = apexos_core::node_agent_id();
             let dream_started_at = chrono::Utc::now().to_rfc3339();
             let args = serde_json::json!({ "agent_id": agent_id });
-            match proxy.call("dream_run", args).await {
+            match proxy.call_with_timeout("dream_run", args, dream_run_timeout()).await {
                 Ok(out) if out.ok => {
                     eprintln!("[dream] nightly dream_run complete");
                     // Dream digest exchange (colony-federation Slice 3): share
@@ -3226,6 +3246,19 @@ fn vast_swap_target(event: &Event, def: &VastRevertDefaults) -> Option<Inference
 mod tests {
     use super::*;
     use apexos_core::{ContentBlock, Message};
+
+    // ── nightly dream_run timeout resolver ───────────────────────────────────
+    #[test]
+    fn dream_timeout_defaults_and_floor() {
+        use std::time::Duration;
+        // absent / junk / below-floor → the 1800s default
+        assert_eq!(parse_dream_timeout(None), Duration::from_secs(1800));
+        assert_eq!(parse_dream_timeout(Some("nope")), Duration::from_secs(1800));
+        assert_eq!(parse_dream_timeout(Some("10")), Duration::from_secs(1800));
+        // valid ≥60s wins (floor inclusive)
+        assert_eq!(parse_dream_timeout(Some("60")), Duration::from_secs(60));
+        assert_eq!(parse_dream_timeout(Some("3600")), Duration::from_secs(3600));
+    }
 
     // ── exo-workspace stick detection (embodiment hint) ──────────────────────
     #[test]

@@ -71,13 +71,27 @@ impl ToolProxy {
     pub fn new(tx: mpsc::Sender<SupervisorCmd>) -> Self { Self { tx } }
 
     pub async fn call(&self, tool: &str, args: serde_json::Value) -> anyhow::Result<ToolOutput> {
+        self.call_with_timeout(tool, args, Duration::from_secs(10)).await
+    }
+
+    /// Like `call`, but with a caller-chosen patience window. The 10s `call`
+    /// default suits quick bookkeeping calls; a long-running tool (the nightly
+    /// `dream_run` takes ~a minute and scales with the store) needs the caller
+    /// to wait out the work. The dispatched tool task runs to completion either
+    /// way — a too-short timeout doesn't stop the tool, it abandons the result.
+    pub async fn call_with_timeout(
+        &self,
+        tool: &str,
+        args: serde_json::Value,
+        timeout: Duration,
+    ) -> anyhow::Result<ToolOutput> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx.send(SupervisorCmd::DirectCall {
             tool:  tool.to_string(),
             args,
             reply: reply_tx,
         }).await.map_err(|_| anyhow::anyhow!("supervisor channel closed"))?;
-        tokio::time::timeout(Duration::from_secs(10), reply_rx).await
+        tokio::time::timeout(timeout, reply_rx).await
             .map_err(|_| anyhow::anyhow!("direct call timed out: {tool}"))?
             .map_err(|_| anyhow::anyhow!("reply dropped"))
     }
