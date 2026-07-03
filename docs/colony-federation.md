@@ -171,6 +171,17 @@ As built (`agentd/src/dream_digest.rs`):
   No new policy rule needed.
 - **Acceptance (the colony field test):** apex2's 03:00 dream forms a schema; by morning
   apex1 recalls it with `from:apex2 · dream-digest` provenance.
+- **Field-fix (2026-07-03) — the first shared night never happened, and the dream was
+  innocent:** ground truth from all three nodes showed every nightly `dream_run`
+  *succeeding* inside cerebro (~50–57s, `dream_reports` success:true) while agentd logged
+  `dream_run error: direct call timed out` at 03:00:10 — the generic `ToolProxy::call`
+  10s cap abandoned the reply (the dispatched tool task runs to completion either way),
+  so the `Ok(out) if out.ok` gate never opened and the digest push never ran, on any node.
+  Fix: `ToolProxy::call_with_timeout` + the dream loop waits `AGENTD_DREAM_TIMEOUT_SECS`
+  (default 1800s, 60s floor). Caveat for the acceptance test: recent dreams birth
+  *procedural* items (procedures/skills) and 0 schemas — digest-eligible types are
+  schematic + semantic, so a valid night may honestly log
+  `[dream-digest] nothing new to share tonight`; that line is itself proof the path runs.
 
 ### Slice 4 — Procedure replication  ·  *the B dividend*  ·  ✅ shipped (2026-07-02) — **the arc is code-complete**
 
