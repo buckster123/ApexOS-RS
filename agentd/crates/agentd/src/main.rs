@@ -1109,12 +1109,12 @@ async fn apply_evolution(
             // turn). Unbound/APEX writes the global soul.md + mirrors the live arc.
             match agent_soul {
                 Some(path) => {
-                    tokio::fs::write(path, &content).await?;
+                    write_atomic(path, content.as_bytes()).await?;
                     eprintln!("[evolution] agent soul {} updated ({} chars)", path.display(), content.len());
                     Ok(format!("agent soul updated ({} chars)", content.len()))
                 }
                 None => {
-                    tokio::fs::write(soul_path, &content).await?;
+                    write_atomic(soul_path, content.as_bytes()).await?;
                     *soul_arc.write().await = content.clone();
                     eprintln!("[evolution] soul.md updated ({} chars)", content.len());
                     Ok(format!("system prompt updated ({} chars)", content.len()))
@@ -1139,7 +1139,7 @@ async fn apply_evolution(
         EvolutionProposal::RegisterMcpServer { name, command, env, reason: _ } => {
             let toml_text = tokio::fs::read_to_string(plugins_path).await?;
             let new_toml = evolution::plugins_toml_add(&toml_text, &name, &command, &env)?;
-            tokio::fs::write(plugins_path, new_toml).await?;
+            write_atomic(plugins_path, new_toml.as_bytes()).await?;
             let config = PluginConfig {
                 id:      name.clone(),
                 cmd:     command,
@@ -1157,7 +1157,7 @@ async fn apply_evolution(
         EvolutionProposal::UnregisterMcpServer { name, reason: _ } => {
             let toml_text = tokio::fs::read_to_string(plugins_path).await?;
             let new_toml = evolution::plugins_toml_remove(&toml_text, &name)?;
-            tokio::fs::write(plugins_path, new_toml).await?;
+            write_atomic(plugins_path, new_toml.as_bytes()).await?;
             sv_cmd_tx.send(SupervisorCmd::KillPlugin { id: PluginId(name.clone()) }).await
                 .map_err(|_| anyhow::anyhow!("supervisor channel closed"))?;
             eprintln!("[evolution] unregistered MCP server '{name}'");

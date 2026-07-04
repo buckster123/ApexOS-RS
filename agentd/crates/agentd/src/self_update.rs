@@ -12,7 +12,7 @@
 //!  0. preconditions  repo is a clean git tree · commit == HEAD · cargo present · not in-flight
 //!  1. staging build  cargo build --release -p agentd   (in repo; never over the live binary)
 //!  2. tests          cargo test -p agentd  +  caller test_cmd
-//!  (3. adversarial review — slice 4, not yet wired)
+//!  3. adversarial review  slice 4 (shipped): a reviewer model examines the diff; its verdict gates the swap
 //!  4. pre-swap commit  session_save() + store_intention("resuming…") · write request.json
 //! ```
 //!

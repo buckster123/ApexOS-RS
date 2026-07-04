@@ -179,6 +179,16 @@ pub fn spawn_council_handler(
                     r.synthesis = synthesis.clone();
                     if r.rounds == 0 { r.rounds = 1; }
                 }
+                // Bound the listing: drop oldest COMPLETED records past the cap
+                // (running ones are never evicted), so the Vec can't grow
+                // unbounded across a long-lived daemon.
+                const MAX_COUNCIL_RECORDS: usize = 50;
+                if sess.len() > MAX_COUNCIL_RECORDS {
+                    let mut excess = sess.len() - MAX_COUNCIL_RECORDS;
+                    sess.retain(|r| {
+                        if excess > 0 && r.status == "complete" { excess -= 1; false } else { true }
+                    });
+                }
                 drop(sess);
 
                 // Store council summary in Cerebro (best-effort)

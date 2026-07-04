@@ -186,13 +186,13 @@ Discipline unchanged: gate passes → commit + push; docs travel with code; `ses
 - ⚠️ **linuxkms = one fullscreen surface** — windows are in-canvas (correct for kiosk anyway).
 - ⚠️ **Perf on Nano/femtovg** — many animated windows are heavy; tier-gate effects.
 
-## 11. Open decisions to lock at build time
+## 11. Open decisions to lock at build time — resolutions (sweep 2026-07-04)
 
-1. WM geometry source of truth: Rust-owned + Slint-live-drag (recommended) vs Slint-owned.
-2. Persona style preamble: new WS field vs per-session soul augmentation.
-3. Asset strategy: embedded vs `/usr/share` install (binary-size budget).
-4. Default persona on a fresh install: Apex/Desktop, or force the first-boot wizard before first use.
-5. Win-98 sound: ship the chime or stay silent by default (kiosk-friendliness).
+1. ✅ WM geometry source of truth — **Rust-owned** `WindowDesc` VecModel + Slint-live-drag, deltas committed on release (G2, as recommended).
+2. ✅ Persona style preamble — **new WS field**: `set_persona` frame + `hello{persona}` → `PersonaSessions` → `persona_style` fragment in the 4-layer `compose_system` (G5 tier-2, shipped).
+3. ⏳ **Still open:** asset strategy (embedded vs `/usr/share` install, binary-size budget). No bitmap assets shipped yet; fonts install to `/usr/local/share/fonts/apexos-rs/` — decide when the first Win-98 bitmap asset lands.
+4. ✅ Default persona on a fresh install — **forced first-boot wizard** (G4).
+5. ✅ Win-98 sound — **silent by default** (kiosk-friendliness); chime deferred with the G6 asset items.
 
 ---
 

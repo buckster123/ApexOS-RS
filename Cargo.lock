@@ -365,6 +365,7 @@ name = "apexos-plugins"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apexos-confine",
  "apexos-core",
  "chrono",
  "reqwest",

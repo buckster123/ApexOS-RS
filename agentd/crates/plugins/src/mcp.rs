@@ -128,14 +128,31 @@ impl McpClient {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
 
-        self.send_line(&json!({
+        if let Err(e) = self.send_line(&json!({
             "jsonrpc": "2.0",
             "id":      id,
             "method":  method,
             "params":  params,
-        })).await?;
+        })).await {
+            self.pending.lock().await.remove(&id);
+            return Err(e);
+        }
 
-        let response = rx.await.map_err(|_| anyhow!("MCP server closed before responding to {method}"))?;
+        // Bounded wait — same knob + default as the turn-level tool timeout
+        // (AGENTD_TOOL_RESULT_TIMEOUT_SECS, 1800s), so a plugin that never
+        // answers can't wedge a caller forever on either the agent path or a
+        // DirectCall, and the pending entry is reclaimed instead of leaking.
+        let timeout = std::time::Duration::from_secs(
+            std::env::var("AGENTD_TOOL_RESULT_TIMEOUT_SECS")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(1800),
+        );
+        let response = match tokio::time::timeout(timeout, rx).await {
+            Ok(r)  => r.map_err(|_| anyhow!("MCP server closed before responding to {method}"))?,
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                anyhow::bail!("MCP request timed out after {}s: {method}", timeout.as_secs());
+            }
+        };
 
         if let Some(err) = response.get("error") {
             anyhow::bail!("MCP error on {method}: {err}");
