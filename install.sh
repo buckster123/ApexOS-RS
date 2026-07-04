@@ -1292,9 +1292,60 @@ if $OCCIPITAL_INSTALLED && [[ -f /etc/agentd/plugins.toml ]] \
   ok "Occipital plugin registered in /etc/agentd/plugins.toml"
 fi
 
-# policy.toml (don't overwrite an existing policy)
+# ── policy-sync ───────────────────────────────────────────────────────────────
+# policy.toml is seed-if-absent (self-evolved rules must survive updates), which
+# meant a rule shipped AFTER a node's first install never reached it — the tool
+# then gates "unknown → ask" in suggest mode on approvals nobody watches (the
+# 2026-07 sweep found live nodes missing 27–35 rules each). sync_policy_rules
+# closes that gap ADDITIVELY on every run: a [rules] key present in the shipped
+# config but absent from the live file is appended (inside [rules], before the
+# next section header); an existing key is NEVER touched — the split is: soul =
+# self-evolved, policy = follows the repo additively, self-evolved values win.
+sync_policy_rules() {
+  local shipped="$1" live="$2"
+  [[ -f "$shipped" && -f "$live" ]] || return 0
+  local missing=() key
+  while IFS= read -r key; do
+    grep -qE "^\"${key}\"[[:space:]]*=" "$live" || missing+=("$key")
+  done < <(grep -oE '^"[a-z_]+"' "$shipped" | tr -d '"')
+  [[ ${#missing[@]} -gt 0 ]] || return 0
+  local block; block=$(mktemp)
+  {
+    echo ""
+    echo "# --- rules added by apexos policy-sync $(date -u +%F) (new in this release; existing values never touched) ---"
+    for key in "${missing[@]}"; do
+      grep -E "^\"${key}\"[[:space:]]*=" "$shipped" | head -1
+    done
+  } > "$block"
+  # Insert inside [rules]: before the first section header after it, else EOF.
+  # (A degenerate live file with no [rules] gets the header appended first.)
+  local rules_ln next_ln=""
+  rules_ln=$(grep -n '^\[rules\]' "$live" | head -1 | cut -d: -f1 || true)
+  if [[ -n "$rules_ln" ]]; then
+    next_ln=$(awk -v s="$rules_ln" 'NR>s && /^\[/{print NR; exit}' "$live")
+  else
+    printf '\n[rules]' >> "$live"
+  fi
+  if [[ -n "$next_ln" ]]; then
+    local tmp; tmp=$(mktemp)
+    head -n $((next_ln-1)) "$live" > "$tmp"
+    cat "$block" >> "$tmp"
+    echo "" >> "$tmp"
+    tail -n +"$next_ln" "$live" >> "$tmp"
+    cat "$tmp" > "$live"   # cat-over keeps the live file's owner + mode
+    rm -f "$tmp"
+  else
+    cat "$block" >> "$live"
+  fi
+  rm -f "$block"
+  ok "policy-sync: ${#missing[@]} new rule(s) → $live (${missing[*]})"
+}
+
+# policy.toml (don't overwrite an existing policy — but DO additively sync new rules)
 if [[ ! -f /etc/agentd/policy.toml ]]; then
   install -m 644 "$REPO_DIR/config/policy.toml" /etc/agentd/policy.toml
+else
+  sync_policy_rules "$REPO_DIR/config/policy.toml" /etc/agentd/policy.toml
 fi
 
 # soul.md — APEX's identity / system prompt (created from the default if missing).
