@@ -176,6 +176,19 @@ fn inject_ambient(history: &[Message], ambient: &str) -> Vec<Message> {
     out
 }
 
+/// Process-global ActionId allocator. Ids MUST be unique across turns and
+/// sessions, not just within one turn: the old per-turn counter restarted at 1
+/// every turn, so a transcript accumulated many tool cards with the same
+/// call id (the UI's row lookup then pinned approvals/results to the OLDEST
+/// twin — the "approval buttons render way up the chat" bug), and two
+/// CONCURRENT turns (root + sub-agent) could have identical pending ids in
+/// flight, making a `user_approval { action }` ambiguous.
+fn next_action_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_ACTION_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_ACTION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Run one assistant turn (streaming + tool round-trips).
 ///
 /// Returns the full updated history so the caller can persist it.
@@ -187,8 +200,6 @@ pub async fn run_turn(
     tools: Vec<ToolSpec>,
     engine: Arc<TurnEngine>,
 ) -> anyhow::Result<Vec<Message>> {
-    // Per-turn ActionId counter (simple; unique within this turn).
-    let mut next_id: u64 = 1;
     // Maps our ActionId back to the Anthropic string id for tool_result blocks.
     let mut id_map: HashMap<ActionId, String> = HashMap::new();
 
@@ -257,8 +268,7 @@ pub async fn run_turn(
                         assistant_blocks.push(ContentBlock::Thinking { thinking, signature });
                     }
                     Chunk::ToolUse { id: api_id, name, input } => {
-                        let action_id = ActionId(next_id);
-                        next_id += 1;
+                        let action_id = ActionId(next_action_id());
                         id_map.insert(action_id, api_id.clone());
                         assistant_blocks.push(ContentBlock::ToolUse {
                             id:    api_id,
