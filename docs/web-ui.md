@@ -16,7 +16,7 @@ and was never deployed by -RS install.sh; this replaces it for the RS line).
 |------|------|
 | `index.html` | App shell — login overlay + chat view |
 | `style.css` | The apex theme; mobile-first, scales to desktop |
-| `app.js` | All logic — 3e login, WS, chat/tools/approvals rendering |
+| `app.js` | All logic — 3e login, WS, chat/tools/approvals, files browser, voice |
 | `sw.js` | Service worker — installable + offline app-shell (network-first) |
 | `manifest.json` | PWA manifest (standalone, theme colors, icon) |
 | `icon.svg` | App icon (apex peak mark) |
@@ -88,9 +88,28 @@ mount *under* the workspace. A 📁 button in the topbar opens a full-screen Fil
 
 Both endpoints are gated + share the workspace confinement of the file verbs (#196).
 
+## Voice — 🔊 speak replies + 🎤 mic (client-side)
+
+Voice-arc slice 8 (`docs/voice.md`) — mirrors the native UI's client-side audio:
+
+- **🔊 TTS** — a toggle next to Send; when on, each `turn_complete` fetches
+  `POST /api/tts {text}` (the last agent bubble) and plays the returned WAV as an
+  audio blob in the browser. Works over **plain HTTP** — playback needs no secure
+  context. Backend selection is agentd's (the shared `tts_synth_wav` resolver:
+  Kokoro sidecar / cloud API / espeak per the node's voice config).
+- **🎤 STT** — `MediaRecorder` (webm) → `POST /api/transcribe` with the raw blob as
+  the body (route body limit 16 MB); the gateway ffmpeg-converts to 16 kHz mono WAV
+  and runs the shared `transcribe_wav` chain (apex-stt sidecar → whisper-cpp →
+  cloud). The transcript fills the input and auto-sends.
+- **Secure-context gate** — browsers only allow `getUserMedia` on **HTTPS or
+  localhost**, so over `http://<LAN-IP>:8787` (the phone case) the mic button is
+  **hidden** (`window.isSecureContext` check) while 🔊 still works. Full phone mic
+  needs TLS on the node — a known follow-on.
+
 ## Deferred (web grows toward native parity)
 
-Voice (mic → `/api/record`, TTS → `/api/speak`), sensors/home dashboard, full
-session management (list/switch/archive/export), settings, image upload + camera,
-council/mesh views. Each is a follow-on slice; the native Slint UI already covers
-them. PNG icons (iOS add-to-homescreen polish) are a nice-to-have over the SVG.
+Sensors/home dashboard, full session management (list/switch/archive/export),
+settings, image upload + camera, council/mesh views. Each is a follow-on slice; the
+native Slint UI already covers them. An HTTPS option (TLS on the node) would unlock
+the phone mic (see Voice above). PNG icons (iOS add-to-homescreen polish) are a
+nice-to-have over the SVG.

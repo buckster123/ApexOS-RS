@@ -34,10 +34,10 @@ tokens than prose, behaviourally lossless, consistent across tokenizer families.
 · **Lift:** the whole thing is a self-contained doc + corpus + harness; reimplement in any language.
 The exemplar for "factored for theft" — an idea you can take without taking any code.
 
-**Soul / embodiment / priming — the layered system prompt** ✅🟡
+**Soul / embodiment / priming / style — the layered system prompt** ✅🟡
 Separate the *portable identity* (soul, hand-authored) from the *live body* (embodiment,
-machine-regenerated each turn from the node's actual state) from *per-session boot priming*. The
-join is a pure function.
+machine-regenerated each turn from the node's actual state) from *per-session boot priming* from the
+*per-session persona voice* (style). The join is a pure function.
 · `compose_system()` in [`agentd/crates/agent/src/turn.rs`](agentd/crates/agent/src/turn.rs) (pure ✅);
 `build_embodiment()` in `agentd/crates/agentd/src/main.rs` (🟡, node-probe coupled)
 · explained in [`docs/agent-identity.md`](docs/agent-identity.md), [`docs/symbiosis.md`](docs/symbiosis.md)
@@ -113,6 +113,33 @@ contract, Cerebro-as-recovery, and a recoverability invariant.
 · explained (design-first) in [`docs/self-update.md`](docs/self-update.md)
 · **Lift:** doc-first — the failure-mode table and the invariants are the portable part.
 
+**Caller-patience vs tool-runtime — the two-timeout seam** ✅
+Separate how long a *caller* waits from how long a *tool* may run: a per-call, caller-chosen patience
+window on the tool proxy (a too-short timeout abandons the result, it never kills the tool), plus one
+bounded transport-level wait so a plugin that never answers can't wedge any caller — and the pending
+entry is reclaimed, not leaked.
+· `ToolProxy::call_with_timeout()` in [`agentd/crates/plugins/src/supervisor.rs`](agentd/crates/plugins/src/supervisor.rs)
+  + the bounded `McpClient::request()` in `agentd/crates/plugins/src/mcp.rs`
+· **Lift:** the shape (oneshot + `tokio::time::timeout` per call, one env-tunable bound at the transport) copies anywhere.
+
+**Goal-scoped yolo — capability elevation scoped to one session** ✅🟡
+Auto-approval that arms for exactly one autonomous goal's session, never a global flag: a shared
+per-session set, armed on goal create, disarmed on any terminal outcome, checked at the approval
+gate — and **failing closed** (a poisoned lock returns false, so a lock error can never silently
+auto-approve).
+· `GoalYoloSessions` + `goal_session_is_yolo()` in [`agentd/crates/core/src/identity.rs`](agentd/crates/core/src/identity.rs)
+  (pure check, tested); consulted at the supervisor's Ask arm
+· explained in the goal-scoped-yolo note in [`CLAUDE.md`](CLAUDE.md)
+· **Lift:** the session-scoped set + fails-closed check is the reusable core; the safety property *is* the scoping.
+
+**Additive config sync — repo-follows, user-overrides-win** ✅
+For a seed-if-absent config that users (or the agent itself) evolve at runtime: on every update,
+append any key present in the shipped config but absent from the live file; never touch an existing
+key. New capabilities reach long-deployed nodes automatically while self-evolved values always win —
+retiring a whole class of "already-deployed nodes need the rule added manually" caveats.
+· `sync_policy_rules()` in [`install.sh`](install.sh)
+· **Lift:** ~40 lines of self-contained bash; the split (identity files = seed-only, capability rules = additive-sync) is the idea.
+
 ---
 
 ## C. Mesh & morphology
@@ -123,6 +150,42 @@ a2a sessions, capability advertisement, node-to-node file relay, and *blocking* 
 `agent_spawn` (the delegation keystone) with timeout + circuit-breaker + hop guards.
 · agentd + gateway · explained in [`docs/colony-mesh.md`](docs/colony-mesh.md)
 · **Lift:** the doc is a buildable spec; the constitution (spine/edge, soft-governed) is reusable design.
+
+**Federated memory — receiver-stamped provenance + a shared-only wire boundary** ✅🟡
+Memories travel between *separate* cognitive stores as provenance-stamped copies, never a merge. The
+receiver stamps origin as tags (`colony` · `from:<node>` · `origin:<id>`) and **strips any
+sender-supplied provenance-shaped tags** (origin can't be forged); imports run the receiver's own
+dedup/classification pipeline; per-origin cleanup stays one tag-filter away. Peers answer recall
+queries under a *shared-only* visibility scope enforced at every recall touch point — a private
+memory doesn't even influence the ranking.
+· pure `federated_remember_args()` + `federated_recall_hits()` in
+  [`agentd/crates/gateway/src/mesh.rs`](agentd/crates/gateway/src/mesh.rs) (unit-tested);
+  `VisibilityScope::shared_only()` in `cerebro/crates/cerebro/src/types.rs`
+· explained in [`docs/colony-federation.md`](docs/colony-federation.md) (slices 1–2)
+· **Lift:** the pure arg-builders copy as-is; the trust model (receiver-always-stamps,
+Shared-gates-the-wire) is the portable contract.
+
+**Dream-digest echo-guard — convergent knowledge propagation** ✅
+Nightly consolidation pushes its newly-born memories one hop to every peer — and a federated *import*
+is never a digest candidate (any `colony`/`from:*`/`dream-digest` tag disqualifies), so colony
+knowledge flow converges instead of ping-ponging; the dream window itself is the dedup (only this
+dream's creations qualify).
+· pure `digest_candidates()` in [`agentd/crates/agentd/src/dream_digest.rs`](agentd/crates/agentd/src/dream_digest.rs) — unit-tested
+· explained in [`docs/colony-federation.md`](docs/colony-federation.md) (slice 3)
+· **Lift:** the guard is one pure filter; the invariant (imports are terminal — one hop per genuine
+creation) ports to any gossip-shaped knowledge mesh.
+
+**Skills travel, fitness doesn't** ✅🟡
+Procedure replication where the origin's outcome ledger rides along only as *context* (a note), while
+the receiver drops sender salience and starts an empty ledger — a skill's track record is re-earned
+per embodiment, never transferred. Duplicate re-sends are caught by exact-tag origin lookup
+(`find_by_tags`), not fuzzy recall.
+· `mesh_procedure_send()` + pure `track_record_note()` in
+  [`agentd/crates/plugins/src/supervisor.rs`](agentd/crates/plugins/src/supervisor.rs) (tested);
+  the salience-drop + origin-dedup live in the gateway receiver (`mesh.rs`)
+· explained in [`docs/colony-federation.md`](docs/colony-federation.md) (slice 4)
+· **Lift:** the semantics are the value — fitness is embodiment-local; reimplement over any store
+with tags + a metadata ledger.
 
 **EDK — embodiment gradient / request-to-incarnate** 🟡
 The agent senses its own missing capabilities and files a hardware request; on-hand parts in an
@@ -153,10 +216,20 @@ depended on without dragging in the whole daemon. The model for every clean seam
 · [`apexos-protocol/`](apexos-protocol/) · **Lift:** `cargo add`-grade. This is what "factored for theft" looks like in code.
 
 **`apexos-confine` — the FS-sandbox algorithm** ✅
-A std-only, zero-ApexOS-dep crate: reject `..`, lenient-canonicalize (resolve symlinks, tolerate
-non-existent write targets), root containment, read/secret split — the path-confinement mechanism on
-its own, unit-tested incl. the symlink-escape (TOCTOU) case. Born from this very smoothing pass.
+A std-only, zero-ApexOS-dep crate: reject `..`, lenient-canonicalize (`canonicalize_lenient` — judge
+a not-yet-existing write target by its deepest *existing* ancestor, symlinks resolved), root
+containment, read/secret split — the path-confinement mechanism on its own, unit-tested incl. the
+symlink-escape (TOCTOU) case. Born from this very smoothing pass.
 · [`apexos-confine/`](apexos-confine/) · **Lift:** `cargo add apexos-confine`; supply your own policy + messages.
+
+**Workspace-excluded sidecar crates — dependency decoupling by process boundary** ✅
+When two subsystems need incompatible versions of the same native dep (the TTS binding's `ort` pin vs
+cerebro's `fastembed` pin) — or one drags a heavy foreign C++ build (whisper.cpp) into every workspace
+rebuild — don't fight the resolver: exclude the crate from the workspace (own `Cargo.lock`), run it as
+a loopback HTTP sidecar, talk to it over a tiny endpoint.
+· [`tools/crates/apex-tts`](tools/crates/apex-tts) + [`tools/crates/apex-stt`](tools/crates/apex-stt)
+  (`exclude`d in the root `Cargo.toml`) · explained in [`docs/voice.md`](docs/voice.md)
+· **Lift:** a build-topology move, not code — any Cargo monorepo with a version war can apply it.
 
 **Pure-core utilities** ✅
 Small pure functions that hold a tricky rule, with tests that document the rule:
