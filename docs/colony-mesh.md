@@ -28,6 +28,10 @@ level, where the agents self-organize it. agentd does **not** hard-code node rol
 (transport, delegation, advertisement), not policy; the colony decides how to use it. Revisit only if
 soft self-governance proves insufficient.
 
+*Status note (2026-07): the colony is now **3 live nodes** — apex3 (andre-laptop, x86 desktop-mode,
+pro tier) joined alongside apex1/apex2. The table above records the original 2-node constitution;
+apex3 has not yet self-declared a constitutional role — that's the colony's to deliberate.*
+
 ---
 
 ## What already exists (the substrate we build on)
@@ -120,7 +124,11 @@ dark mid-thermal-alert, I need to know. Silence and 'everything fine' look ident
   (don't wait for a human to notice the board went grey). Distinct from `PeerLost` (mDNS *advertising* loss).
 - **Knobs:** `MESH_BEACON=0` disables it; interval / stale-misses / notify-agent all env-tunable.
 - **Next on this pathway:** richer **sensor→agent alert sensitivity** + a **smoker/non-smoker toggle**
-  (Sensors/Settings) — same notify pathway, distinct slice (touches `SensorThresholds`). Parked UX item.
+  (Sensors/Settings) — same notify pathway, distinct slice (touches `SensorThresholds`). ~~Parked UX item.~~
+  **✅ Shipped** as the sensor-alert **profiles** selector: `profile_thresholds`
+  (`standard`/`smoker`/`kitchen`/`workshop`, pure + unit-tested in agentd `main.rs`) feeding the alert
+  loop live, `GET`/`POST /api/sensors/config` (gateway, canonical `SENSOR_PROFILES` list, persisted),
+  and the Settings **SENSOR ALERTS** chip row. See the sensor-profiles gotcha in CLAUDE.md.
 
 ---
 
@@ -128,13 +136,13 @@ dark mid-thermal-alert, I need to know. Silence and 'everything fine' look ident
 
 | # | Item | Why deferred | Revisit when |
 |---|------|--------------|--------------|
-| #5  | NATS / async pub-sub | New transport daemon + dep; at 2 nodes HTTP req/resp + the existing event broadcast + polling cover it. Pub/sub's win is fan-out at scale. | 3+ nodes, or capability-polling proves too chatty |
-| #8/#9 | ~~Cross-cerebro federation / write~~ | **PROMOTED** → the [colony-federation charter](colony-federation.md) (colony deliberation 2026-07-01: unanimous #1) | — |
+| #5  | NATS / async pub-sub | New transport daemon + dep; at 2 nodes HTTP req/resp + the existing event broadcast + polling cover it. Pub/sub's win is fan-out at scale. | 3+ nodes, or capability-polling proves too chatty. **Trigger FIRED** — the colony is 3 nodes (2026-07). Human steer (André, 2026-07-03): NATS is still overkill at this scale; HTTP req/resp + broadcast held through the federation arc. **Queued for the colony's next deliberation** with federation field data — not building now |
+| #8/#9 | ~~Cross-cerebro federation / write~~ | **PROMOTED** → the [colony-federation charter](colony-federation.md) (colony deliberation 2026-07-01: unanimous #1) — **shipped** as charter Slices 1–2 (memory relay + federated recall, 2026-07-02, live-verified colony-wide) | — |
 | #15 | mTLS / zero-trust | Per-peer bearer tokens already gate cross-node calls; mTLS is the upgrade for *untrusted networks*. | Before adding an untrusted-network node |
-| #11 | ~~Distributed `dream_run`~~ | **PROMOTED** → federation charter Slice 3 (dream digest exchange; colony's #2, "one arc with A") | — |
-| #10 | ~~Procedure replication~~ | **PROMOTED** → federation charter Slice 4 (colony's #3) | — |
-| #13 | Collective sensor fusion | Colony deliberation parked it as **arc+2**: coverage ≠ architecture; wants federation first so *context* propagates, not raw readings. | After the federation arc + sensor head validated |
-| #14 | Cloud bridge via spine | Edge → spine → Vast.ai → result back. | After the agent_spawn keystone (Slice 3) |
+| #11 | ~~Distributed `dream_run`~~ | **PROMOTED** → federation charter Slice 3 (dream digest exchange; colony's #2, "one arc with A") — **shipped** 2026-07-02 (nightly dream now waits out the run, `AGENTD_DREAM_TIMEOUT_SECS`; digest pushes after it) | — |
+| #10 | ~~Procedure replication~~ | **PROMOTED** → federation charter Slice 4 (colony's #3) — **shipped** 2026-07-02 (field test pending) | — |
+| #13 | Collective sensor fusion | Colony deliberation parked it as **arc+2**: coverage ≠ architecture; wants federation first so *context* propagates, not raw readings. | After the federation arc + sensor head validated — **both met** (2026-07): the federation arc shipped (all 4 slices) and the sensor head is live-verified on apex1. The colony's own arc+2 candidate for its next deliberation |
+| #14 | Cloud bridge via spine | Edge → spine → Vast.ai → result back. **Substantially delivered by the vast.ai bridge:** `vast_launch` → ready → the launching node hot-swaps its inference backend+model to the tunneled GPU (`vast_swap_target`, agentd `main.rs`; auto-revert on destroy/tunnel-loss), and any peer reaches that brain via blocking `agent_spawn(node=…)` — so edge → GPU-backed spine → result back works today. Residual: peers consume it via *delegation* only (the SSH tunnel is loopback-bound on the launching node — peers can't point their own backend at it), and there's no automatic edge-triggered launch/routing. | ~~After the agent_spawn keystone (Slice 3)~~ keystone shipped; residual is opportunistic |
 | #16–18 | Pi Zero sensor nodes · GPU node · agent mobility | Expansion / endgame; agent mobility (`federateWith`) is "5+ nodes". | When the colony grows |
 | #1/#2/#12 | Watchdog heartbeat · redundant scheduling · soul.md constitution anchor | Heartbeat is mostly wiring (`schedule_task`+`send_to_agent`+`notify`); scheduling is low; the constitution anchor is **soul-level / agent-self-evolved**, not substrate. | Opportunistic / agent-driven |
 

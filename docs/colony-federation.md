@@ -62,6 +62,9 @@ pattern (#7 → `mesh_file_send`), capability advertisement landed the discovery
 6. **Observability from day one.** Federation counters (memories sent/received per peer,
    digests exchanged, federated-recall hits) surface via `/api/mesh/peers` + stats — the
    long-run multi-node benching story depends on being able to *see* knowledge flow.
+   *Status (2026-07): NOT built — the four slices shipped without counters; this principle
+   was not honored "from day one". Tracked as a BACKLOG medium item ("Federation
+   observability counters").*
 
 ---
 

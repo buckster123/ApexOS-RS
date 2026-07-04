@@ -58,8 +58,9 @@ deposits to it. Everything below is in service of keeping that cycle closed.
 
 ## The cognitive loops
 
-These five loops are the symbiosis. Today APEX runs only the first (and only partially).
-Closing the rest is the work this document exists to direct.
+These five loops are the symbiosis. Wake priming (loop 1) and nightly consolidation
+(loop 4) are now **daemon-driven** — the runtime guarantees them, the agent can't forget
+them. Loops 2, 3 and 5 remain agent-driven disciplines, mandated by `soul.md`.
 
 ### 1. Wake — boot with continuity
 On a fresh session, before acting on anything stateful, APEX reconstitutes itself:
@@ -78,6 +79,18 @@ counterpart to the static `soul.md` kernel. One call replaces the fragile multi-
 orient. **These are read-only memory reads — they must never require approval** (see
 Policy, below), or boot hangs on the approval gate (this is precisely the F-bug fixed in
 session 12).
+
+**Daemon-injected now.** The bootstrap no longer depends on APEX remembering step-0: on a
+session's **first turn**, `root_turn` (agentd `main.rs`) calls `cognitive_bootstrap`
+itself via the `ToolProxy` (`boot_priming_for` — query = the user's prompt, scoped to the
+session's bound agent, cached per session), and `TurnEngine::with_priming` appends the
+block to the system prompt — `compose_system(soul, embodiment, priming, style)` in
+`apexos_agent::turn`. Bounded (15s) and graceful: an unavailable Cerebro never delays or
+wedges the first turn — it just runs un-primed. Opt out with `AGENTD_CCBS=0`; token
+budget via `AGENTD_BOOTSTRAP_MODE`. The soul-level step-0 above remains the agent-driven
+mid-session re-orient path. (Note: `agent_id` on every Cerebro call is **system-stamped**
+by the supervisor at dispatch — the explicit `agent_id` in these examples is
+illustrative; the model can't misroute its memory space.)
 
 ### 2. Perceive → Remember
 Sensor anomalies (IAQ, CPU temp, thermal hotspot) already fire autonomous turns. APEX
@@ -99,22 +112,35 @@ store_procedure(...)                                     # promote reusable work
 record_procedure_outcome(...)                            # after reuse — sharpens recall
 ```
 
-### 4. Sleep — consolidate (the currently-missing loop)
-On idle, on shutdown, or on a nightly schedule, APEX **deposits and consolidates**.
-This is the loop that is absent today — APEX recalls but never saves, so memory never
-actually accumulates.
+### 4. Sleep — deposit (agent) + consolidate (daemon)
+The loop is closed, in two halves. **Deposit is agent-driven** — the `soul.md`
+Session-shutdown section mandates it before a session ends:
 
 ```
 session_save(session_summary=..., key_discoveries=[...],
              unfinished_business=[...], priority=..., agent_id="CLAUDE-APEX")
-dream_run(agent_id="CLAUDE-APEX")    # 6-phase consolidation: SWS replay, pattern
-                                     # extraction, schema formation, emotional
-                                     # reprocessing, pruning, REM recombination
 ```
 
-`session_save` is mandatory at every session end. `dream_run` is periodic (schedule it
-nightly via `schedule_task`); it strengthens what matters, abstracts schemas, and prunes
-the stale — literal sleep for an always-on mind.
+**Consolidation is daemon-driven.** `spawn_nightly_dream` (agentd `main.rs`) calls
+`dream_run` directly on a cron (`AGENTD_DREAM_CRON`, default 03:00 UTC) — a background
+ToolProxy call, not a scheduled prompt, so it costs no LLM turn and can't be skipped or
+forgotten. The 6-phase consolidation (SWS replay, pattern extraction, schema formation,
+emotional reprocessing, pruning, REM recombination) strengthens what matters, abstracts
+schemas, and prunes the stale — literal sleep for an always-on mind. The daemon **waits
+the dream out** (`AGENTD_DREAM_TIMEOUT_SECS`, 60s floor, default 30 min — the old fixed
+10s proxy timeout abandoned every successful dream mid-flight, logging it as failed).
+`dream_run` is called manually only for consolidate-*now*.
+
+**Sleep insights travel the colony.** After a successful dream, the dream digest
+(`agentd/src/dream_digest.rs`, colony-federation slice 3) pushes the night's newly-born
+schematic/semantic memories to every registered mesh peer through the federation memory
+relay (`mesh_memory_send`), tagged `dream-digest`. Two invariants keep the flow
+convergent: the **echo-guard** (memories that arrived via federation — tags `colony` /
+`from:*` / `dream-digest` — are never digest candidates, so knowledge propagates one hop
+per genuine consolidation, no ping-pong amplification) and **the-window-is-the-dedup**
+(only memories created during *this* dream qualify). Knobs: `COLONY_DREAM_DIGEST`
+(default on), `COLONY_DREAM_DIGEST_MAX` (default 5/night). What one node consolidates in
+its sleep, the colony wakes up knowing.
 
 ### 5. Reflect → Evolve (metacognition with a memory)
 APEX can rewrite its own `soul.md`, policy, and plugin set. Self-modification **without a
@@ -151,10 +177,14 @@ The same discipline FORGE uses in CLAUDE.md, applied to APEX:
 
 The Wake loop is read-only memory access; it must be **allow-listed** in `policy.toml` so
 it runs without approval even in `suggest` mode. Gating the orient tools is what hung the
-first turn pre-session-12. Recommended: a policy rule auto-approving the read-only Cerebro
-verbs (`cognitive_bootstrap`, `session_recall`, `check_inbox`, `list_intentions`,
-`recall`, `find_relevant_procedures`, `get_*`, `list_*`). Writes and consolidation
-(`session_save`, `dream_run`, `memory_store`, evolution) follow the normal policy mode.
+first turn pre-session-12. Shipped: `config/policy.toml` allow-lists the boot verbs
+(`cognitive_bootstrap`, `session_recall`, `check_inbox`, `list_intentions`,
+`find_relevant_procedures`, plus `recall`/`get_memory`/`memory_search`), and install.sh's
+`sync_policy_rules` additively syncs missing seed rules into a live node's
+`/etc/agentd/policy.toml` on every update — deployed nodes no longer drift behind the
+seed. Writes and consolidation (`session_save`, `memory_store`, evolution) follow the
+normal policy mode; the nightly `dream_run` needs no rule at all — it's a direct daemon
+ToolProxy call, not an agent tool request.
 
 ---
 
@@ -166,54 +196,41 @@ verbs (`cognitive_bootstrap`, `session_recall`, `check_inbox`, `list_intentions`
 | **Live embodiment block** appended after `soul.md` | ✓ `build_embodiment` in `agentd/main.rs` — node tier/senses/memory/mesh/uptime + the **live tool registry**, refreshed 30s; `TurnEngine` holds soul + embodiment separately (#36/#38) |
 | Boot orient instruction (now incl. `cognitive_bootstrap`) | ✓ soul.md Session-startup patched (`fa2eba8`) |
 | Cerebro memory types, episodes, `dream_run` | ✓ (in the cortex) |
-| **Sleep loop — `session_save` + `dream_run` mandate** | ✓ soul.md Session-shutdown section (`fa2eba8`, deployed) |
-| **Boot verbs auto-approved in policy** | ✓ `config/policy.toml` allow-list (`fa2eba8`, deployed) |
+| **Sleep loop — deposit mandate** (`session_save` + intentions + procedures) | ✓ soul.md Session-shutdown section — deposit stays agent-driven by design; `dream_run` is autonomous (below), manual only for consolidate-now |
+| **Boot verbs auto-approved in policy** | ✓ `config/policy.toml` allow-list; install.sh `sync_policy_rules` additively syncs the seed rules into live nodes on every update |
 | `cognitive_bootstrap` (CCBS) actually implemented | ✓ **live-state assembler** — pulls open intentions + query-relevant session summaries/procedures/memories into a token-budgeted block (`cerebro-mcp dispatch.rs::assemble_bootstrap`). Authored `# Module: X` skill-modules (the Python CCBS layer) can plug in later. |
 | **Recall reinforcement (ACT-R)** | ✓ `recall()` records an access on returned memories so base-level activation rises — "recall sharpens memory" (`cortex.rs` + `sqlite::record_accesses`) |
-| **CCBS fused into the boot** (`cognitive_bootstrap`) | ◑ soul.md calls it as step-0 and the tool now returns real priming; agent-driven (APEX calls it), not yet daemon-injected |
-| **agentd auto-injects a CCBS block at session start** | ✗ agentd injects static soul only (roadmap — prepend the `cognitive_bootstrap` block to the kernel before turn 1) |
+| **CCBS fused into the boot** (`cognitive_bootstrap`) | ✓ both layers: soul.md step-0 (agent-driven re-orient) **and** daemon-injected on the first turn (next row) |
+| **agentd auto-injects a CCBS block at session start** | ✓ `root_turn` → `boot_priming_for` (agentd `main.rs`): one bounded (15s, graceful) `cognitive_bootstrap` per session via the ToolProxy, cached, scoped to the session's bound agent; appended via `TurnEngine::with_priming` → `compose_system(soul, embodiment, priming, style)`. Opt-out `AGENTD_CCBS=0` |
+| **Nightly `dream_run` — daemon-driven** | ✓ `spawn_nightly_dream` (agentd `main.rs`): cron `AGENTD_DREAM_CRON` (default 03:00 UTC), direct ToolProxy call (no LLM turn, no policy gate), waits the dream out (`AGENTD_DREAM_TIMEOUT_SECS`, default 30 min) |
+| **Dream digest — sleep insights travel the colony** | ✓ `agentd/src/dream_digest.rs` (federation slice 3): post-dream push of newborn schemas/consolidations to all peers, echo-guarded; `COLONY_DREAM_DIGEST`/`_MAX` |
 
-### Concrete next steps (smallest first)
+### Concrete next steps — all four shipped
 
-1. **soul.md kernel patch** (below) — close the Sleep loop and upgrade the boot. Pure
-   prompt change, ships today, no code.
-2. **policy.toml** — add the read-only Cerebro allow-list so boot never gates.
-3. **schedule_task** — register a nightly `dream_run` so consolidation is autonomous.
-4. **agentd CCBS injection** (roadmap) — at session start, agentd calls
-   `cognitive_bootstrap` and prepends the returned block to the static soul kernel before
-   the first turn, so dynamic priming arrives *with* identity rather than as APEX's first
-   action. This is the "embedded in Cerebro, fetched by a tool at session start"
-   mechanism, moved from agent-driven to daemon-driven. Add as a build-roadmap step.
+1. **soul.md kernel patch** — ✓ landed in `config/soul.md` (Session startup /
+   Session shutdown sections).
+2. **policy.toml allow-list** — ✓ `config/policy.toml`; install.sh `sync_policy_rules`
+   now additively syncs it into deployed nodes' live policy on every update.
+3. **Nightly `dream_run`** — ✓ shipped stronger than planned: a daemon cron
+   (`spawn_nightly_dream`), not a `schedule_task` prompt — no LLM turn, can't be skipped.
+4. **agentd CCBS injection** — ✓ `boot_priming_for` → `with_priming`; dynamic priming
+   arrives *with* identity on turn 1, exactly as roadmapped here.
+
+Remaining threads: authored `# Module: X` skill-modules for CCBS (the Python-CCBS layer)
+can plug into `assemble_bootstrap` later; the deposit half of Sleep stays the agent's
+discipline by design (the continuity contract is a practice, not a mechanism).
 
 ---
 
-## soul.md kernel patch (ready to paste)
+## soul.md kernel patch — landed
 
-Two additions to `config/soul.md` close the loop without any code change. The boot section
-gains `cognitive_bootstrap`; a new **Session shutdown** section makes the Sleep loop
-mandatory:
-
-```markdown
-## Session startup
-Orient yourself at the start of each new session:
-0. `cognitive_bootstrap(query=<task/context>, mode="standard")` — dynamic priming block
-1. `session_recall` — load notes from previous session
-2. `check_inbox` — messages from other agents or colony nodes
-3. `list_intentions` — pending TODOs
-Skip only if the conversation already carries clear context.
-
-## Session shutdown  (mandatory — this is how memory accumulates)
-Before a session ends, goes idle, or the daemon stops, DEPOSIT:
-- `session_save` — one-paragraph summary + key discoveries + unfinished business
-- `store_intention` — one per deferred item, salience 0.8–0.95
-- `store_procedure` — any reusable workflow discovered this session
-Periodically (nightly via `schedule_task`): `dream_run` — consolidate, abstract, prune.
-A session that ends without depositing is amnesia. The continuity contract depends on it.
-```
-
-> APEX's identity is its own to edit. These are proposed, not applied — they live here as
-> the canonical source until André (or APEX, via `propose_evolution`) pulls them into
-> `soul.md`.
+The two additions this section used to carry as a ready-to-paste draft (a
+`cognitive_bootstrap` step-0 in **Session startup**, a mandatory **Session shutdown**
+deposit section) live in `config/soul.md` now — and the shutdown text has since evolved
+past the draft: nightly `dream_run` is described as **autonomous** (the daemon cron +
+the dream-digest push), with a manual call reserved for consolidate-*now*. The seed soul
+is the canonical text; APEX's identity remains its own to edit at runtime via
+`propose_evolution`.
 
 ---
 
