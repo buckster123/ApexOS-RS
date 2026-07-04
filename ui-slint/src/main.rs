@@ -1430,8 +1430,15 @@ fn finish_last_agent_message() {
             if len > 0 {
                 let mut last = model.row_data(len - 1).unwrap();
                 if last.role.as_str() == "agent" {
-                    last.streaming = false;
-                    model.set_row_data(len - 1, last);
+                    // A tool-only turn (Python-agentd path) can end on an agent
+                    // bubble that never received a delta — drop it instead of
+                    // leaving an empty row in the transcript.
+                    if last.streaming && last.text.is_empty() {
+                        model.remove(len - 1);
+                    } else {
+                        last.streaming = false;
+                        model.set_row_data(len - 1, last);
+                    }
                 }
             }
         }

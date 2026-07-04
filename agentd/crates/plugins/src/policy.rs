@@ -14,9 +14,9 @@ pub enum Rule {
     Allow,
     /// Always ask (overridden by Yolo).
     Ask,
-    /// Auto if path is inside AGENTD_WORKSPACE, else ask.
-    /// Path check is deferred to keyboard; currently treated as Allow in
-    /// AutoEdit mode and Ask in Suggest mode.
+    /// Auto if the path resolves inside AGENTD_WORKSPACE, else ask — see
+    /// `workspace_decision` (canonicalized target, `..` rejected, fail-closed
+    /// when nothing resolves). The supervisor feeds it every path-typed arg.
     Workspace,
 }
 
@@ -144,9 +144,15 @@ impl PolicyEngine {
 
         let ws_canon = std::fs::canonicalize(&ws)
             .unwrap_or_else(|_| std::path::PathBuf::from(&ws));
-        // Canonicalize the target; if it doesn't exist yet, use it as-is.
-        let tgt_canon = std::fs::canonicalize(p)
-            .unwrap_or_else(|_| std::path::PathBuf::from(p));
+        // Canonicalize the target. A not-yet-existing target resolves through
+        // its nearest EXISTING ancestor (canonicalize_lenient), so a symlinked
+        // parent dir can't smuggle an "inside the workspace" string whose real
+        // location is elsewhere. Nothing resolvable (e.g. a relative path
+        // outside the ws) → Ask, fail-closed; the tool's confine() stays the
+        // hard gate either way — this only decides the approval prompt.
+        let Some(tgt_canon) = apexos_confine::canonicalize_lenient(std::path::Path::new(p)) else {
+            return Decision::Ask;
+        };
 
         if tgt_canon.starts_with(&ws_canon) {
             Decision::Allow
@@ -275,6 +281,32 @@ mod tests {
             Decision::Ask
         );
         std::env::remove_var("AGENTD_WORKSPACE");
+    }
+
+    #[test]
+    fn workspace_rule_symlinked_parent_resolves_to_real_location() {
+        // A not-yet-existing target under a symlinked dir must be judged by the
+        // symlink's REAL destination, not the raw string — the old fallback
+        // (`canonicalize(p).unwrap_or(raw)`) trusted the unresolved prefix.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("apexos_policy_symlink_{}", std::process::id()));
+        let ws      = base.join("ws");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        // ws/escape -> outside : a path string INSIDE the ws whose real home isn't
+        std::os::unix::fs::symlink(&outside, ws.join("escape")).unwrap();
+        std::env::set_var("AGENTD_WORKSPACE", &ws);
+
+        let e = engine(PolicyMode::Suggest, &[("write_file", Rule::Workspace)]);
+        let sneaky = ws.join("escape").join("new_file.txt");
+        assert_eq!(e.check("write_file", Some(sneaky.to_str().unwrap())), Decision::Ask);
+        // ...while an honest not-yet-existing nested target inside the ws stays Allow
+        let honest = ws.join("newdir").join("new_file.txt");
+        assert_eq!(e.check("write_file", Some(honest.to_str().unwrap())), Decision::Allow);
+
+        std::env::remove_var("AGENTD_WORKSPACE");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

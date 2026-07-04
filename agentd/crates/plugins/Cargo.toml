@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-apexos-core  = { path = "../core" }
+apexos-core    = { path = "../core" }
+apexos-confine = { path = "../../../apexos-confine" }
 tokio        = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }

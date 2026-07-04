@@ -2324,10 +2324,17 @@ async fn record_start_handler() -> impl IntoResponse {
     let device = std::env::var("ALSA_CAPTURE_DEVICE")
         .unwrap_or_else(|_| "plughw:2,0".into());
 
-    // Kill any in-flight recording
+    // One recording at a time: a concurrent start would clobber the shared WAV
+    // path mid-write, so refuse with 409 (mirrors the wake CAS) instead of
+    // silently killing the other client's capture. A child that already exited
+    // (arecord self-bounds at -d 30, or a stop that never came) frees the slot.
     {
         let mut guard = recorder_lock().lock().await;
-        if let Some(mut c) = guard.take() { let _ = c.kill().await; }
+        let in_flight = matches!(guard.as_mut().map(|c| c.try_wait()), Some(Ok(None)));
+        if in_flight {
+            return (StatusCode::CONFLICT, "a recording is already in progress").into_response();
+        }
+        guard.take(); // reap an exited/errored child
     }
     let _ = tokio::fs::remove_file(SERVER_WAV).await;
 

@@ -1,9 +1,9 @@
 use serde_json::{json, Value};
 
-/// Tool schema registry — 63 tools mirroring the Python MCP server.
+/// Tool schema registry — the advertised tool set (count asserted by the
+/// `tools.len()` test in dispatch.rs so this header can't silently go stale;
+/// currently 67 = 66 functional + the deferred `ingest_file` stub).
 /// Descriptions are verbatim from the Python mcp_server.py (agent-facing strings).
-/// Step 8: remember, recall, associate, get_memory have full schemas.
-/// Step 9: remaining tools will be filled in.
 pub fn all_tool_schemas() -> Vec<Value> {
     TOOL_NAMES.iter().map(|&name| tool_schema(name)).collect()
 }

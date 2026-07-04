@@ -240,6 +240,23 @@ fn migrate_from_python(conn: &mut Connection) -> Result<()> {
             |r| r.get::<_, i64>(0),
         ).unwrap_or(0) > 0;
         if done {
+            // One-time reap of the migration's leftovers: the Python originals
+            // (memory_nodes/associative_links) and the _py_* renames are kept
+            // as a fallback through the migration boot itself; once a migrated
+            // DB is back in service they're dead weight. Dropping memory_nodes
+            // also makes every future open skip this probe (has_py = false).
+            if let Err(e) = conn.execute_batch(
+                "DROP TABLE IF EXISTS memory_nodes;
+                 DROP TABLE IF EXISTS associative_links;
+                 DROP TABLE IF EXISTS _py_agents;
+                 DROP TABLE IF EXISTS _py_episodes;
+                 DROP TABLE IF EXISTS _py_episode_steps;
+                 DROP TABLE IF EXISTS _py_audit_log;",
+            ) {
+                tracing::warn!("orphan Python-table reap failed (non-fatal): {e}");
+            } else {
+                tracing::info!("reaped Python-migration orphan tables (memory_nodes, associative_links, _py_*)");
+            }
             return Ok(());
         }
     }
