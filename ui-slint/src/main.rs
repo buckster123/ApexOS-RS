@@ -2076,7 +2076,12 @@ fn apply_agent_sketch(ui: &AppWindow, clear: bool, strokes: &[AgentStroke]) -> O
 fn find_tool_row(call_id: &str) -> Option<usize> {
     MESSAGES.with(|m| {
         if let Some(model) = m.borrow().as_ref() {
-            for i in 0..model.row_count() {
+            // Scan newest-first: agentd's ActionIds are globally unique now,
+            // but a transcript from an older daemon (or a restored replay) can
+            // hold duplicate call ids from the per-turn-counter era — the live
+            // event always belongs to the NEWEST matching card, never a twin
+            // far up the chat.
+            for i in (0..model.row_count()).rev() {
                 if let Some(item) = model.row_data(i) {
                     if item.role.as_str() == "tool" && item.call_id.as_str() == call_id {
                         return Some(i);
@@ -3555,6 +3560,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // verification of the face, GL or 2D). Independent of the render path.
     if std::env::var_os("APEX_FACE_AUTOOPEN").is_some() {
         wm_launch(&ui, &windows, AppKind::Face);
+    }
+    if std::env::var_os("APEX_SKETCH_AUTOOPEN").is_some() {
+        wm_launch(&ui, &windows, AppKind::Sketchpad);
     }
     // Dev: APEX_OCCIPITAL_DEMO=1 opens the Occipital reader at launch with a
     // sample page so the follow-along window can be verified without agentd
@@ -5459,6 +5467,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_sk     = http_base.clone();
     let tx_sk       = tx.clone();
     ui.on_sketch_send(move |w, h| {
+        // Send carries the exact canvas px — refresh the agent-draw scale too
+        // (report-canvas only fires from pointer events now, see the view).
+        SKETCH_CANVAS.with(|c| c.set((w, h)));
         let payload = sketch_payload(w, h);
         let empty = payload["strokes"].as_array().map(|a| a.is_empty()).unwrap_or(true);
         if empty {

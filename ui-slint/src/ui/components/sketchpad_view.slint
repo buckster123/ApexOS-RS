@@ -107,10 +107,14 @@ export component SketchpadView {
             background: #0d0f18;   // mirrors the gateway's default sketch bg
             clip: true;
 
-            // Report the canvas pixel size to Rust so agent-driven `sketch_draw`
-            // (normalized 0-1 coords) can scale exactly to this canvas.
-            changed width  => { root.report-canvas(self.width / 1px, self.height / 1px); }
-            changed height => { root.report-canvas(self.width / 1px, self.height / 1px); }
+            // NB: no `changed width/height` trackers here — registering them
+            // evaluates canvas geometry mid-layout and closes a binding cycle
+            // through the parent layout cache ("Recursion detected" panic on
+            // the desktop/winit shell). The canvas size is reported from EVENT
+            // context instead (pointer-down below + the send button), which is
+            // exact whenever it matters: agent-driven `sketch_draw` scaling is
+            // the only consumer, and it composites onto a canvas the human is
+            // touching (or has just sent).
 
             // Empty-state hint.
             if root.strokes.length == 0: Text {
@@ -141,6 +145,10 @@ export component SketchpadView {
             draw-ta := TouchArea {
                 pointer-event(e) => {
                     if (e.kind == PointerEventKind.down) {
+                        // Event context — safe to read geometry (unlike a
+                        // `changed` tracker); keeps SKETCH_CANVAS exact for
+                        // agent-stroke scaling.
+                        root.report-canvas(canvas.width / 1px, canvas.height / 1px);
                         root.down(self.mouse-x / 1px, self.mouse-y / 1px);
                     } else if (e.kind == PointerEventKind.up) {
                         root.up();
