@@ -144,6 +144,12 @@ pub struct GatewayState {
     pub mesh_unread:        MeshInbox,
     /// On-disk JSON backing for `mesh_unread` (`<log_dir>/mesh_unread.json`).
     pub mesh_unread_path:   PathBuf,
+    /// Federation observability counters (principle 6, receiver-side v1):
+    /// peer node_id → inbound memories/duplicates/recall stats. Bumped by
+    /// `mesh_memory_handler` + `mesh_recall_handler`, folded into
+    /// `GET /api/mesh/peers`, persisted to `<log_dir>/mesh_fed_stats.json`.
+    pub fed_stats:          FedStats,
+    pub fed_stats_path:     PathBuf,
     /// Session-consolidation requests → the agentd-side worker (which owns the LLM
     /// provider + Cerebro ToolProxy, unavailable here at GatewayState build time).
     /// The handler sends a `ConsolidateReq` and awaits its oneshot reply. See
@@ -1393,6 +1399,58 @@ fn persist_mesh_unread(path: &std::path::Path, map: &HashMap<u64, MeshUnread>) {
             eprintln!("[mesh] could not persist mesh_unread: {e}");
         }
     }
+}
+
+// ── Federation observability counters (colony-federation principle 6, v1) ─────
+// Per-peer counters for knowledge flowing INTO this node — the receiving edge.
+// v1 is deliberately receiver-side only: every node counting its inbound makes
+// colony-wide flow fully visible with zero cross-crate wiring (a peer's "sent"
+// is this node's "received"); sender-side attribution (who initiated: manual
+// send vs dream digest vs procedure) is the follow-up if the colony wants it.
+// Same shape as MeshInbox: std Mutex (tiny ops, never held across await),
+// persisted to `<log_dir>/mesh_fed_stats.json`, folded into GET /api/mesh/peers.
+
+/// One peer's inbound-federation counters on this node.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PeerFedStats {
+    pub memories_received: u64, // imports stored (manual sends · dream digests · procedures)
+    pub duplicates:        u64, // re-sends answered `duplicate:true` (origin dedup)
+    pub recall_served:     u64, // federated recall queries answered for this peer
+    pub recall_hits:       u64, // total hits returned across those queries
+    pub last_ts:           i64, // epoch secs of this peer's last federation touch
+}
+
+/// Peer node_id → inbound counters.
+pub type FedStats = Arc<std::sync::Mutex<HashMap<String, PeerFedStats>>>;
+
+/// Bump one peer's counters (pure; caller persists the returned snapshot).
+fn fed_stats_bump(
+    map: &mut HashMap<String, PeerFedStats>,
+    from: &str,
+    now: i64,
+    f: impl FnOnce(&mut PeerFedStats),
+) {
+    let e = map.entry(from.to_string()).or_default();
+    f(e);
+    e.last_ts = now;
+}
+
+fn persist_fed_stats(path: &std::path::Path, map: &HashMap<String, PeerFedStats>) {
+    if let Ok(json) = serde_json::to_string_pretty(map) {
+        if let Err(e) = std::fs::write(path, json) {
+            eprintln!("[mesh] could not persist fed_stats: {e}");
+        }
+    }
+}
+
+/// Lock → bump → snapshot → persist, in one call (the handlers' one-liner).
+fn fed_stats_record(state: &GatewayState, from: &str, f: impl FnOnce(&mut PeerFedStats)) {
+    let snapshot = {
+        let mut map = state.fed_stats.lock().unwrap_or_else(|e| e.into_inner());
+        fed_stats_bump(&mut map, from, now_epoch_secs(), f);
+        map.clone()
+    };
+    persist_fed_stats(&state.fed_stats_path, &snapshot);
 }
 
 fn now_epoch_secs() -> i64 {
@@ -3436,6 +3494,7 @@ async fn mesh_memory_handler(
             if let Ok(Ok(found)) = prx.await {
                 if let Some(existing) = found.as_array().and_then(|a| a.first()) {
                     let memory_id = existing["id"].as_str().unwrap_or("").to_string();
+                    fed_stats_record(&state, &from, |s| s.duplicates += 1);
                     return Json(serde_json::json!({
                         "ok": true, "memory_id": memory_id, "from": from, "duplicate": true,
                     }));
@@ -3452,6 +3511,7 @@ async fn mesh_memory_handler(
     match reply_rx.await {
         Ok(Ok(stored)) => {
             let memory_id = stored["id"].as_str().unwrap_or("").to_string();
+            fed_stats_record(&state, &from, |s| s.memories_received += 1);
             state.bus.emit(Event::MeshMemoryShared {
                 from_node: from.clone(),
                 memory_id: memory_id.clone(),
@@ -3504,7 +3564,10 @@ async fn mesh_recall_handler(
     match reply_rx.await {
         Ok(Ok(results)) => {
             let hits = mesh::federated_recall_hits(&results, limit);
-            let _ = from; // trust-gate only; the response carries no per-peer state
+            fed_stats_record(&state, &from, |s| {
+                s.recall_served += 1;
+                s.recall_hits   += hits.len() as u64;
+            });
             Json(serde_json::json!({
                 "ok": true, "node": state.node_id.as_str(), "count": hits.len(), "hits": hits,
             }))
@@ -3556,10 +3619,13 @@ async fn mesh_peers_get_handler(State(state): State<GatewayState>) -> impl IntoR
     let registry = state.peer_registry.read().await;
     // Never serialize the per-peer token: it's the peer's secret credential.
     // Clients only need to know whether one is set (drives the a2a-ready dot).
+    let fed = state.fed_stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let mut peers: Vec<serde_json::Value> = Vec::with_capacity(registry.peers.len());
     for p in &registry.peers {
         // Fold in the beacon's active-liveness (alive/dark + seconds-since-seen).
         let (live, last_seen_secs) = beacon::peer_liveness(&state.liveness, &p.node_id).await;
+        // Fold in the inbound-federation counters (principle 6, receiver-side).
+        let f = fed.get(p.node_id.as_str()).cloned().unwrap_or_default();
         peers.push(serde_json::json!({
             "node_id":        p.node_id,
             "ws_url":         p.ws_url,
@@ -3568,6 +3634,13 @@ async fn mesh_peers_get_handler(State(state): State<GatewayState>) -> impl IntoR
             "has_token":      p.token.is_some(),
             "live":           live,
             "last_seen_secs": last_seen_secs,
+            "federation": {
+                "memories_received": f.memories_received,
+                "duplicates":        f.duplicates,
+                "recall_served":     f.recall_served,
+                "recall_hits":       f.recall_hits,
+                "last_ts":           f.last_ts,
+            },
         }));
     }
     Json(serde_json::json!({ "peers": peers }))
@@ -5669,6 +5742,32 @@ mod ws_filter_tests {
         // The counter is shared with socket-session allocation, so the next socket
         // id is strictly above every mesh id — they can never collide.
         assert_eq!(counter.fetch_add(1, Ordering::SeqCst), 25);
+    }
+
+    #[test]
+    fn fed_stats_bump_accumulates_and_roundtrips() {
+        let mut map: HashMap<String, PeerFedStats> = HashMap::new();
+        // Import + a re-send caught by origin dedup + a recall answered with 3 hits.
+        fed_stats_bump(&mut map, "ApexOS-2", 100, |s| s.memories_received += 1);
+        fed_stats_bump(&mut map, "ApexOS-2", 160, |s| s.duplicates += 1);
+        fed_stats_bump(&mut map, "ApexOS-2", 200, |s| { s.recall_served += 1; s.recall_hits += 3; });
+        let e = &map["ApexOS-2"];
+        assert_eq!(
+            (e.memories_received, e.duplicates, e.recall_served, e.recall_hits, e.last_ts),
+            (1, 1, 1, 3, 200),
+            "counters accumulate independently; last_ts follows the latest touch"
+        );
+
+        // A different peer is independent; an unknown peer reads as all-zeros default.
+        fed_stats_bump(&mut map, "andre-laptop", 210, |s| s.memories_received += 1);
+        assert_eq!(map["andre-laptop"].memories_received, 1);
+        assert_eq!(map["ApexOS-2"].memories_received, 1, "other peer untouched");
+        assert_eq!(PeerFedStats::default().memories_received, 0);
+
+        // JSON round-trip (the persistence format).
+        let json = serde_json::to_string(&map).unwrap();
+        let back: HashMap<String, PeerFedStats> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back["ApexOS-2"].recall_hits, 3);
     }
 
     #[test]

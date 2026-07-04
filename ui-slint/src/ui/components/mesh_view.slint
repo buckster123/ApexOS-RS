@@ -283,6 +283,14 @@ export component MeshView {
                                 font-size: 10px;
                                 overflow: elide;
                             }
+                            // Federation flow (receiver-side counters); hidden
+                            // until this peer has sent/queried something.
+                            if item.fed-line != "": Text {
+                                text: item.fed-line;
+                                color: Palette.primary-dim;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
                         }
 
                         // Role / status badge

@@ -2917,6 +2917,20 @@ fn seed_inbox(rows: Vec<InboxThread>) {
     inbox_refresh_badge();
 }
 
+/// Render a peer's inbound-federation counters ("federation" from
+/// GET /api/mesh/peers) into one dim roster line; "" when no traffic yet
+/// (the row hides). Pure.
+fn fed_stats_line(f: &serde_json::Value) -> String {
+    let recv = f["memories_received"].as_u64().unwrap_or(0);
+    let dup  = f["duplicates"].as_u64().unwrap_or(0);
+    let srv  = f["recall_served"].as_u64().unwrap_or(0);
+    let hits = f["recall_hits"].as_u64().unwrap_or(0);
+    if recv == 0 && dup == 0 && srv == 0 {
+        return String::new();
+    }
+    format!("fed ↓{recv} mem · {dup} dup · {srv} recall ({hits} hits)")
+}
+
 async fn fetch_mesh(client: &reqwest::Client, base_url: &str) -> Vec<MeshNode> {
     let (peers_resp, nodes_resp) = tokio::join!(
         json_get(client, format!("{base_url}/api/mesh/peers")),
@@ -2934,6 +2948,7 @@ async fn fetch_mesh(client: &reqwest::Client, base_url: &str) -> Vec<MeshNode> {
                 status:    p["live"].as_str().or_else(|| p["status"].as_str()).unwrap_or("online").into(),
                 is_peer:   true,
                 has_token: p["has_token"].as_bool().unwrap_or(false),
+                fed_line:  fed_stats_line(&p["federation"]).into(),
             });
         }
     }
@@ -2951,6 +2966,7 @@ async fn fetch_mesh(client: &reqwest::Client, base_url: &str) -> Vec<MeshNode> {
                 status:    "discovered".into(),
                 is_peer:   false,
                 has_token: false,
+                fed_line:  "".into(),
             });
         }
     }

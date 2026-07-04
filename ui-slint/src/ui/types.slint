@@ -225,6 +225,7 @@ export struct MeshNode {
     status:    string,   // "online" | "discovered" | …
     is-peer:   bool,
     has-token: bool,     // saved peer carries an a2a token (GET /api/mesh/peers has_token)
+    fed-line:  string,   // federation counters summary ("" = no federation traffic yet)
 }
 
 // One mesh a2a conversation thread (a peer → this node), surfaced in the Mesh
