@@ -49,11 +49,11 @@ The point of naming these: hardening is *closing specific boundaries*, not a vib
 
 Gemini's framing of a "Nursery" — an immutable guardrail layer the evolving agent can't bypass — is the right mental model. Grounded against what we already have:
 
-### A1. Namespace-isolate the `apexos-tools` worker *(new — high value)*
-The tools process does FS + GPIO only; it has **no legitimate reason to touch the network**. Wrap its spawn in Linux namespaces (via the `nix` crate, in-Rust):
-- **`CLONE_NEWNET`** → the worker literally cannot open a socket. A jailbroken tool can't phone home. *(Clean win — closes the "tools ↔ network" gap that systemd `IPAddressDeny` only partially covers.)*
-- **pivot-root / `CLONE_NEWNS`** → a read-only `/` view, writable only at the workspace.
-- *Reality note:* this is **new** code, NOT "use apexos-confine" — that crate is std-only *path-string* confinement, not OS jailing. They compose (path-confine inside the namespace), they aren't the same thing.
+### A1. Namespace-isolate the `apexos-tools` worker *(re-graded 2026-07-05: DEFERRED post-beta)*
+The original premise — "the tools process does FS + GPIO only; it has **no legitimate reason to touch the network**" — turned out to be **wrong against the shipped tool set**: `http_fetch`, `screenshot_mirror` (fetches the UI's loopback snapshot server), `bootstrap_node` (SSH provisioning), and the notify/sonus paths all legitimately open sockets. So:
+- **`CLONE_NEWNET`** as scoped would break real tools; doing it properly means **splitting the worker into net/no-net halves** first — a real refactor, not a wrapper.
+- The marginal gain over what's in place (apexos-confine path confinement, `ProtectSystem=strict` + `PrivateDevices` + `NoNewPrivileges`, ssrf_guard, ask-gated `run_command`, the secret denylist) doesn't gate the beta. **Deferred; documented as a known residual in `SECURITY.md`.**
+- *Reality notes kept:* this is **new** code, NOT "use apexos-confine" (std-only path-string confinement, not OS jailing — they compose); pivot-root / `CLONE_NEWNS` (read-only `/` view) remains attractive *with* the split, post-beta.
 
 ### A2. Capability caps on the systemd units *(small)*
 Add `CapabilityBoundingSet=` (drop `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, …) + `RestrictAddressFamilies=`/`SystemCallFilter=` to `agentd.service` and friends. We already ship `NoNewPrivileges` + `ProtectSystem=strict` + `PrivateDevices` — this tightens the residual.
@@ -127,7 +127,7 @@ Naming it keeps the door honest without over-investing today.
 
 | Idea | Verdict |
 |------|---------|
-| Namespace-jail the tools worker (`CLONE_NEWNET`, pivot-root) | ✅ **Gold** — A1 (but it's *new*, not "use apexos-confine") |
+| Namespace-jail the tools worker (`CLONE_NEWNET`, pivot-root) | ◑ **Gold idea, wrong premise here** — A1 deferred post-beta (several tools legitimately use the network; needs a net/no-net worker split first) |
 | Read-only root + watchdog remount | ✅ **Gold** — A6 / C |
 | Adversarial red-team test suite | ✅ **Gold** — A5 |
 | Capability caps | ✅ Real — A2 |
