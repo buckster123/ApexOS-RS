@@ -181,6 +181,15 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default();
     let mesh_unread = Arc::new(std::sync::Mutex::new(mesh_unread));
 
+    // Federation observability counters (principle 6, receiver-side v1) —
+    // peer node_id → inbound memories/duplicates/recall stats, cross-restart.
+    let fed_stats_path = log_dir.join("mesh_fed_stats.json");
+    let fed_stats: HashMap<String, apexos_gateway::PeerFedStats> = std::fs::read_to_string(&fed_stats_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let fed_stats = Arc::new(std::sync::Mutex::new(fed_stats));
+
     // Server-issued session IDs — start above any IDs already loaded from disk
     // (history JSONL *and* the mesh per-peer map).
     let max_loaded_sid = initial_histories.keys().map(|s| s.0).max().unwrap_or(0)
@@ -352,6 +361,8 @@ async fn main() -> anyhow::Result<()> {
         mesh_sessions_path:   mesh_sessions_path.clone(),
         mesh_unread:          Arc::clone(&mesh_unread),
         mesh_unread_path:     mesh_unread_path.clone(),
+        fed_stats:            Arc::clone(&fed_stats),
+        fed_stats_path:       fed_stats_path.clone(),
         consolidate_tx:       consolidate_tx.clone(),
         spawn_tx:             spawn_tx.clone(),
         mesh_memory_tx:       mesh_memory_tx.clone(),

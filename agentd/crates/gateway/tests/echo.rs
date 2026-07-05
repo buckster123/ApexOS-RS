@@ -49,6 +49,8 @@ fn make_state(handle: apexos_core::BusHandle, bcast: tokio::sync::broadcast::Sen
         mesh_sessions_path:   PathBuf::from("."),
         mesh_unread:          Arc::new(std::sync::Mutex::new(HashMap::new())),
         mesh_unread_path:     PathBuf::from("."),
+        fed_stats:            Arc::new(std::sync::Mutex::new(HashMap::new())),
+        fed_stats_path:       PathBuf::from("."),
         consolidate_tx:       tokio::sync::mpsc::channel(1).0,
         spawn_tx:             tokio::sync::mpsc::channel(1).0,
         mesh_memory_tx:       tokio::sync::mpsc::channel(1).0,

@@ -62,9 +62,15 @@ pattern (#7 → `mesh_file_send`), capability advertisement landed the discovery
 6. **Observability from day one.** Federation counters (memories sent/received per peer,
    digests exchanged, federated-recall hits) surface via `/api/mesh/peers` + stats — the
    long-run multi-node benching story depends on being able to *see* knowledge flow.
-   *Status (2026-07): NOT built — the four slices shipped without counters; this principle
-   was not honored "from day one". Tracked as a BACKLOG medium item ("Federation
-   observability counters").*
+   *Status (2026-07-04): **v1 shipped** — receiver-side counters per peer
+   (`memories_received` · `duplicates` · `recall_served`/`recall_hits` + `last_ts`),
+   bumped in `mesh_memory_handler`/`mesh_recall_handler`, persisted to
+   `<log_dir>/mesh_fed_stats.json`, folded into `GET /api/mesh/peers` as `federation`,
+   surfaced as a per-peer flow line in the Mesh view. Deliberately the receiving edge
+   only: every node counting inbound makes colony-wide flow visible (a peer's "sent" is
+   this node's "received"); sender-side attribution (manual vs digest vs procedure) is
+   the follow-up if long-run benching wants the breakdown. The four slices did ship
+   without counters first — the "from day one" promise was honored three days late.*
 
 ---
 
