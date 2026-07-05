@@ -6,10 +6,11 @@
 
 ### An AI agent that *lives on the hardware in your drawer* — remembers, evolves, and rewrites its own code.
 
-*One ~32 MB Rust binary. No Chromium. No Electron. No cloud required.*
-*Pi Zero to DGX. Persistent memory, a face, senses, a mesh — and a daemon that can safely recompile and reincarnate itself.*
+*A pure-Rust stack. No Chromium. No Electron. No cloud required.*
+*Pi Zero to DGX. Persistent memory, a face, a voice, senses, a colony — and a daemon that can safely recompile and reincarnate itself.*
 
 [![status](https://img.shields.io/badge/status-alive_on_hardware-22c55e?style=for-the-badge)]()
+[![release](https://img.shields.io/badge/release-v0.1.0--beta-f59e0b?style=for-the-badge)]()
 [![rust](https://img.shields.io/badge/100%25-Rust-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
 [![ui](https://img.shields.io/badge/UI-Slint_·_KMS%2FDRM-8b5cf6?style=for-the-badge)](https://slint.dev/)
 [![self--updating](https://img.shields.io/badge/self--updating-binary_+_rollback-e11d48?style=for-the-badge)]()
@@ -18,7 +19,7 @@
 </div>
 
 > [!NOTE]
-> **What if your AI assistant wasn't a chat window to someone else's datacenter — but a *resident* of a $15 computer you own?** One that keeps its own memories across reboots, has a face on a little screen, reads its sensors, talks to other nodes in your house, edits its own personality, and — when it has a better idea for how it should work — **rebuilds and swaps its own binary, with an automatic safety net if the new version misbehaves.** That's ApexOS-RS.
+> **What if your AI assistant wasn't a chat window to someone else's datacenter — but a *resident* of a $15 computer you own?** One that keeps its own memories across reboots, has a face on a little screen, listens and talks back with a fully-local voice, reads its sensors, shares what it learns with the other nodes in your house — **they consolidate memories together in their sleep** — edits its own personality, and, when it has a better idea for how it should work, **rebuilds and swaps its own binary, with an automatic safety net if the new version misbehaves.** That's ApexOS-RS.
 
 ---
 
@@ -26,7 +27,7 @@
 
 ApexOS-RS is a **self-contained AI agent operating system** — the agent daemon, a cognitive memory system, system/sensor/vision tools, and a native GPU-rendered UI, all in **one pure-Rust Cargo workspace**. `cargo build --release --workspace`, one `install.sh`, and a spare board becomes a persistent, embodied, self-improving agent.
 
-It's the pure-Rust distro of [ApexOS](https://github.com/buckster123/ApexOS): where the original runs a Chromium kiosk, ApexOS-RS renders natively to KMS/DRM in a single ~32 MB binary that boots to UI in ~200 ms. But the headline isn't the diet — it's what the agent can *do* when it lives entirely on local hardware.
+It's the pure-Rust distro of [ApexOS](https://github.com/buckster123/ApexOS): where the original runs a Chromium kiosk, ApexOS-RS renders natively to KMS/DRM in a single ~47 MB binary that boots to UI in ~200 ms. But the headline isn't the diet — it's what the agent can *do* when it lives entirely on local hardware.
 
 ```mermaid
 flowchart LR
@@ -50,12 +51,14 @@ flowchart LR
 
 |  |  |
 |--|--|
-| 🪶 **Tiny & native** | One self-contained **~32 MB** binary. No browser, no Node, no Wayland compositor. Boots to UI in ~200 ms, ~160 MB RSS on a Pi 5. |
+| 🪶 **Tiny & native** | One self-contained **~47 MB** UI binary. No browser, no Node, no Wayland compositor. Boots to UI in ~200 ms, **~115 MB RSS** on a Pi 5 — the whole stack (daemon + memory cortex + tools + UI) idles under 1.5 GB with semantic embeddings loaded. |
 | 🧠 **It remembers** | **Cerebro** — a cognitive memory cortex (FTS5 + optional semantic embeddings) that survives reboots. The agent wakes up *oriented*: where it left off, its skills, its intentions. It even **consolidates memory nightly** while idle, no prompting. |
 | 🧬 **It evolves** | The agent proposes and applies changes to **its own identity (`soul.md`), its policy, and its plugins** at runtime — every change reversible. Skills grow in memory under selection pressure. It can even **request new hardware** when it wants a capability it lacks. |
 | 🔄 **It rewrites itself** | The frontier piece: the daemon can **rebuild and hot-swap its own binary** from a committed git ref — gated by *build → test → an adversarial LLM review* — while a privileged watchdog health-checks the new process and **automatically rolls back to the last good binary** if it doesn't come up healthy. Proven on real hardware. *(See ↓ [The self-update loop](#-the-self-update-loop).)* |
-| 🤖 **It has a body** | An expressive **GPU-rendered face** (12 emotions, gaze, blinks), reads **air-quality + thermal sensors**, **sees** through a camera, **hears + speaks** (mic/TTS), and drives **GPIO**. Embodiment scales with the hardware actually present. |
-| 🌐 **It's a mesh** | Multiple nodes discover each other (mDNS), message agent-to-agent, and **delegate inference** — a GPU box joins the network and serves big models to the whole cluster, no restart needed. |
+| 🤖 **It has a body** | An expressive **GPU-rendered face** (12 emotions, gaze, blinks), reads **air-quality + thermal sensors**, **sees** through a camera, and drives **GPIO**. Embodiment scales with the hardware actually present. |
+| 🗣️ **It has a voice** | **Fully local speech**: Kokoro-82M neural TTS + Whisper STT, on-device — cloud voices (ElevenLabs/OpenAI) optional, `espeak` as the always-works fallback. Wake-word on the kiosk, push-to-talk everywhere else. |
+| 🌐 **It's a colony** | Nodes discover each other (mDNS), pair with one-time codes, message agent-to-agent, relay files, spawn sub-agents cross-node, **federate memories** — and **exchange what they learned in their sleep** (the nightly dream digest, provenance-stamped). A GPU box joins and serves big models to the whole cluster, no restart needed. |
+| 📱 **It's reachable** | An installable **PWA / browser UI** for headless nodes and phones: profile login (one-tap or PIN), streaming chat, tool approvals, a file browser, voice. Label a USB stick `APEX-*` and it becomes a **portable agent workspace**. |
 | 🔒 **It's yours** | Runs **fully offline** with a local model (Ollama) or against an API — your call. Memories, soul, and data stay on *your* device. No telemetry. |
 
 ---
@@ -131,6 +134,7 @@ flowchart LR
     selfupd -. watchdog net .-> boot
     night(["🌙 nightly, idle"]) --> dream["💤 dream_run<br/>consolidate + prune memory"]
     dream --> remember
+    dream -. "dream digest — share<br/>new skills with peers" .-> colony(["🌐 colony"])
     style selfupd fill:#3b0764,stroke:#e11d48,color:#fbcfe8
 ```
 
@@ -224,6 +228,8 @@ sudo bash install.sh --api-key=sk-... # set Anthropic key non-interactively
 > [!WARNING]
 > The one-liner pipes a script into `sudo bash` — you're trusting GitHub's TLS/CDN. Review [`install.sh`](install.sh) first if your threat model needs it. **Always build on the Pi, never cross-compile** (Cortex-A76 / arm64).
 
+After install: a kiosk node boots straight to the native UI; **any node** (headless included) serves the installable PWA at `http://<node-ip>:8787` — log in with a profile tap or PIN, no token copying. Updating later is one command: `apexos-update`.
+
 ---
 
 <details>
@@ -234,29 +240,33 @@ sudo bash install.sh --api-key=sk-... # set Anthropic key non-interactively
 ```
 agentd/crates/    # agent daemon — core · gateway · plugins · agent · store · agentd
 cerebro/crates/   # cognitive memory — cerebro lib · cerebro-mcp · cerebro-api · cerebro-cli
-tools/crates/     # system plugins — apexos-tools · apex-sensor-bridge
+tools/crates/     # system plugins — apexos-tools · apex-sensor-bridge (+ apex-tts / apex-stt voice sidecars)
 ui-slint/         # the native Slint UI (the unique contribution of this repo)
+web/              # the installable browser / PWA frontend — login · chat · files · voice
 config/           # default plugins.toml, policy.toml
-deploy/           # systemd units + the self-update watchdog
+deploy/           # systemd units + the self-update watchdog + udev/USB helpers
 install.sh        # one-shot installer
 ```
 
 ### Capabilities at a glance
 
-- **Cerebro** — 60+ cognitive-memory tools: store/recall, episodes, procedures (graded + champion-selected), intentions, schemas, associative graph, audit trail, nightly `dream_run` consolidation, `cognitive_bootstrap` boot-priming.
-- **apexos-tools** — 30+ tools: workspace-confined filesystem, **git** (commit your own source for self-update), `run_command`, `http_fetch` (SSRF-guarded), camera capture, screenshot mirror, sketchpad, audio DSP, GPIO, `display_face`.
-- **Occipital** — a web "reading cortex": `web_search` / `web_fetch` / `web_recall` with a follow-along reader window.
+- **Cerebro** — 60+ cognitive-memory tools: store/recall, episodes, procedures (graded + champion-selected), intentions, schemas, associative graph, audit trail, nightly `dream_run` consolidation, `cognitive_bootstrap` boot-priming, CLIP visual recall.
+- **apexos-tools** — 30+ tools: workspace-confined filesystem, **git** (commit your own source for self-update), `run_command`, `http_fetch` (SSRF-guarded), camera capture, screenshot mirror, sketchpad (bidirectional — the agent draws back), audio DSP, GPIO, `display_face`, USB safe-eject.
+- **Voice** — local **Kokoro-82M** neural TTS + **Whisper** STT as build-isolated sidecars; cloud (ElevenLabs / OpenAI) optional; runtime-tunable per node (`auto`/`local`/`api`/`off`); client-side audio on desktop so the daemon stays sandboxed.
+- **Occipital** — a web "reading cortex": `web_search` / `web_fetch` / `web_recall` (semantic on Micro+) / `web_distill` (LLM-curated knowledge hub), with a follow-along reader window.
+- **Colony federation** — provenance-stamped memory relay between separate Cerebros (never a merge), federated recall (shared-visibility only at the wire), the nightly **dream digest exchange** (echo-guarded), procedure replication where a skill's fitness is **re-earned per node**, per-peer flow counters.
+- **Goals** — an autonomous goal driver (create → act per step → done/failed) with per-goal opt-in yolo and live board chips in the UI.
 - **Self-evolution (EDK)** — `propose_evolution` over soul / policy / plugins (reversible), skill grading, and the *request-to-incarnate* hardware loop.
 - **Self-update** — `apply_daemon_update` + a root systemd watchdog with health-gated rollback + probation. → [`docs/self-update.md`](docs/self-update.md)
-- **Multi-agent identity** — per-session agent binding: distinct Cerebro space, soul, policy, and skin per agent on one node.
+- **Multi-agent identity** — per-session agent binding: distinct Cerebro space, soul, workspace, and skin per agent on one node; persona skins carry a per-persona agent voice.
 
 ### Why pure Rust beats the Chromium build
 
 | | ApexOS (original) | ApexOS-RS |
 |--|--|--|
 | UI runtime | Chromium | Slint native |
-| UI footprint | hundreds of MB + runtime | one ~32 MB binary |
-| UI memory | ~300 MB+ | ~160 MB RSS (Pi 5) |
+| UI footprint | hundreds of MB + runtime | one ~47 MB binary |
+| UI memory | ~300 MB+ | ~115 MB RSS (Pi 5) |
 | Startup | ~5 s (cage + Chromium) | ~200 ms |
 | Display stack | cage → Wayland → Chromium | KMS/DRM direct |
 | Language | Rust + HTML/JS | 100% Rust |
@@ -299,9 +309,17 @@ apexos-update                          # pull → rebuild → hot-swap → resta
 
 ---
 
+## 🚦 Status — beta
+
+ApexOS-RS runs **live, daily, on a real three-node colony** — two Pi 5 kiosks (one carrying the full BME688 + MLX90640 sensor head) and an x86 laptop in desktop mode. The core loops — chat, tools, memory, evolution, self-update, mesh, federation, voice — are field-tested on that fleet. Broader hardware coverage is exactly what a beta is for.
+
+- **Try it, break it, tell us** — [issues](../../issues) are welcome, from install papercuts to architecture arguments.
+- **Security findings** — please disclose privately first: see [SECURITY.md](SECURITY.md).
+- **Forking or building on it** — see [AGENTS.md](AGENTS.md); Apache-2.0, attribution appreciated, upstreaming appreciated more.
+
 ## 🤝 Relationship to ApexOS
 
-ApexOS-RS is a **distro, not a replacement.** Canonical [ApexOS](https://github.com/buckster123/ApexOS) stays Chromium-based — richest feature set (Monaco IDE, iframe embeds), best on a Pi 5. ApexOS-RS optimizes for footprint, hardware range, a 100%-Rust stack, and the self-evolution / self-update frontier. **Both share the same `agentd` backend — you choose the frontend.**
+ApexOS-RS started as the **pure-Rust distro** of [ApexOS](https://github.com/buckster123/ApexOS) and has since become the flagship line — the self-update loop, colony federation, voice, and the EDK live here. The Chromium-based original remains for setups that want browser-embed-heavy apps (Monaco IDE, iframes). The two share the same protocol lineage but have diverged; new development happens in -RS.
 
 ## License
 
