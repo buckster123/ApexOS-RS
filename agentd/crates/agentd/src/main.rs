@@ -3459,7 +3459,7 @@ tmpfs /var/lib/agentd/workspace/media tmpfs rw 0 0
         // Empty history → no marker (nothing to alternate against).
         assert!(!cancel_marker_needed(&[]));
         // Ends on a user prompt with no reply (the cancelled-mid-turn case) → marker.
-        assert!(cancel_marker_needed(&[user.clone()]));
+        assert!(cancel_marker_needed(std::slice::from_ref(&user)));
         assert!(cancel_marker_needed(&[asst.clone(), user.clone()]));
         // Turn already wrote its assistant reply before the cancel landed → no marker.
         assert!(!cancel_marker_needed(&[user.clone(), asst.clone()]));

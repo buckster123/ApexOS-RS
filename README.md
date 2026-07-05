@@ -77,11 +77,11 @@ flowchart LR
   </tr>
   <tr>
     <td><img src="assets/screenshots/mesh.png" width="420" alt="Mesh view — node roster and agent-to-agent inbox"></td>
-    <td><img src="assets/screenshots/showcase.png" width="420" alt="The desktop shell — window manager and taskbar"></td>
+    <td><img src="assets/screenshots/kiosk-sensors.png" width="420" alt="The Pi 5 kiosk — live sensor telemetry, personas, Sonus, sketchpad"></td>
   </tr>
   <tr>
     <td align="center"><b>The colony — live node roster + agent-to-agent inbox</b></td>
-    <td align="center"><b>The desktop shell — goals board, council, web-reading cortex</b></td>
+    <td align="center"><b>The Pi 5 kiosk — live air quality + thermal, personas, the agent's own music</b></td>
   </tr>
 </table>
 </div>
