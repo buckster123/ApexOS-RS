@@ -65,25 +65,23 @@ flowchart LR
 
 ## 📸 Gallery
 
-> 🚧 *Screenshots populate `assets/screenshots/` — chat, the live face, the sensor heatmap, the dashboard, the terminal.*
-
 <div align="center">
 <table>
   <tr>
-    <td><img src="assets/screenshots/chat.png" width="420" alt="Agent chat + tool cards"></td>
-    <td><img src="assets/screenshots/face.png" width="420" alt="Expressive GL face"></td>
+    <td><img src="assets/screenshots/chat.png" width="420" alt="Agent chat with a live tool-approval card"></td>
+    <td><img src="assets/screenshots/face.png" width="420" alt="The GPU-rendered face in four emotions"></td>
   </tr>
   <tr>
-    <td align="center"><b>Streaming chat + inline tool approvals</b></td>
-    <td align="center"><b>The agent's live, GPU-rendered face</b></td>
+    <td align="center"><b>Streaming chat + inline tool approvals</b><br><sub>(yes — that's the agent helping shoot its own beta screenshots)</sub></td>
+    <td align="center"><b>The raymarched GL face — 12 emotions, gaze, blush, speech</b></td>
   </tr>
   <tr>
-    <td><img src="assets/screenshots/sensors.png" width="420" alt="IAQ + thermal heatmap"></td>
-    <td><img src="assets/screenshots/dashboard.png" width="420" alt="Home dashboard"></td>
+    <td><img src="assets/screenshots/mesh.png" width="420" alt="Mesh view — node roster and agent-to-agent inbox"></td>
+    <td><img src="assets/screenshots/showcase.png" width="420" alt="The desktop shell — window manager and taskbar"></td>
   </tr>
   <tr>
-    <td align="center"><b>Air-quality history + MLX90640 thermal heatmap</b></td>
-    <td align="center"><b>Home dashboard — CPU/RAM/disk, air quality</b></td>
+    <td align="center"><b>The colony — live node roster + agent-to-agent inbox</b></td>
+    <td align="center"><b>The desktop shell — goals board, council, web-reading cortex</b></td>
   </tr>
 </table>
 </div>
