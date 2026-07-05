@@ -32,7 +32,7 @@ The full trust-boundary table lives in [`docs/post-mk1.md` §2](docs/post-mk1.md
 - **Policy/approval gate** — in the default (suggest) mode, destructive tools require human approval and a tool with no policy rule defaults to *ask*, never *allow*. Yolo/autonomy is opt-in, per node or per goal — never the default.
 - **systemd sandboxing** on every service: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices` where hardware isn't needed.
 - **Token-gated network surface** — shared node token or minted session tokens (24 h, in-memory), constant-time comparison; a non-loopback bind refuses to start without a token.
-- **SSRF guard** on `http_fetch` — loopback/link-local/RFC1918 blocked, re-checked on every redirect hop, 4 MB streaming cap.
+- **SSRF guard** on `http_fetch` — loopback/link-local/RFC1918/unspecified blocked, including **encoded-IPv4** (hex/octal/decimal, normalized by the URL parser) and **IPv6 literals** (`[::1]`, v4-mapped, `fe80::/fc00::`), re-checked on every redirect hop, 4 MB streaming cap.
 - **Self-update privilege separation** — build → test → adversarial LLM review of the diff, then a *request file*; only the root watchdog touches `/usr/local/bin`, with health-gated rollback and a probation window.
 - **Mesh trust** — pairing-code token exchange, per-peer bearer tokens, `x-mesh-hops` guard against spawn recursion, per-peer circuit breakers; federated recall serves **shared-visibility memories only**, and imports are provenance-stamped by the *receiver* (a peer can't forge origin).
 

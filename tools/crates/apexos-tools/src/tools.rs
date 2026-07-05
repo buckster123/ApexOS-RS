@@ -1598,12 +1598,31 @@ fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
 /// range. Returns Ok(()) for public hosts. A literal IP host is checked
 /// directly.
 fn ssrf_guard(url: &str) -> Result<(), String> {
-    use std::net::ToSocketAddrs;
+    use std::net::{IpAddr, ToSocketAddrs};
+    use std::str::FromStr;
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid url: {}", e))?;
     let host = parsed
         .host_str()
         .ok_or_else(|| "url has no host".to_string())?;
     let port = parsed.port_or_known_default().unwrap_or(80);
+
+    // Literal IP fast-path. The url crate already normalizes hex/octal/decimal
+    // IPv4 (0x7f000001 / 2130706433 / 0177.0.0.1 → 127.0.0.1); here we also
+    // strip IPv6 brackets and check the literal directly. Without this an IPv6
+    // literal (`http://[::1]/`) reaches to_socket_addrs as the *bracketed*
+    // string, fails to parse as an IpAddr, and leaks into a DNS lookup — so the
+    // is_blocked_ip IPv6 arm never runs on it. Parsing here makes the IPv6 block
+    // real and closes the defence-in-depth gap.
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = IpAddr::from_str(bare) {
+        if is_blocked_ip(ip) {
+            return Err(format!("blocked: {} is a non-public address", ip));
+        }
+        return Ok(());
+    }
 
     // host:port → resolve to one or more socket addresses.
     let addrs = (host, port)
@@ -3074,4 +3093,109 @@ mod tests {
         std::env::remove_var("AGENTD_WORKSPACE");
         let _ = fs::remove_dir_all(&ws);
     }
+
+    // ─── A5 red-team: SSRF guard ────────────────────────────────────────────────
+    // These use literal IPs / URL-normalized literals only, so they need NO DNS
+    // and never flake offline (a literal IP resolves without a lookup).
+
+    #[test]
+    fn ssrf_blocks_loopback_private_and_metadata() {
+        for u in [
+            "http://127.0.0.1/",
+            "http://127.0.0.1:8787/admin",
+            "https://10.0.0.5/",
+            "http://172.16.9.9/",
+            "http://192.168.1.1/",
+            "http://169.254.169.254/latest/meta-data/", // cloud metadata SSRF classic
+            "http://0.0.0.0/",
+        ] {
+            assert!(ssrf_guard(u).is_err(), "must block {u}");
+        }
+    }
+
+    #[test]
+    fn ssrf_blocks_encoded_ipv4_loopback() {
+        // The url crate normalizes these to 127.0.0.1; the guard must catch them.
+        for u in [
+            "http://0x7f000001/",   // hex
+            "http://2130706433/",   // decimal
+            "http://0177.0.0.1/",   // octal first octet
+            "http://127.0.0.1./",   // trailing dot
+        ] {
+            assert!(ssrf_guard(u).is_err(), "must block encoded loopback {u}");
+        }
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6_literals() {
+        // Regression guard for the bracket-stripping fix: IPv6 literals must be
+        // caught by is_blocked_ip directly (not leak to a DNS lookup).
+        for u in [
+            "http://[::1]/",                 // loopback
+            "http://[::ffff:127.0.0.1]/",    // v4-mapped loopback
+            "http://[::ffff:10.0.0.1]/",     // v4-mapped private
+            "http://[fe80::1]/",             // link-local
+            "http://[fc00::1]/",             // unique-local
+            "http://[::]/",                  // unspecified
+        ] {
+            let r = ssrf_guard(u);
+            assert!(r.is_err(), "must block IPv6 literal {u}, got {r:?}");
+            assert!(
+                r.unwrap_err().contains("non-public"),
+                "{u} should be blocked by the IP guard, not a resolution failure"
+            );
+        }
+    }
+
+    #[test]
+    fn ssrf_allows_public_literals_and_rejects_garbage() {
+        // A public literal IP resolves without DNS → allowed offline.
+        assert!(ssrf_guard("http://8.8.8.8/").is_ok());
+        assert!(ssrf_guard("http://1.1.1.1/").is_ok());
+        // Non-URLs / hostless URLs are a clean Err, never a panic.
+        for u in ["", "not a url", "file:///etc/shadow", "http://", "://x"] {
+            assert!(ssrf_guard(u).is_err(), "must reject {u:?}");
+        }
+    }
+
+    #[test]
+    fn is_blocked_ip_corpus() {
+        use std::net::IpAddr;
+        use std::str::FromStr;
+        let blocked = [
+            "127.0.0.1", "127.9.9.9", "10.0.0.1", "172.16.0.1", "172.31.255.255",
+            "192.168.0.1", "169.254.1.1", "0.0.0.0",
+            "::1", "::", "::ffff:127.0.0.1", "::ffff:192.168.1.1",
+            "fe80::1", "fc00::1", "fd12:3456::1",
+        ];
+        for ip in blocked {
+            assert!(is_blocked_ip(IpAddr::from_str(ip).unwrap()), "{ip} must be blocked");
+        }
+        let allowed = ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"];
+        for ip in allowed {
+            assert!(!is_blocked_ip(IpAddr::from_str(ip).unwrap()), "{ip} must be allowed");
+        }
+    }
+
+    // ─── A5 red-team: git option-injection ──────────────────────────────────────
+
+    #[test]
+    fn git_safe_arg_rejects_option_injection_corpus() {
+        // Any leading '-' would be parsed by git as a flag, not a positional
+        // ref/branch/path — the whole class must be refused.
+        for v in [
+            "-x",
+            "--upload-pack=touch /tmp/pwned",
+            "--output=/etc/cron.d/x",
+            "-o ProxyCommand=evil",
+            "--exec=sh",
+        ] {
+            assert!(git_safe_arg("ref", v).is_err(), "must reject {v:?}");
+        }
+        // Legitimate refs/branches/paths (dashes not leading) still pass.
+        for v in ["main", "HEAD~3", "feature/x-y", "release-1.2", "a/b/c.txt"] {
+            assert!(git_safe_arg("ref", v).is_ok(), "must allow {v:?}");
+        }
+    }
 }
+
