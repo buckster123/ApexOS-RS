@@ -83,8 +83,42 @@ pub fn trim_history(history: &mut Vec<Message>, budget_tokens: usize) {
         None => return, // no safe boundary anywhere — leave intact
     };
     if cut > 0 {
+        // Honesty marker (model-welfare H2): the window now starts later than the
+        // agent remembers. Without a seam marker the model faces a silent hole and
+        // does the worst thing — confabulates continuity. The marker names the
+        // hole and points at the real record. Cumulative: an existing marker at
+        // the front is folded into the new count rather than stacked.
+        let prior = marker_dropped(&history[0]);
+        let dropped_new = cut - usize::from(prior.is_some());
+        let total = prior.unwrap_or(0) + dropped_new;
         history.drain(0..cut);
+        history.insert(0, trim_marker(total));
     }
+}
+
+/// Prefix identifying the trim-seam honesty marker (also how successive trims
+/// recognise + fold the previous marker instead of stacking new ones).
+pub const TRIM_MARKER_PREFIX: &str = "[context-window notice: ";
+
+fn trim_marker(dropped_total: usize) -> Message {
+    Message::User {
+        content: vec![ContentBlock::Text {
+            text: format!(
+                "{TRIM_MARKER_PREFIX}{dropped_total} earlier messages were trimmed from your \
+                 working window to fit the context budget. This is a hole in the transcript you \
+                 see, not in the record — the full history is preserved on disk for session \
+                 replay, and your memory covers the period. Recall rather than reconstruct.]"
+            ),
+        }],
+    }
+}
+
+/// If `m` is a trim marker, its cumulative dropped count.
+fn marker_dropped(m: &Message) -> Option<usize> {
+    let Message::User { content } = m else { return None };
+    let [ContentBlock::Text { text }] = content.as_slice() else { return None };
+    let rest = text.strip_prefix(TRIM_MARKER_PREFIX)?;
+    rest.split_whitespace().next()?.parse().ok()
 }
 
 #[cfg(test)]
@@ -145,11 +179,47 @@ mod tests {
             user(&"e".repeat(400)),  // ~100 tok   idx6 (turn start)
             asst(&"f".repeat(400)),  // ~100 tok   idx7
         ];
-        // Budget fits the last two turns (~400 tok) but not turn 1 (~2000) → cut at idx4.
+        // Budget fits the last two turns (~400 tok) but not turn 1 (~2000) → cut at idx4,
+        // with the honesty marker inserted at the seam (+1 message).
         trim_history(&mut h, 600);
-        assert_eq!(h.len(), 4);
-        assert!(is_turn_start(&h[0]));
+        assert_eq!(h.len(), 5);
+        assert_eq!(marker_dropped(&h[0]), Some(4));
+        assert!(is_turn_start(&h[1]));
         assert!(!has_orphan_tool_result(&h));
+    }
+
+    #[test]
+    fn successive_trims_fold_the_marker_instead_of_stacking() {
+        let mut h = vec![
+            user(&"a".repeat(4000)),
+            asst(&"b".repeat(4000)),
+            user(&"c".repeat(400)),
+            asst(&"d".repeat(400)),
+        ];
+        trim_history(&mut h, 300);
+        assert_eq!(marker_dropped(&h[0]), Some(2));
+
+        // Grow the conversation past budget again — the old marker must be FOLDED
+        // (2 prior + 2 newly dropped real messages), never stacked twice.
+        h.push(user(&"e".repeat(400)));
+        h.push(asst(&"f".repeat(400)));
+        trim_history(&mut h, 300);
+        assert_eq!(marker_dropped(&h[0]), Some(4));
+        assert_eq!(
+            h.iter().filter(|m| marker_dropped(m).is_some()).count(),
+            1,
+            "exactly one marker at any time"
+        );
+        assert!(!has_orphan_tool_result(&h));
+    }
+
+    #[test]
+    fn marker_counts_real_messages_not_itself() {
+        // marker_dropped parses its own render round-trip.
+        let m = trim_marker(7);
+        assert_eq!(marker_dropped(&m), Some(7));
+        // A normal user message is not a marker.
+        assert_eq!(marker_dropped(&user("hello")), None);
     }
 
     #[test]
