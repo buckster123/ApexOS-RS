@@ -174,6 +174,9 @@ pub struct Supervisor {
     /// handler in main.rs, which runs the build/test gates and files the swap
     /// request. `None` until wired.
     self_update_tx:    Option<mpsc::Sender<(SessionId, ActionId, serde_json::Value)>>,
+    /// `soul_rehearse` → the agentd rehearse worker (owns the provider; the soul
+    /// fitting room, colony H4 tier 2). `None` until wired.
+    rehearse_tx:       Option<mpsc::Sender<(SessionId, ActionId, serde_json::Value)>>,
 }
 
 impl Supervisor {
@@ -204,6 +207,7 @@ impl Supervisor {
             identities:        None,
             propose_tx:        None,
             self_update_tx:    None,
+            rehearse_tx:       None,
         }
     }
 
@@ -226,6 +230,12 @@ impl Supervisor {
     /// Wires the self-update channel so `apply_daemon_update` reaches its handler.
     pub fn set_self_update_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, serde_json::Value)>) {
         self.self_update_tx = Some(tx);
+    }
+
+    /// Wires the rehearsal channel so `soul_rehearse` reaches the worker that owns
+    /// the provider (the fitting room — ephemeral candidate-soul probes, H4 tier 2).
+    pub fn set_rehearse_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, serde_json::Value)>) {
+        self.rehearse_tx = Some(tx);
     }
 
     /// Wires the scheduler channel so schedule_* tools route to the scheduler task.
@@ -743,6 +753,39 @@ impl Supervisor {
         // Virtual tool: apply_daemon_update — routes to the self-update handler
         // (docs/self-update.md slice 3). The handler runs the pre-swap build/test
         // gates and, on success, files the swap request the root watchdog consumes.
+        // Virtual tool: soul_rehearse — run a candidate soul on an ephemeral,
+        // tool-less mind (the fitting room) and return the probe transcripts.
+        // Forwarded to the agentd rehearse worker (owns the provider); the worker
+        // replies with the deferred ToolResult. No identity gate: rehearsal is
+        // pure compute — it reads the live embodiment and touches no real soul.
+        if call.tool == "soul_rehearse" {
+            let call_id = call.id;
+            let args    = call.args.clone();
+            let bus     = self.bus.clone();
+            match &self.rehearse_tx {
+                Some(tx) => {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        if tx.send((session, call_id, args)).await.is_err() {
+                            bus.emit(Event::ToolResult {
+                                session, call: call_id,
+                                output: ToolOutput { ok: false, content: serde_json::json!("rehearse worker not available") },
+                            }).await;
+                        }
+                    });
+                }
+                None => {
+                    tokio::spawn(async move {
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!("rehearse worker not wired") },
+                        }).await;
+                    });
+                }
+            }
+            return;
+        }
+
         if call.tool == "apply_daemon_update" {
             let call_id = call.id;
             let args    = call.args.clone();
