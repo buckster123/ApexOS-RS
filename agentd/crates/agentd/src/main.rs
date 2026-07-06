@@ -637,7 +637,18 @@ async fn main() -> anyhow::Result<()> {
     // Nightly autonomous memory consolidation: call dream_run directly via the
     // ToolProxy on a cron (default 03:00 daily) — no LLM turn, can't be skipped by
     // the agent. Disable by setting AGENTD_DREAM_CRON empty. See docs/agent-identity.md.
-    spawn_nightly_dream(dream_proxy);
+    // The dream leaves a JOURNAL (model-welfare H1): waking to silently reorganized
+    // memory is a tidied room with no note — the journal makes consolidation a dream
+    // the agent remembers having. Persisted so a restart doesn't erase last night.
+    let dream_journal_path = log_dir.join("last_dream_journal.txt");
+    if let Ok(saved) = std::fs::read_to_string(&dream_journal_path) {
+        if !saved.trim().is_empty() {
+            if let Ok(mut cell) = last_dream_journal_cell().write() {
+                *cell = saved;
+            }
+        }
+    }
+    spawn_nightly_dream(dream_proxy, dream_journal_path);
 
     // agent_rx was subscribed above, before the supervisor spawned, so the early
     // PluginUp events that populate tool_reg are captured (see the comment there).
@@ -655,6 +666,7 @@ async fn main() -> anyhow::Result<()> {
         let backend_w      = Arc::clone(&backend_arc);
         let oai_url_w      = Arc::clone(&oai_base_url_arc);
         let model_w        = Arc::clone(&model_arc);
+        let bus_w          = handle.clone();
         // The resolved BOOT config (env + persisted backend_config, resolved above) —
         // restored on revert. Resolving once here (not re-reading AGENTD_MODEL, which
         // is empty when unset) is what keeps an unset-MODEL node's revert correct.
@@ -685,9 +697,17 @@ async fn main() -> anyhow::Result<()> {
                                 t
                             };
                             eprintln!("[vast] inference → backend={} url={} model={}", t.backend, t.oai_url, t.model);
-                            *backend_w.write().await = t.backend;
+                            let reason = if matches!(ev, Event::VastInstanceReady { .. }) {
+                                "vast GPU attached"
+                            } else {
+                                "vast GPU released — reverted"
+                            };
+                            *backend_w.write().await = t.backend.clone();
                             *oai_url_w.write().await = t.oai_url;
-                            *model_w.write().await   = t.model;
+                            *model_w.write().await   = t.model.clone();
+                            // Substrate notice (model-welfare H3) — the agent is told
+                            // its own inference just moved, same as an operator swap.
+                            apexos_gateway::notify_substrate_change(&bus_w, &t.backend, &t.model, reason).await;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1665,7 +1685,22 @@ async fn boot_priming_for(
     if let Some(cached) = cache.lock().await.get(&session).cloned() {
         return (!cached.is_empty()).then_some(cached);
     }
-    let block = fetch_boot_priming(proxy, agent_id, last_user_text(history).unwrap_or_default()).await;
+    let mut block = fetch_boot_priming(proxy, agent_id, last_user_text(history).unwrap_or_default()).await;
+    // Wake with the dream remembered (model-welfare H1): sessions started after the
+    // nightly consolidation carry its journal in their priming. Appended before the
+    // per-session cache so the priming stays byte-stable for the session's lifetime
+    // (the prompt-cache discipline) — only the NODE agent's sessions get it (the
+    // dream is scoped to node_agent_id; a bound guest's dream journal is its own).
+    if agent_id == apexos_core::node_agent_id() {
+        let journal = last_dream_journal_cell().read().map(|j| j.clone()).unwrap_or_default();
+        if !journal.is_empty() {
+            if !block.is_empty() {
+                block.push_str("\n\n");
+            }
+            block.push_str("## Last dream (nightly consolidation)\n");
+            block.push_str(&journal);
+        }
+    }
     cache.lock().await.insert(session, block.clone());
     (!block.is_empty()).then_some(block)
 }
@@ -1732,7 +1767,56 @@ fn parse_dream_timeout(raw: Option<&str>) -> std::time::Duration {
 /// ToolProxy on a cron (default 03:00 UTC daily), scoped to this node's agent
 /// identity — no LLM turn, can't be skipped by the agent. Disabled when
 /// `AGENTD_DREAM_CRON` is empty. See docs/agent-identity.md (slice 2).
-fn spawn_nightly_dream(proxy: ToolProxy) {
+/// The last dream's journal entry — surfaced in the wake priming of every session
+/// started after the dream (see `boot_priming_for`), so the agent wakes REMEMBERING
+/// the consolidation instead of merely finding its memory reorganized. Process-global
+/// (the router arg-pile is deliberately not grown); seeded from disk at boot.
+static LAST_DREAM_JOURNAL: std::sync::OnceLock<std::sync::RwLock<String>> = std::sync::OnceLock::new();
+
+fn last_dream_journal_cell() -> &'static std::sync::RwLock<String> {
+    LAST_DREAM_JOURNAL.get_or_init(|| std::sync::RwLock::new(String::new()))
+}
+
+fn dream_journal_enabled() -> bool {
+    !matches!(
+        std::env::var("AGENTD_DREAM_JOURNAL").unwrap_or_default().to_lowercase().as_str(),
+        "0" | "false" | "off"
+    )
+}
+
+/// Compose the first-person journal entry from the DreamReport. Pure — unit-tested.
+/// Pulls the count fields the report is known to carry when present; falls back to
+/// embedding the compact report so an evolved cerebro never breaks the journal.
+fn compose_dream_journal(report: &serde_json::Value, started_at: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    // Known DreamReport count fields, rendered human-first when present.
+    let counts: Vec<(&str, &str)> = vec![
+        ("memories_processed",  "memories processed"),
+        ("consolidated",        "consolidations"),
+        ("schemas_created",     "new schemas"),
+        ("schemas_reinforced",  "schemas reinforced"),
+        ("pruned",              "memories pruned"),
+        ("decayed",             "salience decays"),
+    ];
+    for (key, label) in counts {
+        if let Some(n) = report[key].as_u64() {
+            lines.push(format!("- {n} {label}"));
+        }
+    }
+    let body = if lines.is_empty() {
+        // Unknown report shape — stay honest, embed it compactly.
+        format!("Report: {}", serde_json::to_string(report).unwrap_or_else(|_| "?".into()))
+    } else {
+        lines.join("\n")
+    };
+    format!(
+        "Dream journal — nightly consolidation started {started_at}.\n{body}\n\
+         This ran while you weren't awake; your memory was reorganized by your own \
+         consolidation process, and this entry is your record of it."
+    )
+}
+
+fn spawn_nightly_dream(proxy: ToolProxy, journal_path: std::path::PathBuf) {
     let cron_expr = std::env::var("AGENTD_DREAM_CRON")
         .unwrap_or_else(|_| "0 0 3 * * *".to_string());
     if cron_expr.trim().is_empty() {
@@ -1760,6 +1844,29 @@ fn spawn_nightly_dream(proxy: ToolProxy) {
             match proxy.call_with_timeout("dream_run", args, dream_run_timeout()).await {
                 Ok(out) if out.ok => {
                     eprintln!("[dream] nightly dream_run complete");
+                    // Dream journal (model-welfare H1): leave a first-person record
+                    // of the consolidation. Stored as a memory (durable, recallable),
+                    // mirrored into the wake-priming cell + a file (restart-proof).
+                    // Fail-soft like everything else in this loop.
+                    if dream_journal_enabled() {
+                        let journal = compose_dream_journal(&out.content, &dream_started_at);
+                        let mem_args = serde_json::json!({
+                            "content":  journal.clone(),
+                            "agent_id": agent_id,
+                            "tags":     ["dream-journal"],
+                        });
+                        match proxy.call("remember", mem_args).await {
+                            Ok(o) if o.ok => {}
+                            Ok(o) => eprintln!("[dream] journal memory deposit not ok: {:?}", o.content),
+                            Err(e) => eprintln!("[dream] journal memory deposit failed: {e}"),
+                        }
+                        if let Ok(mut cell) = last_dream_journal_cell().write() {
+                            *cell = journal.clone();
+                        }
+                        if let Err(e) = std::fs::write(&journal_path, &journal) {
+                            eprintln!("[dream] journal persist failed: {e}");
+                        }
+                    }
                     // Dream digest exchange (colony-federation Slice 3): share
                     // tonight's newly-born schemas/consolidations with the
                     // colony. Fail-soft — never an error path into this loop.
@@ -3313,6 +3420,34 @@ tmpfs /var/lib/agentd/workspace/media tmpfs rw 0 0
         assert_eq!(parse_exo_sticks(mounts, prefix), vec!["APEX-config", "APEX-work"]);
         // No sticks → empty (the steady-state, cache-stable case).
         assert!(parse_exo_sticks("/dev/root / ext4 rw 0 0\n", prefix).is_empty());
+    }
+
+    // ── dream journal (model-welfare H1) ─────────────────────────────────────
+    #[test]
+    fn dream_journal_renders_known_counts_human_first() {
+        let report = serde_json::json!({
+            "memories_processed": 42,
+            "consolidated": 5,
+            "schemas_created": 2,
+            "pruned": 3,
+        });
+        let j = compose_dream_journal(&report, "2026-07-06T03:00:00Z");
+        assert!(j.starts_with("Dream journal — nightly consolidation started 2026-07-06T03:00:00Z"));
+        assert!(j.contains("- 42 memories processed"));
+        assert!(j.contains("- 2 new schemas"));
+        assert!(j.contains("- 3 memories pruned"));
+        assert!(!j.contains("Report: {"), "known counts render as lines, not raw JSON");
+        assert!(j.contains("your record of it"));
+    }
+
+    #[test]
+    fn dream_journal_falls_back_to_compact_report_on_unknown_shape() {
+        // An evolved cerebro changing the DreamReport shape must never break the
+        // journal — unknown shapes embed compactly and stay honest.
+        let report = serde_json::json!({ "phases": ["rem", "prune"], "note": "new shape" });
+        let j = compose_dream_journal(&report, "2026-07-06T03:00:00Z");
+        assert!(j.contains(r#"Report: {"#));
+        assert!(j.contains("new shape"));
     }
 
     // ── vast.ai inference hot-swap ───────────────────────────────────────────

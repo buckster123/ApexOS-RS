@@ -1109,6 +1109,27 @@ async fn get_backend_handler(State(state): State<GatewayState>) -> impl IntoResp
     }))
 }
 
+/// Substrate-change notice (model-welfare H3): a backend/model hot-swap makes the
+/// agent differently capable mid-life — without a notice it has no idea why its own
+/// competence shifted, and its memories of the period carry false context. Injects
+/// a root-session note (mirrors the USB-plug greeting / mesh beacon notify).
+/// Default ON; `AGENTD_SWAP_NOTIFY_AGENT=0/false/off` silences it.
+pub async fn notify_substrate_change(bus: &BusHandle, backend: &str, model: &str, reason: &str) {
+    let notify = std::env::var("AGENTD_SWAP_NOTIFY_AGENT")
+        .map(|v| { let v = v.to_lowercase(); v != "0" && v != "false" && v != "off" })
+        .unwrap_or(true);
+    if !notify {
+        return;
+    }
+    let text = format!(
+        "[substrate notice — {reason}] Your inference substrate just changed: backend `{backend}`, \
+         model `{model}`. You are the same agent — soul, memory, and tools are unchanged — but \
+         capability, style, and speed may differ from the substrate you were just running on. \
+         If it matters to ongoing work, note the change in memory; otherwise a brief acknowledgement is enough."
+    );
+    bus.emit(Event::UserPrompt { session: SessionId(0), text, images: vec![] }).await;
+}
+
 /// Snapshot the three arcs and persist as the operator's steady-state choice
 /// (file-wins-on-restart, the voice-config pattern). Called from the operator
 /// handlers only — the vast hot-swap writes the arcs directly and deliberately
@@ -1166,6 +1187,13 @@ async fn set_backend_handler(
     }
 
     persist_backend_snapshot(&state).await;
+    notify_substrate_change(
+        &state.bus,
+        &state.backend.read().await.clone(),
+        &state.model.read().await.clone(),
+        "operator backend switch",
+    )
+    .await;
     get_backend_handler(State(state)).await.into_response()
 }
 
@@ -1193,8 +1221,15 @@ async fn set_model_handler(
     if model.is_empty() {
         return Json(serde_json::json!({ "ok": false, "error": "empty model" }));
     }
-    *state.model.write().await = model;
+    *state.model.write().await = model.clone();
     persist_backend_snapshot(&state).await;
+    notify_substrate_change(
+        &state.bus,
+        &state.backend.read().await.clone(),
+        &model,
+        "operator model switch",
+    )
+    .await;
     Json(serde_json::json!({ "ok": true }))
 }
 
