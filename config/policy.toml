@@ -95,6 +95,21 @@ mode = "suggest"
 # strictly de-escalating: it only halts one of the agent's own goals, never acts outward.
 "goal_cancel"      = "allow"
 
+# Scheduler — two families on one engine. schedule_wakeup is the agent's CONTINUITY
+# tool (one-shot note-to-future-self into its own root thread): allow, because a
+# self-wakeup that needs human approval defeats its purpose — safety is the built-in
+# bounds (60s floor, 90d horizon, pending cap, per-UTC-day fire cap) plus normal
+# policy gating on whatever the woken turn then does. list/cancel are read-only /
+# de-escalating. schedule_task (recurring cron, uncapped, arbitrary session) asks —
+# a standing repeating prompt deserves one human look; these three previously had NO
+# rule at all and silently gated unknown→ask in suggest mode.
+"schedule_wakeup"  = "allow"
+"list_wakeups"     = "allow"
+"cancel_wakeup"    = "allow"
+"schedule_task"    = "ask"
+"list_schedules"   = "allow"
+"cancel_schedule"  = "allow"
+
 # Git tools (apexos-tools) — confined by the tool to the workspace + AGENTD_GIT_ROOTS.
 # Read-only verbs + init/branch/commit are allow (self-confined, like read_file:
 # with no AGENTD_GIT_ROOTS the only git root is the workspace, so an allow commit

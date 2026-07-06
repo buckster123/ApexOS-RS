@@ -617,8 +617,38 @@ impl Supervisor {
             return;
         }
 
-        // Virtual tools: schedule_task / list_schedules / cancel_schedule — forwarded to scheduler task.
-        if matches!(call.tool.as_str(), "schedule_task" | "list_schedules" | "cancel_schedule") {
+        // Virtual tools: schedule_task / list_schedules / cancel_schedule (recurring cron)
+        // + schedule_wakeup / list_wakeups / cancel_wakeup (one-shot agent continuity)
+        // — all forwarded to the scheduler task.
+        if matches!(
+            call.tool.as_str(),
+            "schedule_task" | "list_schedules" | "cancel_schedule"
+                | "schedule_wakeup" | "list_wakeups" | "cancel_wakeup"
+        ) {
+            // Wakeups fire into the ROOT session under the NODE agent's identity —
+            // they are APEX's continuity thread. A bound guest agent must not plant
+            // or cancel notes in it, so the mutators gate on the resolved identity
+            // (system-stamped, same trust basis as the cerebro agent_id stamp).
+            if matches!(call.tool.as_str(), "schedule_wakeup" | "cancel_wakeup") {
+                let agent = apexos_core::resolve_agent_id(&self.session_bindings, session);
+                if agent != apexos_core::node_agent_id() {
+                    let call_id = call.id;
+                    let bus = self.bus.clone();
+                    tokio::spawn(async move {
+                        bus.emit(Event::ToolResult {
+                            session,
+                            call: call_id,
+                            output: ToolOutput {
+                                ok: false,
+                                content: serde_json::json!(
+                                    "wakeups belong to the node agent's own thread — a bound guest agent cannot schedule or cancel them"
+                                ),
+                            },
+                        }).await;
+                    });
+                    return;
+                }
+            }
             let call_id  = call.id;
             let tool     = call.tool.clone();
             let args     = call.args.clone();
