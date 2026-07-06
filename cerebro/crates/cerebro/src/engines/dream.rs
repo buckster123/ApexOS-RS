@@ -652,6 +652,68 @@ impl DreamEngine {
         budget:         usize,
         overall_budget: usize,
     ) -> Result<PhaseResult> {
+        /// Cosine-similarity floor above which a dream-extracted candidate counts as a
+        /// RE-DISCOVERY of an existing procedure rather than a novel one. bge-small
+        /// paraphrases of the same lesson land ~0.85–0.95; topically-adjacent-but-
+        /// different procedures land ~0.6–0.8 — 0.86 keeps genuine variants novel.
+        const REDISCOVERY_SIMILARITY: f32 = 0.86;
+
+        /// Recurring evidence is stronger evidence — but boundedly: small bump,
+        /// hard cap below champion territory.
+        fn reinforced_salience(current: f32) -> f32 {
+            (current + 0.05).min(0.95)
+        }
+
+        /// If `content` is a semantic near-duplicate of an existing PROCEDURAL memory,
+        /// reinforce that memory (salience bump + a rediscovery ledger in metadata)
+        /// and return true. Embeddings-only: on FTS5 nodes (no vec0/embedder) this is
+        /// always false and the caller's prefix dedup remains the only gate.
+        async fn reinforce_if_rediscovery(
+            cortex:  &Arc<CerebroCortex>,
+            content: &str,
+            scope:   &VisibilityScope,
+        ) -> bool {
+            let storage = cortex.storage.read().await;
+            if !storage.vector.is_vec_available() || !storage.vector.is_embedder_loaded() {
+                return false;
+            }
+            let (scope_sql, scope_params) = scope.sql_filter();
+            let Ok(hits) = storage.vector.search(content, 3, &scope_sql, &scope_params).await else {
+                return false;
+            };
+            let near_ids: Vec<crate::types::MemoryId> = hits
+                .into_iter()
+                .filter(|(_, score)| *score >= REDISCOVERY_SIMILARITY)
+                .map(|(id, _)| id)
+                .collect();
+            if near_ids.is_empty() {
+                return false;
+            }
+            let Ok(nodes) = storage.sqlite.get_memories_by_ids(&near_ids, scope).await else {
+                return false;
+            };
+            let Some(mut existing) = nodes
+                .into_iter()
+                .find(|n| n.memory_type == MemoryType::Procedural)
+            else {
+                return false;
+            };
+            existing.salience = reinforced_salience(existing.salience);
+            if let serde_json::Value::Object(ref mut map) = existing.metadata {
+                let n = map.get("rediscovered_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                map.insert("rediscovered_count".to_string(), json!(n + 1));
+                map.insert("last_rediscovered".to_string(), json!(Utc::now().to_rfc3339()));
+            }
+            if storage.sqlite.update_memory(&existing).await.is_err() {
+                return false; // couldn't reinforce — let the candidate store normally
+            }
+            tracing::info!(
+                id = %existing.id.0,
+                salience = existing.salience,
+                "dream re-discovery reinforced existing procedure"
+            );
+            true
+        }
         let start = std::time::Instant::now();
         let mut result = PhaseResult::new("pattern_extraction");
 
@@ -679,6 +741,7 @@ impl DreamEngine {
         let clusters_total = tag_map.values().filter(|v| v.len() >= CLUSTER_MIN_SIZE).count();
         let mut budget_remaining = budget;
         let mut total_procedures = 0usize;
+        let mut total_rediscovered = 0usize;
 
         for (tag, indices) in &tag_map {
             if indices.len() < CLUSTER_MIN_SIZE { continue; }
@@ -710,7 +773,26 @@ impl DreamEngine {
                                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                                 .unwrap_or_else(|| vec![tag.clone()]);
 
-                            // Basic dedup: skip if first 40 chars match any existing memory
+                            // Semantic re-discovery gate (colony C2): the old 40-char
+                            // prefix check let the LLM re-mint the same lesson nightly
+                            // in different words — apex2 found five near-identical
+                            // procedures across five nights, never merged, each too
+                            // weak to trust. With embeddings available, check the
+                            // candidate against the WHOLE store: a procedural hit at
+                            // ≥ REDISCOVERY_SIMILARITY means the dream re-discovered
+                            // something known → REINFORCE the existing memory (small
+                            // capped salience bump — recurring evidence IS stronger
+                            // evidence — plus a rediscovery ledger in metadata)
+                            // instead of storing a fragment, counted honestly in the
+                            // report so the journal can say novel vs re-discovered.
+                            if reinforce_if_rediscovery(cortex, content, scope).await {
+                                total_rediscovered += 1;
+                                continue;
+                            }
+
+                            // Prefix dedup kept as the FTS5-only (Nano) fallback —
+                            // BM25 scores aren't a similarity, so no threshold works
+                            // there — and as a cheap first line everywhere.
                             let prefix = truncate_chars(content, 40);
                             if memories.iter().any(|n| n.content.starts_with(prefix)) {
                                 continue;
@@ -737,10 +819,11 @@ impl DreamEngine {
             }
         }
 
-        result.procedures_extracted = total_procedures;
+        result.procedures_extracted    = total_procedures;
+        result.procedures_rediscovered = total_rediscovered;
         result.notes = format!(
-            "Extracted {} procedures from {} clusters (budget used: {}/{})",
-            total_procedures, clusters_total, result.llm_calls, budget,
+            "Extracted {} novel procedures from {} clusters, reinforced {} re-discoveries (budget used: {}/{})",
+            total_procedures, clusters_total, total_rediscovered, result.llm_calls, budget,
         );
         result.duration_secs = start.elapsed().as_secs_f64();
         Ok(result)
@@ -1666,6 +1749,12 @@ pub struct PhaseResult {
     #[serde(default)]
     pub procedures_merged:    usize,
     pub procedures_extracted: usize,
+    /// Colony C2: extraction candidates that semantically matched an EXISTING
+    /// procedure (≥ the rediscovery similarity floor) and reinforced it instead of
+    /// storing a fragment. novel-vs-treading-water, visible in the dream journal.
+    /// `#[serde(default)]` keeps older persisted reports deserialisable.
+    #[serde(default)]
+    pub procedures_rediscovered: usize,
     pub llm_calls:            usize,
     pub duration_secs:        f64,
     pub notes:                String,
@@ -1689,6 +1778,7 @@ impl PhaseResult {
             procedures_mutated:   0,
             procedures_merged:    0,
             procedures_extracted: 0,
+            procedures_rediscovered: 0,
             llm_calls:            0,
             duration_secs:        0.0,
             notes:                String::new(),
@@ -2091,6 +2181,24 @@ mod tests {
         assert!(!has_pending_merge(&[merged_node("deploy", true)], "deploy"));
         // an ungraded hybrid in a DIFFERENT niche does not block "deploy"
         assert!(!has_pending_merge(&[merged_node("other", false)], "deploy"));
+    }
+}
+
+#[cfg(test)]
+mod report_compat_tests {
+    use super::PhaseResult;
+
+    #[test]
+    fn phase_result_deserializes_without_rediscovered_field() {
+        // Older persisted DreamReports predate the C2 novel/rediscovery split —
+        // the serde(default) must keep them loadable (dream_status reads them back).
+        let old = r#"{"phase":"pattern_extraction","episodes_consolidated":0,
+            "memories_processed":10,"links_created":0,"links_strengthened":0,
+            "memories_pruned":0,"schemas_extracted":0,"procedures_extracted":3,
+            "llm_calls":2,"duration_secs":1.0,"notes":"","success":true}"#;
+        let r: PhaseResult = serde_json::from_str(old).unwrap();
+        assert_eq!(r.procedures_rediscovered, 0);
+        assert_eq!(r.procedures_extracted, 3);
     }
 }
 
