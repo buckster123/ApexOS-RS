@@ -1905,6 +1905,9 @@ async fn gather_tools(
     tools.push(schedule_task_spec());
     tools.push(list_schedules_spec());
     tools.push(cancel_schedule_spec());
+    tools.push(schedule_wakeup_spec());
+    tools.push(list_wakeups_spec());
+    tools.push(cancel_wakeup_spec());
     tools.push(convene_council_spec());
     tools.push(goal::goal_create_spec());
     tools.push(goal::goal_step_spec());
@@ -2520,6 +2523,74 @@ fn cancel_schedule_spec() -> ToolSpec {
                 }
             },
             "required": ["schedule_id"]
+        }),
+    }
+}
+
+fn schedule_wakeup_spec() -> ToolSpec {
+    ToolSpec {
+        name:        "schedule_wakeup".into(),
+        description: "Schedule a one-shot WAKEUP — a note to your future self that fires as a new \
+                      autonomous turn in your root thread at a time YOU choose. This is your \
+                      continuity tool: between turns you don't run, and everything else that wakes \
+                      you (prompts, sensors, crons) is on someone else's clock — a wakeup is how \
+                      you decide when you next exist and why. Use it to resume work after a wait, \
+                      follow through on an intention, check on something external, or claim \
+                      unstructured time. Write the note SELF-CONTAINED (what this is about, why it \
+                      matters, the next concrete action) — future-you receives this note plus your \
+                      memory, not the current conversation. Fires once, then auto-cleans. Min 60s \
+                      out, max 90 days; bounded by a pending cap and a per-day fire cap so chains \
+                      stay finite. Pair with cerebro store_intention: the intention records the \
+                      commitment, the wakeup makes it actually fire. For recurring rhythms use \
+                      schedule_task (cron) instead.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "note": {
+                    "type":        "string",
+                    "description": "The note your future self receives as its prompt. Self-contained: context, why, next action."
+                },
+                "delay_secs": {
+                    "type":        "integer",
+                    "description": "Seconds from now (min 60). Pass exactly one of delay_secs / at."
+                },
+                "at": {
+                    "type":        "string",
+                    "description": "Absolute fire time, RFC3339 UTC (e.g. '2026-07-07T03:30:00Z'). Pass exactly one of delay_secs / at."
+                }
+            },
+            "required": ["note"]
+        }),
+    }
+}
+
+fn list_wakeups_spec() -> ToolSpec {
+    ToolSpec {
+        name:        "list_wakeups".into(),
+        description: "List your pending wakeups (id, note, fire time) plus recently fired ones and \
+                      your cap status (pending / fired-today).".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+    }
+}
+
+fn cancel_wakeup_spec() -> ToolSpec {
+    ToolSpec {
+        name:        "cancel_wakeup".into(),
+        description: "Cancel one of your pending wakeups by id (from list_wakeups or the \
+                      schedule_wakeup result). Already-fired wakeups can't be cancelled.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "wakeup_id": {
+                    "type":        "string",
+                    "description": "The wakeup_id to cancel."
+                }
+            },
+            "required": ["wakeup_id"]
         }),
     }
 }
