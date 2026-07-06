@@ -946,38 +946,95 @@ async fn get_model_handler(State(state): State<GatewayState>) -> impl IntoRespon
     Json(serde_json::json!({ "model": model }))
 }
 
+/// Parse Anthropic's `GET /v1/models` list shape (`data[].{id, display_name}`) into
+/// the picker's `{id, name}` rows. Newest-first API order is kept (Fable/Sonnet 5
+/// land on top). `display_name` falls back to the id.
+fn parse_anthropic_models(v: &serde_json::Value) -> Vec<serde_json::Value> {
+    v["data"]
+        .as_array()
+        .map(|data| {
+            data.iter()
+                .filter_map(|m| {
+                    let id = m["id"].as_str()?;
+                    let name = m["display_name"].as_str().unwrap_or(id);
+                    Some(serde_json::json!({ "id": id, "name": name }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Offline / key-less fallback for the Anthropic picker — the current family at the
+/// time of writing. The live path below supersedes this whenever the API is reachable,
+/// so a new model launch needs no code change to appear on deployed nodes.
+fn anthropic_fallback_models() -> serde_json::Value {
+    serde_json::json!([
+        { "id": "claude-fable-5",    "name": "Fable 5"    },
+        { "id": "claude-opus-4-8",   "name": "Opus 4.8"   },
+        { "id": "claude-sonnet-5",   "name": "Sonnet 5"   },
+        { "id": "claude-opus-4-7",   "name": "Opus 4.7"   },
+        { "id": "claude-sonnet-4-6", "name": "Sonnet 4.6" },
+        { "id": "claude-haiku-4-5",  "name": "Haiku 4.5"  },
+    ])
+}
+
 /// Returns available models for the active backend.
-/// For Anthropic: static list. For OAI backends: proxies to {base_url}/models.
+/// For Anthropic: live discovery via `GET api.anthropic.com/v1/models` (auth-only —
+/// no tokens billed; the same free call install.sh uses to verify keys), so the
+/// picker reflects exactly what this key can see: new launches AND any legacy-model
+/// access privileges the org holds. Static current-family fallback when offline or
+/// key-less. For OAI backends: proxies to {base_url}/models.
 async fn get_models_handler(State(state): State<GatewayState>) -> impl IntoResponse {
     let current     = state.model.read().await.clone();
     let backend     = state.backend.read().await.clone();
     let oai_base    = state.oai_base_url.read().await.clone();
 
+    // Shared across calls so repeated /api/models probes don't each rebuild a TLS
+    // client (function-local — only this handler needs it).
+    static MODELS_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    let client = MODELS_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(4))
+            .build()
+            .unwrap_or_default()
+    });
+
     if backend == "anthropic" {
+        let api_key = state.api_key.read().await.clone();
+        if !api_key.is_empty() {
+            // limit=1000 fetches the whole catalog in one page (the list is dozens
+            // of entries at most; the default page size of 20 could clip legacy ids).
+            let resp = client
+                .get("https://api.anthropic.com/v1/models?limit=1000")
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .send()
+                .await;
+            if let Ok(resp) = resp {
+                if resp.status().is_success() {
+                    if let Ok(body) = resp.json::<serde_json::Value>().await {
+                        let models = parse_anthropic_models(&body);
+                        if !models.is_empty() {
+                            return Json(serde_json::json!({
+                                "backend": backend,
+                                "current": current,
+                                "models": models,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
         return Json(serde_json::json!({
             "backend": backend,
             "current": current,
-            "models": [
-                { "id": "claude-sonnet-4-6", "name": "Sonnet 4.6" },
-                { "id": "claude-opus-4-8",   "name": "Opus 4.8"   },
-                { "id": "claude-opus-4-7",   "name": "Opus 4.7"   },
-                { "id": "claude-haiku-4-5",  "name": "Haiku 4.5"  },
-            ]
+            "models": anthropic_fallback_models(),
         }));
     }
 
     // OAI-compatible backend: query {base_url}/models for live model list
     let models_url = format!("{}/models", oai_base.trim_end_matches('/'));
     let api_key = state.oai_api_key.read().await.clone();
-    // Shared across calls so repeated /api/models probes don't each rebuild a TLS
-    // client (function-local — only this handler needs it).
-    static MODELS_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    let client = MODELS_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
-            .build()
-            .unwrap_or_default()
-    });
 
     let mut req = client.get(&models_url);
     if !api_key.is_empty() {
@@ -5592,6 +5649,37 @@ pub async fn serve(state: GatewayState, addr: SocketAddr) -> anyhow::Result<()> 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router(state)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod models_tests {
+    use super::*;
+
+    #[test]
+    fn parse_anthropic_models_extracts_id_and_display_name() {
+        let body = serde_json::json!({
+            "data": [
+                { "type": "model", "id": "claude-fable-5", "display_name": "Claude Fable 5" },
+                { "type": "model", "id": "claude-3-opus-20240229" }, // no display_name → id
+                { "type": "model", "display_name": "no id — skipped" },
+            ],
+            "has_more": false,
+        });
+        let models = parse_anthropic_models(&body);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["id"], "claude-fable-5");
+        assert_eq!(models[0]["name"], "Claude Fable 5");
+        assert_eq!(models[1]["id"], "claude-3-opus-20240229");
+        assert_eq!(models[1]["name"], "claude-3-opus-20240229");
+    }
+
+    #[test]
+    fn parse_anthropic_models_handles_garbage() {
+        assert!(parse_anthropic_models(&serde_json::Value::Null).is_empty());
+        assert!(parse_anthropic_models(&serde_json::json!({"data": "nope"})).is_empty());
+        // Empty catalog must fall through to the static fallback (non-empty check).
+        assert!(parse_anthropic_models(&serde_json::json!({"data": []})).is_empty());
+    }
 }
 
 #[cfg(test)]
