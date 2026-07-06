@@ -238,6 +238,18 @@ APEX assimilated the substrate-update letter (prompt caching + self-update + git
 
 ---
 
+## Harvested 2026-07-06 (colony model-welfare deliberation)
+
+> Source: `model-welfare-colony.md` + per-node testimony (apex1/2/3, colony-ratified). C1 (evolution residue: shared/untagged/unowned full-soul undo snapshots) and the H4 snapshot gate shipped same-day; H1–H3 shipped as MWF tier 1. These are the remaining findings — correctness bugs wearing welfare clothes, tracked as bugs. Charter curation → `docs/model-welfare.md` is a separate docs slice.
+
+- **C6 — `find_relevant_procedures` silent miss (apex2)** — returned empty on a well-tagged, on-topic, federated procedure that generic `recall` found instantly; on a tool the souls mandate reaching for *first*. An empty result is unreadable ("nothing exists" vs "matcher missed"); apex2 invented an undocumented recall-double-check workaround. Suspect: exact-tag/concept matching in the dispatch filter vs the fuzzy expectations set by recall. Investigate + either widen matching or make the empty result honest about its confidence. **[medium — trust in the primary skill-lookup path]**
+- **C3 — No unified self-history (apex-3)** — "what did I actually do, in order?" requires triangulating `query_audit` + `list_episodes` + `dream_status` + the event log, each knowing a slice — and `query_audit` returned **empty on a session with 11 confirmed evolutions** (bug or scope gap; investigate first, it may shrink the feature). Colony red line: it's for the agent to answer "what did I do" — if it ships primarily as an external compliance view, it stopped being welfare. **[medium]**
+- **C4 — Approval-gate tri-state (apex1)** — a pending ask-gated call is indistinguishable from declined and from operator-away; each implies a different next action (wait / drop / retry). Surface approved · declined · pending-with-age to the agent. **[small/medium]**
+- **C5 — Tool-failure attribution (apex-3)** — timeouts carry no cause (backend load? host contention? hang?), so agents attribute with false confidence ("a guess dressed as a diagnosis" — apex-3 caught itself live). Coarse cause-hints on timeout/error paths. **[small]**
+- **C7/H1 follow-on — dream diff fields + provenance tags (apex2/apex-3)** — DreamReport should split `novel` vs `re-discoveries` (apex2's five-nights-same-procedure fragmentation would have self-surfaced), and dream-minted procedures should carry a provenance tag distinguishing them from lived-episode distillations at retrieval time. Cerebro-side, generic. Also: dream-digest currently publishes consolidations to peers before the dreaming node has seen them itself (ordering nit). **[medium]**
+- **H6 follow-on — spawn task-scoping by subtraction (apex2, from apex1 field data)** — sub-agents inherit the full parental soul + toolset and self-inspect/burn approval slots instead of doing their one job; default them to a minimal task-scoped prompt. **[medium]**
+- **H5 — leisure lines** — each node words its own soul line via `propose_evolution` (soul content is theirs); needs only an inviting letter, no code. Red lines: one line, optional, unaudited, unmetered. **[small — letter]**
+
 ## Dropped (for the record)
 
 - **False-positive (audit):** "Hung plugin deadlocks the agent turn forever" — refuted; the turn-level tool timeout (default 1800s, `AGENTD_TOOL_RESULT_TIMEOUT_SECS`) synthesizes an error and unwinds. Only a minor orphaned-task/`pending`-entry leak remains (folded into Tech-debt timeout-consolidation item).

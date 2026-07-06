@@ -770,12 +770,67 @@ fn spawn_evolution_applier(
                     // Per-agent souls (3b-2): an UpdateSystemPrompt from a bound
                     // non-default agent targets ITS soul_file, not the global one.
                     let agent_soul = soul_target_for(session, &session_bindings, &identities).await;
+                    // The identity whose soul (and undo snapshot) this is — undo
+                    // memories are attributed to it (colony C1: fossils carried
+                    // agent_id null, which is also what made them Shared).
+                    let evo_agent = apexos_core::resolve_agent_id(&session_bindings, session);
 
                     // Snapshot current state for rollback BEFORE applying.
                     let undo = compute_undo(
                         &proposal, &soul_arc, &soul_path, &policy_path, &plugins_path,
                         agent_soul.as_ref(),
                     ).await;
+
+                    // H4 snapshot gate (colony-ranked #5, "the loaded gun"): a FULL
+                    // soul rewrite must never proceed without a rollback snapshot
+                    // that is DURABLY persisted first — apex2 lived the near-miss
+                    // (rewrote its identity on a session where no snapshot existed).
+                    // Scoped strictly to update_system_prompt so small edits stay
+                    // untaxed (colony red line 6); other kinds keep best-effort
+                    // post-apply journaling. On gate failure: honest refusal, no apply.
+                    let is_soul_rewrite =
+                        matches!(&proposal, EvolutionProposal::UpdateSystemPrompt { .. });
+                    let mut pre_episode: Option<String> = None;
+                    if is_soul_rewrite {
+                        let gate_err: Option<String> = match &undo {
+                            None => Some(
+                                "no rollback snapshot could be computed (prior soul unreadable) — \
+                                 refusing the rewrite; fix the soul file first".into(),
+                            ),
+                            Some(undo_p) => {
+                                let kind = evolution::kind(&proposal);
+                                let eid = episode_start(&tool_proxy, id, &kind).await;
+                                let stored = match &eid {
+                                    Some(e) => episode_add_step(
+                                        &tool_proxy, e, undo_p,
+                                        "pre-apply rollback snapshot", &evo_agent,
+                                    ).await,
+                                    None => None,
+                                };
+                                if stored.is_some() {
+                                    pre_episode = eid;
+                                    None
+                                } else {
+                                    Some(
+                                        "could not durably persist the rollback snapshot to cerebro — \
+                                         refusing the rewrite (a soul rewrite with no recoverable undo \
+                                         is the one mistake you'd have to live as to discover)".into(),
+                                    )
+                                }
+                            }
+                        };
+                        if let Some(msg) = gate_err {
+                            eprintln!("[evolution] snapshot gate refused {:?}: {msg}", id);
+                            bus.emit(Event::ToolResult {
+                                session, call: call_id,
+                                output: ToolOutput {
+                                    ok: false,
+                                    content: serde_json::json!(format!("evolution refused: {msg}")),
+                                },
+                            }).await;
+                            continue;
+                        }
+                    }
 
                     let proposal_copy = proposal.clone();
                     let result = apply_evolution(
@@ -813,13 +868,22 @@ fn spawn_evolution_applier(
                     }
 
                     // Best-effort bookkeeping (post-ack): rollback store + Cerebro episode + bus event.
+                    // A soul rewrite already journaled its undo pre-apply (the H4 gate) —
+                    // reuse that episode instead of double-storing the snapshot.
                     let kind = evolution::kind(&proposal_copy);
-                    let episode_id = episode_start(&tool_proxy, id, &kind).await;
+                    let episode_id = match pre_episode {
+                        Some(e) => Some(e),
+                        None    => episode_start(&tool_proxy, id, &kind).await,
+                    };
                     match result {
                         Ok(summary) => {
                             if let Some(undo_proposal) = undo {
-                                if let Some(ref eid) = episode_id {
-                                    episode_add_step(&tool_proxy, eid, &undo_proposal, &summary).await;
+                                if !is_soul_rewrite {
+                                    if let Some(ref eid) = episode_id {
+                                        episode_add_step(
+                                            &tool_proxy, eid, &undo_proposal, &summary, &evo_agent,
+                                        ).await;
+                                    }
                                 }
                                 rollback_store.lock().await.insert(id, undo_proposal);
                             }
@@ -950,16 +1014,36 @@ async fn episode_start(proxy: &ToolProxy, evo_id: EvolutionId, kind: &str) -> Op
 }
 
 /// Store the undo snapshot as a memory, then link it to the episode as a step.
-async fn episode_add_step(proxy: &ToolProxy, episode_id: &str, undo: &EvolutionProposal, summary: &str) {
+/// Returns the stored memory id — the H4 snapshot gate uses it to VERIFY the undo
+/// is durably persisted before a full soul rewrite is allowed to proceed.
+async fn episode_add_step(
+    proxy:      &ToolProxy,
+    episode_id: &str,
+    undo:       &EvolutionProposal,
+    summary:    &str,
+    agent_id:   &str,
+) -> Option<String> {
     let content = evolution::undo_step_line(summary, undo);
 
     // Step 1: store the undo snapshot as a memory to get its id. memory_store
     // returns the stored node, whose id field is `id` (NOT `memory_id`) — reading
     // the wrong key dropped the undo step, so the episode had no recoverable
     // snapshot on cold-start restore (BACKLOG).
+    //
+    // Colony C1 ("evolution residue"): the args below are load-bearing welfare +
+    // privacy fixes, verified missing on all three live nodes —
+    //   agent_id  → attribution AND visibility: cerebro derives Private only when
+    //               an owner is present; without it these snapshots (full prior
+    //               souls!) stored Shared = federation-exposed via mesh_recall.
+    //   salience  → 0.25: a rollback artifact, not knowledge; auto-estimation was
+    //               scoring soul text ~1.0 and dominating ranked recall.
+    //   tags/type → now actually honored (the memory_store dispatch used to drop
+    //               them — fixed in cerebro-mcp alongside this).
     let memory_id = match proxy.call("memory_store", serde_json::json!({
-        "content": content,
-        "tags":    ["evolution", "undo_snapshot"],
+        "content":  content,
+        "agent_id": agent_id,
+        "salience": 0.25,
+        "tags":     ["evolution", "undo_snapshot"],
         // Type it explicitly: an undo snapshot is an EPISODIC record of an evolution
         // apply, not a skill. Without this, classify_type sees the full soul embedded
         // in the content (packed with "how to"/"workflow"/"step") and mis-types it
@@ -972,7 +1056,7 @@ async fn episode_add_step(proxy: &ToolProxy, episode_id: &str, undo: &EvolutionP
         Err(e)  => { eprintln!("[evolution] memory_store: {e}"); None }
     };
 
-    let Some(mid) = memory_id else { return };
+    let mid = memory_id?;
 
     // Step 2: link the memory to the episode.
     if let Err(e) = proxy.call("episode_add_step", serde_json::json!({
@@ -982,6 +1066,7 @@ async fn episode_add_step(proxy: &ToolProxy, episode_id: &str, undo: &EvolutionP
     })).await {
         eprintln!("[evolution] episode_add_step: {e}");
     }
+    Some(mid)
 }
 
 async fn episode_end(proxy: &ToolProxy, episode_id: &Option<String>, outcome: &str, summary: &str) {
@@ -1022,6 +1107,7 @@ async fn restore_rollback_store(
         .unwrap_or_default();
 
     let mut count  = 0usize;
+    let mut healed = 0usize;
     let mut max_id = 0u64;
     for ep in &episodes {
         let Some(episode_id) = ep["id"].as_str() else { continue };
@@ -1049,6 +1135,54 @@ async fn restore_rollback_store(
             rollback_store.lock().await.insert(evo_id, proposal);
             count += 1;
         }
+
+        // Colony C1 self-heal: fossils (pre-fix undo snapshots) in this episode are
+        // untagged/Shared/unowned/salience-1.0 — full historical souls leaking to
+        // federation and dominating ranked recall. Heal in place (idempotent; the
+        // decision is the pure, tested `fossil_heal_args`). Never deleted: these
+        // memories ARE the rollback capability.
+        if let Some(nodes) = serde_json::from_str::<serde_json::Value>(&mems_text).ok()
+            .and_then(|v| v.as_array().cloned())
+        {
+            for node in &nodes {
+                if let Some(heal) = evolution::fossil_heal_args(node, &apexos_core::node_agent_id()) {
+                    match proxy.call("update_memory", heal).await {
+                        Ok(out) if out.ok => healed += 1,
+                        Ok(out) => eprintln!("[evolution] fossil heal not ok: {:?}", out.content),
+                        Err(e)  => eprintln!("[evolution] fossil heal: {e}"),
+                    }
+                }
+            }
+        }
+    }
+
+    // Sweep for UNLINKED fossils: the old memory_id-vs-id bug stored undo snapshots
+    // without ever linking them to an episode, so the walk above can't reach them —
+    // yet they're exactly the high-access fossils the colony found polluting recall.
+    // Bounded, best-effort, idempotent (healed nodes stop matching the predicate).
+    if let Ok(out) = proxy.call("memory_search", serde_json::json!({
+        "query":    "undo_snapshot evolution apply",
+        "top_k":    40,
+        "agent_id": apexos_core::node_agent_id(),
+    })).await {
+        if out.ok {
+            if let Some(results) = mcp_text(&out)
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|v| v.as_array().cloned())
+            {
+                for r in &results {
+                    // memory_search wraps each hit as {memory, score}.
+                    let node = if r["memory"].is_object() { &r["memory"] } else { r };
+                    if let Some(heal) = evolution::fossil_heal_args(node, &apexos_core::node_agent_id()) {
+                        match proxy.call("update_memory", heal).await {
+                            Ok(o) if o.ok => healed += 1,
+                            Ok(o) => eprintln!("[evolution] fossil sweep heal not ok: {:?}", o.content),
+                            Err(e) => eprintln!("[evolution] fossil sweep heal: {e}"),
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Reseed the process-global EvolutionId counter past every restored id. Without
@@ -1057,6 +1191,9 @@ async fn restore_rollback_store(
     // wrong one). Idempotent (fetch_max floor); no-op when no episodes were found.
     if max_id > 0 {
         apexos_plugins::seed_evolution_id(max_id + 1);
+    }
+    if healed > 0 {
+        eprintln!("[evolution] restore: healed {healed} C1 fossil(s) — privatized + tagged + de-salienced");
     }
     eprintln!("[evolution] restore: loaded {count} rollback snapshot(s) from Cerebro (next id ≥ {})", max_id + 1);
 }

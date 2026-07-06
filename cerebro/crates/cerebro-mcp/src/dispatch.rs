@@ -5,7 +5,7 @@ use cerebro::{
     engines::dream::{is_skill_champion, retrieval_rank},
     models::{AssociativeLink, MemoryNode},
     storage::ListFilter,
-    types::{AgentId, LinkType, MemoryId, MemoryType, VisibilityScope},
+    types::{AgentId, LinkType, MemoryId, MemoryType, Visibility, VisibilityScope},
     CerebroCortex, VisionQuery,
 };
 use serde_json::{json, Value};
@@ -230,6 +230,33 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             if !args["tags"].is_null() {
                 node.tags = coerce_str_list(&args["tags"]);
             }
+            // Ownership re-attribution (colony C1: fossils with agent_id null).
+            // Model-originated calls are safe by construction — the supervisor
+            // stamps agent_id with the caller's own identity, so a model can only
+            // claim a memory to itself; explicit reassignment is a DirectCall
+            // (daemon migration) privilege.
+            if let Some(a) = args["set_agent_id"].as_str().map(str::trim).filter(|a| !a.is_empty()) {
+                node.agent_id = Some(AgentId(a.to_string()));
+            }
+            // Visibility change (colony C1: privatize leaked evolution residue).
+            // share_memory remains the deliberate private→shared publish act; this
+            // is the general knob, and the orphan guard keeps a privatized memory
+            // reachable: private + no owner would be visible to no one.
+            if let Some(v) = args["visibility"].as_str() {
+                let vis = match v.to_lowercase().as_str() {
+                    "private" => Visibility::Private,
+                    "shared"  => Visibility::Shared,
+                    "thread"  => Visibility::Thread,
+                    other => anyhow::bail!("unknown visibility '{other}' (private|shared|thread)"),
+                };
+                if vis == Visibility::Private && node.agent_id.is_none() {
+                    anyhow::bail!(
+                        "refusing to privatize an owner-less memory (it would be visible to no one) — \
+                         pass set_agent_id to attribute it first"
+                    );
+                }
+                node.visibility = vis;
+            }
 
             let storage = brain.storage.read().await;
             storage.sqlite.update_memory(&node).await?;
@@ -244,8 +271,19 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             if name == "memory_store" {
                 let content = args["content"].as_str()
                     .ok_or_else(|| anyhow::anyhow!("content is required"))?.to_string();
+                // TRUE alias of `remember`: honor memory_type / tags / salience.
+                // This dispatch used to drop them (None, None, None) while the schema
+                // documented them — the cause of the colony's C1 "evolution residue"
+                // finding: agentd's undo snapshots passed tags + type that never
+                // landed, so the fossils were untagged, mis-typed Procedural,
+                // auto-salienced ~1.0, and (via the missing agent_id) Shared.
+                let memory_type: Option<MemoryType> =
+                    serde_json::from_value(args["memory_type"].clone()).ok();
+                let tag_vec = coerce_str_list(&args["tags"]);
+                let tags = if tag_vec.is_empty() { None } else { Some(tag_vec) };
+                let salience = args["salience"].as_f64().map(|f| f as f32);
                 let scope = agent_scope(args);
-                let node = brain.remember(content, None, None, None, scope).await?;
+                let node = brain.remember(content, memory_type, tags, salience, scope).await?;
                 Ok(serde_json::to_value(&node)?)
             } else {
                 let query = args["query"].as_str()
