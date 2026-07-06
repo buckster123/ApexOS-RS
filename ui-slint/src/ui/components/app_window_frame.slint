@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, BoardCard } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, BoardCard } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -112,6 +112,11 @@ export component AppWindowFrame inherits Rectangle {
     in property <string>         login-user-name: "";
     in property <bool>           login-is-default: false;
     in property <[ModelItem]>    models;
+    in property <string>         inference-backend-sel: "anthropic";
+    in property <string>         inference-oai-url: "";
+    in property <bool>           inference-oai-key-set: false;
+    in property <[EndpointItem]> inference-endpoints;
+    in property <bool>           inference-scan-busy: false;
     in property <string>         terminal-text;
     in property <int>            terminal-scroll-tick;
     in property <[CouncilAgent]> council-agents;
@@ -225,6 +230,11 @@ export component AppWindowFrame inherits Rectangle {
     callback set-sensor-profile(string);
     callback set-voice-backend(string);
     callback set-default-login(bool);
+    callback set-backend(string);
+    callback apply-endpoint(string, string);
+    callback save-oai-key(string);
+    callback scan-compute();
+    callback filter-models(string);
     callback refresh-settings();
     callback terminal-send(string);
     // Tier-A parity apps.
@@ -528,6 +538,11 @@ export component AppWindowFrame inherits Rectangle {
             voice-api-available: root.voice-api-available;
             login-user-name: root.login-user-name;
             login-is-default: root.login-is-default;
+            backend: root.inference-backend-sel;
+            oai-base-url: root.inference-oai-url;
+            oai-key-set: root.inference-oai-key-set;
+            endpoints: root.inference-endpoints;
+            scan-busy: root.inference-scan-busy;
             save-soul(text) => { root.save-soul(text); }
             set-policy(mode) => { root.set-policy(mode); }
             set-model(id) => { root.set-model(id); }
@@ -535,6 +550,11 @@ export component AppWindowFrame inherits Rectangle {
             set-sensor-profile(p) => { root.set-sensor-profile(p); }
             set-voice-backend(p) => { root.set-voice-backend(p); }
             set-default-login(b) => { root.set-default-login(b); }
+            set-backend(b) => { root.set-backend(b); }
+            apply-endpoint(u, k) => { root.apply-endpoint(u, k); }
+            save-oai-key(k) => { root.save-oai-key(k); }
+            scan-compute => { root.scan-compute(); }
+            filter-models(f) => { root.filter-models(f); }
             refresh => { root.refresh-settings(); }
         }
 

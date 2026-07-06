@@ -8,6 +8,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+pub mod backend_config;
+
+pub mod compute;
+
 pub mod mesh;
 pub use mesh::{parse_avahi_output, PeerRecord, PeerRegistry, PeerRole};
 pub mod beacon;
@@ -296,6 +300,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/usage",       get(get_usage_handler))
         .route("/api/thermal/frame", get(thermal_frame_handler))
         .route("/api/backend",     get(get_backend_handler).post(set_backend_handler))
+        .route("/api/compute/discover", get(compute_discover_handler))
         .route("/api/policy",         post(set_policy_handler))
         .route("/api/policy/rules",   get(get_policy_rules_handler))
         .route("/api/soul",           get(get_soul_handler).post(set_soul_handler))
@@ -1038,9 +1043,26 @@ async fn thermal_frame_handler() -> impl IntoResponse {
 
 async fn get_backend_handler(State(state): State<GatewayState>) -> impl IntoResponse {
     Json(serde_json::json!({
-        "backend":     state.backend.read().await.clone(),
+        "backend":      state.backend.read().await.clone(),
         "oai_base_url": state.oai_base_url.read().await.clone(),
+        "model":        state.model.read().await.clone(),
+        "backends":     backend_config::KNOWN_BACKENDS,
+        "anthropic_key_set": !state.api_key.read().await.is_empty(),
+        "oai_key_set":       !state.oai_api_key.read().await.is_empty(),
     }))
+}
+
+/// Snapshot the three arcs and persist as the operator's steady-state choice
+/// (file-wins-on-restart, the voice-config pattern). Called from the operator
+/// handlers only — the vast hot-swap writes the arcs directly and deliberately
+/// does NOT persist (a rented GPU is transient, never a boot default).
+async fn persist_backend_snapshot(state: &GatewayState) {
+    let cfg = backend_config::BackendConfig {
+        backend:      state.backend.read().await.clone(),
+        model:        state.model.read().await.clone(),
+        oai_base_url: state.oai_base_url.read().await.clone(),
+    };
+    backend_config::persist(&cfg);
 }
 
 async fn set_backend_handler(
@@ -1049,15 +1071,33 @@ async fn set_backend_handler(
 ) -> impl IntoResponse {
     let backend = body["backend"].as_str().unwrap_or("").trim().to_lowercase();
     if backend.is_empty() {
-        return Json(serde_json::json!({ "ok": false, "error": "missing backend" }));
+        return Json(serde_json::json!({ "ok": false, "error": "missing backend" })).into_response();
     }
-    *state.backend.write().await = backend;
+    // Reject unknowns: RoutingProvider's `_ => anthropic` arm would otherwise turn a
+    // typo into a silent wrong-backend node.
+    if !backend_config::backend_valid(&backend) {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": format!("unknown backend '{backend}' (known: {})",
+                backend_config::KNOWN_BACKENDS.join(", ")),
+        })).into_response();
+    }
 
-    if let Some(url) = body["oai_base_url"].as_str() {
-        let url = url.trim().to_string();
-        if !url.is_empty() {
-            *state.oai_base_url.write().await = url;
-        }
+    let explicit_url = body["oai_base_url"]
+        .as_str()
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty());
+    // openrouter has exactly one canonical endpoint — switching to it without an
+    // explicit URL must not leave the arc pointing at ollama's localhost default.
+    let url = match (&explicit_url, backend.as_str()) {
+        (Some(u), _)         => Some(u.clone()),
+        (None, "openrouter") => Some(backend_config::default_url_for("openrouter").to_string()),
+        (None, _)            => None,
+    };
+
+    *state.backend.write().await = backend;
+    if let Some(url) = url {
+        *state.oai_base_url.write().await = url;
     }
 
     // Optionally update the model when switching backends
@@ -1068,7 +1108,24 @@ async fn set_backend_handler(
         }
     }
 
-    Json(serde_json::json!({ "ok": true }))
+    persist_backend_snapshot(&state).await;
+    get_backend_handler(State(state)).await.into_response()
+}
+
+/// GET /api/compute/discover — operator-triggered LAN sweep for OpenAI-compatible
+/// inference endpoints (Settings → SCAN NETWORK). Localhost + the local /24 + mesh
+/// peers, verified by the /v1/models shape. Takes a few seconds on a quiet LAN.
+async fn compute_discover_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let peer_urls: Vec<String> = state
+        .peer_registry
+        .read()
+        .await
+        .peers
+        .iter()
+        .map(|p| p.ws_url.clone())
+        .collect();
+    let endpoints = compute::discover(compute::peer_hosts(&peer_urls)).await;
+    Json(serde_json::json!({ "endpoints": endpoints }))
 }
 
 async fn set_model_handler(
@@ -1080,6 +1137,7 @@ async fn set_model_handler(
         return Json(serde_json::json!({ "ok": false, "error": "empty model" }));
     }
     *state.model.write().await = model;
+    persist_backend_snapshot(&state).await;
     Json(serde_json::json!({ "ok": true }))
 }
 

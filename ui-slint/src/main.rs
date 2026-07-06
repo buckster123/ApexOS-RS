@@ -1588,6 +1588,36 @@ fn replace_models(items: Vec<ModelItem>) {
     });
 }
 
+// The un-filtered model catalog for the Settings picker. An OAI backend's /models can
+// be huge (OpenRouter: hundreds), so the visible list is a capped/filtered view over
+// this cache — `set_models_full` stores + shows the head, `apply_model_filter` narrows.
+thread_local! {
+    static MODELS_FULL: RefCell<Vec<ModelItem>> = const { RefCell::new(Vec::new()) };
+}
+const MODELS_VIEW_CAP: usize = 60;
+
+fn set_models_full(items: Vec<ModelItem>) {
+    replace_models(items.iter().take(MODELS_VIEW_CAP).cloned().collect());
+    MODELS_FULL.with(|f| *f.borrow_mut() = items);
+}
+
+fn apply_model_filter(filter: &str) {
+    let f = filter.trim().to_lowercase();
+    let view: Vec<ModelItem> = MODELS_FULL.with(|full| {
+        full.borrow()
+            .iter()
+            .filter(|m| {
+                f.is_empty()
+                    || m.model_id.to_lowercase().contains(&f)
+                    || m.model_name.to_lowercase().contains(&f)
+            })
+            .take(MODELS_VIEW_CAP)
+            .cloned()
+            .collect()
+    });
+    replace_models(view);
+}
+
 fn replace_events(items: Vec<EventLogItem>) {
     EVENTS.with(|e| {
         if let Some(model) = e.borrow().as_ref() {
@@ -2674,17 +2704,22 @@ struct SettingsData {
     sensor_profile:     String,
     voice_backend:        String,
     voice_api_available:  bool,
+    backend:       String,
+    oai_base_url:  String,
+    oai_key_set:   bool,
 }
 
-// Fetch /api/status, /api/soul, /api/models, /api/cache, /api/sensors/config, /api/voice in parallel.
+// Fetch /api/status, /api/soul, /api/models, /api/cache, /api/sensors/config, /api/voice,
+// /api/backend in parallel.
 async fn fetch_settings(client: &reqwest::Client, base_url: &str) -> SettingsData {
-    let (status, soul, models_resp, cache, sensors, voice) = tokio::join!(
+    let (status, soul, models_resp, cache, sensors, voice, backend) = tokio::join!(
         json_get(client, format!("{base_url}/api/status")),
         json_get(client, format!("{base_url}/api/soul")),
         json_get(client, format!("{base_url}/api/models")),
         json_get(client, format!("{base_url}/api/cache")),
         json_get(client, format!("{base_url}/api/sensors/config")),
         json_get(client, format!("{base_url}/api/voice")),
+        json_get(client, format!("{base_url}/api/backend")),
     );
     let models: Vec<ModelItem> = models_resp["models"]
         .as_array()
@@ -2709,6 +2744,9 @@ async fn fetch_settings(client: &reqwest::Client, base_url: &str) -> SettingsDat
         voice_backend:       voice["voice_backend"].as_str().unwrap_or("auto").to_string(),
         voice_api_available: voice["has_elevenlabs"].as_bool().unwrap_or(false)
             || voice["has_openai"].as_bool().unwrap_or(false),
+        backend:      backend["backend"].as_str().unwrap_or("anthropic").to_string(),
+        oai_base_url: backend["oai_base_url"].as_str().unwrap_or("").to_string(),
+        oai_key_set:  backend["oai_key_set"].as_bool().unwrap_or(false),
     }
 }
 
@@ -4633,10 +4671,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_settings_sensor_profile(data.sensor_profile.into());
                     ui.set_settings_voice_backend(data.voice_backend.into());
                     ui.set_settings_voice_api_available(data.voice_api_available);
+                    ui.set_settings_backend(data.backend.into());
+                    ui.set_settings_oai_url(data.oai_base_url.into());
+                    ui.set_settings_oai_key_set(data.oai_key_set);
                     LOGIN_ME.with(|m| *m.borrow_mut() = me_id);
                     ui.set_settings_login_user_name(me_name.into());
                     ui.set_settings_login_is_default(is_default);
-                    replace_models(data.models);
+                    set_models_full(data.models);
                 }
             }).ok();
         });
@@ -5595,6 +5636,147 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if ok { notify(ToastKind::Info, "Model switched"); }
             else  { notify(ToastKind::Error, "Failed to switch model"); }
         });
+    });
+
+    // ── set-backend callback ──────────────────────────────────────────────────
+    // Chip tap → POST /api/backend (live next turn, persisted server-side). The
+    // server pins openrouter's canonical URL itself; a full settings refetch then
+    // pulls the new backend's model catalog into the picker.
+    let rt_h_be    = rt.handle().clone();
+    let client_be  = Arc::clone(&http_client);
+    let base_be    = http_base.clone();
+    let ui_weak_be = ui.as_weak();
+    ui.on_set_backend(move |backend| {
+        let b = backend.to_string();
+        if let Some(ui) = ui_weak_be.upgrade() {
+            ui.set_settings_backend(b.clone().into());
+        }
+        let client = Arc::clone(&client_be);
+        let base   = base_be.clone();
+        let ui_w   = ui_weak_be.clone();
+        rt_h_be.spawn(async move {
+            let ok = client.post(format!("{base}/api/backend"))
+                .json(&serde_json::json!({"backend": b}))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok { notify(ToastKind::Info, "Backend switched"); }
+            else  { notify(ToastKind::Error, "Failed to switch backend"); }
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    ui.invoke_refresh_settings();
+                }
+            }).ok();
+        });
+    });
+
+    // ── apply-endpoint callback ───────────────────────────────────────────────
+    // A typed URL (APPLY) or a discovered endpoint row → adopt backend + URL.
+    let rt_h_ep    = rt.handle().clone();
+    let client_ep  = Arc::clone(&http_client);
+    let base_ep    = http_base.clone();
+    let ui_weak_ep = ui.as_weak();
+    ui.on_apply_endpoint(move |url, kind| {
+        let (u, k) = (url.to_string(), kind.to_string());
+        let client = Arc::clone(&client_ep);
+        let base   = base_ep.clone();
+        let ui_w   = ui_weak_ep.clone();
+        rt_h_ep.spawn(async move {
+            let ok = client.post(format!("{base}/api/backend"))
+                .json(&serde_json::json!({"backend": k, "oai_base_url": u}))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok { notify(ToastKind::Info, "Endpoint adopted"); }
+            else  { notify(ToastKind::Error, "Failed to set endpoint"); }
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    ui.invoke_refresh_settings();
+                }
+            }).ok();
+        });
+    });
+
+    // ── save-oai-key callback ─────────────────────────────────────────────────
+    let rt_h_key    = rt.handle().clone();
+    let client_key  = Arc::clone(&http_client);
+    let base_key    = http_base.clone();
+    let ui_weak_key = ui.as_weak();
+    ui.on_save_oai_key(move |key| {
+        let k = key.to_string();
+        let client = Arc::clone(&client_key);
+        let base   = base_key.clone();
+        let ui_w   = ui_weak_key.clone();
+        rt_h_key.spawn(async move {
+            let ok = client.post(format!("{base}/api/keys"))
+                .json(&serde_json::json!({"oai": k}))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok { notify(ToastKind::Success, "API key saved"); }
+            else  { notify(ToastKind::Error, "Failed to save key"); }
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    if ok { ui.set_settings_oai_key_set(true); }
+                }
+            }).ok();
+        });
+    });
+
+    // ── scan-compute callback ─────────────────────────────────────────────────
+    // Operator-triggered LAN sweep (GET /api/compute/discover, a few seconds).
+    let rt_h_scan    = rt.handle().clone();
+    let client_scan  = Arc::clone(&http_client);
+    let base_scan    = http_base.clone();
+    let ui_weak_scan = ui.as_weak();
+    ui.on_scan_compute(move || {
+        if let Some(ui) = ui_weak_scan.upgrade() {
+            ui.set_settings_scan_busy(true);
+        }
+        let client = Arc::clone(&client_scan);
+        let base   = base_scan.clone();
+        let ui_w   = ui_weak_scan.clone();
+        rt_h_scan.spawn(async move {
+            let resp = client.get(format!("{base}/api/compute/discover"))
+                .timeout(std::time::Duration::from_secs(30))
+                .send().await;
+            let body = match resp {
+                Ok(r) if r.status().is_success() =>
+                    r.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null),
+                _ => serde_json::Value::Null,
+            };
+            let found: Vec<EndpointItem> = body["endpoints"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .map(|e| EndpointItem {
+                    url:  e["url"].as_str().unwrap_or("").into(),
+                    kind: e["kind"].as_str().unwrap_or("").into(),
+                    host: e["host"].as_str().unwrap_or("").into(),
+                    model_count: e["models"].as_array().map(|m| m.len() as i32).unwrap_or(0),
+                })
+                .collect();
+            let n = found.len();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    ui.set_settings_endpoints(slint::ModelRc::from(Rc::new(
+                        slint::VecModel::from(found),
+                    )));
+                    ui.set_settings_scan_busy(false);
+                }
+            }).ok();
+            if n == 0 { notify(ToastKind::Info, "No LAN compute found"); }
+            else      { notify(ToastKind::Success, format!("{n} endpoint{} found", if n == 1 {""} else {"s"})); }
+        });
+    });
+
+    // ── filter-models callback ────────────────────────────────────────────────
+    // Pure view narrowing over the cached full catalog — no network.
+    ui.on_filter_models(move |f| {
+        apply_model_filter(&f);
     });
 
     // ── set-cache callback ────────────────────────────────────────────────────

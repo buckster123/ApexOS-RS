@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, UsbCandidate, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, BoardCard } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, UsbCandidate, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, BoardCard } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { IdentityWizard } from "components/identity_wizard.slint";
 import { ImagePicker } from "components/image_picker.slint";
@@ -55,6 +55,13 @@ export component AppWindow inherits Window {
     // this device's auto-login default; set/cleared via the Settings LOGIN section.
     in-out property <string>         settings-login-user-name: "";
     in-out property <bool>           settings-login-is-default: false;
+    // Inference backend selection (anthropic/openrouter/ollama/oai), live-swapped +
+    // persisted via /api/backend; discovered LAN endpoints via /api/compute/discover.
+    in-out property <string>         settings-backend: "anthropic";
+    in-out property <string>         settings-oai-url: "";
+    in-out property <bool>           settings-oai-key-set: false;
+    in-out property <[EndpointItem]> settings-endpoints;
+    in-out property <bool>           settings-scan-busy: false;
     in-out property <[ModelItem]>    available-models;
     in-out property <bool>           power-modal-open: false;
     // Terminal app (G3d) — Rust owns the /terminal-ws PTY; output streams here.
@@ -207,6 +214,11 @@ export component AppWindow inherits Window {
     callback set-cache(bool, bool, string);
     callback set-sensor-profile(string);
     callback set-default-login(bool);
+    callback set-backend(string);
+    callback apply-endpoint(string, string);   // url, backend-kind
+    callback save-oai-key(string);
+    callback scan-compute();
+    callback filter-models(string);
     callback power-action(string);
     callback terminal-send(string);          // a submitted terminal command line
     // Tier-A parity apps
@@ -610,6 +622,11 @@ export component AppWindow inherits Window {
                         voice-api-available: root.settings-voice-api-available;
                         login-user-name: root.settings-login-user-name;
                         login-is-default: root.settings-login-is-default;
+                        backend: root.settings-backend;
+                        oai-base-url: root.settings-oai-url;
+                        oai-key-set: root.settings-oai-key-set;
+                        endpoints: root.settings-endpoints;
+                        scan-busy: root.settings-scan-busy;
                         save-soul(text) => { root.save-soul(text); }
                         set-policy(mode) => { root.set-policy(mode); }
                         set-model(id) => { root.set-model(id); }
@@ -617,6 +634,11 @@ export component AppWindow inherits Window {
                         set-sensor-profile(p) => { root.set-sensor-profile(p); }
                         set-voice-backend(p) => { root.set-voice-backend(p); }
                         set-default-login(b) => { root.set-default-login(b); }
+                        set-backend(b) => { root.set-backend(b); }
+                        apply-endpoint(u, k) => { root.apply-endpoint(u, k); }
+                        save-oai-key(k) => { root.save-oai-key(k); }
+                        scan-compute => { root.scan-compute(); }
+                        filter-models(f) => { root.filter-models(f); }
                         refresh => { root.refresh-settings(); }
                     }
 
@@ -732,6 +754,11 @@ export component AppWindow inherits Window {
                         voice-api-available: root.settings-voice-api-available;
                         login-user-name: root.settings-login-user-name;
                         login-is-default: root.settings-login-is-default;
+                        inference-backend-sel: root.settings-backend;
+                        inference-oai-url: root.settings-oai-url;
+                        inference-oai-key-set: root.settings-oai-key-set;
+                        inference-endpoints: root.settings-endpoints;
+                        inference-scan-busy: root.settings-scan-busy;
                         terminal-text: root.terminal-text;
                         terminal-scroll-tick: root.terminal-scroll-tick;
                         council-agents: root.council-agents;
@@ -840,6 +867,11 @@ export component AppWindow inherits Window {
                         set-sensor-profile(p) => { root.set-sensor-profile(p); }
                         set-voice-backend(p) => { root.set-voice-backend(p); }
                         set-default-login(b) => { root.set-default-login(b); }
+                        set-backend(b) => { root.set-backend(b); }
+                        apply-endpoint(u, k) => { root.apply-endpoint(u, k); }
+                        save-oai-key(k) => { root.save-oai-key(k); }
+                        scan-compute => { root.scan-compute(); }
+                        filter-models(f) => { root.filter-models(f); }
                         refresh-settings => { root.refresh-settings(); }
                         refresh-events(types, hours) => { root.refresh-events(types, hours); }
                         refresh-mesh => { root.refresh-mesh(); }

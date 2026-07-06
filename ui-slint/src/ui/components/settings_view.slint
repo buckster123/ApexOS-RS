@@ -1,7 +1,7 @@
 import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
-import { ModelItem } from "../types.slint";
+import { ModelItem, EndpointItem } from "../types.slint";
 import { PersonaTile } from "persona_picker.slint";
 
 // ── SettingsView ───────────────────────────────────────────────────────────────
@@ -19,6 +19,13 @@ export component SettingsView {
     in property <string>         current-model: "";
     in property <bool>           api-key-set: false;
     in property <[ModelItem]>    models;
+    // Inference backend (anthropic / openrouter / ollama / custom OAI endpoint),
+    // live-swapped + persisted via /api/backend; endpoints from /api/compute/discover.
+    in property <string>         backend: "anthropic";
+    in property <string>         oai-base-url: "";
+    in property <bool>           oai-key-set: false;
+    in property <[EndpointItem]> endpoints;
+    in property <bool>           scan-busy: false;
     // Prompt-cache policy (Anthropic), live-tuned via /api/cache.
     in property <bool>           cache-enabled: true;
     in property <bool>           cache-conversation: true;
@@ -36,6 +43,12 @@ export component SettingsView {
     callback save-soul(string);
     callback set-policy(string);
     callback set-model(string);
+    callback set-backend(string);
+    // (url, backend-kind) — adopt an endpoint (typed or discovered).
+    callback apply-endpoint(string, string);
+    callback save-oai-key(string);
+    callback scan-compute();
+    callback filter-models(string);
     callback set-default-login(bool);
     // (enabled, cache_conversation, ttl) — full desired state each tap.
     callback set-cache(bool, bool, string);
@@ -213,6 +226,205 @@ export component SettingsView {
                     }
                 }
 
+                // ── Inference backend ─────────────────────────────────────
+                // Chips swap the provider live (persisted server-side); OLLAMA /
+                // CUSTOM take an endpoint URL; SCAN sweeps the LAN for compute.
+                VerticalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: "INFERENCE BACKEND";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 2px;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        for opt in ["anthropic", "openrouter", "ollama", "custom"]: Rectangle {
+                            width: 92px;
+                            height: 32px;
+                            border-radius: Palette.radius;
+                            background: (root.backend == opt || (opt == "custom" && (root.backend == "oai" || root.backend == "vllm")))
+                                ? Palette.primary-dim : Palette.surface;
+                            border-width: 1px;
+                            border-color: (root.backend == opt || (opt == "custom" && (root.backend == "oai" || root.backend == "vllm")))
+                                ? Palette.primary : Palette.border;
+                            animate background   { duration: 150ms; }
+                            animate border-color { duration: 150ms; }
+                            TouchArea {
+                                clicked => { root.set-backend(opt == "custom" ? "oai" : opt); }
+                            }
+                            Text {
+                                text: opt;
+                                color: (root.backend == opt || (opt == "custom" && (root.backend == "oai" || root.backend == "vllm")))
+                                    ? Palette.primary : Palette.text-dim;
+                                font-size: 9px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Endpoint URL — editable for local/custom backends; openrouter
+                    // is canonical (server pins it), anthropic doesn't use one.
+                    if root.backend == "openrouter": Text {
+                        text: "endpoint: openrouter.ai/api/v1 · key " + (root.oai-key-set ? "set ✓" : "NOT SET — enter below");
+                        color: root.oai-key-set ? Palette.text-dim : Palette.warning;
+                        font-size: 10px;
+                    }
+                    if root.backend != "anthropic" && root.backend != "openrouter": HorizontalLayout {
+                        spacing: 6px;
+                        Rectangle {
+                            height: 32px;
+                            horizontal-stretch: 1;
+                            border-radius: Palette.radius;
+                            background: Palette.surface;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            url-input := TextInput {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                single-line: true;
+                                font-size: 11px;
+                                color: Palette.text;
+                                selection-background-color: Palette.primary-dim;
+                                accepted => { if (self.text != "") { root.apply-endpoint(self.text, root.backend); } }
+                            }
+                            if url-input.text == "": Text {
+                                x: 10px;
+                                text: root.oai-base-url == "" ? "http://host:11434/v1" : root.oai-base-url;
+                                color: Palette.text-dim;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Rectangle {
+                            width: 64px;
+                            height: 32px;
+                            border-radius: Palette.radius;
+                            background: Palette.surface;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            TouchArea {
+                                clicked => { if (url-input.text != "") { root.apply-endpoint(url-input.text, root.backend); } }
+                            }
+                            Text {
+                                text: "APPLY";
+                                color: Palette.text-dim;
+                                font-size: 9px;
+                                letter-spacing: 1px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // OAI/OpenRouter key entry — POST /api/keys, masked, cleared on save.
+                    if root.backend != "anthropic": HorizontalLayout {
+                        spacing: 6px;
+                        Rectangle {
+                            height: 32px;
+                            horizontal-stretch: 1;
+                            border-radius: Palette.radius;
+                            background: Palette.surface;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            key-input := TextInput {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                single-line: true;
+                                input-type: password;
+                                font-size: 11px;
+                                color: Palette.text;
+                                selection-background-color: Palette.primary-dim;
+                                accepted => { if (self.text != "") { root.save-oai-key(self.text); self.text = ""; } }
+                            }
+                            if key-input.text == "": Text {
+                                x: 10px;
+                                text: root.oai-key-set ? "API key (set ✓ — paste to replace)" : "API key (sk-or-…)";
+                                color: Palette.text-dim;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Rectangle {
+                            width: 64px;
+                            height: 32px;
+                            border-radius: Palette.radius;
+                            background: Palette.surface;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            TouchArea {
+                                clicked => { if (key-input.text != "") { root.save-oai-key(key-input.text); key-input.text = ""; } }
+                            }
+                            Text {
+                                text: "SAVE";
+                                color: Palette.text-dim;
+                                font-size: 9px;
+                                letter-spacing: 1px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // LAN compute discovery — operator-triggered sweep (a few seconds).
+                    Rectangle {
+                        height: 34px;
+                        border-radius: Palette.radius;
+                        background: root.scan-busy ? Palette.primary-dim : Palette.surface;
+                        border-width: 1px;
+                        border-color: root.scan-busy ? Palette.primary : Palette.border;
+                        TouchArea {
+                            clicked => { if (!root.scan-busy) { root.scan-compute(); } }
+                        }
+                        Text {
+                            text: root.scan-busy ? "SCANNING LAN FOR COMPUTE…" : "⌖ SCAN NETWORK FOR COMPUTE";
+                            color: root.scan-busy ? Palette.primary : Palette.text-dim;
+                            font-size: 10px;
+                            letter-spacing: 1px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    for e in root.endpoints: Rectangle {
+                        height: 38px;
+                        border-radius: Palette.radius;
+                        background: root.oai-base-url == e.url ? Palette.primary-dim : Palette.surface;
+                        border-width: 1px;
+                        border-color: root.oai-base-url == e.url ? Palette.primary : Palette.border;
+                        TouchArea {
+                            clicked => { root.apply-endpoint(e.url, e.kind == "ollama" ? "ollama" : "oai"); }
+                        }
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 8px;
+                            Text {
+                                text: e.host + " · " + e.kind;
+                                color: root.oai-base-url == e.url ? Palette.text-bright : Palette.text;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Text {
+                                text: e.model-count == 1 ? "1 model" : e.model-count + " models";
+                                color: Palette.text-dim;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
                 // ── Model picker ──────────────────────────────────────────
                 VerticalLayout {
                     spacing: 8px;
@@ -223,6 +435,34 @@ export component SettingsView {
                         color: Palette.text-dim;
                         font-size: 9px;
                         letter-spacing: 2px;
+                    }
+
+                    // Filter — an OAI catalog (OpenRouter: hundreds) needs narrowing;
+                    // Rust filters the cached full list and repopulates `models`.
+                    if root.models.length >= 13 || root.backend == "openrouter": Rectangle {
+                        height: 32px;
+                        border-radius: Palette.radius;
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        filter-input := TextInput {
+                            x: 10px;
+                            width: parent.width - 20px;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            single-line: true;
+                            font-size: 11px;
+                            color: Palette.text;
+                            selection-background-color: Palette.primary-dim;
+                            edited => { root.filter-models(self.text); }
+                        }
+                        if filter-input.text == "": Text {
+                            x: 10px;
+                            text: "filter models… (e.g. qwen, gemma)";
+                            color: Palette.text-dim;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
                     }
 
                     if root.models.length == 0: Text {
@@ -269,6 +509,56 @@ export component SettingsView {
                                 color: Palette.primary;
                                 font-size: 10px;
                                 letter-spacing: 0.5px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Exact model id escape hatch — anything the picker doesn't list.
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Rectangle {
+                            height: 32px;
+                            horizontal-stretch: 1;
+                            border-radius: Palette.radius;
+                            background: Palette.surface;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            custom-model-input := TextInput {
+                                x: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                single-line: true;
+                                font-size: 11px;
+                                color: Palette.text;
+                                selection-background-color: Palette.primary-dim;
+                                accepted => { if (self.text != "") { root.set-model(self.text); self.text = ""; } }
+                            }
+                            if custom-model-input.text == "": Text {
+                                x: 10px;
+                                text: "custom model id…";
+                                color: Palette.text-dim;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Rectangle {
+                            width: 64px;
+                            height: 32px;
+                            border-radius: Palette.radius;
+                            background: Palette.surface;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            TouchArea {
+                                clicked => { if (custom-model-input.text != "") { root.set-model(custom-model-input.text); custom-model-input.text = ""; } }
+                            }
+                            Text {
+                                text: "SET";
+                                color: Palette.text-dim;
+                                font-size: 9px;
+                                letter-spacing: 1px;
+                                horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
                         }
