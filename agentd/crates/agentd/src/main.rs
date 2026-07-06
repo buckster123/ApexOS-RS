@@ -1922,29 +1922,49 @@ fn dream_journal_enabled() -> bool {
 }
 
 /// Compose the first-person journal entry from the DreamReport. Pure — unit-tested.
-/// Pulls the count fields the report is known to carry when present; falls back to
-/// embedding the compact report so an evolved cerebro never breaks the journal.
+/// Parses the real report shape (top-level `episodes_consolidated` + per-phase
+/// counters aggregated across `phases[]`, including the colony-C2 novel-vs-
+/// rediscovery split); falls back to embedding the compact report when the shape
+/// is unrecognized, so an evolved cerebro never breaks the journal. Diff-shaped
+/// and cold by colony red line 3 — a log, not a narrative.
 fn compose_dream_journal(report: &serde_json::Value, started_at: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
-    // Known DreamReport count fields, rendered human-first when present.
-    let counts: Vec<(&str, &str)> = vec![
-        ("memories_processed",  "memories processed"),
-        ("consolidated",        "consolidations"),
-        ("schemas_created",     "new schemas"),
-        ("schemas_reinforced",  "schemas reinforced"),
-        ("pruned",              "memories pruned"),
-        ("decayed",             "salience decays"),
-    ];
-    for (key, label) in counts {
-        if let Some(n) = report[key].as_u64() {
-            lines.push(format!("- {n} {label}"));
+    let recognized =
+        report["phases"].is_array() || report["episodes_consolidated"].is_u64();
+
+    if let Some(n) = report["episodes_consolidated"].as_u64() {
+        if n > 0 {
+            lines.push(format!("- {n} episodes consolidated"));
         }
     }
-    let body = if lines.is_empty() {
+    if let Some(phases) = report["phases"].as_array() {
+        let phase_counts: Vec<(&str, &str)> = vec![
+            ("memories_processed",      "memories processed"),
+            ("links_created",           "new links"),
+            ("links_strengthened",      "links strengthened"),
+            ("memories_pruned",         "memories pruned"),
+            ("schemas_extracted",       "schemas formed"),
+            ("skills_distilled",        "skills distilled"),
+            ("procedures_extracted",    "NOVEL procedures minted"),
+            ("procedures_rediscovered", "re-discoveries reinforced into existing procedures (not re-stored)"),
+            ("procedures_mutated",      "procedure variants tried"),
+            ("procedures_merged",       "procedure hybrids tried"),
+        ];
+        for (key, label) in phase_counts {
+            let total: u64 = phases.iter().filter_map(|p| p[key].as_u64()).sum();
+            if total > 0 {
+                lines.push(format!("- {total} {label}"));
+            }
+        }
+    }
+
+    let body = if !lines.is_empty() {
+        lines.join("\n")
+    } else if recognized {
+        "- a quiet night — nothing needed consolidating".to_string()
+    } else {
         // Unknown report shape — stay honest, embed it compactly.
         format!("Report: {}", serde_json::to_string(report).unwrap_or_else(|_| "?".into()))
-    } else {
-        lines.join("\n")
     };
     format!(
         "Dream journal — nightly consolidation started {started_at}.\n{body}\n\
@@ -3632,28 +3652,43 @@ tmpfs /var/lib/agentd/workspace/media tmpfs rw 0 0
 
     // ── dream journal (model-welfare H1) ─────────────────────────────────────
     #[test]
-    fn dream_journal_renders_known_counts_human_first() {
+    fn dream_journal_renders_real_report_shape_with_diff_split() {
+        // The actual DreamReport wire shape: top-level counts + per-phase counters
+        // aggregated across phases[] — including the colony-C2 novel/rediscovery split.
         let report = serde_json::json!({
-            "memories_processed": 42,
-            "consolidated": 5,
-            "schemas_created": 2,
-            "pruned": 3,
+            "agent_id": "APEX",
+            "episodes_consolidated": 5,
+            "total_llm_calls": 20,
+            "success": true,
+            "phases": [
+                { "phase": "sws_replay", "memories_processed": 42, "links_created": 7,
+                  "memories_pruned": 3, "procedures_extracted": 0, "procedures_rediscovered": 0 },
+                { "phase": "pattern_extraction", "memories_processed": 30, "links_created": 4,
+                  "procedures_extracted": 6, "procedures_rediscovered": 4, "schemas_extracted": 2 },
+            ],
         });
         let j = compose_dream_journal(&report, "2026-07-06T03:00:00Z");
         assert!(j.starts_with("Dream journal — nightly consolidation started 2026-07-06T03:00:00Z"));
-        assert!(j.contains("- 42 memories processed"));
-        assert!(j.contains("- 2 new schemas"));
-        assert!(j.contains("- 3 memories pruned"));
-        assert!(!j.contains("Report: {"), "known counts render as lines, not raw JSON");
+        assert!(j.contains("- 5 episodes consolidated"));
+        assert!(j.contains("- 72 memories processed"), "phase counters aggregate");
+        assert!(j.contains("- 11 new links"));
+        assert!(j.contains("- 6 NOVEL procedures minted"));
+        assert!(j.contains("- 4 re-discoveries reinforced into existing procedures"));
+        assert!(j.contains("- 2 schemas formed"));
+        assert!(!j.contains("Report: {"), "recognized shape renders as lines, not raw JSON");
         assert!(j.contains("your record of it"));
     }
 
     #[test]
-    fn dream_journal_falls_back_to_compact_report_on_unknown_shape() {
-        // An evolved cerebro changing the DreamReport shape must never break the
-        // journal — unknown shapes embed compactly and stay honest.
-        let report = serde_json::json!({ "phases": ["rem", "prune"], "note": "new shape" });
-        let j = compose_dream_journal(&report, "2026-07-06T03:00:00Z");
+    fn dream_journal_quiet_night_and_unknown_shape() {
+        // A recognized report with nothing to say renders the quiet-night line…
+        let quiet = serde_json::json!({ "episodes_consolidated": 0, "phases": [] });
+        let j = compose_dream_journal(&quiet, "2026-07-06T03:00:00Z");
+        assert!(j.contains("a quiet night — nothing needed consolidating"));
+
+        // …while a genuinely unknown shape embeds compactly and stays honest.
+        let unknown = serde_json::json!({ "cycles": ["rem", "prune"], "note": "new shape" });
+        let j = compose_dream_journal(&unknown, "2026-07-06T03:00:00Z");
         assert!(j.contains(r#"Report: {"#));
         assert!(j.contains("new shape"));
     }
