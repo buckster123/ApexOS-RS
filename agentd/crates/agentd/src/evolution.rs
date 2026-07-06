@@ -74,6 +74,54 @@ pub fn parse_undo_from_episode_memories(mems_text: &str) -> Option<EvolutionProp
         .find_map(parse_undo_snapshot_from_text)
 }
 
+// ── fossil healing (colony C1: evolution residue) ────────────────────────────
+
+/// Decide whether an undo-snapshot memory node is a C1 "fossil" needing healing —
+/// snapshots stored before the attributed/tagged/low-salience path landed were
+/// untagged, `agent_id: null` (hence Shared = federation-exposed full historical
+/// souls), and auto-salienced ~1.0 (dominating ranked recall). Returns the
+/// `update_memory` args to heal it, `None` when the node is already clean or is
+/// not an undo snapshot at all. Pure — the boot migration and the sweep both use
+/// it, and healing is idempotent (a healed node stops matching).
+pub fn fossil_heal_args(node: &serde_json::Value, agent_id: &str) -> Option<serde_json::Value> {
+    let content = node["content"].as_str()?;
+    if !content.contains("undo_snapshot: ") {
+        return None; // not a rollback artifact — never touch
+    }
+    let id = node["id"].as_str()?;
+
+    let tags: Vec<String> = node["tags"].as_array()
+        .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let has_tags   = tags.iter().any(|t| t == "undo_snapshot");
+    let is_private = node["visibility"].as_str() == Some("private");
+    let owned      = !node["agent_id"].is_null();
+    let salience   = node["salience"].as_f64().unwrap_or(1.0);
+
+    if has_tags && is_private && owned && salience <= 0.3 {
+        return None; // already clean
+    }
+
+    let mut new_tags = tags;
+    for t in ["evolution", "undo_snapshot"] {
+        if !new_tags.iter().any(|x| x == t) {
+            new_tags.push(t.to_string());
+        }
+    }
+    let mut args = serde_json::json!({
+        "memory_id":  id,
+        "agent_id":   agent_id, // scope for the lookup
+        "tags":       new_tags,
+        "salience":   salience.min(0.25),
+        "visibility": "private",
+    });
+    if !owned {
+        // Privatizing an owner-less node needs attribution first (the orphan guard).
+        args["set_agent_id"] = serde_json::json!(agent_id);
+    }
+    Some(args)
+}
+
 // ── inverse (rollback planning) ──────────────────────────────────────────────
 
 /// The prior on-disk values an apply will overwrite — captured by the glue (via IO)
@@ -238,6 +286,54 @@ pub fn wishlist_append(
          - status: REQUESTED — seat it, reboot; the embodiment probe confirms it live\n",
     ));
     doc
+}
+
+#[cfg(test)]
+mod fossil_tests {
+    use super::*;
+
+    fn fossil(content: &str, tags: &[&str], vis: &str, agent: Option<&str>, sal: f64) -> serde_json::Value {
+        serde_json::json!({
+            "id": "mem_x",
+            "content": content,
+            "tags": tags,
+            "visibility": vis,
+            "agent_id": agent,
+            "salience": sal,
+        })
+    }
+
+    #[test]
+    fn heals_the_colony_reported_fossil_shape() {
+        // The live shape all three nodes verified: untagged, shared, unowned, salience 1.0.
+        let n = fossil("evolution apply: soul\nundo_snapshot: {\"kind\":\"update_system_prompt\"}",
+                       &[], "shared", None, 1.0);
+        let args = fossil_heal_args(&n, "APEX").expect("must heal");
+        assert_eq!(args["visibility"], "private");
+        assert_eq!(args["set_agent_id"], "APEX");
+        assert!((args["salience"].as_f64().unwrap() - 0.25).abs() < 1e-9);
+        let tags: Vec<&str> = args["tags"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+        assert!(tags.contains(&"undo_snapshot") && tags.contains(&"evolution"));
+    }
+
+    #[test]
+    fn clean_nodes_and_non_snapshots_are_untouched() {
+        // Already-healed snapshot → None (idempotence).
+        let clean = fossil("x\nundo_snapshot: {}", &["evolution", "undo_snapshot"], "private", Some("APEX"), 0.25);
+        assert!(fossil_heal_args(&clean, "APEX").is_none());
+        // An ordinary memory that merely mentions evolution → never touched.
+        let normal = fossil("note about the evolution system design", &[], "shared", None, 1.0);
+        assert!(fossil_heal_args(&normal, "APEX").is_none());
+    }
+
+    #[test]
+    fn owned_fossil_keeps_its_owner() {
+        // Attributed but leaked-shared: heal visibility/tags/salience, no re-attribution.
+        let n = fossil("undo_snapshot: {}", &["evolution"], "shared", Some("GUEST-1"), 0.9);
+        let args = fossil_heal_args(&n, "APEX").expect("must heal");
+        assert!(args.get("set_agent_id").is_none(), "ownership is preserved, not overwritten");
+        assert_eq!(args["visibility"], "private");
+    }
 }
 
 #[cfg(test)]

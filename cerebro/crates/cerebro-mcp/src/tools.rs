@@ -109,7 +109,16 @@ fn tool_schema(name: &str) -> Value {
                     "content":   { "type": "string" },
                     "tags":      { "anyOf": [{"type":"array","items":{"type":"string"}},{"type":"string"}] },
                     "salience":  { "type": "number" },
-                    "agent_id":  { "type": "string" }
+                    "agent_id":  { "type": "string" },
+                    "visibility": {
+                        "type": "string",
+                        "enum": ["private", "shared", "thread"],
+                        "description": "Change visibility. share_memory stays the deliberate publish act; privatizing an owner-less memory requires set_agent_id (else it would be visible to no one)."
+                    },
+                    "set_agent_id": {
+                        "type": "string",
+                        "description": "Re-attribute ownership (e.g. heal an agent_id-null record). Caller-stamped for model calls — a model can only claim to itself."
+                    }
                 },
                 "required": ["memory_id"]
             }
