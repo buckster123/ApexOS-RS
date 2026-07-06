@@ -163,6 +163,14 @@ export struct ModelItem {
     model-name: string,   // e.g. "Sonnet 4.6"
 }
 
+// A LAN inference endpoint found by GET /api/compute/discover (Settings → SCAN).
+export struct EndpointItem {
+    url:         string,  // ready-to-adopt OAI base URL, e.g. "http://192.168.0.42:11434/v1"
+    kind:        string,  // ollama | vllm | lmstudio | llama.cpp
+    host:        string,
+    model-count: int,
+}
+
 // Tokenomics / cache-bank readout for the ⚡ Inference view. Rust formats every
 // field into a display string from GET /api/usage (cumulative since daemon boot).
 export struct Usage {

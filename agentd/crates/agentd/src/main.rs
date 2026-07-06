@@ -100,21 +100,30 @@ async fn main() -> anyhow::Result<()> {
     let api_key_arc = Arc::new(RwLock::new(api_key_str));
     let oai_api_key_str = load_oai_api_key();
     let oai_api_key_arc = Arc::new(RwLock::new(oai_api_key_str));
-    let backend_str = std::env::var("AGENTD_BACKEND").unwrap_or_else(|_| "anthropic".into());
-    let oai_base_url_str = std::env::var("AGENTD_OAI_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:11434/v1".into());
-    let default_model = std::env::var("AGENTD_MODEL").unwrap_or_else(|_| match backend_str.as_str() {
-        "ollama" | "vllm" => "qwen3:27b".into(),
-        "openrouter"      => "qwen/qwen3-70b-a3b".into(),
-        _                 => "claude-sonnet-4-6".into(),
-    });
-    eprintln!("[agentd] backend: {backend_str}, model: {default_model}");
+    // Backend/model/URL resolve through the persisted operator choice first (Settings
+    // → POST /api/backend|model → backend_config.json, file-wins-on-restart like
+    // voice/sensor config), then env, then backend-aware defaults. One resolution,
+    // shared by the arcs AND the vast revert defaults, so every consumer agrees.
+    let persisted_backend = apexos_gateway::backend_config::load_persisted();
+    let boot_cfg = apexos_gateway::backend_config::resolve_boot(
+        &std::env::var("AGENTD_BACKEND").unwrap_or_default(),
+        &std::env::var("AGENTD_MODEL").unwrap_or_default(),
+        &std::env::var("AGENTD_OAI_BASE_URL").unwrap_or_default(),
+        persisted_backend.as_ref(),
+    );
+    eprintln!(
+        "[agentd] backend: {}, model: {}{}",
+        boot_cfg.backend,
+        boot_cfg.model,
+        if persisted_backend.is_some() { " (persisted)" } else { "" }
+    );
     // Keep the resolved boot model owned (clone into the arc) — the vast hot-swap
     // block reverts to this exact value, which is correct even when AGENTD_MODEL is
     // unset (the per-backend default), unlike re-reading AGENTD_MODEL alone.
-    let model_arc        = Arc::new(RwLock::new(default_model.clone()));
-    let backend_arc      = Arc::new(RwLock::new(backend_str));
-    let oai_base_url_arc = Arc::new(RwLock::new(oai_base_url_str));
+    let default_model = boot_cfg.model.clone();
+    let model_arc        = Arc::new(RwLock::new(boot_cfg.model.clone()));
+    let backend_arc      = Arc::new(RwLock::new(boot_cfg.backend.clone()));
+    let oai_base_url_arc = Arc::new(RwLock::new(boot_cfg.oai_base_url.clone()));
 
     // Load policy config and wrap in a shared Arc so the evolution applier can hot-swap it.
     let policy_path = PathBuf::from(
@@ -646,14 +655,12 @@ async fn main() -> anyhow::Result<()> {
         let backend_w      = Arc::clone(&backend_arc);
         let oai_url_w      = Arc::clone(&oai_base_url_arc);
         let model_w        = Arc::clone(&model_arc);
+        // The resolved BOOT config (env + persisted backend_config, resolved above) —
+        // restored on revert. Resolving once here (not re-reading AGENTD_MODEL, which
+        // is empty when unset) is what keeps an unset-MODEL node's revert correct.
         let defaults = VastRevertDefaults {
-            backend: std::env::var("AGENTD_BACKEND").unwrap_or_else(|_| "anthropic".into()),
-            oai_url: std::env::var("AGENTD_OAI_BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:11434/v1".into()),
-            // The model the daemon BOOTED with — restored on revert. The old code
-            // re-read AGENTD_MODEL (empty when unset) and only restored when set, so
-            // an unset-MODEL node reverted the backend but left the vast model id in
-            // place → every post-revert turn failed against Anthropic.
+            backend: boot_cfg.backend.clone(),
+            oai_url: boot_cfg.oai_base_url.clone(),
             model:   default_model,
         };
         tokio::spawn(async move {
@@ -661,6 +668,22 @@ async fn main() -> anyhow::Result<()> {
                 match vast_rx.recv().await {
                     Ok(ev) => {
                         if let Some(t) = vast_swap_target(&ev, &defaults) {
+                            // A REVERT restores the operator's steady-state choice: a
+                            // backend_config persisted AFTER boot (a Settings switch
+                            // made mid-session) beats the boot snapshot. The vast
+                            // swap itself never persists — a rented GPU is transient.
+                            let t = if !matches!(ev, Event::VastInstanceReady { .. }) {
+                                match apexos_gateway::backend_config::load_persisted() {
+                                    Some(p) => InferenceTarget {
+                                        backend: p.backend,
+                                        oai_url: p.oai_base_url,
+                                        model:   p.model,
+                                    },
+                                    None => t,
+                                }
+                            } else {
+                                t
+                            };
                             eprintln!("[vast] inference → backend={} url={} model={}", t.backend, t.oai_url, t.model);
                             *backend_w.write().await = t.backend;
                             *oai_url_w.write().await = t.oai_url;
