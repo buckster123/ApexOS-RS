@@ -51,7 +51,7 @@ pub async fn run(
             text: format!("Session {id} transcript follows. Consolidate it into the JSON object.\n\n{transcript}"),
         }],
     }];
-    let raw = match collect(&provider, &history).await {
+    let raw = match collect(&provider, &history, SYSTEM).await {
         Ok(t)  => t,
         Err(e) => return json!({ "ok": false, "error": format!("summarization failed: {e}") }),
     };
@@ -92,8 +92,14 @@ pub async fn run(
 }
 
 /// One-shot completion (no tools) — mirrors self_update's `collect_completion`.
-async fn collect(provider: &Arc<dyn Provider>, history: &[Message]) -> Result<String, String> {
-    let mut stream = provider.messages_stream(history, &[], Some(SYSTEM)).await.map_err(|e| e.to_string())?;
+/// Shared with `rehearse` (the soul fitting room): both are off-turn ephemeral
+/// LLM work owned by this worker seam, so the system prompt is a parameter.
+pub(crate) async fn collect(
+    provider: &Arc<dyn Provider>,
+    history:  &[Message],
+    system:   &str,
+) -> Result<String, String> {
+    let mut stream = provider.messages_stream(history, &[], Some(system)).await.map_err(|e| e.to_string())?;
     let mut text = String::new();
     while let Some(chunk) = stream.next().await {
         match chunk {

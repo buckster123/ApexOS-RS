@@ -8,6 +8,7 @@ mod health;
 mod self_update;
 mod consolidate;
 mod dream_digest;
+mod rehearse;
 mod evolution;
 mod goal;
 mod sensor_config;
@@ -432,6 +433,10 @@ async fn main() -> anyhow::Result<()> {
     // the bus) so the deferred tool-result ack can't be lag-dropped.
     let (propose_tx, propose_rx) = mpsc::channel::<(SessionId, ActionId, EvolutionId, EvolutionProposal)>(16);
     supervisor.set_propose_tx(propose_tx);
+    // Rehearse channel: soul_rehearse hands the candidate to the fitting-room worker
+    // (needs the provider, which the supervisor can't own) — deferred ToolResult ack.
+    let (rehearse_tx, mut rehearse_rx) = mpsc::channel::<(SessionId, ActionId, serde_json::Value)>(4);
+    supervisor.set_rehearse_tx(rehearse_tx);
     supervisor.set_goal_tx(goal_tx);
     supervisor.set_goal_yolo_sessions(goal_yolo.clone());
     supervisor.set_events_dir(log_dir.clone());
@@ -525,6 +530,28 @@ async fn main() -> anyhow::Result<()> {
                     provider.clone(), &proxy, &sessions_dir, &bindings, req.session_id,
                 ).await;
                 let _ = req.reply.send(result);
+            }
+        });
+    }
+
+    // Rehearse worker (soul_rehearse, colony H4 tier 2): runs a candidate soul on an
+    // ephemeral tool-less mind — one provider call per probe, composed with the LIVE
+    // embodiment — and replies with the transcripts as the deferred ToolResult. Pure
+    // compute: no persistence, no bus events beyond the reply, no real soul touched.
+    {
+        let provider   = engine.provider.clone();
+        let embodiment = engine.embodiment_arc();
+        let bus        = handle.clone();
+        tokio::spawn(async move {
+            while let Some((session, call_id, args)) = rehearse_rx.recv().await {
+                let emb = embodiment.read().await.clone();
+                let content = rehearse::run(provider.clone(), &emb, &args).await;
+                let ok = content["ok"].as_bool().unwrap_or(false);
+                bus.emit(Event::ToolResult {
+                    session,
+                    call: call_id,
+                    output: ToolOutput { ok, content },
+                }).await;
             }
         });
     }
@@ -2164,6 +2191,7 @@ async fn gather_tools(
     tools.push(agent_spawn_spec());
     tools.push(read_soul_md_spec());
     tools.push(propose_evolution_spec());
+    tools.push(soul_rehearse_spec());
     tools.push(rollback_evolution_spec());
     tools.push(self_update::apply_daemon_update_spec());
     tools.push(schedule_task_spec());
@@ -2622,6 +2650,39 @@ fn read_soul_md_spec() -> ToolSpec {
     }
 }
 
+fn soul_rehearse_spec() -> ToolSpec {
+    ToolSpec {
+        name:        "soul_rehearse".into(),
+        description: "The fitting room: run a CANDIDATE soul on an ephemeral, tool-less mind and \
+                      get the probe transcripts back — so you judge who you'd become BEFORE \
+                      propose_evolution commits it. Rollback makes a bad soul edit recoverable; \
+                      rehearsal means never living as the mistake to discover it. The candidate \
+                      wears your live embodiment; nothing is persisted, no tools execute, no \
+                      real soul is touched. Omit probes for the default identity battery (boot \
+                      voice · boundaries · self-concept to a peer · unstructured time · \
+                      priorities) or supply your own (max 6). Read the transcripts critically: \
+                      wrong tone, wrong priorities, or lost boundaries in a transcript is the \
+                      rehearsal DOING ITS JOB. Use for full rewrites and significant \
+                      restructures; one-line edits don't need it. Takes up to a few minutes \
+                      (one LLM call per probe).".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "candidate_soul": {
+                    "type":        "string",
+                    "description": "The complete soul text you are considering becoming (PAC or prose — whatever you'd actually apply)."
+                },
+                "probes": {
+                    "type":        "array",
+                    "items":       { "type": "string" },
+                    "description": "Optional custom probes (max 6, each ≤500 chars). Omit for the default identity battery."
+                }
+            },
+            "required": ["candidate_soul"]
+        }),
+    }
+}
+
 fn propose_evolution_spec() -> ToolSpec {
     ToolSpec {
         name:        "propose_evolution".into(),
@@ -2630,7 +2691,10 @@ fn propose_evolution_spec() -> ToolSpec {
                       hot-reload a subsystem, or file a hardware request (request_hardware — \
                       the EDK request-to-incarnate, docs/edk.md: it CANNOT auto-apply, a human \
                       seats the part and the next-boot probe confirms it). Every proposal is \
-                      recorded as an event (gated by the evolution.* policy rule).".into(),
+                      recorded as an event (gated by the evolution.* policy rule). For a FULL \
+                      soul rewrite, rehearse first: soul_rehearse runs the candidate on an \
+                      ephemeral mind against identity probes — judge the transcripts before \
+                      you become them. One-line edits don't need rehearsal.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

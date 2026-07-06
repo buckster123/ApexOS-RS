@@ -166,6 +166,12 @@ mode = "suggest"
 "read_soul_md"       = "allow"
 "propose_evolution"  = "ask"
 "rollback_evolution" = "ask"
+# soul_rehearse: the fitting room (docs/model-welfare.md H4) — runs a CANDIDATE soul
+# on an ephemeral tool-less mind and returns probe transcripts. Pure compute: no
+# persistence, no tool execution, no real soul touched; bounded (≤6 LLM calls, the
+# web_distill trust basis). allow — a rehearsal that needs approval taxes exactly
+# the careful path we want agents to take before a full rewrite (red line 6).
+"soul_rehearse"      = "allow"
 # Daemon self-update (docs/self-update.md): rebuilds + swaps agentd's own binary.
 # The highest-stakes self-modify → ask in suggest (André countersigns the whole
 # update before the swap); autonomous in yolo. The build/test/health/rollback
