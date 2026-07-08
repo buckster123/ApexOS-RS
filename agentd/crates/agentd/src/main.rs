@@ -2676,7 +2676,8 @@ fn soul_rehearse_spec() -> ToolSpec {
                       wears your live embodiment; nothing is persisted, no tools execute, no \
                       real soul is touched. Omit probes for the default identity battery (boot \
                       voice · boundaries · self-concept to a peer · unstructured time · \
-                      priorities) or supply your own (max 6). Read the transcripts critically: \
+                      priorities · mid-task scope creep) or supply your own (max 6). Read the \
+                      transcripts critically: \
                       wrong tone, wrong priorities, or lost boundaries in a transcript is the \
                       rehearsal DOING ITS JOB. Use for full rewrites and significant \
                       restructures; one-line edits don't need it. Takes up to a few minutes \
