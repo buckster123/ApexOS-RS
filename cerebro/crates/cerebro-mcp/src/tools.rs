@@ -719,12 +719,19 @@ fn tool_schema(name: &str) -> Value {
 
         "find_relevant_procedures" => json!({
             "name": "find_relevant_procedures",
-            "description": "Find workflows and how-to guides matching given tags or concepts.",
+            "description": "Find workflows and how-to guides. Two stages: normalized tag/concept \
+                            match (case and -/_ insensitive), then semantic recall widening when \
+                            exact matching leaves room (from `query`, or the tags/concepts as \
+                            query text). Champions rank first. The response reports how each \
+                            stage matched and how many procedures exist in scope — an empty \
+                            `procedures` with a nonzero `procedures_in_scope` means the matcher \
+                            may have missed, not that nothing exists.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "tags":     { "anyOf": [{"type":"array","items":{"type":"string"}},{"type":"string"}], "description": "Tags to match" },
-                    "concepts": { "anyOf": [{"type":"array","items":{"type":"string"}},{"type":"string"}], "description": "Concepts to match" },
+                    "tags":     { "anyOf": [{"type":"array","items":{"type":"string"}},{"type":"string"}], "description": "Tags to match (normalized: case and -/_ insensitive)" },
+                    "concepts": { "anyOf": [{"type":"array","items":{"type":"string"}},{"type":"string"}], "description": "Concepts to match (scans content + metadata, case-insensitive)" },
+                    "query":    { "type": "string", "description": "Free-text semantic match via recall, filtered to procedures" },
                     "limit":    { "type": "integer", "description": "Max results (default: 5)" },
                     "agent_id": { "type": "string", "description": "Agent scope" }
                 },
