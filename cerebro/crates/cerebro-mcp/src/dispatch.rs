@@ -888,8 +888,13 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
         "find_relevant_procedures" => {
             let tags     = coerce_str_list(&args["tags"]);
             let concepts = coerce_str_list(&args["concepts"]);
-            if tags.is_empty() && concepts.is_empty() {
-                return Ok(json!([]));
+            let query    = args["query"].as_str().unwrap_or("").trim().to_string();
+            if tags.is_empty() && concepts.is_empty() && query.is_empty() {
+                return Ok(json!({
+                    "procedures": [],
+                    "note": "nothing to match — pass tags/concepts for exact lookup \
+                             and/or query for semantic matching",
+                }));
             }
             let max_results = args["limit"].as_u64().unwrap_or(5) as usize;
             let scope       = agent_scope(args);
@@ -900,27 +905,80 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             };
             let nodes = brain.storage.read().await.sqlite
                 .list_memories_scoped(&scope, &filter).await?;
-            let mut filtered: Vec<_> = nodes.into_iter()
+            let in_scope = nodes.iter()
+                .filter(|n| !n.tags.iter().any(|t| t == "undo_snapshot"))
+                .count();
+
+            // Stage 1 — exact-ish match, NORMALIZED (colony C6: exact string
+            // equality silently missed "mesh_recall" vs "mesh-recall" and
+            // case drift, on the tool the souls mandate reaching for first).
+            // Concepts scan content too, not just the metadata JSON string.
+            let mut matched: Vec<_> = nodes.into_iter()
                 .filter(|n| {
                     // Skip evolution undo-snapshots (rollback artifacts mis-typed Procedural).
                     if n.tags.iter().any(|t| t == "undo_snapshot") { return false; }
-                    let tag_hit = tags.iter().any(|t| n.tags.iter().any(|nt| nt == t));
-                    let meta_str = n.metadata.to_string();
-                    let concept_hit = concepts.iter().any(|c| meta_str.contains(c.as_str()));
+                    let tag_hit = tags.iter()
+                        .any(|t| n.tags.iter().any(|nt| norm_tag(nt) == norm_tag(t)));
+                    let meta_lc    = n.metadata.to_string().to_lowercase();
+                    let content_lc = n.content.to_lowercase();
+                    let concept_hit = concepts.iter().any(|c| {
+                        let c = c.to_lowercase();
+                        meta_lc.contains(c.as_str()) || content_lc.contains(c.as_str())
+                    });
                     tag_hit || concept_hit
                 })
                 .collect();
-            // Champion-aware ordering (E1 follow-up). The tag/concept match above
-            // is a *binary* relevance gate — it imposes no order, so prior to this
-            // the surfaced `max_results` were whatever the DB happened to list
-            // first. Rank the matched set by the SAME fitness the dream
-            // competition uses (`retrieval_rank`): a niche champion leads, then by
-            // Wilson fitness, ungraded falling back to salience. So when several
-            // procedures fit a niche, the one competition crowned surfaces first.
-            filtered.sort_by(|a, b| retrieval_rank(b)
+            let exact_hits = matched.len();
+
+            // Stage 2 — semantic widening through the SAME recall path that set
+            // the fuzzy expectations (C6): the explicit query, else the
+            // tags+concepts as query text. Only when exact matching left room,
+            // so a full exact answer costs nothing extra.
+            let mut semantic_hits = 0usize;
+            if matched.len() < max_results {
+                let qtext = if query.is_empty() {
+                    tags.iter().chain(concepts.iter()).cloned()
+                        .collect::<Vec<_>>().join(" ")
+                } else {
+                    query.clone()
+                };
+                if let Ok(results) = brain.recall(&qtext, max_results * 4, scope.clone()).await {
+                    for (node, _score) in results {
+                        if node.memory_type != MemoryType::Procedural { continue; }
+                        if node.tags.iter().any(|t| t == "undo_snapshot") { continue; }
+                        if matched.iter().any(|m| m.id == node.id) { continue; }
+                        matched.push(node);
+                        semantic_hits += 1;
+                    }
+                }
+            }
+
+            // Champion-aware ordering (E1 follow-up). The match stages are a
+            // *binary* relevance gate — rank the whole matched set by the SAME
+            // fitness the dream competition uses (`retrieval_rank`): a niche
+            // champion leads, then by Wilson fitness, ungraded falling back to
+            // salience. So when several procedures fit, the one competition
+            // crowned surfaces first — whichever stage found it.
+            matched.sort_by(|a, b| retrieval_rank(b)
                 .partial_cmp(&retrieval_rank(a)).unwrap_or(std::cmp::Ordering::Equal));
-            filtered.truncate(max_results);
-            Ok(json!(filtered))
+            matched.truncate(max_results);
+
+            // An empty result must be readable (C6): "nothing exists" and "the
+            // matcher missed" are different situations — say which is plausible.
+            let mut out = json!({
+                "procedures": matched,
+                "matched": { "exact": exact_hits, "semantic": semantic_hits },
+                "procedures_in_scope": in_scope,
+            });
+            if out["procedures"].as_array().is_some_and(|a| a.is_empty()) && in_scope > 0 {
+                out["note"] = json!(format!(
+                    "no match, but {in_scope} procedural memories exist in scope — an \
+                     empty result can mean the matcher missed, not that nothing exists. \
+                     Cross-check with recall or list_procedures; if the procedure you \
+                     expected is there, re-tag it to match how you look it up."
+                ));
+            }
+            Ok(out)
         }
 
         "record_procedure_outcome" => {
@@ -1410,6 +1468,13 @@ fn agent_scope(args: &Value) -> VisibilityScope {
     }
 }
 
+/// Canonical form for procedure-lookup tag comparison (colony C6): lowercase
+/// with `-`/`_`/space folded to one separator, so "Mesh_Recall" == "mesh-recall"
+/// == "mesh recall". Lookup-side only — stored tags are never rewritten.
+fn norm_tag(t: &str) -> String {
+    t.trim().to_lowercase().replace(['_', ' '], "-")
+}
+
 /// Canonicalize a session priority to uppercase (the schema enum case), so the
 /// `priority:<p>` tag written on session_save and the filter on session_recall
 /// agree regardless of input casing ("medium"/"MEDIUM"/"Medium" all match).
@@ -1697,11 +1762,102 @@ mod tests {
         let resp = dispatch_tool(find, Arc::clone(&brain)).await;
         assert!(resp["error"].is_null(), "find should not error: {}", resp["error"]);
         let text  = resp["result"]["content"][0]["text"].as_str().unwrap();
-        let procs: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(procs.as_array().unwrap().len(), 2, "both niche procedures returned");
+        let result: Value = serde_json::from_str(text).unwrap();
+        let procs = result["procedures"].as_array().unwrap();
+        assert_eq!(procs.len(), 2, "both niche procedures returned");
         // The champion floats to the front despite being stored second.
         assert!(procs[0]["tags"].as_array().unwrap().iter().any(|t| t == "skill_champion"),
             "champion must surface first, got: {}", procs[0]);
+        assert_eq!(result["matched"]["exact"].as_u64(), Some(2));
+    }
+
+    // ---- colony C6: the silent-miss fixes ----------------------------------
+
+    #[tokio::test]
+    async fn find_relevant_procedures_matches_normalized_tags() {
+        // apex2's C6: a well-tagged procedure returned [] because the matcher
+        // was exact string equality — "mesh_recall" vs "Mesh-Recall" missed.
+        let (brain, _dir) = make_brain().await;
+        let r = dispatch_tool(json!({
+            "jsonrpc":"2.0","id":0,"method":"tools/call",
+            "params":{"name":"store_procedure","arguments":{
+                "content": "to query the colony: mesh_recall with a short query, group hits per peer",
+                "tags": ["mesh_recall", "Federation"]
+            }}
+        }), Arc::clone(&brain)).await;
+        assert!(r["error"].is_null(), "store should not error: {}", r["error"]);
+
+        for asked in ["Mesh-Recall", "mesh recall", "FEDERATION"] {
+            let resp = dispatch_tool(json!({
+                "jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"find_relevant_procedures","arguments":{ "tags":[asked] }}
+            }), Arc::clone(&brain)).await;
+            let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+            let result: Value = serde_json::from_str(text).unwrap();
+            assert_eq!(result["procedures"].as_array().unwrap().len(), 1,
+                "normalized tag '{asked}' must match, got: {result}");
+        }
+    }
+
+    #[tokio::test]
+    async fn find_relevant_procedures_empty_result_is_honest() {
+        // An empty result over a non-empty procedure store must SAY the matcher
+        // may have missed — "no match" and "nothing exists" are different states.
+        let (brain, _dir) = make_brain().await;
+        dispatch_tool(json!({
+            "jsonrpc":"2.0","id":0,"method":"tools/call",
+            "params":{"name":"store_procedure","arguments":{
+                "content": "deploy: stop service, hot-swap binary, start, tail journal",
+                "tags": ["deploy"]
+            }}
+        }), Arc::clone(&brain)).await;
+
+        let resp = dispatch_tool(json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"find_relevant_procedures","arguments":{ "tags":["zzz-unrelated-topic"] }}
+        }), Arc::clone(&brain)).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert!(result["procedures"].as_array().unwrap().is_empty());
+        assert_eq!(result["procedures_in_scope"].as_u64(), Some(1));
+        let note = result["note"].as_str().unwrap_or_default();
+        assert!(note.contains("matcher missed") || note.contains("matcher may"),
+            "empty result must state the matcher may have missed, got: {note}");
+    }
+
+    #[tokio::test]
+    async fn find_relevant_procedures_widens_semantically_via_query() {
+        // No tag overlap at all — the free-text query must still find the
+        // procedure through the recall path (FTS in tests), filtered to
+        // procedural type, and report it as a semantic hit.
+        let (brain, _dir) = make_brain().await;
+        dispatch_tool(json!({
+            "jsonrpc":"2.0","id":0,"method":"tools/call",
+            "params":{"name":"store_procedure","arguments":{
+                "content": "hotfix rollout: push through the mesh relay pipeline node by node",
+                "tags": ["ops"]
+            }}
+        }), Arc::clone(&brain)).await;
+
+        let resp = dispatch_tool(json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"find_relevant_procedures","arguments":{
+                "query": "mesh relay pipeline"
+            }}
+        }), Arc::clone(&brain)).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["procedures"].as_array().unwrap().len(), 1,
+            "semantic query must reach the procedure, got: {result}");
+        assert_eq!(result["matched"]["semantic"].as_u64(), Some(1));
+        assert_eq!(result["matched"]["exact"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn norm_tag_folds_case_and_separators() {
+        assert_eq!(norm_tag("Mesh_Recall"), norm_tag("mesh-recall"));
+        assert_eq!(norm_tag(" mesh recall "), norm_tag("MESH-RECALL"));
+        assert_ne!(norm_tag("mesh"), norm_tag("mesh-recall"), "no substring over-match");
     }
 
     #[tokio::test]
