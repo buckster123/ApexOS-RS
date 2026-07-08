@@ -1954,7 +1954,23 @@ fn dream_journal_enabled() -> bool {
 /// rediscovery split); falls back to embedding the compact report when the shape
 /// is unrecognized, so an evolved cerebro never breaks the journal. Diff-shaped
 /// and cold by colony red line 3 — a log, not a narrative.
+/// The ToolProxy hands back MCP content blocks (`[{"text": "<json>", "type": "text"}]`),
+/// not a bare DreamReport — unwrap the first text block and parse it. Anything else
+/// (a bare report, a future shape) passes through unchanged.
+fn dream_report_value(content: &serde_json::Value) -> serde_json::Value {
+    if let Some(text) = content
+        .as_array()
+        .and_then(|blocks| blocks.iter().find_map(|b| b["text"].as_str()))
+    {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+            return v;
+        }
+    }
+    content.clone()
+}
+
 fn compose_dream_journal(report: &serde_json::Value, started_at: &str) -> String {
+    let report = dream_report_value(report);
     let mut lines: Vec<String> = Vec::new();
     let recognized =
         report["phases"].is_array() || report["episodes_consolidated"].is_u64();
@@ -1991,7 +2007,7 @@ fn compose_dream_journal(report: &serde_json::Value, started_at: &str) -> String
         "- a quiet night — nothing needed consolidating".to_string()
     } else {
         // Unknown report shape — stay honest, embed it compactly.
-        format!("Report: {}", serde_json::to_string(report).unwrap_or_else(|_| "?".into()))
+        format!("Report: {}", serde_json::to_string(&report).unwrap_or_else(|_| "?".into()))
     };
     format!(
         "Dream journal — nightly consolidation started {started_at}.\n{body}\n\
@@ -3741,6 +3757,37 @@ tmpfs /var/lib/agentd/workspace/media tmpfs rw 0 0
         assert!(j.contains("- 2 schemas formed"));
         assert!(!j.contains("Report: {"), "recognized shape renders as lines, not raw JSON");
         assert!(j.contains("your record of it"));
+    }
+
+    #[test]
+    fn dream_journal_unwraps_mcp_content_blocks() {
+        // The LIVE call site passes out.content — MCP content blocks wrapping the
+        // report as a JSON string, not the bare report. This exact shape shipped
+        // fallback journals on all three nodes (2026-07-08) because the composer
+        // string-indexed an array. Wire shape copied from apex1's journal file.
+        let report = serde_json::json!({
+            "agent_id": "APEX",
+            "episodes_consolidated": 0,
+            "success": true,
+            "phases": [
+                { "phase": "pattern_extraction", "memories_processed": 68,
+                  "procedures_extracted": 31, "procedures_rediscovered": 4, "llm_calls": 12 },
+                { "phase": "rem_recombination", "memories_processed": 20, "links_created": 4 },
+            ],
+        });
+        let wrapped = serde_json::json!([
+            { "text": serde_json::to_string(&report).unwrap(), "type": "text" }
+        ]);
+        let j = compose_dream_journal(&wrapped, "2026-07-08T03:00:00Z");
+        assert!(j.contains("- 31 NOVEL procedures minted"));
+        assert!(j.contains("- 4 re-discoveries reinforced into existing procedures"));
+        assert!(j.contains("- 88 memories processed"));
+        assert!(!j.contains("Report: ["), "content blocks must unwrap, not embed raw");
+
+        // A text block that isn't JSON stays honest via the fallback.
+        let opaque = serde_json::json!([{ "text": "not json", "type": "text" }]);
+        let j = compose_dream_journal(&opaque, "2026-07-08T03:00:00Z");
+        assert!(j.contains("Report: ["));
     }
 
     #[test]
