@@ -150,7 +150,11 @@ impl McpClient {
             Ok(r)  => r.map_err(|_| anyhow!("MCP server closed before responding to {method}"))?,
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                anyhow::bail!("MCP request timed out after {}s: {method}", timeout.as_secs());
+                anyhow::bail!(
+                    "MCP request timed out after {}s: {method} — the plugin process is \
+                     alive but did not answer (hung, or working past this window)",
+                    timeout.as_secs()
+                );
             }
         };
 
