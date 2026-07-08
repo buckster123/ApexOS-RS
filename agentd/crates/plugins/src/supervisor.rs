@@ -92,7 +92,12 @@ impl ToolProxy {
             reply: reply_tx,
         }).await.map_err(|_| anyhow::anyhow!("supervisor channel closed"))?;
         tokio::time::timeout(timeout, reply_rx).await
-            .map_err(|_| anyhow::anyhow!("direct call timed out: {tool}"))?
+            .map_err(|_| anyhow::anyhow!(
+                "direct call timed out after {}s: {tool} — the dispatched tool keeps \
+                 running; only this caller stopped waiting (a genuinely long tool \
+                 needs a longer caller timeout, cf. the nightly-dream 10s lesson)",
+                timeout.as_secs()
+            ))?
             .map_err(|_| anyhow::anyhow!("reply dropped"))
     }
 }
@@ -359,7 +364,11 @@ impl Supervisor {
                                         call: action,
                                         output: ToolOutput {
                                             ok:      false,
-                                            content: serde_json::json!("denied by user"),
+                                            content: serde_json::json!(
+                                                "declined by the operator — an explicit no to \
+                                                 this call (not a timeout, not a policy error). \
+                                                 Adjust course or ask before retrying."
+                                            ),
                                         },
                                     }).await;
                                 });
@@ -1903,6 +1912,27 @@ impl Supervisor {
             }
         }
         // Unknown tool or plugin not live → return error so the turn loop unblocks.
+        // Cause-hint (colony C5): a dead plugin de-registers its tools, so a tool
+        // that vanished mid-session looks "unknown" — name any down plugin so the
+        // agent can attribute (and retry after the restart) instead of concluding
+        // the tool never existed.
+        let down: Vec<String> = self.configs.keys()
+            .filter(|id| !self.plugins.contains_key(*id))
+            .map(|id| id.0.clone())
+            .collect();
+        let content = if down.is_empty() {
+            format!(
+                "unknown tool: {tool_name} — no loaded plugin provides it and all \
+                 configured plugins are up (this is not a crash; check the tool list)"
+            )
+        } else {
+            format!(
+                "tool '{tool_name}' is not available right now: plugin(s) [{}] are \
+                 down/restarting, and a dead plugin's tools de-register until it \
+                 returns. If '{tool_name}' belongs to one of them, retry shortly.",
+                down.join(", ")
+            )
+        };
         let bus     = self.bus.clone();
         let call_id = call.id;
         tokio::spawn(async move {
@@ -1911,7 +1941,7 @@ impl Supervisor {
                 call: call_id,
                 output: ToolOutput {
                     ok:      false,
-                    content: serde_json::json!(format!("unknown tool: {tool_name}")),
+                    content: serde_json::json!(content),
                 },
             }).await;
         });

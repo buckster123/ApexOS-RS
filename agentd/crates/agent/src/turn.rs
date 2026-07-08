@@ -308,6 +308,61 @@ pub async fn run_turn(
     }
 }
 
+/// Where a still-missing tool call last stood, tracked from bus events so a
+/// synthesized error names the true blocker (colony C4/C5: pending ≠ declined ≠
+/// tool-hung — each implies a different next action, and a generic "timed out"
+/// invites false attribution).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WaitPhase {
+    /// Went straight to the plugin (allow policy) — no result means the tool
+    /// itself stalled or the work outlasted the window.
+    Dispatched,
+    /// Parked at the approval gate — no result means the operator never
+    /// responded (a decline would have produced an explicit result).
+    AwaitingApproval,
+    /// Operator said yes and the tool has been running since — no result means
+    /// it stalled after approval.
+    Approved,
+}
+
+/// Compose the synthesized error for a tool call that produced no result.
+/// Pure — unit-tested. `lagged` wins over phase: a lag-drop means the result
+/// may exist, which changes what the agent should do next (verify, don't retry
+/// blind).
+fn missing_result_message(
+    tool: &str,
+    phase: WaitPhase,
+    phase_age_secs: u64,
+    lagged: bool,
+    window_secs: u64,
+) -> String {
+    if lagged {
+        return format!(
+            "no result received for tool '{tool}' — the event bus lagged and the result \
+             may have been dropped in transit, so the tool MAY have completed. Verify its \
+             effects before retrying."
+        );
+    }
+    match phase {
+        WaitPhase::AwaitingApproval => format!(
+            "tool '{tool}' is still awaiting operator approval — {phase_age_secs}s with no \
+             response (this is NOT a decline and NOT a tool failure; the operator may be \
+             away). Proceed another way if you can, or retry later and ask for a decision."
+        ),
+        WaitPhase::Approved => format!(
+            "tool '{tool}' was approved by the operator {phase_age_secs}s ago but returned \
+             no result within the {window_secs}s window — it may still be running, or hung. \
+             Its effects may land later; verify before retrying."
+        ),
+        WaitPhase::Dispatched => format!(
+            "tool '{tool}' was dispatched but returned no result within {window_secs}s — \
+             the plugin may be hung, or the work genuinely outlasted the window (it was \
+             never waiting on approval and was not declined). Its effects may still land; \
+             verify before retrying."
+        ),
+    }
+}
+
 async fn collect_tool_results(
     rx:      &mut broadcast::Receiver<Event>,
     session: SessionId,
@@ -317,6 +372,15 @@ async fn collect_tool_results(
 ) -> anyhow::Result<Vec<ContentBlock>> {
     let mut remaining: HashMap<ActionId, ()> = pending.iter().map(|c| (c.id, ())).collect();
     let mut results:   HashMap<ActionId, ToolOutput> = HashMap::new();
+    // Approval-gate phase per call, updated from the same bus stream. Matched by
+    // ActionId alone (globally unique via next_action_id) — a UserApproval frame
+    // for a child-session call can arrive stamped with the parent socket's
+    // session, so an id match is the reliable one.
+    let mut phases: HashMap<ActionId, (WaitPhase, std::time::Instant)> = pending
+        .iter()
+        .map(|c| (c.id, (WaitPhase::Dispatched, std::time::Instant::now())))
+        .collect();
+    let mut lagged = false;
 
     // Bound the whole collection. On expiry we fall through and synthesize error
     // results for whatever is still missing, so the turn always unwinds and the
@@ -328,6 +392,18 @@ async fn collect_tool_results(
                 Ok(Event::ToolResult { session: s, call: action_id, output }) if s == session => {
                     if remaining.remove(&action_id).is_some() {
                         results.insert(action_id, output);
+                    }
+                }
+                Ok(Event::ApprovalPending { call, .. }) => {
+                    if remaining.contains_key(&call.id) {
+                        phases.insert(call.id, (WaitPhase::AwaitingApproval, std::time::Instant::now()));
+                    }
+                }
+                Ok(Event::UserApproval { action, granted: true, .. }) => {
+                    // A decline needs no tracking — the supervisor answers it with
+                    // an explicit "declined by the operator" ToolResult.
+                    if remaining.contains_key(&action) {
+                        phases.insert(action, (WaitPhase::Approved, std::time::Instant::now()));
                     }
                 }
                 Ok(_) => {}
@@ -346,7 +422,7 @@ async fn collect_tool_results(
 
     match tokio::time::timeout(timeout, collect).await {
         Ok(Ok(true))  => {}           // all tool results collected
-        Ok(Ok(false)) => {}           // lagged — remaining tools get synthesized errors below
+        Ok(Ok(false)) => lagged = true,  // remaining tools get lag-marked errors below
         Ok(Err(e))    => return Err(e),   // bus closed
         Err(_)        => eprintln!(
             "[agent:{session:?}] tool result(s) timed out after {}s — synthesizing errors for {} call(s)",
@@ -356,11 +432,17 @@ async fn collect_tool_results(
 
     let mut out = Vec::with_capacity(pending.len());
     for call in pending {
-        let output = results.remove(&call.id).unwrap_or(ToolOutput {
-            ok:      false,
-            content: serde_json::json!(format!(
-                "no result for tool '{}' (timed out or dropped)", call.tool
-            )),
+        let output = results.remove(&call.id).unwrap_or_else(|| {
+            let (phase, since) = phases
+                .get(&call.id)
+                .copied()
+                .unwrap_or((WaitPhase::Dispatched, std::time::Instant::now()));
+            ToolOutput {
+                ok:      false,
+                content: serde_json::json!(missing_result_message(
+                    &call.tool, phase, since.elapsed().as_secs(), lagged, timeout.as_secs(),
+                )),
+            }
         });
         let api_id = id_map.get(&call.id).cloned().unwrap_or_default();
         // A successful result carrying the vision sentinel gets its image shimmed and
@@ -686,9 +768,11 @@ mod tests {
 
     #[tokio::test]
     async fn tool_timeout_synthesizes_error_and_unwinds() {
-        // No tool executor is listening, so the result never arrives. With a short
-        // timeout the turn must still complete (error result synthesized), proving
-        // an abandoned/never-answered tool can't wedge the turn forever.
+        // No tool executor answers, but a simulated supervisor parks the call at
+        // the approval gate. With a short timeout the turn must still complete
+        // (error result synthesized), proving an abandoned approval can't wedge
+        // the turn forever — and the synthesized message must name the TRUE
+        // blocker (awaiting approval, colony C4), not a generic timeout.
         std::env::set_var("AGENTD_TOOL_RESULT_TIMEOUT_SECS", "1");
         let (bus, handle, bcast) = Bus::new(SystemState::default());
         tokio::spawn(bus.run());
@@ -700,6 +784,17 @@ mod tests {
             ],
             vec![ Chunk::TextBlock("recovered".into()), Chunk::Done ],
         ]);
+
+        // Simulated supervisor: every ToolRequested parks at the approval gate.
+        let bus_sim = handle.clone();
+        let mut rx_sim = bcast.subscribe();
+        tokio::spawn(async move {
+            while let Ok(event) = rx_sim.recv().await {
+                if let Event::ToolRequested { session, call } = event {
+                    bus_sim.emit(Event::ApprovalPending { session, call }).await;
+                }
+            }
+        });
 
         let engine = Arc::new(TurnEngine::new(provider, 1, None));
         let history = vec![Message::User { content: vec![ContentBlock::Text { text: "go".into() }] }];
@@ -713,10 +808,42 @@ mod tests {
         // user → assistant(tool_use) → user(synthesized error result) → assistant(text)
         assert_eq!(updated.len(), 4);
         match &updated[2] {
-            Message::User { content } => assert!(content.iter().any(|b|
-                matches!(b, ContentBlock::ToolResult { is_error, .. } if *is_error))),
+            Message::User { content } => {
+                let block = content.iter().find_map(|b| match b {
+                    ContentBlock::ToolResult { is_error: true, content, .. } => Some(content),
+                    _ => None,
+                }).expect("expected synthesized error tool_result");
+                let text = block.as_str().unwrap_or_default();
+                assert!(text.contains("awaiting operator approval"),
+                    "synthesized error must name the approval hold, got: {text}");
+            }
             _ => panic!("expected synthesized tool_result"),
         }
+    }
+
+    #[test]
+    fn missing_result_message_names_the_true_blocker() {
+        // Pending: not a decline, not a tool failure — with age.
+        let m = missing_result_message("run_command", WaitPhase::AwaitingApproval, 120, false, 1800);
+        assert!(m.contains("awaiting operator approval"));
+        assert!(m.contains("120s"));
+        assert!(m.contains("NOT a decline"));
+
+        // Approved-then-silent: the human said yes; the tool stalled after.
+        let m = missing_result_message("run_command", WaitPhase::Approved, 90, false, 1800);
+        assert!(m.contains("approved by the operator 90s ago"));
+        assert!(m.contains("verify before retrying"));
+
+        // Plain dispatch: never at the gate — say so explicitly.
+        let m = missing_result_message("http_fetch", WaitPhase::Dispatched, 1800, false, 1800);
+        assert!(m.contains("never waiting on approval"));
+        assert!(m.contains("1800s"));
+
+        // Lag wins over phase: the result may exist — verify, don't retry blind.
+        let m = missing_result_message("remember", WaitPhase::AwaitingApproval, 5, true, 1800);
+        assert!(m.contains("lagged"));
+        assert!(m.contains("MAY have completed"));
+        assert!(!m.contains("awaiting operator approval"));
     }
 
     // A real PNG, base64-encoded — mirrors what the gateway's tiny-skia rasteriser
