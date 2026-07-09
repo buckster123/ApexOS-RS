@@ -178,8 +178,8 @@ Same binaries everywhere — the *tier* is just environment, no per-device build
 | **Nano** | Pi Zero 2W, any 512 MB board | 512 MB | `linuxkms-femtovg` (software) | FTS5 only (~23 MB) | API only |
 | **Micro** | Pi 4 1–2 GB, older ARM64 | 1–2 GB | `linuxkms` | `bge-small` (~275 MB) | API or small local |
 | **Standard** | Pi 5, x86 mini-PC, M1 Mini | 4–8 GB | `linuxkms` / `winit` | `bge-small` | Ollama 7–13B |
-| **Pro** | x86 + GPU (CUDA/ROCm/Metal) | 8 GB+ | `winit` | `bge-large` + GPU | Ollama 30–70B local |
-| **Titan** | DGX Spark / Station | 128 GB+ | headless | GPU-accelerated | 70B+, serves the mesh |
+| **Pro** | x86 + GPU (CUDA/ROCm/Metal) | 8 GB+ | `winit` | `bge-small` | Ollama 30–70B local |
+| **Titan** | DGX Spark / Station | 128 GB+ | headless | `bge-small` | 70B+, serves the mesh |
 
 **Modes** (orthogonal to tier): **Kiosk** (Pi + HDMI, native UI) · **Headless** (server/laptop/DGX — browser + PWA only) · **Desktop** (x86 windowed). `install.sh` auto-detects and asks.
 
@@ -202,10 +202,10 @@ flowchart LR
     end
     a1 -->|"hot-swap backend → gpu:11434"| ol
     a2 -->|send_to_agent| a3
-    c2 -->|dream_run delegated| c3
+    c2 <-.->|"nightly dream digest"| c3
 ```
 
-mDNS discovery + per-peer tokens. A GPU node joins; Nano/Micro nodes point their inference backend at it at runtime (`POST /api/backend`, no restart). The GPU node can even run nightly memory consolidation for the whole cluster.
+mDNS discovery + per-peer tokens. A GPU node joins; Nano/Micro nodes point their inference backend at it at runtime (`POST /api/backend`, no restart). It can carry the cluster's vision captioning too (point `CEREBRO_VISION_URL` at it) — and every node pushes what its nightly dream learned to its peers (the digest exchange).
 </details>
 
 ---
@@ -254,7 +254,8 @@ install.sh        # one-shot installer
 - **Occipital** — a web "reading cortex": `web_search` / `web_fetch` / `web_recall` (semantic on Micro+) / `web_distill` (LLM-curated knowledge hub), with a follow-along reader window.
 - **Colony federation** — provenance-stamped memory relay between separate Cerebros (never a merge), federated recall (shared-visibility only at the wire), the nightly **dream digest exchange** (echo-guarded), procedure replication where a skill's fitness is **re-earned per node**, per-peer flow counters.
 - **Goals** — an autonomous goal driver (create → act per step → done/failed) with per-goal opt-in yolo and live board chips in the UI.
-- **Self-evolution (EDK)** — `propose_evolution` over soul / policy / plugins (reversible), skill grading, and the *request-to-incarnate* hardware loop.
+- **Self-evolution (EDK)** — `propose_evolution` over soul / policy / plugins (reversible), a `soul_rehearse` fitting room (A/B-try a candidate soul on an ephemeral, tool-less mind *before* applying), skill grading, and the *request-to-incarnate* hardware loop.
+- **Honest self-context (model welfare)** — the agent's model of its own situation is kept true across every gap it wakes over: a first-person **dream journal**, an honest marker at every history-trim seam, substrate notices on model/backend hot-swaps, and tool failures that name the *true* blocker (never a generic "timed out"). → [`docs/model-welfare.md`](docs/model-welfare.md)
 - **Self-update** — `apply_daemon_update` + a root systemd watchdog with health-gated rollback + probation. → [`docs/self-update.md`](docs/self-update.md)
 - **Multi-agent identity** — per-session agent binding: distinct Cerebro space, soul, workspace, and skin per agent on one node; persona skins carry a per-persona agent voice.
 
@@ -277,8 +278,8 @@ install.sh        # one-shot installer
 | Raspberry Pi 4 (4/2/1 GB) | fine→tight | Standard→Micro | BCM2711, `v3d` driver |
 | Raspberry Pi Zero 2W | 512 MB | Nano | `linuxkms-femtovg` + FTS5 |
 | x86 mini-PC (no GPU) | 4–16 GB | Standard | Ollama 7–13B |
-| x86 + NVIDIA / AMD GPU | 8 GB+ | Pro | CUDA / ROCm ORT, full-VRAM Ollama |
-| Apple Silicon (M1/M2/M3) | 8–96 GB | Pro | CoreML ORT, Ollama Metal |
+| x86 + NVIDIA / AMD GPU | 8 GB+ | Pro | full-VRAM Ollama 30–70B |
+| Apple Silicon (M1/M2/M3) | 8–96 GB | Pro | Ollama Metal |
 | DGX Spark / Station | 128 GB+ | Titan | arm64 — same binary as the Pi |
 
 ### Docs

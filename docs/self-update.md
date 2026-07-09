@@ -91,7 +91,7 @@ The edit/commit of the *source* is the existing git layer (PR #117 tools, with
 |---|---------------|------|------------------------|
 | 0 | **Preconditions** (tool) | clean git tree at `commit`; no update already in flight (lockfile); disk + toolchain ok | abort, plain tool error → **live daemon untouched** |
 | 1 | **Staging build** (tool) | `cargo build --release -p agentd` into a *staging* path — **never over the live binary** | build error returned to APEX → **untouched** |
-| 2 | **Tests** (tool) | `cargo test -p agentd` (+ workspace smoke) **and** the caller's `test_cmd` | test failure returned → **untouched** |
+| 2 | **Tests** (tool) | `cargo test -p agentd` **and** the caller's `test_cmd` | test failure returned → **untouched** |
 | 3 | **Adversarial review** (✅ slice 4) | a fresh-context LLM (own `RoutingProvider`) reviews the diff being swapped in: "could this brick boot / health / rollback? is it reversible? does it touch the update machinery itself?" → final `VERDICT: SAFE\|BLOCK`. **Fail-closed** (unparseable/unavailable → block); empty diff → trivially safe (no call); `AGENTD_SELF_UPDATE_REVIEW=0` to skip. Single reviewer v1, `review_diff` is the N-way-panel seam | review veto returned → **untouched** |
 | 4 | **Pre-swap commit** (tool) | `session_save()` + `store_intention("resuming after self-update: <reason>")`; write `request.json` (staged path, sha256, target/prev commit, deadline) | if the write fails, abort → **untouched** |
 | 5 | **Swap** (watchdog, root) | verify staged sha256; `cp agentd → agentd.prev`; **atomic** `mv staged → /usr/local/bin/agentd`; `systemctl restart agentd` | mv/restart fails → restore `agentd.prev` → **known-good** |

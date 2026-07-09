@@ -61,6 +61,11 @@ the Cerebro space key and the thing the system stamps everywhere.
   rule in CLAUDE.md).
 - **Agent ≠ session.** A `SessionId` is one conversation/turn-stream; an agent identity spans
   many sessions (and reboots). One agent, many sessions; the binding is session → identity.
+  Ephemeral **spawn sessions** (`SessionId ≥ apexos_core::SPAWN_SESSION_BASE`, the `1<<63`
+  range) sharpen this: a sub-agent is deliberately *not* the parent identity by default —
+  `resolve_spawn_system` (supervisor) gives it a minimal task charter instead of the parental
+  soul (`inherit_soul:true` is the explicit opt-in; an explicit `system` wins over both), and
+  its Cerebro mints carry the system-stamped `spawn-derived` tag (see the stamp family below).
 
 ---
 
@@ -68,17 +73,32 @@ the Cerebro space key and the thing the system stamps everywhere.
 
 > **Identity is stamped by the system at the boundary, never trusted from the agent's output.**
 
-agentd holds the **session → identity** binding (today: every session → `APEX`). When a tool
+agentd holds the **session → identity** binding (`apexos_core::SessionBindings`; an unbound
+session resolves to the node default, `APEX`). When a tool
 call crosses into a plugin, agentd **stamps the bound `agent_id` onto the call**, overwriting
 whatever the model produced. The model *cannot* write to another agent's space, because it no
 longer chooses the space — the same way the gateway already injects `session` into inbound
 frames rather than trusting the client to.
 
 Concretely, the seam is `Supervisor::dispatch_tool` (`agentd/.../supervisor.rs`): for any
-Cerebro-namespaced tool, set `call.args["agent_id"]` (and an owning-user field) from the
-session's identity before forwarding to the MCP plugin. This is the executable form of the
-note: *"system-provided `user: Andre, agent: APEX, …` follows along and is hooked into Cerebro
-calls for routing."*
+Cerebro-namespaced tool, set `call.args["agent_id"]` from the session's identity before
+forwarding to the MCP plugin. This is the executable form of the note: *"system-provided
+`user: Andre, agent: APEX, …` follows along and is hooked into Cerebro calls for routing."*
+(`agent_id` alone turned out to be the full routing key — no owning-user field is stamped.)
+
+The stamp is now a **family** — three stamps, all applied at the same seam, none trusted
+from the model:
+
+- **`stamp_agent_id`** — the original: overrides `agent_id` on every `cerebro`-plugin call
+  with `resolve_agent_id(session)` (bound agent → else `node_agent_id()`).
+- **`stamp_workspace`** — the same move for the *filesystem*: apexos-tools is one process
+  shared by every agent, so the per-agent FS root travels per call as `__workspace`
+  (`agent_workspace_root(agent_id)`), overwriting anything the model typed — a model can
+  never widen or redirect its own confinement boundary.
+- **`stamp_spawn_provenance`** — a Cerebro **mint** call (`remember`/`store_procedure`/…)
+  from an ephemeral spawn session gets a `spawn-derived` tag appended, so the continuous
+  self can tell at retrieval which memories a sub-agent wrote. Keyed by session range
+  (`apexos_core::is_spawn_session`), never model-supplied, never strippable by the child.
 
 Why this is both **security** and **correctness**:
 - *Security / isolation* — a session bound to agent B physically cannot read or write agent A's
@@ -121,7 +141,7 @@ This is where the design has one genuinely open product decision:
 | ~~OS-user-backed~~ | Map to system users / PAM | Rejected: overkill/heavy for the spare-device tier |
 
 The PIN is salted-hashed at rest (`sha256(salt‖pin)`); its real protection is an
-API-side guess **lockout** (a 3b sub-slice), since a 4-digit PIN is low-entropy
+API-side guess **lockout** (shipped in 3c), since a 4-digit PIN is low-entropy
 regardless of hash strength.
 
 ---
@@ -130,7 +150,7 @@ regardless of hash strength.
 
 | # | Slice | What lands | Status |
 |---|-------|-----------|--------|
-| 1 | **System-stamped Cerebro identity** 🔑 | agentd binds session→`agent_id` and stamps it onto every Cerebro call in `dispatch_tool` (overriding the model). Unify the `APEX`/`CLAUDE-APEX` drift to one source of truth. Default identity `APEX` → **zero behavior change for today's single agent**; pure hardening + the substrate multi-agent needs. | ✅ shipped — `apexos_core::node_agent_id()` (env `AGENTD_AGENT_ID`, default `APEX`); `Supervisor` caches it and `stamp_agent_id()` overrides `agent_id` on `cerebro`-plugin calls; council + rollback-store writes unified to it |
+| 1 | **System-stamped Cerebro identity** 🔑 | agentd binds session→`agent_id` and stamps it onto every Cerebro call in `dispatch_tool` (overriding the model). Unify the `APEX`/`CLAUDE-APEX` drift to one source of truth. Default identity `APEX` → **zero behavior change for today's single agent**; pure hardening + the substrate multi-agent needs. | ✅ shipped — `apexos_core::node_agent_id()` (env `AGENTD_AGENT_ID`, default `APEX`); `stamp_agent_id()` overrides `agent_id` on `cerebro`-plugin calls (since 3b resolved per-session via `resolve_agent_id`); council + rollback-store writes unified to it |
 | 2 | **Per-identity cognitive boot** | CCBS injection at session start keyed to the session's identity (select agent X → boot X's skills/intentions/memories) + nightly `dream_run` schedule. Absorbs the open symbiosis steps 3–4 (now unblocked: `cognitive_bootstrap` is implemented, not the stub the old BACKLOG claims). | ✅ shipped — `root_turn` calls `cognitive_bootstrap` via `ToolProxy` on a session's first turn (cached, 15s-bounded, graceful), composed into the prompt as `soul+embodiment+priming` by `TurnEngine::with_priming`; both scoped to `node_agent_id()`. Nightly `dream_run` runs as a dedicated direct-call task (`spawn_nightly_dream`, cron `AGENTD_DREAM_CRON`). Opt-out `AGENTD_CCBS=0` |
 | 3a | **Identity store** (data layer) | `User`/`AgentRecord`/`Identities` in `apexos_core::identity`: toml persistence (`identities.toml`), `seed_defaults` (owner + APEX), optional salted PIN (hash/verify, constant-time). Pure + unit-tested, **inert** (no wiring → zero hot-path risk). | ✅ shipped |
 | 3b | **Per-session binding** (memory) | A `hello` frame may carry `agent_id`; agentd records `SessionId→agent_id` (`SessionBindings`). The slice-1 stamp + slice-2 CCBS boot resolve identity via `resolve_agent_id(session)` — bound agent → else `node_agent_id()`. So selecting an agent switches its **Cerebro memory space**. Unbound = APEX (current behavior). | ✅ shipped — `apexos_core::{SessionBindings, resolve_agent_id}`; gateway binds on `hello`, supervisor stamp + `root_turn` CCBS resolve per-session |
@@ -149,7 +169,7 @@ The cognitive boot loop is the **missing middle**: Slice 1 *enforces* an identit
 > **Arc complete (all slices shipped).** Identity is system-stamped (1), the agent wakes
 > oriented (2), the registry + API + PIN exist (3a/3c), selecting an agent switches its
 > memory *and* soul (3b/3b-2), a human picks at boot (3d), and the wizard was polished/hardened
-> (lock badge · agent empty-state · lockout messaging). a human picks at boot (3d), and **connection auth is real** — a login mints a session
+> (lock badge · agent empty-state · lockout messaging), and **connection auth is real** — a login mints a session
 > token so the desktop/web/PWA client no longer needs the shared node secret (3e, server **and**
 > native-UI wiring — login screen → `/api/auth/login` → re-exec with the minted token).
 > **Binding security closed (3e):** the multi-agent `hello{agent_id}` bind is now **auth-gated** — a
@@ -184,11 +204,11 @@ The cognitive boot loop is the **missing middle**: Slice 1 *enforces* an identit
 - **vs [edk.md](edk.md)** (bigger body) — orthogonal axis: body is per-node and physical,
   identity is portable across the mesh. A request-to-incarnate changes the body; the identity
   riding it is unchanged.
-- **vs self-evolution hardening** (separate track) — the `EvolutionId` global counter is
-  already fixed; the remaining bits (cold-start rollback JSON parse, defer `propose_evolution`
-  ack) are pure correctness, do anytime. They become **more** relevant once multi-agent lands,
-  because soul/policy evolution becomes *per-agent* — so land them before Slice 3, but they are
-  not part of this arc.
+- **vs self-evolution hardening** (separate track) — all landed: the `EvolutionId` global
+  counter, the cold-start rollback restore (`restore_rollback_store`), and the deferred
+  `propose_evolution` ack (dedicated mpsc, `set_propose_tx`). The multi-agent relevance
+  materialized as predicted: soul evolution *is* per-agent now (`soul_target_for`, slice
+  3b-2 — a bound agent evolves its own `soul_file`, never APEX's global soul).
 
 ---
 

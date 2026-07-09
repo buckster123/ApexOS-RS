@@ -223,14 +223,16 @@ messages.push(MessageItem { text: "hello".into(), ..Default::default() });
 
 ## agentd WebSocket protocol
 
-On connect, send:
+On connect, the **gateway pushes** the session frame (client sends nothing first):
 ```json
-{"type": "session_init"}
+{"type": "session_init", "session_id": 42, "history": []}
 ```
-agentd responds:
-```json
-{"type": "hello", "session_id": 42}
-```
+The client switches sessions with `hello` frames — `{"type":"hello","resume_session":42}`
+restores (gateway answers with a fresh `session_init` carrying the replayed history),
+`{"type":"hello","new":true}` mints a new session on the live socket; `hello` may also
+carry `agent_id` (identity bind — gated via `gate_agent_bind` for session-token humans)
+and `persona`. (ui-slint still sends a legacy `{"type":"session_init"}` frame on connect
+for Python-agentd cross-compat; the Rust gateway drops it as an undecodable frame — harmless.)
 
 Key inbound events. **NB:** the gateway sends the raw `Event` enum
 (`serde_json::to_string(&event)`, no reshaping). Tool fields nest under
@@ -375,7 +377,7 @@ Full event list: `agentd/crates/core/src/types.rs` — `Event` enum.
 - **Pi Zero 2W rendering** — BCM2837 uses `vc4` not `v3d`. Set `SLINT_BACKEND=linuxkms-femtovg` for software rendering; no GPU required.
 - **Emoji render monochrome, not colour — femtovg can't draw colour-glyph fonts.** ui-slint compiles only the **femtovg** + software renderers (Skia is too heavy for the Nano-first tier ladder — `cargo tree -p ui-slint` shows no skia). femtovg rasterizes glyph **outlines only** — no COLR/CBDT/sbix — so a colour-bitmap font ("Noto Color Emoji") comes out as tofu. Slint 1.16 selects fonts via **parley + fontique**, and fontique's Linux fallback goes through the real **fontconfig** lib (honours `/etc/fonts`). Fix (shipped): install.sh installs the bundled OFL **monochrome** `deploy/fonts/NotoEmoji-mono.ttf` to `/usr/local/share/fonts/apexos-rs/`, and ui-slint's `ensure_mono_emoji_fontconfig()` (runs before `AppWindow::new()`) writes a per-process `FONTCONFIG_FILE` that `<include>`s the system config then `<rejectfont>`s "Noto Color Emoji" — so fallback lands on the mono outline font **for ui-slint only** (the rest of the machine keeps colour emoji). Kaomoji (ツ via Noto CJK) and many symbols (Noto Sans Symbols2) already render. Colour emoji would need the Skia renderer — **measured +5 MB** on x86 (30→36 MB; the linker prunes ~23 MB of the 28 MB `libskia.a`), GL-only so Nano stays femtovg; deferred to a Pro/Standard-tier opt-in build. Verify a font resolves with `fc-match emoji` / `FONTCONFIG_FILE=~/.cache/apexos-rs/fonts.conf fc-match emoji`.
 - **agentd must be running** — the UI will retry the WS connection on disconnect. In dev, agentd can be on a remote Pi; just set `AGENTD_WS`.
-- **Session replay** — send `{"type": "session_init", "session_id": 42}` to restore a prior session. agentd replays the full message history.
+- **Session replay** — send `{"type": "hello", "resume_session": 42}` to restore a prior session; the gateway answers with a `session_init` frame carrying the full replayed history.
 - **New chat without a reconnect** — a WS connect allocates a fresh session; `hello{resume_session}` switches to an existing one; **`hello{new:true}`** mints a *new* session id (from `next_session_id`) with empty history on the live socket. The ui-slint chat header's **"+ New"** button sends it via `AgentBridge.new-chat` (the global, so it works from both the focus surface and a desktop window — ChatView isn't single-instance); the gateway's `session_init` reply clears the view + sets `current_session_id` (same path as restore). Before this the only way to leave a session was restoring another from the Sessions view (or restarting agentd).
 - **Session management is REST on `sessions/<id>.jsonl`, not the bus.** Sessions persist one-file-per-session under `<log_dir>/sessions/<id>.jsonl` (`SessionStore`, no open handle — append re-opens each write). The gateway exposes CRUD over that dir: `DELETE /api/sessions/{id}` (remove file + drop in-mem history), `POST /api/sessions/{id}/archive` (move → `sessions/archive/<id>.jsonl`; `sessions_handler` reads the top level only, so archived files vanish from the list — recoverable), `POST /api/sessions/export` (`{ids:[…]}` or `{all:true}`, `format:"md"|"jsonl"` → writes `<workspace>/exports/session-<id>.<ext>`; markdown via the pure, unit-tested `render_session_markdown` — works on the kiosk too, which has no browser download). **Root session 0 is refused for delete/archive** (the always-on sensor/scheduler funnel). **`POST /api/sessions/{id}/consolidate`** distils a session into Cerebro before it's gone: one LLM turn → `{summary, key_discoveries}` → `session_save` into the session's bound agent space (`resolve_agent_id` — APEX for normal/mesh, the bound agent for a bound session). The gateway can't reach the LLM provider + ToolProxy at build time, so the handler sends a `ConsolidateReq` over an mpsc to an **agentd worker** (`consolidate::run`, owns `engine.provider` + `tool_proxy`) and awaits a oneshot reply; `DirectCall` (ToolProxy) does NOT stamp `agent_id`, so the explicit space is honored. ui-slint Sessions view: a **SELECT mode** (header toggle) turns rows into a multi-select (one = a selection of one, "some" = several) with bulk Export/Archive/Delete/**CEREBRO** (consolidate) + a delete confirm overlay whose primary action is **CONSOLIDATE → CEREBRO, THEN DELETE** (a session whose consolidation fails is *kept* — never lose data to a failed extraction); EXPORT ALL is always available; normal mode still taps-to-restore.
 - **A plain `Rectangle` is not a layout** — children are absolutely positioned and it does **not** report their size upward. A `for`-row built on a bare `Rectangle` collapses to ~0 height and rows draw on top of each other. Use a `VerticalLayout`/`HorizontalLayout` for any row that must size to its content.

@@ -1,8 +1,9 @@
 # Voice — STT + TTS
 
 > ApexOS-RS voice I/O: speech-in (whisper) and speech-out (Kokoro neural TTS via the
-> `apex-tts` sidecar, with a graceful espeak-ng fallback). Server-side: the device's
-> own mic and speakers, driven by agentd's gateway.
+> `apex-tts` sidecar, with a graceful espeak-ng fallback). Server-side (kiosk/headless):
+> the device's own mic and speakers, driven by agentd's gateway. Client-side (desktop /
+> web/PWA): the UI carries the audio via `/api/tts` + `/api/transcribe`.
 
 ## At a glance
 
@@ -40,9 +41,9 @@ the kiosk), so *it* can reach the audio. Both directions:
   STT backend plan), instead of the server-side `/api/record/*`. Override the capture device
   with `ALSA_CAPTURE_DEVICE` (defaults to the session's ALSA "default").
 
-This keeps **agentd fully sandboxed** (no security change) and works on desktop + (later)
-web/PWA/phone. *Wake-word detection is still server-side (agentd listening), so it remains a
-kiosk feature for now; the manual mic button is the desktop path.*
+This keeps **agentd fully sandboxed** (no security change) and works on desktop + web/PWA/phone
+(slice 8 shipped the web side). *Wake-word detection is still server-side (agentd listening), so
+it remains a kiosk feature for now; the manual mic button is the desktop path.*
 
 ## Backend selection (`AGENTD_VOICE_BACKEND`)
 
@@ -159,7 +160,8 @@ and also the final `/api/speak` fallback. install.sh installs it when voice is e
 | `APEX_TTS_URL` | `http://127.0.0.1:8770/synth` | gateway: where to reach the sidecar |
 | `KOKORO_MODEL_URL` / `KOKORO_VOICES_URL` | thewh1teagle release | install.sh: model download sources |
 | `PIPER_MODEL` | unset | gateway: legacy piper voice (a fallback, if set) |
-| `WHISPER_MODEL` / `WHISPER_BIN` | `…/ggml-tiny.en.bin` / `whisper-cpp` | STT model + binary |
+| `WHISPER_MODEL` | `…/ggml-base.en.bin` | apex-stt: ggml model path (the gateway's whisper-cpp fallback also reads it, defaulting to `…/ggml-tiny.en.bin`) |
+| `WHISPER_BIN` | `/usr/local/bin/whisper-cpp` | gateway: hand-installed whisper-cpp fallback binary |
 
 ## Roadmap
 
@@ -169,12 +171,12 @@ and also the final `/api/speak` fallback. install.sh installs it when voice is e
 3. ✅ **STT selector + cloud STT** — `AGENTD_STT_BACKEND` + OpenAI / ElevenLabs Scribe.
 4. ✅ **Local STT** — the `apex-stt` Whisper sidecar (whisper-rs), so `local` STT works out of
    the box (install.sh builds it + fetches the ggml model), no hand-installed whisper-cpp needed.
-5. ◑ **Settings UI selector** — a native **VOICE** chip row (auto/local/api/off) in Settings,
+5. ✅ **Settings UI selector** — a native **VOICE** chip row (auto/local/api/off) in Settings,
    backed by `GET`/`POST /api/voice` (a process-global `VoiceConfig` seeded from env, retuned
    live, persisted to `AGENTD_VOICE_CONFIG`). One chip drives both TTS + STT; power users can
-   split `tts_api`/`stt_api` via the endpoint. *Remaining:* install.sh ElevenLabs/OpenAI key
-   prompting, GPU-feature `whisper-rs` builds (cuda/metal/vulkan) on the Pro tier, and a web-UI
-   settings page.
+   split `tts_api`/`stt_api` via the endpoint. *Follow-ons (beyond the arc):* install.sh
+   ElevenLabs/OpenAI key prompting, GPU-feature `whisper-rs` builds (cuda/metal/vulkan) on the
+   Pro tier, and a web-UI settings page.
 6. ✅ **Client-side voice (native UI)** — TTS: `POST /api/tts` returns WAV bytes, ui-slint plays
    them locally (`aplay`). STT: ui-slint records the mic (`arecord`) → `/api/transcribe`. Both
    run in the user's session, so desktop voice works while agentd stays sandboxed. (Wake-word is

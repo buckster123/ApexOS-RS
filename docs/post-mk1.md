@@ -16,7 +16,7 @@ We may be among the first to do it *this way* (native-rendered, mesh-colonied, s
 
 **mk1 is done when the [BACKLOG](../BACKLOG.md) Top 10 closes.** That's the last of the audited correctness/robustness + the deployment-validation work.
 
-**v0.1.0 (the public release) is deliberately a *fully-functional* drop, not a teaser-WIP.** There is no front-end git traffic or social mention of the RS line yet — the first the world sees of it is a working colony OS. The release bar:
+**v0.1.0 (the public release) is deliberately a *fully-functional* drop, not a teaser-WIP.** The **`v0.1.0-beta` is out** (2026-07-05: SSH-signed tag + the beta README + `SECURITY.md`) — the RS line's first release-facing cut, shipped as a working colony OS, not a WIP. The v0.1.0 bar:
 
 - **mk1 backlog cleared** (robustness + onboarding).
 - **A self-review / audit + polish pass** (a deliberate sweep — see §4: code-review at depth, the red-team suite, a clean `cargo clippy`/`test`, a docs freshness pass).
@@ -25,6 +25,8 @@ We may be among the first to do it *this way* (native-rendered, mesh-colonied, s
 - The **10-second teaser** (Grok-made, from the git banner) goes out *with* the tag — flag-plant + first impression in one.
 
 Sequencing intent (André, 2026-06-23): **Hardening (A) → Stewardship/Release (B) → the distro (C) → weight-evolution (D)**. C and D are real but *back of the queue* — a bit further out.
+
+**Status at the beta cut (2026-07-05, André + FORGE):** the A-track was re-scoped for beta — the **lean A5 suite shipped green** (and found a real IPv6 SSRF-guard gap on the way in), **A1 deferred post-beta**, A2–A4 remain post-beta candidates with the residuals honestly listed in `SECURITY.md`. Track B's mechanics are proven on the beta (Apache-2.0 + AGENTS.md landed earlier; the beta tag is SSH-signed). v0.1.0 proper is the follow-through on the bar above.
 
 ---
 
@@ -64,8 +66,8 @@ Add `CapabilityBoundingSet=` (drop `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, …) + `Res
 ### A4. Input sanitization at the gate *(modest)*
 Before user/tool text reaches the model: **NFC-normalize** (expose homoglyph/obfuscated-unicode injection) via `unicode-normalization`, and a fast **token-repetition / compression-ratio** check to flag token-stuffing (Pliny-style) payloads. A pre-turn filter, not a model change.
 
-### A5. The adversarial red-team test suite *(concrete, do early)*
-A dedicated integration test pipeline that feeds GCG strings, token-stuffing sequences, homoglyph injections, and classic prompt-injection blocks straight at the input + `apexos-protocol` deserialization, asserting **clean errors, no panic, no boundary crossing**. This is the single most *actionable* nugget — it gives the audit pass teeth and guards every future change. Lives next to the existing pure-fn unit tests.
+### A5. The adversarial red-team test suite *(✅ SHIPPED lean, 2026-07-05 — the beta gate)*
+Three offline, deterministic corpora asserting **clean errors, no panic, no boundary crossing**: `apexos-protocol/tests/redteam.rs` (malformed / wrong-typed / homoglyph / deep-nested / huge / unknown-tag frames vs the wire `Event` decoder, forward-compat pinned), `apexos-confine/tests/redteam.rs` (traversal variants, symlink-chain + symlinked-parent escapes, prefix-collision sibling, secret-denylist-wins), and an SSRF / git-option-injection block in `apexos-tools`. The suite earned its keep on landing — it found + fixed a real gap (`ssrf_guard` passed bracketed IPv6 hosts to DNS lookup, so IPv6 literals never reached `is_blocked_ip`). This was the single most *actionable* nugget — it gives the audit pass teeth and guards every future change; it lives next to the existing pure-fn unit tests. The heavyweight *live-agent* red-team (GCG / token-stuffing payloads fed at a running node) waits for community feedback.
 
 ### A6. Read-only root + watchdog remount *(pairs with the distro, C)*
 On the custom image, mount core OS partitions (`/usr`, `/bin`, `/sbin`) **read-only** at runtime; the root self-update watchdog remounts *only the target binary's partition* rw for the swap, verifies the health probe, and re-locks ro. Even a fully-compromised agent can't drop a persistent rootkit in the system utils. *(Depends on Track C's image; spec it now, land it with the distro.)*
@@ -74,9 +76,9 @@ On the custom image, mount core OS partitions (`/usr`, `/bin`, `/sbin`) **read-o
 
 ## 4. The audit & polish pass — the gate to release
 
-Before the tag, one deliberate self-review sweep (André: "self-review/audit and polish first"):
+Before the tag, one deliberate self-review sweep (André: "self-review/audit and polish first") — *the beta cut ran the lean version of this pass (clippy green-up, README/SECURITY refresh, A5); the full-depth sweep remains the v0.1.0 gate:*
 - **Depth code-review** of the whole surface (the `/code-review` ultra path or a workflow sweep) — correctness + the new hardening.
-- **A5 red-team suite** green.
+- **A5 red-team suite** green ✅ *(shipped + green at the beta cut)*.
 - `cargo clippy` clean (already is) + `cargo test --workspace` green; a UI smoke on each tier.
 - **Docs freshness:** the stale CLAUDE.md Slint examples + the doc-debt items in BACKLOG; confirm CLAUDE.md / docs match the shipped reality.
 - A **live colony pass** — the things only hardware confirms (the live-verify queue that's been accumulating per-PR).
@@ -94,7 +96,7 @@ Switched from the `Cargo.toml`-declared MIT (which had **no LICENSE file** — a
 The emerging cross-tool standard (some agents read `AGENTS.md`; Claude Code reads `CLAUDE.md`). A **thin, tasteful** one: project identity + a pointer to `CLAUDE.md`/`docs/` as the real architecture, clean attribution, the license, and a light "if you fork, keep attribution + consider upstreaming" note. No try-hard "directives to crawlers" — useful first, flag-plant second.
 
 ### B3. Signed `v0.1.0` tag + metric snapshot
-Tag the release with a GPG/SSH-signed commit (deterministic, dated proof of authorship). Snapshot the GitHub traffic analytics (the algorithmic-clone spike) for the portfolio — the "built it before the wave" receipt.
+Tag the release with a GPG/SSH-signed commit (deterministic, dated proof of authorship). **The `v0.1.0-beta` tag is already SSH-signed** (2026-07-05) — the pattern is proven; v0.1.0 repeats it. Snapshot the GitHub traffic analytics (the algorithmic-clone spike) for the portfolio — the "built it before the wave" receipt.
 
 ### B4. The drop
 `v0.1.0` tag + the 10-second teaser + a real README/landing moment (the lander repo `apexos-rs-lander` exists). Positioned as a **finished, agent-first OS that runs on anything** — not a prototype.
@@ -129,7 +131,7 @@ Naming it keeps the door honest without over-investing today.
 |------|---------|
 | Namespace-jail the tools worker (`CLONE_NEWNET`, pivot-root) | ◑ **Gold idea, wrong premise here** — A1 deferred post-beta (several tools legitimately use the network; needs a net/no-net worker split first) |
 | Read-only root + watchdog remount | ✅ **Gold** — A6 / C |
-| Adversarial red-team test suite | ✅ **Gold** — A5 |
+| Adversarial red-team test suite | ✅ **Gold** — A5, **shipped** (the beta gate) |
 | Capability caps | ✅ Real — A2 |
 | Input sanitization (NFC / token-stuffing) | ✅ Real — A4 |
 | "Serde protocol jail" | ◑ **We already have it** (`apexos-protocol`) — harden the silent-drop (A3) |

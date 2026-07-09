@@ -70,7 +70,9 @@ Separately, the **`web/` PWA** is a parallel -RS-owned browser/mobile frontend
    (`hermes-sonus`), not -RS code. Diagnosis of the live flakiness:
    - It's a **3-step async flow** the model must drive: `generate_song` → `task_id`,
      then `check_status_until_done` (blocks ≤300s), then `download_track`. agentd's
-     MCP client has **no request timeout**, so the long poll isn't killed by -RS.
+     MCP client now has a **bounded wait** (`AGENTD_TOOL_RESULT_TIMEOUT_SECS`,
+     default 1800s — `mcp.rs::request`, from the honest-tool-failure arc), well
+     above the ≤300s poll, so the long poll still isn't killed by -RS.
    - **#1 cause:** a local model (Nemotron) fumbling that multi-step dance without
      guidance → fix is a **soul.md/skill proposal to APEX** (house rule: propose,
      don't edit). [[config-changes-suggest-to-agent]]

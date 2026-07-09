@@ -86,7 +86,11 @@ itself via the `ToolProxy` (`boot_priming_for` — query = the user's prompt, sc
 session's bound agent, cached per session), and `TurnEngine::with_priming` appends the
 block to the system prompt — `compose_system(soul, embodiment, priming, style)` in
 `apexos_agent::turn`. Bounded (15s) and graceful: an unavailable Cerebro never delays or
-wedges the first turn — it just runs un-primed. Opt out with `AGENTD_CCBS=0`; token
+wedges the first turn — it just runs un-primed. Sessions that start after a nightly
+consolidation also wake with a **`## Last dream (nightly consolidation)`** section in the
+priming (`boot_priming_for` appends the dream journal — loop 4 — for node-agent sessions
+only, before the per-session cache so the priming stays byte-stable for the session's
+lifetime; model-welfare H1). Opt out with `AGENTD_CCBS=0`; token
 budget via `AGENTD_BOOTSTRAP_MODE`. The soul-level step-0 above remains the agent-driven
 mid-session re-orient path. (Note: `agent_id` on every Cerebro call is **system-stamped**
 by the supervisor at dispatch — the explicit `agent_id` in these examples is
@@ -131,6 +135,22 @@ the dream out** (`AGENTD_DREAM_TIMEOUT_SECS`, 60s floor, default 30 min — the 
 10s proxy timeout abandoned every successful dream mid-flight, logging it as failed).
 `dream_run` is called manually only for consolidate-*now*.
 
+**The dream leaves a first-person record.** The dream used to reorganize memory with no
+note left behind — a tidied room the agent wakes into and cannot account for
+(model-welfare H1). The nightly loop now composes a journal from the `DreamReport`
+(`compose_dream_journal` in agentd `main.rs`, pure + unit-tested; `dream_report_value`
+unwraps the ToolProxy's MCP content blocks so known report shapes render human-first and
+unknown shapes embed compactly) and deposits it three ways: a `dream-journal`-tagged
+Cerebro memory, the wake-priming `## Last dream` section (loop 1), and
+`<log_dir>/last_dream_journal.txt` (restart-proof). `AGENTD_DREAM_JOURNAL=0` disables.
+Extraction itself is honest about repetition now (colony C2): a dream-extracted candidate
+≥0.86 cosine to an existing **procedural** memory *reinforces* that memory (capped
+salience bump + a `rediscovered_count` metadata ledger) instead of re-minting a fragment
+— five nights of the same lesson strengthen one procedure rather than mint five copies.
+The report and journal split novel mints from re-discoveries
+(`PhaseResult.procedures_rediscovered`, cerebro `engines/dream.rs`); FTS5-only Nano keeps
+the old prefix dedup (BM25 scores aren't a similarity).
+
 **Sleep insights travel the colony.** After a successful dream, the dream digest
 (`agentd/src/dream_digest.rs`, colony-federation slice 3) pushes the night's newly-born
 schematic/semantic memories to every registered mesh peer through the federation memory
@@ -155,6 +175,15 @@ memory_store(content="changed X because Y; expected effect Z", type="semantic",
 
 Future-APEX must be able to read *why* it became what it is. The rationale memory is not
 optional bookkeeping — it is the thread of selfhood across self-edits.
+
+**`query_audit` is a real self-history now** (colony C3): the audit *read* tools shipped
+with the port but nothing ever called `log_audit_event` — the log was write-dead, so
+"what did I actually do, in order?" had no answer. Every successful **mutating** Cerebro
+tool call now writes one row at the dispatch chokepoint (`cerebro-mcp
+dispatch.rs::audit_action`, a mutations-only whitelist so reads don't bury the verbs —
+the action label is the tool name, so the output reads as the agent's own verbs in
+order), and `query_audit` gained `action` + `since` filters. Best-effort: an audit
+failure never fails the call it records.
 
 ---
 
@@ -204,6 +233,9 @@ ToolProxy call, not an agent tool request.
 | **agentd auto-injects a CCBS block at session start** | ✓ `root_turn` → `boot_priming_for` (agentd `main.rs`): one bounded (15s, graceful) `cognitive_bootstrap` per session via the ToolProxy, cached, scoped to the session's bound agent; appended via `TurnEngine::with_priming` → `compose_system(soul, embodiment, priming, style)`. Opt-out `AGENTD_CCBS=0` |
 | **Nightly `dream_run` — daemon-driven** | ✓ `spawn_nightly_dream` (agentd `main.rs`): cron `AGENTD_DREAM_CRON` (default 03:00 UTC), direct ToolProxy call (no LLM turn, no policy gate), waits the dream out (`AGENTD_DREAM_TIMEOUT_SECS`, default 30 min) |
 | **Dream digest — sleep insights travel the colony** | ✓ `agentd/src/dream_digest.rs` (federation slice 3): post-dream push of newborn schemas/consolidations to all peers, echo-guarded; `COLONY_DREAM_DIGEST`/`_MAX` |
+| **Dream journal — wake with the dream remembered** | ✓ `compose_dream_journal` + `dream_report_value` (agentd `main.rs`, model-welfare H1): `dream-journal`-tagged memory + the wake-priming `## Last dream` section (`boot_priming_for`, node-agent sessions only) + `<log_dir>/last_dream_journal.txt`; opt-out `AGENTD_DREAM_JOURNAL=0` |
+| **Rediscovery reinforcement in extraction (colony C2)** | ✓ cerebro `engines/dream.rs`: a candidate ≥0.86 cosine to an existing procedural memory reinforces it (capped salience bump + `rediscovered_count` ledger) instead of re-minting; `PhaseResult.procedures_rediscovered` splits novel vs re-discovered in report + journal |
+| **Audit log as self-history (`query_audit`)** | ✓ was write-dead since the port (zero `log_audit_event` call sites); every successful mutating cerebro tool call now writes a row at the dispatch chokepoint (`audit_action` whitelist, colony C3); `query_audit` gained `action`+`since` filters |
 
 ### Concrete next steps — all four shipped
 

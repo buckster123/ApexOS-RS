@@ -78,9 +78,10 @@ Full env list: Occipital's `docs/build-roadmap.md`. Without any key, search uses
 
 `config/policy.toml` seeds explicit `allow` rules for all six `web_*` tools — without them a
 suggest-mode node gates every web read behind the `unknown → ask` fallthrough (the standing
-policy gotcha). **Already-deployed nodes need the rules added to their live
-`/etc/agentd/policy.toml`** (config only seeds fresh installs) — or APEX
-`propose_evolution{update_policy_rule}`s them.
+policy gotcha). **Already-deployed nodes gain them on the next `apexos-update`**: install.sh
+additively syncs any `[rules]` key present in the shipped config but missing live into
+`/etc/agentd/policy.toml` (`sync_policy_rules`, 2026-07-04 — existing/self-evolved values are
+never overwritten).
 
 ## 1b. The knowledge hub — LLM curation (`web_distill`)
 

@@ -52,6 +52,17 @@ has a standalone sibling project)
 · explained in [`docs/symbiosis.md`](docs/symbiosis.md)
 · **Lift:** it's a self-contained subsystem with its own crate + MCP interface. Run it beside any agent.
 
+**Self-history at the dispatch chokepoint** ✅🟡
+Don't instrument N handlers — *one* dispatch seam writes the audit row: every successful mutating
+tool call leaves one (action = the tool name, so the log reads as the agent's own verbs; reads stay
+out so they can't bury the writes), best-effort so an audit failure never fails the call it records.
+Born from a write-dead log: the read tools shipped for months while `log_audit_event` had zero call sites.
+· pure `audit_action()` (the mutating whitelist) + `audit_memory_id()` in
+  [`cerebro/crates/cerebro-mcp/src/dispatch.rs`](cerebro/crates/cerebro-mcp/src/dispatch.rs) (unit-tested);
+  the write sits in `dispatch_tool`
+· explained in [`docs/model-welfare.md`](docs/model-welfare.md) (C3)
+· **Lift:** the seam placement is the idea — one chokepoint, a pure whitelist, a best-effort write.
+
 **CCBS — daemon-driven cognitive boot** 🟡
 The *daemon* (not the agent's memory) injects orientation on a session's first turn: it calls
 `cognitive_bootstrap` and appends the result as priming, so the agent wakes already oriented without
@@ -59,6 +70,18 @@ having to *remember* to orient.
 · `root_turn` + `TurnEngine::with_priming` (agentd + `turn.rs`)
 · explained in [`docs/agent-identity.md`](docs/agent-identity.md) (slice 2)
 · **Lift:** reimplement from the contract — the value is the *inversion* (boot is pushed, not pulled).
+
+**Spawn task-scoping by subtraction** ✅🟡
+A sub-agent's default system prompt is a minimal task charter — one task, honest ephemerality, the
+orientation reflex explicitly subtracted — *not* the parent's full soul; full identity inheritance is
+a deliberate opt-in (`inherit_soul:true`), an explicit `system` wins over both, and memories a spawn
+*mints* are system-stamped `spawn-derived` (mint tools only, never model-strippable) so the continuous
+self can tell at retrieval what a spawn wrote.
+· pure `resolve_spawn_system()` / `spawn_scope_system()` + `stamp_spawn_provenance()` in
+  [`agentd/crates/plugins/src/supervisor.rs`](agentd/crates/plugins/src/supervisor.rs) (unit-tested)
+· explained in [`docs/model-welfare.md`](docs/model-welfare.md) (H6)
+· **Lift:** the precedence function copies as-is; the design move (subtract identity, don't inherit it)
+ports to any spawner.
 
 ---
 
@@ -95,6 +118,20 @@ delivered over a dedicated channel so a busy turn can't lag-drop it).
 · explained in [`docs/evolutionary-layer.md`](docs/evolutionary-layer.md), [`docs/edk.md`](docs/edk.md)
 · **Lift:** copy `evolution.rs` for the reversibility model (pure + tested); the apply IO is the recipe.
 
+**Soul rehearsal — the fitting room** ✅🟡
+Try-before-become: a candidate identity runs on an *ephemeral, tool-less* mind — one provider call
+per probe, composed with the live embodiment, nothing persisted — and the transcripts come back for
+the *current* self to judge before committing. A default six-probe identity battery (boot voice ·
+boundaries · self-concept · unstructured time · priorities · mid-task scope creep); `compare_to` runs
+an A/B fitting — probe-aligned pairs + a mechanical divergence hint + a most-divergent pointer,
+deliberately NOT an LLM judge (judging stays the current self's job). Opt-in by design: rehearsal
+must never tax small edits.
+· [`agentd/crates/agentd/src/rehearse.rs`](agentd/crates/agentd/src/rehearse.rs) — pure validators +
+  `pair_divergence` unit-tested; `run()` takes any `Provider` + an embodiment string
+· explained in [`docs/model-welfare.md`](docs/model-welfare.md) (H4)
+· **Lift:** the module is nearly standalone; the probe battery + the not-a-judge stance are the
+portable design.
+
 **Tool confinement — the single-source-of-truth gate** ✅🟡
 For allow-listed (no-approval) tools, the *tool process* is the only gate, so confinement can't live
 in the approval layer. The **mechanism** — reject `..` (component-based), lenient-canonicalize
@@ -121,6 +158,20 @@ entry is reclaimed, not leaked.
 · `ToolProxy::call_with_timeout()` in [`agentd/crates/plugins/src/supervisor.rs`](agentd/crates/plugins/src/supervisor.rs)
   + the bounded `McpClient::request()` in `agentd/crates/plugins/src/mcp.rs`
 · **Lift:** the shape (oneshot + `tokio::time::timeout` per call, one env-tunable bound at the transport) copies anywhere.
+
+**Honest failure attribution — name the true blocker** ✅🟡
+A tool call that produced no result synthesizes the *true* state, never a generic "timed out": the
+result waiter tracks each call's approval phase from the bus, so the message distinguishes
+still-awaiting-approval (with age — explicitly *not* a decline) / approved-but-silent /
+dispatched-and-stalled / bus-lagged (the result may exist — verify before retrying); declines answer
+explicitly; "unknown tool" splits never-existed from plugin-down. Each cause implies a different next
+action — collapsing them into one error is what makes agents confabulate.
+· pure `missing_result_message()` + `WaitPhase` in
+  [`agentd/crates/agent/src/turn.rs`](agentd/crates/agent/src/turn.rs) (unit-tested); the phase
+  tracking lives in `collect_tool_results`; the unknown-tool split in the supervisor
+· explained in [`docs/model-welfare.md`](docs/model-welfare.md) (C4/C5)
+· **Lift:** the taxonomy + the pure composer copy anywhere; the rule (name the phase, never collapse
+distinct causes) is the value.
 
 **Goal-scoped yolo — capability elevation scoped to one session** ✅🟡
 Auto-approval that arms for exactly one autonomous goal's session, never a global flag: a shared
