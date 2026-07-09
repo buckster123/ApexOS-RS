@@ -22,9 +22,9 @@ impl SessionStore {
     }
 
     /// Append one message to the session's JSONL file. Fire-and-forget safe.
-    /// Sub-agent sessions (IDs in the top half of u64) are not persisted.
+    /// Ephemeral spawn sessions are not persisted.
     pub async fn append(&self, session_id: SessionId, msg: &Message) {
-        if session_id.0 >= (1u64 << 63) { return; }
+        if apexos_core::is_spawn_session(session_id.0) { return; }
         let line = match serde_json::to_string(msg) {
             Ok(s) => s + "\n",
             Err(_) => return,

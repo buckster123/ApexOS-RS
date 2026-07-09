@@ -141,6 +141,38 @@ fn spawn_scope_system(parent_agent: &str) -> String {
     )
 }
 
+/// Append the `spawn-derived` provenance tag to a Cerebro MINT call from an
+/// ephemeral spawn session (H6 residual). Mint tools only — the tag marks
+/// memories a spawn *created*; `update_memory`'s tags are replacement semantics
+/// on an existing memory, so stamping there would clobber caller intent.
+/// Honors both schema shapes (`tags` as array or bare string), creates the
+/// array when absent, and never double-stamps.
+fn stamp_spawn_provenance(args: &mut serde_json::Value, tool: &str) {
+    const MINT_TOOLS: &[&str] = &[
+        "remember", "memory_store", "store_procedure", "store_intention", "create_schema",
+    ];
+    if !MINT_TOOLS.contains(&tool) {
+        return;
+    }
+    if !args.is_object() {
+        *args = serde_json::json!({});
+    }
+    let Some(obj) = args.as_object_mut() else { return };
+    let tags = obj.entry("tags").or_insert_with(|| serde_json::json!([]));
+    // A bare-string tag (schema-sanctioned) becomes a one-element array first.
+    if let Some(s) = tags.as_str() {
+        *tags = serde_json::json!([s]);
+    }
+    if !tags.is_array() {
+        *tags = serde_json::json!([]);
+    }
+    if let Some(arr) = tags.as_array_mut() {
+        if !arr.iter().any(|t| t == "spawn-derived") {
+            arr.push(serde_json::json!("spawn-derived"));
+        }
+    }
+}
+
 /// Stamp the caller's agent identity onto a Cerebro tool call's args, overriding
 /// any model-supplied value. In every Cerebro tool `agent_id` is the *caller's*
 /// space (storing/filter/scope); cross-agent targets use distinct params
@@ -1942,6 +1974,14 @@ impl Supervisor {
                 if pid.0 == "cerebro" {
                     let agent_id = apexos_core::resolve_agent_id(&self.session_bindings, session);
                     stamp_agent_id(&mut call.args, &agent_id);
+                    // Spawn provenance (H6 residual, apex1): a memory MINTED by an
+                    // ephemeral sub-agent carries the `spawn-derived` tag, so the
+                    // continuous self can tell at retrieval which memories a spawn
+                    // wrote. System-stamped by session range, like the identity —
+                    // never model-supplied, never strippable by the child.
+                    if apexos_core::is_spawn_session(session.0) {
+                        stamp_spawn_provenance(&mut call.args, &call.tool);
+                    }
                 } else if pid.0 == "apexos-tools" {
                     // System-stamp the caller's workspace so the shared (single)
                     // tool process confines this call's FS ops to the per-agent
@@ -2679,6 +2719,41 @@ async fn mesh_agent_spawn(node: &str, prompt: &str, system: Option<&str>, timeou
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn spawn_provenance_stamps_mint_calls_only() {
+        // Mint call, no tags → array created with the provenance tag.
+        let mut args = serde_json::json!({ "content": "found the fix" });
+        stamp_spawn_provenance(&mut args, "remember");
+        assert_eq!(args["tags"], serde_json::json!(["spawn-derived"]));
+
+        // Existing array → appended, never double-stamped.
+        let mut args = serde_json::json!({ "content": "x", "tags": ["deploy", "spawn-derived"] });
+        stamp_spawn_provenance(&mut args, "store_procedure");
+        assert_eq!(args["tags"], serde_json::json!(["deploy", "spawn-derived"]));
+
+        // Schema-sanctioned bare-string tag → coerced to array + appended.
+        let mut args = serde_json::json!({ "content": "x", "tags": "deploy" });
+        stamp_spawn_provenance(&mut args, "remember");
+        assert_eq!(args["tags"], serde_json::json!(["deploy", "spawn-derived"]));
+
+        // Non-mint tools untouched: update_memory tags are replacement semantics,
+        // and reads have nothing to stamp.
+        let mut args = serde_json::json!({ "memory_id": "m1", "tags": ["a"] });
+        stamp_spawn_provenance(&mut args, "update_memory");
+        assert_eq!(args["tags"], serde_json::json!(["a"]));
+        let mut args = serde_json::json!({ "query": "q" });
+        stamp_spawn_provenance(&mut args, "recall");
+        assert!(args["tags"].is_null());
+    }
+
+    #[test]
+    fn spawn_session_range_is_the_top_half() {
+        assert!(!apexos_core::is_spawn_session(0));
+        assert!(!apexos_core::is_spawn_session(apexos_core::SPAWN_SESSION_BASE - 1));
+        assert!(apexos_core::is_spawn_session(apexos_core::SPAWN_SESSION_BASE));
+        assert!(apexos_core::is_spawn_session(u64::MAX));
+    }
 
     #[test]
     fn spawn_system_subtracts_by_default_inherits_only_on_request() {

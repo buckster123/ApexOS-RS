@@ -1461,7 +1461,7 @@ fn spawn_agent_router(
     };
     // Internal session IDs use the top half of u64 to avoid collisions with
     // frontend-assigned IDs (which come in via UserPrompt).
-    let next_child_id    = Arc::new(AtomicU64::new(1u64 << 63));
+    let next_child_id    = Arc::new(AtomicU64::new(apexos_core::SPAWN_SESSION_BASE));
     // CCBS boot-priming cache: one cognitive_bootstrap per session (first turn),
     // reused on later turns so orientation stays in the system prompt all session.
     let boot_primings    = Arc::new(Mutex::new(HashMap::<SessionId, String>::new()));
