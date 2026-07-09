@@ -4,6 +4,12 @@ use crate::{
 };
 
 const MIN_CONTENT_LENGTH: usize = 10;
+/// Upper gate (CB-029): one memory is a note/procedure/summary, not a document
+/// dump — 64 KiB is ~16k tokens of text, far above any legitimate store (the
+/// mesh relay already refuses >60k chars) while bounding what a misbehaving
+/// caller can push through every store path (MCP, API, ingest) uniformly.
+/// Rejection is honest (an error the caller sees), never silent truncation.
+const MAX_CONTENT_LENGTH: usize = 64 * 1024;
 
 const HIGH_SALIENCE_KEYWORDS: &[&str] = &[
     "important", "critical", "bug", "fix", "error", "breakthrough",
@@ -40,6 +46,9 @@ impl GatingEngine {
         visibility:   Visibility,
     ) -> Option<MemoryNode> {
         if content.trim().len() < MIN_CONTENT_LENGTH {
+            return None;
+        }
+        if content.len() > MAX_CONTENT_LENGTH {
             return None;
         }
 
@@ -154,6 +163,16 @@ mod tests {
             None, None, None, None, Visibility::Shared,
         );
         assert!(node.is_some());
+    }
+
+    #[test]
+    fn gate_oversized_content_returns_none() {
+        // CB-029: the upper gate rejects (never truncates) past 64 KiB…
+        let big = "x".repeat(64 * 1024 + 1);
+        assert!(engine().evaluate_input(&big, None, None, None, None, Visibility::Shared).is_none());
+        // …while content at the boundary still stores.
+        let at_cap = "y".repeat(64 * 1024);
+        assert!(engine().evaluate_input(&at_cap, None, None, None, None, Visibility::Shared).is_some());
     }
 
     #[test]
