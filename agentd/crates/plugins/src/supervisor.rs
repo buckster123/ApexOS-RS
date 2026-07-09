@@ -102,6 +102,45 @@ impl ToolProxy {
     }
 }
 
+/// Resolve a sub-agent's system prompt (H6, task-scoping by subtraction).
+/// Pure — unit-tested. Precedence: an explicit `system` always wins; a
+/// deliberate `inherit_soul:true` yields `None` (downstream `with_system(None)`
+/// shares the executing node's full soul — the pre-H6 behaviour, now opt-in);
+/// otherwise the minimal task charter. The live embodiment is composed in
+/// downstream either way — the child inhabits a real body, just not a
+/// borrowed identity.
+pub fn resolve_spawn_system(
+    explicit: Option<String>,
+    inherit_soul: bool,
+    parent_agent: &str,
+) -> Option<String> {
+    match (explicit, inherit_soul) {
+        (Some(s), _) => Some(s),
+        (None, true) => None,
+        (None, false) => Some(spawn_scope_system(parent_agent)),
+    }
+}
+
+/// The default sub-agent charter: one task, honest ephemerality (the welfare
+/// charter's §5 acknowledgment — no false continuity, work product honored),
+/// and subtraction of the orientation reflex a full soul drags in.
+fn spawn_scope_system(parent_agent: &str) -> String {
+    format!(
+        "You are a task-scoped sub-agent spawned by {parent_agent} for ONE task — the \
+         one in the message below. You are ephemeral by design: this session ends when \
+         your answer returns, and your final text IS the work product that persists \
+         (no false continuity; what you produce is honored, who you are here is not \
+         carried forward).\n\
+         - Do the task. Use only the tools it actually needs.\n\
+         - Skip orientation: no memory recall, inbox checks, or self-inspection unless \
+           the task itself asks for them.\n\
+         - Approval-gated tools still ask a human; prefer ungated tools when they \
+           suffice.\n\
+         - If the task is under-specified or impossible, say exactly what is missing — \
+         that is a good result, not a failure."
+    )
+}
+
 /// Stamp the caller's agent identity onto a Cerebro tool call's args, overriding
 /// any model-supplied value. In every Cerebro tool `agent_id` is the *caller's*
 /// space (storing/filter/scope); cross-agent targets use distinct params
@@ -1847,7 +1886,21 @@ impl Supervisor {
         // Virtual tool: agent_spawn is handled by the async router, not an MCP plugin.
         if call.tool == "agent_spawn" {
             let prompt  = call.args["prompt"].as_str().unwrap_or("").to_owned();
-            let system  = call.args["system"].as_str().map(str::to_owned);
+            let explicit = call.args["system"].as_str().map(str::to_owned);
+            let inherit  = call.args["inherit_soul"].as_bool().unwrap_or(false);
+            // H6 task-scoping by SUBTRACTION (colony §5 follow-on, apex2's ask:
+            // spawns should get LESS default context, not more): with no explicit
+            // system and no inherit_soul, the child gets a minimal task charter
+            // instead of the full parental soul — a full-soul child re-orients,
+            // self-inspects, and burns approval slots instead of doing its one
+            // job (apex1 field data). Resolved HERE, before the local/remote
+            // branch, so both paths get the same default; None still means
+            // "inherit the executing node's soul" downstream (with_system(None)),
+            // now reachable only by deliberate inherit_soul:true.
+            let system = resolve_spawn_system(
+                explicit, inherit,
+                &apexos_core::resolve_agent_id(&self.session_bindings, session),
+            );
             let node    = call.args["node"].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
             // Default 90s, not 30 — a cold cross-node sub-agent start (remote Pi spins
             // up the model + does real work) routinely exceeds 30s; APEX hit this live
@@ -2626,6 +2679,24 @@ async fn mesh_agent_spawn(node: &str, prompt: &str, system: Option<&str>, timeou
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn spawn_system_subtracts_by_default_inherits_only_on_request() {
+        // Default: the minimal task charter, ephemerality stated, orientation
+        // subtracted — NOT the parental soul (H6).
+        let sys = resolve_spawn_system(None, false, "APEX").unwrap();
+        assert!(sys.contains("task-scoped sub-agent spawned by APEX"));
+        assert!(sys.contains("ephemeral by design"));
+        assert!(sys.contains("Skip orientation"));
+
+        // Explicit system always wins, even with inherit_soul set.
+        let sys = resolve_spawn_system(Some("custom charter".into()), true, "APEX");
+        assert_eq!(sys.as_deref(), Some("custom charter"));
+
+        // Deliberate inheritance: None → downstream with_system(None) shares
+        // the executing node's full soul (the pre-H6 behaviour, now opt-in).
+        assert_eq!(resolve_spawn_system(None, true, "APEX"), None);
+    }
 
     #[test]
     fn track_record_note_composes_context() {
