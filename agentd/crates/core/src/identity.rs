@@ -271,6 +271,22 @@ pub fn resolve_agent_id(
         .unwrap_or_else(node_agent_id)
 }
 
+// ── Ephemeral spawn sessions ─────────────────────────────────────────────────
+
+/// Session ids at/above this base are EPHEMERAL SPAWN sessions — local
+/// sub-agents (`SpawnAgent`→`child_turn`) and cross-node `/api/spawn` children
+/// draw from one counter seeded here. The range is load-bearing twice: the
+/// session store skips persisting them (no JSONL), and the supervisor stamps
+/// spawn provenance onto their Cerebro mint calls (H6 residual — a memory
+/// written by an ephemeral spawn is distinguishable at retrieval from one
+/// written by the continuous self).
+pub const SPAWN_SESSION_BASE: u64 = 1 << 63;
+
+/// Whether `session_id` is an ephemeral spawn session (see [`SPAWN_SESSION_BASE`]).
+pub fn is_spawn_session(session_id: u64) -> bool {
+    session_id >= SPAWN_SESSION_BASE
+}
+
 // ── Per-session goal autonomy (goal-scoped yolo) ────────────────────────────
 
 /// Process-wide set of goal session ids running with **goal-scoped yolo**
