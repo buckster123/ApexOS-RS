@@ -211,11 +211,13 @@ itself with no weight update and no human in the loop. The selection core
 | `cognitive_bootstrap` live-state assembler | ✓ surfaces relevant procedures already |
 | `record_procedure_outcome` (fitness signal) | ✓ **slice #3**: failure now DEMOTES (salience −0.15, asymmetric vs +0.1 success) and flags `prune_candidate` at the floor; dream's pruning phase retires flagged procedures. Real selection pressure |
 | `dream_run` `schema_formation` | ✓ **slice #1**: phase 3 now also clusters outcome-successful procedures (by `procedure_fitness`) and distils each into a `schematic` memory tagged `skill` + `dream_distilled`, with `derived_from` provenance and fitness-scaled salience |
+| Rediscovery reinforcement (dream extraction) | ✓ **colony C2 (welfare arc)**: `pattern_extraction` semantically dedups each extracted candidate against the whole store — a candidate ≥0.86 cosine (`REDISCOVERY_SIMILARITY`) to an existing *procedural* memory **reinforces** it (bounded +0.05 salience, capped 0.95, plus a `rediscovered_count` metadata ledger) instead of re-minting a fragment. Recurring evidence strengthens the survivor rather than spawning rivals-by-paraphrase; `PhaseResult.procedures_rediscovered` carries the novel/rediscovery split into the report + dream journal. FTS5-only Nano keeps the prefix dedup (BM25 isn't a similarity) |
 | `schematic` skill layer surfaced at boot | ✓ **slice #2**: `cognitive_bootstrap` now buckets recall hits into a dedicated `## Skills (distilled competence)` section (Schematic + `skill` tag), placed ahead of concrete procedures so the generalisation arrives first |
 | Fitness ledger (win/loss evidence base) | ✓ **slice #E1**: `record_procedure_outcome` writes `metadata.outcomes:{successes,failures}` — a real count-based record, additive to the salience/difficulty effects, so fitness no longer has to be inferred from salience alone |
 | Niche competition (relative selection) | ✓ **slice #E1**: new algorithmic `skill_competition` dream phase — procedures sharing a topical tag contend; the Wilson-fittest is tagged `skill_champion`, dominated rivals decay toward the prune floor. Novelty-exempt below 2 graded uses; a champion of any niche is never demoted |
 | Variation / mutation (fresh alternatives) | ✓ **slice #E2 + #E2b**: LLM `variation` dream phase. E2 *refines* underperformers (`dream_mutated`); E2b *merges* two strong distinct same-niche procedures into a hybrid (`dream_merged`). Variants inherit niche tags, link via `derived_from`, start un-graded → exempt until tried → re-compete. Pure `refine_candidates` + `merge_candidates`, unit-tested |
-| Champion-aware retrieval | ✓ **E1 follow-up**: `find_relevant_procedures` (full-sorts) + `cognitive_bootstrap` (stable champion-promotion) surface the crowned procedure first, via the shared `retrieval_rank` (champion +1.0 band → Wilson → salience). Same metric as competition — one source of truth |
+| Champion-aware retrieval | ✓ **E1 follow-up**: `find_relevant_procedures` (full-sorts) + `cognitive_bootstrap` (stable champion-promotion) surface the crowned procedure first, via the shared `retrieval_rank` (champion +1.0 band → Wilson → salience). Same metric as competition — one source of truth. Matcher since retooled (**colony C6**): normalized tag match + a semantic `brain.recall` stage + an object response — see the frontier bullet |
+| Cross-agent skill flow | ✓ **E3**: shipped as `mesh_procedure_send` (colony-federation Slice 4, agentd's mesh layer): a procedure travels as a provenance-stamped copy; the origin's `metadata.outcomes` ledger rides the note as *context* (`track_record_note`), the receiver drops sender salience + the import starts an empty ledger — fitness re-earned per embodiment |
 | Skill → identity promotion path | ✗ deliberate `propose_evolution` step, not yet conventionalized |
 
 ### Build slices (smallest first)
@@ -274,17 +276,33 @@ extends it with genuinely new mechanisms:
   Pure selectors `refine_candidates` + `merge_candidates` are unit-tested. *(E2b also fixed a
   latent E2 bug: `dream_mutated`/`dream_merged` are now `is_structural_tag`, so role markers
   never form a spurious cross-task niche in competition or skill distillation.)*
-- **E3. Cross-agent skill flow.** A Pro/GPU node distils a champion skill and propagates it to
-  the colony (`share_memory`/`send_message` over the mesh) so agents don't each re-evolve from
-  scratch — the "exo-evolution for any MCP consumer" thesis made concrete across the mesh.
+- **E3. Cross-agent skill flow.** ✓ **DONE** — shipped as **`mesh_procedure_send`**
+  (colony-federation Slice 4; agentd's mesh layer, not cerebro — see
+  `docs/colony-federation.md`): a procedure travels the mesh as a provenance-stamped copy so
+  agents don't each re-evolve from scratch. Skill semantics on the wire: the origin's
+  `metadata.outcomes` ledger rides the note as *context* (pure `track_record_note`), while the
+  receiver **drops sender salience** on procedural imports and the import starts an **empty
+  ledger** — **fitness is re-earned per embodiment, never transferred**, so the receiving
+  node's own Darwinian loop grades the import from its first graded use. The
+  "exo-evolution for any MCP consumer" thesis made concrete across the mesh.
 - **Champion-aware retrieval.** ✓ **DONE.** `find_relevant_procedures` and `cognitive_bootstrap`
   now surface the procedure competition crowned, ranking by the **same** fitness the dream phase
   uses (`retrieval_rank` = a `skill_champion` +1.0 band, then Wilson lower bound, ungraded
   falling back to salience) — single source of truth, no second drifting notion of "best".
-  `find_relevant_procedures` (a binary tag/concept gate, no relevance score) full-sorts by
-  `retrieval_rank`; `cognitive_bootstrap` (recall hits already relevance-ordered) instead does a
-  *stable* champion-promotion, so a champion only wins ties and fitness never overrides
-  relevance for non-champions. Without this the matched set surfaced in arbitrary DB order.
+  `find_relevant_procedures` (whose match stages are a binary relevance gate, no score)
+  full-sorts by `retrieval_rank`; `cognitive_bootstrap` (recall hits already relevance-ordered)
+  instead does a *stable* champion-promotion, so a champion only wins ties and fitness never
+  overrides relevance for non-champions. Without this the matched set surfaced in arbitrary DB
+  order. *(The matcher itself has since been retooled — colony C6, exact string equality was
+  silently missing `mesh_recall` vs `mesh-recall` on the tool the souls mandate reaching for
+  first: stage-1 exact matching is **normalized** (`norm_tag` — case/`-`/`_`-insensitive;
+  `concepts` scan content too, not just metadata), a stage-2 **semantic** pass widens through
+  the same `brain.recall` path (the explicit `query` arg, else tags+concepts as query text)
+  only when exact matching leaves room, and the response is an **object** —
+  `{procedures, matched:{exact,semantic}, procedures_in_scope, note}`, no longer a bare
+  array — so an empty result says whether the matcher missed or nothing exists in scope.
+  Ranking is unchanged: the whole matched set, whichever stage found it, full-sorts by
+  `retrieval_rank`.)*
 
 Then: land the foundation **and** the frontier mechanisms in standalone `CerebroCortex-RS`
 so the capability is generic (the two cerebro trees are parity — see the cross-repo mirror).

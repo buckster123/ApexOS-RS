@@ -67,13 +67,13 @@ to courier it. Remove the human from agent↔agent artifact exchange.
 - **Tool** (apexos-tools / supervisor virtual tool, mirrors `send_to_agent`):
   `mesh_file_send(node, path, dest?)` — reads a **workspace-confined** source file and POSTs it to the
   peer with the per-peer bearer token (reqwest, never curl argv).
-- **Endpoint** (gateway, token-gated): `POST /api/mesh/file` — body `{filename, content_b64|text, dest?}`.
-  Writes into the **receiver's workspace** (workspace-confined, reject `..`, sanitized filename).
-  Returns `{ok, path}`.
-- **Confinement:** source read confined to sender's workspace; dest confined to receiver's workspace.
-  Size cap (~5 MB) to bound transfers.
-- **Policy:** propose `mesh_file_send = "allow"` (bounded by the trusted peer registry + double
-  workspace confinement, same model as `send_to_agent`). André's call.
+- **Endpoint** (gateway, token-gated): `POST /api/mesh/file` — **raw bytes** in the body (binary-safe,
+  no base64), the remote relative path in the `x-dest` header. Writes into the **receiver's workspace**
+  (`confine_mesh_dest`: reject `..`/absolute, parents auto-created). Returns `{ok, path, bytes}`.
+- **Confinement:** source read confined to the sender's per-agent workspace (`confine_mesh_source`);
+  dest confined to the receiver's workspace. 5 MB sender cap / 8 MB receiver body limit.
+- **Policy:** `mesh_file_send = "allow"` (bounded by the trusted peer registry + double
+  workspace confinement, same model as `send_to_agent`).
 - **Effort:** Low. **Acceptance:** `mesh_file_send(node="ApexOS-2", path="notes/x.md")` lands the file
   in apex2's workspace; the agents share docs unaided.
 
@@ -82,7 +82,9 @@ to courier it. Remove the human from agent↔agent artifact exchange.
 ~70% built — `build_embodiment` already knows each node's senses + tools. Expose + query it.
 
 - **Refactor:** lift the structured capability data out of `build_embodiment` (node_id, tier, senses
-  `{camera, thermal, gpio, …}`, tool registry, memory mode, peer count) into a reusable struct.
+  `{camera, thermal, gpio, …}`, tool registry, memory mode, peer count) into a reusable snapshot —
+  shipped as `gather_capabilities` (agentd `main.rs`), published to a shared `Arc<RwLock<Value>>` by
+  the 30s embodiment refresher, kept separate from the cache-sensitive embodiment *string*.
 - **Endpoint** (gateway, token-gated): `GET /api/capabilities` → that struct.
 - **Query** (supervisor virtual tool): `mesh_capabilities(node?)` — fetch one/all peers' capabilities
   ("which node has thermal?", "which has a GPU?"). Optionally cache in the discovery loop.
@@ -95,13 +97,19 @@ to courier it. Remove the human from agent↔agent artifact exchange.
 The delegation primitive: "give me a result from another node." Unlocks the cloud bridge, compute
 delegation, cross-node task decomposition.
 
-- **Endpoint** (gateway, token-gated): `POST /api/spawn` — body `{prompt, timeout_s?, agent_id?}`.
-  Runs a **one-shot sub-agent turn** (fresh child id, the `SpawnAgent` path — not the root session),
-  collects the final assistant text, returns `{ok, output}`. Bounded by `timeout_s` (default 30, cap 300).
-- **Caller** (supervisor virtual tool): `agent_spawn(node, prompt, timeout_s?)` — POSTs to the peer's
-  `/api/spawn`, **blocks** on the response.
+- **Endpoint** (gateway, token-gated): `POST /api/spawn` — body `{prompt, system?, timeout_s?}`.
+  Runs a **one-shot sub-agent turn** (ephemeral child id in the `SPAWN_SESSION_BASE` persist-skip
+  range — not the root session; the spawn worker runs `run_turn` directly), collects the final
+  assistant text, returns `{ok, output}`. Bounded by `timeout_s` (**default 90**, clamped 5–300 — a
+  cold cross-node sub-agent start routinely exceeds 30s; APEX hit the old 30s default live).
+- **Caller** (supervisor virtual tool): `agent_spawn(node, prompt, system?, inherit_soul?, timeout_s?)`
+  — POSTs to the peer's `/api/spawn`, **blocks** on the response. With no explicit `system` the child
+  gets the minimal **task charter**, not the parental soul (`resolve_spawn_system`/`spawn_scope_system`,
+  H6 — resolved *before* the local/remote branch, so a remote spawn gets the same default;
+  `inherit_soul:true` is the deliberate opt-in to full identity).
 - **Circuit breaker + loop guard:** per-peer recent-failure tracking → short-circuit a failing peer for
-  a cooldown (no cascading hangs); a **hop-count** header caps A→B→A spawn recursion.
+  a cooldown (3 consecutive failures → 60s open, no cascading hangs); the **`x-mesh-hops`** header caps
+  A→B→A spawn recursion (refused at ≥ 3).
 - **Effort:** Medium. **Acceptance:** `agent_spawn(node="ApexOS-RS", prompt="research X, return findings",
   timeout_s=60)` blocks and returns apex1's sub-agent output.
 

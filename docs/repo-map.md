@@ -29,7 +29,7 @@ ApexOS-RS/
 │   ├── agent        apexos-agent     turn engine: LLM stream → tool round-trips → council; cache + usage
 │   ├── store        apexos-store     append-only JSONL event-log writer
 │   └── agentd       agentd  (bin)    main daemon: wires bus+gateway+supervisor+turn+scheduler+goals
-│                                     +evolution+self-update+dream-digest
+│                                     +evolution+self-update+dream-digest+rehearse
 │
 ├── cerebro/crates/                 # cognitive-memory stack (agent FORGE's brain)
 │   ├── cerebro      cerebro          engine lib: SQLite+vec, petgraph, ACT-R/FSRS, brain engines, vision
@@ -61,26 +61,26 @@ ApexOS-RS/
 |-------|------|------|-----------|------------|
 | **apexos-protocol** | `apexos-protocol` (repo root) | Shared wire-protocol types — the `Event` enum + ToolCall/ContentBlock/Message + ID newtypes. serde-only so frontends depend on it without the daemon stack; both WS ends share these types. | `src/lib.rs` (538 lines — `Event` :217, `ToolCall` :371, `ContentBlock` :429, PolicyMode/EvolutionProposal/SensorReading) | serde, serde_json |
 | **apexos-confine** | `apexos-confine` (repo root) | Path-confinement primitives — the FS-sandbox *algorithm* (std-only, no ApexOS deps, liftable on its own). Policy *values* live in apexos-tools `tools.rs::confine`. | `src/lib.rs` (251 lines — `has_traversal` :53, `canonicalize_lenient` :61, `confine_fs` :86, `confine_to_roots` :125; unit-tested incl. symlink escape) | (none) |
-| **apexos-core** | `agentd/crates/core` | Runtime shared state + the in-process event Bus (mpsc inbox → broadcast out). Re-exports `apexos-protocol` as `types` (so `apexos_core::Event` still resolves). | `src/lib.rs` (re-export glue) · `src/bus.rs` (`Bus::new` → BusHandle emit + broadcast subscribe; `Bus::run` applies state then rebroadcasts) · `src/state.rs` (`SystemState::apply`) · `src/identity.rs` (identity registry, SessionBindings, workspace roots) · `src/persona.rs` (`persona_style`) · `src/history.rs` (`trim_history`) · `src/vision.rs` (image downscale shim) | apexos-protocol, serde, serde_json, tokio, anyhow, image, base64, toml, sha2, subtle, rand |
-| **apexos-gateway** | `agentd/crates/gateway` | axum HTTP+WS server — the entire external surface of agentd. | `src/lib.rs` (5777 lines — `GatewayState` :78, `require_token` :222, `router()` :277, `ws_handler` :395 / `handle_socket` :476, `handle_sensor_bridge` :712, `static_handler` :742 — the web/ filename whitelist, voice `stt_plan` :2384 / `tts_plan` :2753, `handle_terminal_ws` :3102, `serve()` :5460) · `src/mesh.rs` (PeerRegistry, avahi discovery, pairing) · `src/beacon.rs` (downtime-beacon state machine) · `src/session_auth.rs` (login session tokens, `gate_agent_bind`) | apexos-core, apexos-plugins, apexos-agent (CacheConfig), axum, tokio, futures-util, reqwest, libc, toml, chrono, tiny-skia, subtle, percent-encoding |
-| **apexos-plugins** | `agentd/crates/plugins` | MCP plugin host: spawn/supervise stdio plugins, route tool calls, enforce approval policy, vast.ai recipes. | `src/supervisor.rs` (`Supervisor::run` :271, `ToolProxy::call`, `SupervisorCmd`, `dispatch_tool` :458 virtual-tool chain — 2693 lines) · `src/mcp.rs` (`McpClient` over child stdio; `request()` bounded by `AGENTD_TOOL_RESULT_TIMEOUT_SECS`, default 1800s) · `src/policy.rs` (`PolicyEngine`, `Rule`, `Decision`) · `src/config.rs` (plugins.toml loader, RestartPolicy) · `src/vast.rs` | apexos-core, apexos-confine, tokio, serde, serde_json, anyhow, toml, chrono, reqwest |
+| **apexos-core** | `agentd/crates/core` | Runtime shared state + the in-process event Bus (mpsc inbox → broadcast out). Re-exports `apexos-protocol` as `types` (so `apexos_core::Event` still resolves). | `src/lib.rs` (re-export glue) · `src/bus.rs` (`Bus::new` → BusHandle emit + broadcast subscribe; `Bus::run` applies state then rebroadcasts) · `src/state.rs` (`SystemState::apply`) · `src/identity.rs` (identity registry, SessionBindings, workspace roots, `SPAWN_SESSION_BASE`/`is_spawn_session` — the shared ephemeral-spawn-session constant) · `src/persona.rs` (`persona_style`) · `src/history.rs` (`trim_history`) · `src/vision.rs` (image downscale shim) | apexos-protocol, serde, serde_json, tokio, anyhow, image, base64, toml, sha2, subtle, rand |
+| **apexos-gateway** | `agentd/crates/gateway` | axum HTTP+WS server — the entire external surface of agentd. | `src/lib.rs` (6057 lines — `GatewayState` :82, `require_token` :232, `router()` :287, `ws_handler` :406 / `handle_socket` :487, `handle_sensor_bridge` :723, `static_handler` :753 — the web/ filename whitelist, voice `stt_plan` :2592 / `tts_plan` :2961, `handle_terminal_ws` :3310, `serve()` :5683) · `src/mesh.rs` (PeerRegistry, avahi discovery, pairing) · `src/beacon.rs` (downtime-beacon state machine) · `src/session_auth.rs` (login session tokens, `gate_agent_bind`) · `src/backend_config.rs` (`resolve_boot` — persisted > env > backend-aware defaults) · `src/compute.rs` (LAN compute scan → `/api/compute/discover`) | apexos-core, apexos-plugins, apexos-agent (CacheConfig), axum, tokio, futures-util, reqwest, libc, toml, chrono, tiny-skia, subtle, percent-encoding |
+| **apexos-plugins** | `agentd/crates/plugins` | MCP plugin host: spawn/supervise stdio plugins, route tool calls, enforce approval policy, vast.ai recipes. | `src/supervisor.rs` (`Supervisor::run` :357, `ToolProxy::call`, `SupervisorCmd`, `dispatch_tool` :548 virtual-tool chain, `resolve_spawn_system` :112 — spawn task-charter vs `inherit_soul` — + the `spawn-derived` cerebro-tag stamp for spawn sessions — 2942 lines) · `src/mcp.rs` (`McpClient` over child stdio; `request()` bounded by `AGENTD_TOOL_RESULT_TIMEOUT_SECS`, default 1800s) · `src/policy.rs` (`PolicyEngine`, `Rule`, `Decision`) · `src/config.rs` (plugins.toml loader, RestartPolicy) · `src/vast.rs` | apexos-core, apexos-confine, tokio, serde, serde_json, anyhow, toml, chrono, reqwest |
 | **apexos-agent** | `agentd/crates/agent` | Agent turn engine: stream from LLM providers, drive tool round-trips over the Bus, run councils. | `src/turn.rs` (`run_turn`: stream → AgentText, emit ToolRequested, await ToolResult, loop; `compose_system`, `vision_rewrite`, `inject_ambient`) · `src/provider.rs` (`Provider` trait + Chunk stream) · `src/routing.rs` (`RoutingProvider`, live backend swap) · `src/anthropic.rs` / `src/oai.rs` · `src/council.rs` (`run_council`) · `src/cache.rs` (`CacheConfig` — runtime prompt-cache knobs) · `src/usage.rs` (process-global token/cost accumulator → `/api/usage`) | apexos-core, tokio, reqwest, async-trait, async-stream, futures-util, bytes, serde, serde_json |
 | **apexos-store** | `agentd/crates/store` | Append-only event-log writer; subscribes the broadcast bus, persists JSONL (date-rolling). | `src/lib.rs` (`run_log_writer` — single pub async fn) | apexos-core, serde_json, tokio, anyhow, chrono |
-| **agentd** | `agentd/crates/agentd` | Main daemon binary: wires everything, owns the agent-router, evolution-applier, goal-driver and self-update loops. | `src/main.rs` (3713 lines — Bus wiring, `spawn_evolution_applier` :695, `spawn_agent_router` :1213 routing UserPrompt→root_turn, `spawn_nightly_dream` :1701, `gather_tools` :1858, `build_embodiment` :2015) · `src/scheduler.rs` (cron) · `src/council_handler.rs` · `src/session_store.rs` · `src/goal.rs` (autonomous goal driver, `spawn_goal_driver` :249) · `src/evolution.rs` (pure evolution state machine: kind/invert, undo codec, TOML edits) · `src/self_update.rs` + `src/health.rs` (self-update loop + health contract) · `src/consolidate.rs` (session→Cerebro distiller worker) · `src/dream_digest.rs` (post-dream federation push, echo-guarded) · `src/sensor_config.rs` (alert-profile persistence) | apexos-core, apexos-gateway, apexos-plugins, apexos-agent, apexos-store, tokio, toml_edit, cron, chrono, anyhow |
+| **agentd** | `agentd/crates/agentd` | Main daemon binary: wires everything, owns the agent-router, evolution-applier, goal-driver and self-update loops. | `src/main.rs` (4260 lines — Bus wiring, `spawn_evolution_applier` :776, `spawn_agent_router` :1431 routing UserPrompt→root_turn, `spawn_nightly_dream` :2019, `gather_tools` :2199, `build_embodiment` :2360) · `src/scheduler.rs` (cron) · `src/council_handler.rs` · `src/session_store.rs` · `src/goal.rs` (autonomous goal driver, `spawn_goal_driver` :249) · `src/evolution.rs` (pure evolution state machine: kind/invert, undo codec, TOML edits) · `src/self_update.rs` + `src/health.rs` (self-update loop + health contract) · `src/consolidate.rs` (session→Cerebro distiller worker) · `src/rehearse.rs` (`soul_rehearse` fitting-room worker — ephemeral tool-less probes on a candidate soul, 6-probe default battery / ≤6 custom + `compare_to` A/B) · `src/dream_digest.rs` (post-dream federation push, echo-guarded) · `src/sensor_config.rs` (alert-profile persistence) | apexos-core, apexos-gateway, apexos-plugins, apexos-agent, apexos-store, tokio, toml_edit, cron, chrono, anyhow |
 | **cerebro** | `cerebro/crates/cerebro` | Cognitive-memory engine lib: SQLite+vec storage, petgraph graph, ACT-R/FSRS activation, fastembed, brain-region engines, VLM/CLIP vision. | `src/cortex.rs` (`CerebroCortex` facade) · `src/engines/` (hippocampus/neocortex/amygdala/prefrontal/dream/…) · `src/storage/` (sqlite.rs, vector.rs, graph.rs) · `src/activation/` (actr.rs, fsrs.rs, spreading.rs) · `src/vision.rs` (`describe_image` VLM backends + CLIP towers) · `src/config.rs` (`Config::from_env`) | rusqlite, sqlite-vec, petgraph, fastembed, tokio, reqwest, uuid, chrono, notify, dirs-next, serde, tracing |
-| **cerebro-mcp** | `cerebro/crates/cerebro-mcp` | MCP-over-stdio server exposing **67 advertised** Cerebro tools (count asserted by the `tools.len()` test in dispatch.rs — 66 functional + the deferred `ingest_file` stub); the plugin agentd spawns for agent memory. | `src/main.rs` (initialize handshake + read/dispatch/write loop) · `src/dispatch.rs` (`route(name,args,brain)` — 1969 lines) · `src/tools.rs` (schema registry) · `src/transport.rs` (`StdioTransport`) | cerebro, tokio, serde, serde_json, anyhow, tracing, uuid |
+| **cerebro-mcp** | `cerebro/crates/cerebro-mcp` | MCP-over-stdio server exposing **67 advertised** Cerebro tools (count asserted by the `tools.len()` test in dispatch.rs — 66 functional + the deferred `ingest_file` stub); the plugin agentd spawns for agent memory. | `src/main.rs` (initialize handshake + read/dispatch/write loop) · `src/dispatch.rs` (`route(name,args,brain)` + the audit write chokepoint — every successful mutating call logs one row via the `audit_action` whitelist → `log_audit_event` — 2327 lines) · `src/tools.rs` (schema registry) · `src/transport.rs` (`StdioTransport`) | cerebro, tokio, serde, serde_json, anyhow, tracing, uuid |
 | **cerebro-api** | `cerebro/crates/cerebro-api` | axum REST API + dashboard over the engine (~40 routes); AGENTD_TOKEN bearer middleware. | `src/main.rs` (1040 lines — all handlers + router) | cerebro, axum, tower, tokio, serde, serde_json, chrono, uuid, tracing |
 | **cerebro-cli** | `cerebro/crates/cerebro-cli` | clap CLI over the engine (binary named `cerebro`). | `src/main.rs` (Cli/Command/Subcommand tree, 778 lines) | cerebro, clap, tokio, serde, serde_json, chrono, uuid, tracing |
-| **apexos-tools** | `tools/crates/apexos-tools` | MCP-over-stdio system tool plugin: shell/file/git/http/sysinfo/audio/GPIO/display/media, with a command denylist. | `src/main.rs` (stdio JSON-RPC loop) · `src/tools.rs` (`list()`/`call()` + ~43 tool impls + `denylist_check` + `confine` policy values — 3077 lines) | serde, serde_json, reqwest (blocking), apexos-confine |
+| **apexos-tools** | `tools/crates/apexos-tools` | MCP-over-stdio system tool plugin: shell/file/git/http/sysinfo/audio/GPIO/display/media, with a command denylist. | `src/main.rs` (stdio JSON-RPC loop) · `src/tools.rs` (`list()`/`call()` + ~43 tool impls + `denylist_check` + `confine` policy values — 3201 lines) | serde, serde_json, reqwest (blocking), apexos-confine |
 | **apex-sensor-bridge** | `tools/crates/apex-sensor-bridge` | Standalone WS client: polls CPU temp / SensorHead (BME688, MLX90640), pushes SensorReading to `/sensor-bridge`. | `src/main.rs` (272 lines — `read_cpu_temp`, SensorHead HTTP poll, tungstenite WS push loop, reconnect backoff) | serde, serde_json, tungstenite, reqwest (blocking) |
 | **apex-tts** | `tools/crates/apex-tts` | **Workspace-EXCLUDED** Kokoro-82M TTS sidecar — its own workspace/Cargo.lock so the `ort =2.0.0-rc.11` pin can't fight cerebro's fastembed `ort`. `tiny_http` server on loopback `:8770` (`POST /synth` → WAV); gateway reaches it via `APEX_TTS_URL`. Built by install.sh when voice is on. | `src/main.rs` · own `Cargo.lock` | tts-rs (kokoro), ort =rc.11, tiny_http, hound |
 | **apex-stt** | `tools/crates/apex-stt` | **Workspace-EXCLUDED** Whisper STT sidecar (build isolation — the whisper.cpp C++ build stays off workspace builds; no `ort`). Loads a ggml model once; `tiny_http` on loopback `:8771` (`POST /transcribe` ← 16 kHz mono WAV). Built by install.sh when voice is on. | `src/main.rs` · own `Cargo.lock` | whisper-rs, tiny_http, hound |
-| **ui-slint** | `ui-slint` | Native Slint KMS/DRM (or winit) UI binary `apexos-rs-ui`. | `src/main.rs` (6449 lines — tokio bootstrap, WS connect+reconnect, HTTP polling, event→model mapping, window manager, persona/toast/inbox subsystems) · `src/face_gl.rs` (raymarched-SDF GL face overlay, 486 lines) · `src/ui/appwindow.slint` (root) · `src/ui/components/` (33 views: chat_view, tool_card, dashboard, sensor_view, council_view, terminal_view, explorer_view, mesh_view, settings_view, face_view, taskbar, …) · `src/ui/types.slint` (shared structs) · `build.rs` (`slint_build::compile`) | apexos-protocol, slint (backend-linuxkms-noseat + backend-winit), tokio, tokio-tungstenite, futures-util, serde, serde_json, reqwest, chrono, slint-build |
+| **ui-slint** | `ui-slint` | Native Slint KMS/DRM (or winit) UI binary `apexos-rs-ui`. | `src/main.rs` (6658 lines — tokio bootstrap, WS connect+reconnect, HTTP polling, event→model mapping, window manager, persona/toast/inbox subsystems) · `src/face_gl.rs` (raymarched-SDF GL face overlay, 486 lines) · `src/ui/appwindow.slint` (root) · `src/ui/components/` (33 views: chat_view, tool_card, dashboard, sensor_view, council_view, terminal_view, explorer_view, mesh_view, settings_view, face_view, taskbar, …) · `src/ui/types.slint` (shared structs) · `build.rs` (`slint_build::compile`) | apexos-protocol, slint (backend-linuxkms-noseat + backend-winit), tokio, tokio-tungstenite, futures-util, serde, serde_json, reqwest, chrono, slint-build |
 
 Not a crate but part of the shipped surface: **`web/`** — the browser + mobile-PWA frontend
 (`index.html` · `app.js` · `style.css` · `sw.js` · `manifest.json` · `icon.svg`; vanilla JS, no build
 step). install.sh copies it to `/var/lib/agentd/ui` on **every** node (headless included); the gateway
-serves it via the filename-whitelisted `static_handler` (lib.rs:742) — a new asset filename must be
+serves it via the filename-whitelisted `static_handler` (lib.rs:753) — a new asset filename must be
 added there. See [web-ui.md](web-ui.md).
 
 ---
@@ -97,9 +97,9 @@ The **core Bus** is the hub. Everything is fan-out via a `broadcast::Sender<Even
   ui-slint (main.rs)                              agentd
   ┌──────────────┐   {type:user_prompt}   ┌──────────────────────────────┐
   │ WS send      │ ─────────────────────► │ gateway /ws handle_socket     │
-  └──────────────┘                        │  (lib.rs:476; read task)       │
+  └──────────────┘                        │  (lib.rs:487; read task)       │
          ▲                                │  inject session, deser Event   │
-         │                                │  bus.emit (lib.rs:661)         │
+         │                                │  bus.emit (lib.rs:672)         │
          │                                └───────────────┬────────────────┘
          │                                                ▼
          │                                  core Bus::run (bus.rs)
@@ -107,7 +107,7 @@ The **core Bus** is the hub. Everything is fan-out via a `broadcast::Sender<Even
          │                                                │
          │             ┌──────────────────────────────────┼───────────────────────────┐
          │             ▼                                   ▼                            ▼
-         │   spawn_agent_router (main.rs:1213)     apexos-store              (other subscribers)
+         │   spawn_agent_router (main.rs:1431)     apexos-store              (other subscribers)
          │     match UserPrompt → root_turn        run_log_writer (JSONL)
          │             │
          │             ▼
@@ -117,9 +117,9 @@ The **core Bus** is the hub. Everything is fan-out via a `broadcast::Sender<Even
          └─────────────────────────────────────────────────┘  (broadcast → UI appends text)
 
   TOOL ROUND-TRIP
-  run_turn emits Event::ToolRequested (turn.rs:292) ──► broadcast
+  run_turn emits Event::ToolRequested (turn.rs:302) ──► broadcast
         ├──► UI renders tool_card
-        └──► apexos-plugins Supervisor::run (supervisor.rs:271 → dispatch_tool :458) consumes it
+        └──► apexos-plugins Supervisor::run (supervisor.rs:357 → dispatch_tool :548) consumes it
                  PolicyEngine.check(tool,path)  →  Allow | Ask
                    Ask → emit ApprovalPending ──► UI buttons ──► {type:user_approval, action:<id>}
                    Allow → dispatch_tool:
@@ -129,7 +129,8 @@ The **core Bus** is the hub. Everything is fan-out via a `broadcast::Sender<Even
                                         └─ cerebro-mcp   (memory)  → cerebro::CerebroCortex
                                                                        → SQLite/vector/graph + fastembed
                  Supervisor emits Event::ToolResult ──► broadcast
-        run_turn awaits matching ToolResult (turn.rs:318), loops … → Event::TurnComplete
+        run_turn awaits matching ToolResult(s) (collect_tool_results, turn.rs:366 — approval-phase-aware:
+          a missing result names the true blocker, awaiting-approval / declined / stalled), loops … → Event::TurnComplete
 ```
 
 Note the **id shapes** on the wire: tool fields nest under `call` (a `ToolCall`); `ActionId`/`SessionId`
@@ -144,7 +145,7 @@ into the typed `Event` (and logs any undecodable frame) instead of string-matchi
     read CPU temp (sysfs) / SensorHead HTTP (BME688, MLX90640)
         │  WS push, SENSOR_BRIDGE_TOKEN auth
         ▼
-  gateway /sensor-bridge handle_sensor_bridge (lib.rs:712, ungated route + own token check)
+  gateway /sensor-bridge handle_sensor_bridge (lib.rs:723, ungated route + own token check)
         │  emit Event::SensorReading
         ▼
   core Bus  ──broadcast──┬──► UI /ws subscribers (sensor_view, dashboard)
@@ -164,11 +165,11 @@ store writer, scheduler/council handlers.
 |------------|-------|
 | Add / edit a **system tool** (shell, file, http, GPIO, audio) | `tools/crates/apexos-tools/src/tools.rs` (`list()` schema + `call()` dispatch); shell guards in `denylist_check` |
 | Add / edit a **memory tool** (Cerebro) | `cerebro/crates/cerebro-mcp/src/dispatch.rs` (route) + `cerebro/crates/cerebro-mcp/src/tools.rs` (schema); engine logic in `cerebro/crates/cerebro/src/` |
-| Add a **virtual tool** (propose_evolution, schedule_*, convene_council, agent_spawn, vast_*) | declare ToolSpec in `agentd/crates/agentd/src/main.rs` `gather_tools`; intercept in `agentd/crates/plugins/src/supervisor.rs` `dispatch_tool` |
+| Add a **virtual tool** (propose_evolution, schedule_*, convene_council, agent_spawn, soul_rehearse, vast_*) | declare ToolSpec in `agentd/crates/agentd/src/main.rs` `gather_tools`; intercept in `agentd/crates/plugins/src/supervisor.rs` `dispatch_tool` |
 | Change **approval policy** behaviour | rules in `config/policy.toml`; engine logic in `agentd/crates/plugins/src/policy.rs` (`PolicyEngine::check`, workspace_decision) |
 | Change which **plugins** agentd spawns | `config/plugins.toml`; loader in `agentd/crates/plugins/src/config.rs` |
-| Add / change an **HTTP/WS route** or `/api/*` endpoint | `agentd/crates/gateway/src/lib.rs` (`router()` :277, handlers below it) |
-| Change **auth / bind policy** (token, loopback) | bind/auth in `agentd/crates/agentd/src/main.rs:366-368`; `require_token` middleware in `gateway/src/lib.rs:222`; human-login session tokens in `gateway/src/session_auth.rs` |
+| Add / change an **HTTP/WS route** or `/api/*` endpoint | `agentd/crates/gateway/src/lib.rs` (`router()` :287, handlers below it) |
+| Change **auth / bind policy** (token, loopback) | bind/auth in `agentd/crates/agentd/src/main.rs:387-391`; `require_token` middleware in `gateway/src/lib.rs:232`; human-login session tokens in `gateway/src/session_auth.rs` |
 | Change the **wire protocol** (Event/ToolCall shape) | `apexos-protocol/src/lib.rs` (re-exported as `apexos_core::Event` / `apexos_core::types::*`; ui-slint consumes the crate directly) — then `SystemState::apply` in `core/src/state.rs` + every consumer |
 | Change **FS confinement** | new confinement *logic* → `apexos-confine/src/lib.rs` (with a test); policy *values* (workspace root, read allowlist, git roots, secret denylist) → `tools/crates/apexos-tools/src/tools.rs::confine` |
 | Change **LLM provider / turn loop** logic | `agentd/crates/agent/src/turn.rs`; provider impls in `anthropic.rs` / `oai.rs`; dispatch in `routing.rs` |
@@ -179,8 +180,8 @@ store writer, scheduler/council handlers.
 | Change **evolution apply/undo** logic | pure state machine in `agentd/crates/agentd/src/evolution.rs` (with a test); the applier loop in `main.rs` is IO-thin glue |
 | Change **self-update / health** | `agentd/crates/agentd/src/self_update.rs` + `health.rs`; watchdog/rollback scripts + units in `deploy/apexos-self-update.*`, `deploy/apexos-rollback.*` |
 | Change **mesh discovery / pairing / beacon / federation** | `agentd/crates/gateway/src/mesh.rs` (PeerRegistry, avahi, pairing) · `gateway/src/beacon.rs` (liveness) · federation import/recall handlers in `gateway/src/lib.rs` · dream-digest push in `agentd/src/dream_digest.rs` |
-| Change **voice / TTS / STT** | backend plans + handlers in `agentd/crates/gateway/src/lib.rs` (`stt_plan` :2384, `tts_plan` :2753, `speak_handler`, `transcribe_wav`); local engines in the excluded sidecars `tools/crates/apex-tts` / `apex-stt` |
-| Edit the **browser / PWA UI** | `web/` (app.js, index.html, style.css, sw.js) — a NEW asset filename must also be added to the gateway `static_handler` whitelist (`gateway/src/lib.rs:742`) |
+| Change **voice / TTS / STT** | backend plans + handlers in `agentd/crates/gateway/src/lib.rs` (`stt_plan` :2592, `tts_plan` :2961, `speak_handler`, `transcribe_wav`); local engines in the excluded sidecars `tools/crates/apex-tts` / `apex-stt` |
+| Edit the **browser / PWA UI** | `web/` (app.js, index.html, style.css, sw.js) — a NEW asset filename must also be added to the gateway `static_handler` whitelist (`gateway/src/lib.rs:753`) |
 | Change **session history persistence** | `agentd/crates/agentd/src/session_store.rs` (root sessions) |
 | Change the **event log** format | `agentd/crates/store/src/lib.rs` (`run_log_writer`) |
 | Edit the **chat view** | `ui-slint/src/ui/components/chat_view.slint` |

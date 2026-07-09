@@ -124,9 +124,27 @@ Flickable {
 ```
 `viewport-width` may be left unset (defaults to the Flickable width → no horizontal
 scroll). This is also required for any manual auto-scroll-to-bottom handler, since
-`flick.viewport-y = min(0px, -(flick.viewport-height - flick.height))` needs a real
-`viewport-height` to compute the bottom. Every scrollable pane in this repo follows
-this pattern (chat, settings, session, council, terminal, persona, notif).
+the viewport-y math needs a real `viewport-height` to compute the bottom.
+
+**Repo standard: every scrollable pane uses a std-widgets `ScrollView`, never a bare
+`Flickable`.** The linuxkms backend drops scroll-wheel events (only pointer
+motion/button libinput events are translated), so on the Pi kiosk the ScrollView's
+drag-able scrollbar is the *only* scroll affordance — a bare Flickable is unscrollable
+there. The pattern (chat, settings, session, council, terminal, etc.):
+```slint
+sv := ScrollView {
+    vertical-stretch: 1;
+    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+    viewport-width: sv.visible-width;
+    viewport-height: col.preferred-height;
+    col := VerticalLayout { /* … */ }
+}
+```
+ScrollView auto-manages the viewport from its child layout when `viewport-height` is
+left unset (settings does this), but auto-scroll views need it explicit: the
+scroll-to-bottom tick is `sv.viewport-y = min(0px, -(sv.viewport-height -
+sv.visible-height))`, and sparse content is bottom-anchored with
+`viewport-height: max(col.preferred-height, sv.visible-height)` (chat).
 
 ---
 
@@ -134,7 +152,8 @@ this pattern (chat, settings, session, council, terminal, persona, notif).
 
 `Window::set_rendering_notifier` lets you draw raw GL (via `glow`) inside the same
 context femtovg renders with — the basis of the GL face (`ui-slint/src/face_gl.rs`,
-gated by `APEX_FACE_GL=1`). Three things bit us:
+default-on wherever a real `NativeOpenGL` context exists, silent 2D fallback
+otherwise; `APEX_FACE_GL=0` forces 2D). Three things bit us:
 
 **1. Scissor the GL to the element's live rect, not the whole window.** The face is
 a movable desktop-shell window, so the GL pass must track it. The `FaceView` publishes
@@ -214,16 +233,27 @@ SLINT_FULLSCREEN=1 cargo run
 
 ## Font Notes
 
-Slint bundles Noto Sans by default. For the terminal-aesthetic monospace look,
-bundle a `.ttf` via Slint's `@font-face` in `.slint`:
+Slint (1.16, parley + fontique) resolves fonts from the **system** — on Linux the
+fallback chain goes through the real fontconfig lib (honours `/etc/fonts`). To
+bundle a custom `.ttf`, `import` it from a `.slint` file (there is **no**
+`@font-face` in Slint):
 ```slint
-@font-face {
-    font-family: "JetBrains Mono";
-    sources: [ResourcePath("../assets/fonts/JetBrainsMono-Regular.ttf")];
-}
+import "../../assets/fonts/JetBrainsMono-Regular.ttf";
+// then use it:  font-family: "JetBrains Mono";
 ```
-Place the font in `ui-slint/assets/fonts/`. It gets embedded in the binary at
-compile time — zero runtime font dependency.
+Place the font in `ui-slint/assets/fonts/`. An imported font is embedded in the
+binary at compile time (the Rust output defaults to embed-all-resources) — zero
+runtime font dependency.
+
+**Emoji render monochrome by design.** We compile only the femtovg + software
+renderers, and femtovg rasterizes glyph *outlines* only — a colour-bitmap font
+("Noto Color Emoji") comes out as tofu. `ensure_mono_emoji_fontconfig()`
+(ui-slint `main.rs`, runs before `AppWindow::new()`) writes a per-process
+`FONTCONFIG_FILE` that `<include>`s the system config then `<rejectfont>`s
+"Noto Color Emoji", so fallback lands on the bundled mono outline font
+(`deploy/fonts/NotoEmoji-mono.ttf`, installed by install.sh) — scoped to
+ui-slint only; the rest of the machine keeps colour emoji. An existing
+`FONTCONFIG_FILE` (user/operator override) is respected.
 
 ---
 

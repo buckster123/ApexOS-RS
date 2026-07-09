@@ -39,7 +39,7 @@ locally from `/api/tts` WAV bytes, falling back to `/api/speak`. See `docs/voice
 - **Code editor** — evaluate `slint-ui/slint-viewer` or embedded Monaco via a minimal
   embedded webview (webkit2gtk-rs). Or accept: editor opens in SSH session instead.
 - **Sub-agent windows** — after core stable; each child session gets a Slint Popup/Dialog.
-  (So far only a running-sub-agents taskbar badge exists — the per-child window is still open.)
+  (So far only a running-sub-agents taskbar badge + a Work Board "SUB" card exist — the per-child window is still open.)
 - ~~**Sketchpad**~~ — **shipped, bidirectional**: `sketchpad_view.slint` Path-stroke canvas
   + gateway `POST /api/sketch` (tiny-skia raster) + the `sketch_snapshot` read tool + the
   `sketch_draw` write tool (APEX draws onto the same canvas, normalized 0–1 coords, no
@@ -67,7 +67,7 @@ New `.slint` components:
 - `InputBar` — TextInput + send Button + mic button
 
 Rust additions:
-- `handle_event` dispatches `agent_text`, `turn_started`, `turn_complete`
+- `dispatch_event` dispatches `agent_text`, `turn_started`, `turn_complete`
 - `send_message()` serialises `{"type":"user_prompt","text":"..."}` to WS
 
 As-built note: the Rust agentd never emits `turn_started` (Python agentd does) — the UI

@@ -42,12 +42,13 @@ perms, so the agent couldn't write them. So we mount with `uid=agentd` ourselves
 | `deploy/systemd/apexos-usb-mount@.service` | Oneshot (root) — `ExecStart`/`ExecStop` call the helpers, keyed on the kernel dev name. |
 | `deploy/usb/usb-mount` | Own-mount at `<workspace>/media/<label>` with `noexec,nosuid,nodev` + `uid=agentd,gid=agentd` (FAT/exFAT) or mount+chown (other). Hard-confines the mountpoint to `media/`; idempotent; records dev→mountpoint in `/run/apexos-usb/`. |
 | `deploy/usb/usb-umount` | Unmount by `<dev>` (udev remove, via the `/run` state) or `--label APEX-…` (eject). Hard-confines + validates the label before touching anything. |
-| `deploy/sudoers.d/apexos-usb` | Lets the non-root `agentd` user run **only** `usb-umount` as root (for UI/agent eject). |
+| `deploy/systemd/apexos-usb-eject.path`/`.service` + `deploy/usb/usb-eject-drain` | Root eject watcher: drains `APEX-<label>` request files via `usb-umount --label` (see *Eject* below). Replaced the removed `deploy/sudoers.d/apexos-usb` (inert under `NoNewPrivileges`). |
+| `deploy/systemd/apexos-usb-prep.path`/`.service` + `deploy/usb/usb-prep`(`-drain`) | Root prep watcher for *"Use this drive"*: drains `*.req` files via `usb-prep` (relabel/format → mount → init). |
 
 `install.sh` installs all of the above (helpers → `/usr/local/lib/apexos/`,
-`apexos-workspace-init` → `/usr/local/bin`), validates the sudoers with `visudo -c`,
-makes `<workspace>/media`, and reloads udev. Runs on every node (the marker-gate
-keeps it safe everywhere).
+`apexos-workspace-init` → `/usr/local/bin`), removes the old sudoers drop-in, makes
+`<workspace>/media` + the agentd-owned request dirs, reloads udev, and enables the
+eject/prep path units. Runs on every node (the marker-gate keeps it safe everywhere).
 
 ## Eject — privilege separation, NOT sudo
 
@@ -129,9 +130,10 @@ report?"):
   agentd can't sudo under `NoNewPrivileges`). Non-destructive (flush + unmount;
   re-pluggable), confined to `APEX-*` sticks. `allow` because the conversational "want me
   to eject it?" *is* the confirmation — a second
-  approval card would be clunky. **Already-deployed nodes need `eject_media = "allow"`
-  in their live `/etc/agentd/policy.toml`** (config seeds fresh nodes only) — else it
-  gates as `unknown → ask`.
+  approval card would be clunky. The `eject_media = "allow"` rule is seeded in
+  `config/policy.toml` and **reaches already-deployed nodes via install.sh's additive
+  `sync_policy_rules` on the next `apexos-update`** (policy is seed-or-additively-sync
+  since 2026-07-04); a node not yet updated gates it as `unknown → ask`.
 
 ## "Use this drive" — adopt a stick as an exo-workspace (no CLI)
 

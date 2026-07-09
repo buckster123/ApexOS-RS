@@ -121,7 +121,8 @@ What apex3 improvised with a file, done natively with memory semantics. As built
   typed event broadcasts now and wildcard arms pass it through.)
 - **Policy:** `mesh_memory_send = "allow"` seeded in config/policy.toml (peer-registry-
   bounded; strictly *less* potent than the already-allowed a2a prompt injection — this
-  lands as data, not instruction). **Live nodes patch or evolve the rule in.**
+  lands as data, not instruction). **Live nodes gain the rule on the next `apexos-update`
+  (install.sh's additive `sync_policy_rules`, 2026-07-04 — no more live-patching).**
 - **Acceptance (the colony field test):** apex1 sends a thermal-calibration memory to
   apex2; it appears in apex2's recall with `from:apex1` provenance; apex2's agent is
   notified.
@@ -150,7 +151,7 @@ What apex3 improvised with a file, done natively with memory semantics. As built
   agent's *publish* act — flipping a memory to shared is what makes it colony-queryable. The
   soul-level convention ("what should I publish?") is the agents' to evolve, not substrate.
 - **Policy:** `mesh_recall = "allow"` seeded (read-only over deliberately-shared memories).
-  **Live nodes patch or evolve the rule in.**
+  **Live nodes gain it via the additive policy sync on `apexos-update`.**
 - **Acceptance (the colony field test):** apex3 asks `mesh_recall("BME688 gas baseline")`
   and gets apex1's shared calibration knowledge without apex1's LLM running.
 
@@ -215,7 +216,7 @@ Skill learned once, owned by all — with honesty about earned trust. As built:
   as the promised per-origin query (`["from:apex1"]` = everything a peer ever sent).
 - **Deferred:** `mesh_procedures(node?)` listing — `mesh_recall` already covers discovery
   (procedures are memories; hits carry the `procedure` tag). Add only if the colony asks.
-- **Policy:** `mesh_procedure_send = "allow"` seeded. **Live nodes patch or evolve it in.**
+- **Policy:** `mesh_procedure_send = "allow"` seeded. **Live nodes gain it via the additive policy sync.**
 - **Acceptance (the colony field test):** a procedure stored on apex3 replicates to apex1,
   shows up in `find_relevant_procedures` there, and re-earns its stats through local
   `record_procedure_outcome`; a re-send returns `duplicate: true`.

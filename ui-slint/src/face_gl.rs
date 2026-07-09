@@ -14,7 +14,8 @@
 // Slice 3 (SDF): the fake hemisphere becomes a real raymarched ellipsoid head
 // with a protruding nose; features are painted on the true 3D normal.
 //
-// Gated by APEX_FACE_GL=1 in main.rs — dormant (zero cost) otherwise.
+// Auto-enabled in main.rs wherever a real GL context exists (2D fallback
+// otherwise); APEX_FACE_GL=0 forces the 2D face everywhere.
 //
 // GLSL ES 1.00 (`#version 100`) for portability: native on the Pi's V3D GLES and
 // accepted by desktop GL drivers. No depth, alpha blend, one VAO + fullscreen

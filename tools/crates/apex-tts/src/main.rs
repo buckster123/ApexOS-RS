@@ -2,7 +2,7 @@
 //!
 //! A tiny resident HTTP server that loads the Kokoro ONNX model once and answers
 //! `POST /synth` with a 24 kHz float WAV. It lives in its OWN cargo workspace so it
-//! can pin `ort` to the rc tts-rs targets (rc.10), decoupled from cerebro's
+//! can pin `ort` to the rc tts-rs targets (rc.11 — its declared ^rc.10 resolves there), decoupled from cerebro's
 //! fastembed→ort pin in the main workspace (see Cargo.toml).
 //!
 //! The gateway's `/api/speak` posts here; if this service is down or has no model,
