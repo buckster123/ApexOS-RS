@@ -473,6 +473,72 @@ mod storage_basic {
     }
 
     #[tokio::test]
+    async fn retention_sweep_bounds_the_three_lifecycle_tables() {
+        use cerebro::engines::dream::DreamReport;
+        let (store, _dir) = make_store().await;
+
+        // A memory with 15 version snapshots (newest = note "v14").
+        let node = MemoryNode::new("retained", MemoryType::Semantic);
+        let mid = node.id.clone();
+        store.sqlite.insert_memory(&node).await.unwrap();
+        for i in 0..15 {
+            store.sqlite.log_memory_version(&node, Some("test"), Some(&format!("v{i}")))
+                .await.unwrap();
+        }
+
+        // 12 dream reports; started_at = now - duration, so duration 0 is newest.
+        for i in 0..12 {
+            let report = DreamReport {
+                agent_id: Some("APEX".into()),
+                episodes_consolidated: 0,
+                total_llm_calls: 0,
+                total_duration_secs: (11 - i) as f64 * 60.0, // r11 → duration 0 = newest
+                success: true,
+                phases: vec![],
+            };
+            store.sqlite.save_dream_report(&format!("r{i}"), Some("APEX"), &report)
+                .await.unwrap();
+        }
+
+        // 30 audit rows.
+        for i in 0..30 {
+            store.sqlite.log_audit_event(Some("APEX"), "remember", None, Some(&format!("a{i}")))
+                .await.unwrap();
+        }
+
+        // Sweep versions + reports (audit cap 0 = untouched this pass).
+        let (v, r, a) = store.sqlite.retention_sweep(5, 4, 0).await.unwrap();
+        assert_eq!((v, r, a), (10, 8, 0));
+
+        // The NEWEST 5 versions survive.
+        let versions = store.sqlite.get_memory_versions_raw(&mid.0, 100).await.unwrap();
+        assert_eq!(versions.len(), 5);
+        let notes: Vec<String> = versions.iter()
+            .map(|v| v["change_note"].as_str().unwrap().to_string()).collect();
+        assert!(notes.contains(&"v14".to_string()) && !notes.contains(&"v9".to_string()),
+            "newest versions must survive, got {notes:?}");
+
+        // The newest dream report survives and is still the latest.
+        let last = store.sqlite.get_last_dream_report().await.unwrap().unwrap();
+        assert_eq!(last["id"].as_str(), Some("r11"));
+
+        // Audit untouched so far: 30 rows + 1 sweep marker = 31, marker newest.
+        let audit = store.sqlite.query_audit(100, None, None, None).await.unwrap();
+        assert_eq!(audit.len(), 31);
+        assert_eq!(audit[0]["action"].as_str(), Some("retention_sweep"));
+        assert!(audit[0]["details"].as_str().unwrap().contains("10 old memory version(s)"));
+
+        // Second sweep bounds the audit log; the sweep audits itself, so the
+        // survivor set is cap + 1 marker, marker first.
+        let (v2, r2, a2) = store.sqlite.retention_sweep(5, 4, 10).await.unwrap();
+        assert_eq!((v2, r2), (0, 0), "versions/reports already within caps");
+        assert_eq!(a2, 21);
+        let audit = store.sqlite.query_audit(100, None, None, None).await.unwrap();
+        assert_eq!(audit.len(), 11);
+        assert_eq!(audit[0]["action"].as_str(), Some("retention_sweep"));
+    }
+
+    #[tokio::test]
     async fn get_memory_returns_none_for_missing_id() {
         let (store, _dir) = make_store().await;
         use cerebro::types::MemoryId;

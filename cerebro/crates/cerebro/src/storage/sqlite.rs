@@ -1611,6 +1611,75 @@ impl SqliteStore {
     }
 
     // -----------------------------------------------------------------------
+    // Retention (CB-021) — bound the three otherwise-forever tables
+    // -----------------------------------------------------------------------
+
+    /// Prune the three unbounded lifecycle tables on a never-reset brain:
+    /// `memory_versions` (full content copies — keep the newest
+    /// `versions_per_memory` PER memory), `dream_reports` (nightly since the
+    /// dream cron — keep the newest `dream_reports_keep`), and `audit_log`
+    /// (grows on every mutation since the write path went live — keep the
+    /// newest `audit_rows_keep`; it is the agent's self-history, so the caps
+    /// default generous). A cap of 0 means keep-forever for that table.
+    ///
+    /// When anything was pruned, ONE audit row records the sweep itself —
+    /// the same honesty rule as the history trim-seam marker: the timeline
+    /// may shorten, but never silently.
+    pub async fn retention_sweep(
+        &self,
+        versions_per_memory: usize,
+        dream_reports_keep: usize,
+        audit_rows_keep: usize,
+    ) -> Result<(usize, usize, usize)> {
+        let (versions, reports, audits) = {
+            let conn = self.conn.lock().await;
+            let versions = if versions_per_memory > 0 {
+                conn.execute(
+                    "DELETE FROM memory_versions WHERE id IN (
+                         SELECT id FROM (
+                             SELECT id, ROW_NUMBER() OVER (
+                                 PARTITION BY memory_id
+                                 ORDER BY edited_at DESC, id DESC
+                             ) AS rn FROM memory_versions
+                         ) WHERE rn > ?1
+                     )",
+                    params![versions_per_memory as i64],
+                )?
+            } else { 0 };
+            let reports = if dream_reports_keep > 0 {
+                conn.execute(
+                    "DELETE FROM dream_reports WHERE id NOT IN (
+                         SELECT id FROM dream_reports ORDER BY started_at DESC LIMIT ?1
+                     )",
+                    params![dream_reports_keep as i64],
+                )?
+            } else { 0 };
+            let audits = if audit_rows_keep > 0 {
+                conn.execute(
+                    "DELETE FROM audit_log WHERE id NOT IN (
+                         SELECT id FROM audit_log ORDER BY id DESC LIMIT ?1
+                     )",
+                    params![audit_rows_keep as i64],
+                )?
+            } else { 0 };
+            (versions, reports, audits)
+        }; // conn lock dropped before the audit write re-locks
+        if versions + reports + audits > 0 {
+            self.log_audit_event(
+                None,
+                "retention_sweep",
+                None,
+                Some(&format!(
+                    "pruned {versions} old memory version(s), {reports} dream report(s), \
+                     {audits} audit row(s) past the retention caps \
+                     ({versions_per_memory}/memory · {dream_reports_keep} reports · {audit_rows_keep} rows)"
+                )),
+            ).await?;
+        }
+        Ok((versions, reports, audits))
+    }
+
+    // -----------------------------------------------------------------------
     // Memory versions — snapshot content before each update
     // -----------------------------------------------------------------------
 
