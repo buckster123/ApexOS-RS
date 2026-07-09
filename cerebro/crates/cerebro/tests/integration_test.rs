@@ -473,6 +473,51 @@ mod storage_basic {
     }
 
     #[tokio::test]
+    async fn remember_lands_in_graph_even_without_a_vector() {
+        // CB-007/CB-009: the embed runs lock-free before the write guard and a
+        // missing/failed embedding is non-fatal — the memory must still land in
+        // sqlite AND the in-memory graph (spreading activation reachability),
+        // and recall must find it through the FTS5 path (search_seeded(None)).
+        use cerebro::CerebroCortex;
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            db_path:       dir.path().join("test.db"),
+            anthropic_key: None,
+            embed_model:   "".into(), // no embedder → embed_lockfree yields None
+        };
+        let brain = CerebroCortex::new(config).await.unwrap();
+        let node = brain.remember(
+            "the mesh relay token rotates monthly", None, None, None,
+            VisibilityScope::global(),
+        ).await.unwrap();
+
+        // In the graph (CB-009's observable): reachable by spreading activation.
+        assert!(brain.storage.read().await.graph.index.contains_key(&node.id),
+            "memory must be a graph node immediately, not only after restart");
+
+        // Recall finds it via FTS5 despite no vector existing.
+        let hits = brain.recall("mesh relay token", 5, VisibilityScope::global()).await.unwrap();
+        assert!(hits.iter().any(|(n, _)| n.id == node.id),
+            "FTS5 recall must find the vector-less memory");
+    }
+
+    #[tokio::test]
+    async fn search_seeded_none_matches_plain_search() {
+        // CB-019 compat: with no query vector, search_seeded must behave exactly
+        // like search on the FTS5 path.
+        let (store, _dir) = make_store().await;
+        let node = MemoryNode::new("the quick brown fox jumps", MemoryType::Semantic);
+        store.sqlite.insert_memory(&node).await.unwrap();
+
+        let scope = VisibilityScope::global();
+        let (scope_sql, scope_params) = scope.sql_filter();
+        let plain  = store.vector.search("fox", 10, scope_sql, &scope_params).await.unwrap();
+        let seeded = store.vector.search_seeded("fox", 10, scope_sql, &scope_params, None).await.unwrap();
+        assert_eq!(plain, seeded);
+        assert!(!seeded.is_empty());
+    }
+
+    #[tokio::test]
     async fn retention_sweep_bounds_the_three_lifecycle_tables() {
         use cerebro::engines::dream::DreamReport;
         let (store, _dir) = make_store().await;

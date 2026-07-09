@@ -7,7 +7,7 @@
 - **Method**: 9 dimension finders → adversarial verification per finding → synthesis
 - **Yield**: 38 candidates → 34 verified → 30 distinct (after dedup)
 - **Severity**: 0 critical · 6 high · 9 medium · 12 low
-- **Status sweep (2026-07-09)**: re-verified every finding against current code. The waves were largely executed (commits `1494e0b`/`f50ba92`/`700c739`/`39a5fb1`/`384582b`, graph prune #95, vec0 upsert #141, cognitive_bootstrap `9c59b26`, audit-log wiring #243) — **22 of 30 FIXED** (CB-021 retention sweep landed 2026-07-09 — became urgent once #243 wired the audit log live and the dream went nightly), 1 mitigated at the agentd layer (CB-017), 7 still open (CB-003/007/008/009/018/019/029). Per-finding **Status** lines below; evidence text and line numbers remain the audit-time snapshot.
+- **Status sweep (2026-07-09)**: re-verified every finding against current code. The waves were largely executed (commits `1494e0b`/`f50ba92`/`700c739`/`39a5fb1`/`384582b`, graph prune #95, vec0 upsert #141, cognitive_bootstrap `9c59b26`, audit-log wiring #243) — **26 of 30 FIXED** (CB-021 retention sweep 2026-07-09; CB-007/009/019 lock-discipline cluster + CB-029 input bounds 2026-07-10), 1 mitigated at the agentd layer (CB-017), 3 still open (CB-003/008/018). Per-finding **Status** lines below; evidence text and line numbers remain the audit-time snapshot.
 
 ## Verdict
 
@@ -104,7 +104,7 @@ The cerebro memory subsystem is functionally rich and, in its single-process MCP
 - **Evidence**: remember() acquires `self.storage.write().await` (cortex.rs:89, tokio RwLock) then awaits embed_and_store (cortex.rs:91), which runs fastembed inference via spawn_blocking (vector.rs:67-70) BEFORE touching the connection — so the write guard is held across the entire embedding computation. The embed needs only the Arc<embedder>, not the StorageCoordinator lock (the SQLite write uses a separate inner Arc<Mutex<Connection>>). In cerebro-api (single shared Brain=Arc<CerebroCortex> across concurrent handlers) and the dream engine, every concurrent recall (read guard) and remember/associate (write guard) blocks for the full embed latency (tens-to-hundreds of ms on Arm). Nano tier (no embedder) and serial cerebro-mcp are unaffected.
 - **Impact**: Under bursty dashboard- or dream-driven remember load on embedding-enabled tiers, the whole memory subsystem serializes on CPU-bound inference rather than DB work, turning a single store into a latency spike for all concurrent callers in that process.
 - **Recommendation**: Compute the embedding before taking the write lock: spawn_blocking the embed first, then acquire write() only for the synchronous insert_memory + store_raw_embedding + add_node. Merges findings #3 and #10.
-- **Status (2026-07-09)**: **still OPEN** — `remember()` still takes the write guard (cortex.rs:111) before `embed_and_store`'s spawn_blocking (vector.rs:67).
+- **Status (2026-07-10)**: **FIXED** — `remember()` now embeds LOCK-FREE before the write guard (`CerebroCortex::embed_lockfree`: brief read guard clones the embedder Arc, inference runs unguarded); the write lock covers only insert + add_node + `store_raw_embedding`.
 
 #### CB-008 · [medium] · M · recall() does an O(n) full-graph scan plus an all-ids visibility IN-query on every scoped recall
 
@@ -122,7 +122,7 @@ The cerebro memory subsystem is functionally rich and, in its single-process MCP
 - **Evidence**: The store path runs three independent awaits with no surrounding transaction: insert_memory(?), embed_and_store(?), graph.add_node. SQLite is autocommit so the row is durable before the embed. embed_and_store can error at runtime on embedder-present tiers (ONNX/JoinError via `??` at vector.rs:67-70, e.g. OOM during inference); the `?` at cortex.rs:91 returns early, so add_node never runs. There is no graph repair path, so the memory exists in SQLite but is absent from the petgraph until restart. (Nano no-embedder tier returns Ok early and is unaffected.)
 - **Impact**: The orphaned memory is unreachable by spreading activation (which runs purely on the in-memory graph), and a later associate() from it fails the cortex.rs:193 index pre-check and rejects the link entirely. Self-heals only on the next daemon restart — weeks apart on the always-on Pi.
 - **Recommendation**: Add the graph node before the fallible embed (add_node is infallible/cheap), or make embedding failure non-fatal (log + continue, matching how a missing embedder is already a no-op). Ideally wrap the three writes so an embed failure rolls back the sqlite insert.
-- **Status (2026-07-09)**: **still OPEN** — the insert→embed→add_node ordering is unchanged (cortex.rs:112-114); an embed error still `?`-returns before `add_node`.
+- **Status (2026-07-10)**: **FIXED** — `add_node` now runs immediately after `insert_memory` (infallible, before the vector persist), and an embed/persist failure is NON-FATAL (warn + store without a vector; FTS5 still finds the memory). A failed embed can no longer orphan a memory out of spreading activation until restart. Integration-tested (graph membership + FTS recall on the vector-less path).
 
 #### CB-010 · [medium] · XS · MCP server exits on a single malformed JSON-RPC frame — parse error is fatal, not isolated per-frame
 
@@ -214,7 +214,7 @@ The cerebro memory subsystem is functionally rich and, in its single-process MCP
 - **Evidence**: recall() takes `self.storage.read().await` (cortex.rs:108) and holds it through the whole function including `storage.vector.search(...).await`, whose vec_search path embeds the query via spawn_blocking (vector.rs:151-153) while the read guard is alive. Read guards coexist, but a held read guard blocks any writer (remember/associate) on the tokio RwLock. The embed needs only the in-process embedder, no storage state. Nano tier (no embedder) falls through to FTS5 with no embed.
 - **Impact**: In cerebro-api every in-flight recall extends the window during which a remember/associate cannot acquire the write lock by the query-embedding latency. Combined with CB-007, concurrent read+write traffic repeatedly stalls writers on inference. Embedder-enabled tiers only.
 - **Recommendation**: Embed the query string before acquiring the read guard (or restructure search so embedding is lock-free), then take the read lock only for the SQLite/graph phases. Same fix pattern as CB-007.
-- **Status (2026-07-09)**: **still OPEN** — recall still holds the read guard (cortex.rs:130) across `vector.search`'s query-embed spawn_blocking (vector.rs:198).
+- **Status (2026-07-10)**: **FIXED** — recall embeds the query via `embed_lockfree` BEFORE taking the read guard and passes it to the new `search_seeded` (which never embeds; `None` → FTS5). A failed query embed now degrades to FTS5 instead of erroring the recall.
 
 #### CB-020 · [low] · S · vec0/FTS5/links/dangling-row cleanup — FTS5 index retains soft-deleted memories and never shrinks
 
