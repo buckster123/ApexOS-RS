@@ -47,6 +47,44 @@ const SKILL_MIN_FITNESS: f32 = 0.8;
 // in run_cycle to auto-close stale open episodes.
 const EPISODE_AUTO_CLOSE_HOURS: i64 = 24;
 
+/// Retention caps for the pre-phase sweep (CB-021): the three lifecycle tables
+/// that otherwise grow forever on a never-reset brain. Defaults are generous —
+/// ~10 full-content snapshots per edited memory, ~3 months of nightly dream
+/// reports, and >1 year of self-history at typical mutation rates (the audit
+/// log is the agent's own timeline; bounding it is a window, not an erasure —
+/// and the sweep writes an audit row naming what it pruned). Env knobs
+/// `CEREBRO_RETAIN_VERSIONS` / `_DREAM_REPORTS` / `_AUDIT_ROWS`; 0 = keep
+/// that table forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionCaps {
+    pub versions_per_memory: usize,
+    pub dream_reports:       usize,
+    pub audit_rows:          usize,
+}
+
+impl RetentionCaps {
+    pub const DEFAULT: RetentionCaps = RetentionCaps {
+        versions_per_memory: 10,
+        dream_reports:       90,
+        audit_rows:          20_000,
+    };
+
+    /// Pure parse — unit-tested. Unset/garbage → the default; an explicit
+    /// numeric (including 0 = keep forever) wins.
+    pub fn from_env() -> Self {
+        let knob = |name: &str, default: usize| {
+            std::env::var(name).ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(default)
+        };
+        RetentionCaps {
+            versions_per_memory: knob("CEREBRO_RETAIN_VERSIONS", Self::DEFAULT.versions_per_memory),
+            dream_reports:       knob("CEREBRO_RETAIN_DREAM_REPORTS", Self::DEFAULT.dream_reports),
+            audit_rows:          knob("CEREBRO_RETAIN_AUDIT_ROWS", Self::DEFAULT.audit_rows),
+        }
+    }
+}
+
 // Exo-evolution: niche competition (docs/evolutionary-layer.md). Procedures that
 // address the same task — share a topical tag — are rivals competing for one
 // niche. The `skill_competition` phase marks the fittest the niche CHAMPION and
@@ -517,6 +555,19 @@ impl DreamEngine {
             Ok(n) if n > 0 => tracing::info!("dream pre-phase: auto-closed {n} stale episodes"),
             Ok(_)          => {}
             Err(e)         => tracing::warn!("dream pre-phase: close_stale_episodes failed: {e}"),
+        }
+
+        // Pre-phase retention (CB-021): bound the three forever-growing tables
+        // (memory_versions / dream_reports / audit_log). Nightly cadence rides
+        // the dream like the episode cleanup; fail-soft — a failed sweep never
+        // blocks consolidation. The sweep audits itself when it prunes.
+        let caps = RetentionCaps::from_env();
+        match cortex.storage.read().await.sqlite
+            .retention_sweep(caps.versions_per_memory, caps.dream_reports, caps.audit_rows).await {
+            Ok((0, 0, 0)) => {}
+            Ok((v, r, a)) => tracing::info!(
+                "dream pre-phase: retention pruned {v} version(s), {r} dream report(s), {a} audit row(s)"),
+            Err(e) => tracing::warn!("dream pre-phase: retention_sweep failed: {e}"),
         }
 
         let p1 = self.sws_replay(&scope, &cortex).await;
@@ -1801,10 +1852,32 @@ mod tests {
         is_skill_champion, is_structural_tag, merge_candidates, outcome_stats, procedure_fitness,
         refine_candidates, retrieval_rank, wilson_lower_bound, CompetitionAction, SKILL_MIN_FITNESS,
     };
+    use super::RetentionCaps;
     use crate::config::FSRS_INITIAL_DIFFICULTY;
     use crate::models::MemoryNode;
     use crate::types::MemoryType;
     use serde_json::json;
+
+    #[test]
+    fn retention_caps_env_parse() {
+        // Unset → defaults.
+        for v in ["CEREBRO_RETAIN_VERSIONS", "CEREBRO_RETAIN_DREAM_REPORTS", "CEREBRO_RETAIN_AUDIT_ROWS"] {
+            std::env::remove_var(v);
+        }
+        assert_eq!(RetentionCaps::from_env(), RetentionCaps::DEFAULT);
+
+        // Explicit values win — including 0 (keep forever).
+        std::env::set_var("CEREBRO_RETAIN_VERSIONS", "3");
+        std::env::set_var("CEREBRO_RETAIN_DREAM_REPORTS", "0");
+        std::env::set_var("CEREBRO_RETAIN_AUDIT_ROWS", "junk"); // garbage → default
+        let caps = RetentionCaps::from_env();
+        assert_eq!(caps.versions_per_memory, 3);
+        assert_eq!(caps.dream_reports, 0);
+        assert_eq!(caps.audit_rows, RetentionCaps::DEFAULT.audit_rows);
+        for v in ["CEREBRO_RETAIN_VERSIONS", "CEREBRO_RETAIN_DREAM_REPORTS", "CEREBRO_RETAIN_AUDIT_ROWS"] {
+            std::env::remove_var(v);
+        }
+    }
 
     fn proc(salience: f32, difficulty: f32) -> MemoryNode {
         let mut n = MemoryNode::new("how I did X", MemoryType::Procedural);
