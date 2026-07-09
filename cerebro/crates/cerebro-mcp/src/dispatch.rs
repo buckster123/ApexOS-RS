@@ -75,7 +75,23 @@ pub async fn dispatch_tool(msg: Value, brain: Arc<CerebroCortex>) -> Value {
         let params = &msg["params"];
         let name   = params["name"].as_str().unwrap_or("").to_string();
         let args   = params["arguments"].clone();
-        route(&name, &args, brain).await
+        let result = route(&name, &args, Arc::clone(&brain)).await;
+        // Self-history write (colony C3): the audit read tools shipped with the
+        // port but NOTHING ever called log_audit_event — query_audit was empty
+        // forever ("what did I actually do, in order?" had no answer). Every
+        // successful mutating tool call now leaves one row. Best-effort: an
+        // audit failure never fails the call it records.
+        if let (Ok(v), Some(action)) = (&result, audit_action(&name, &args)) {
+            let agent   = args["agent_id"].as_str().filter(|s| !s.is_empty());
+            let mid     = audit_memory_id(&args, v);
+            let details = audit_details(&args);
+            if let Err(e) = brain.storage.read().await.sqlite
+                .log_audit_event(agent, action, mid.as_deref(), details.as_deref()).await
+            {
+                tracing::warn!("audit write failed for {name}: {e}");
+            }
+        }
+        result
     });
 
     match handle.await {
@@ -102,6 +118,60 @@ pub async fn dispatch_tool(msg: Value, brain: Arc<CerebroCortex>) -> Value {
             })
         }
     }
+}
+
+/// Which tool calls write a self-history row (colony C3). Pure — unit-tested.
+///
+/// Mutating tools only: the audit log answers "what did I DO", so reads stay
+/// out (they'd bury the writes; access tracking already covers "what did I
+/// touch"). The action label is the tool name itself — `query_audit` output
+/// then reads as the agent's own verbs. `describe_image` mutates only when it
+/// remembers; `dream_run` is the one background mutation and very much belongs.
+fn audit_action(name: &str, args: &Value) -> Option<&'static str> {
+    const MUTATING: &[&str] = &[
+        "remember", "memory_store", "store_procedure", "store_intention",
+        "resolve_intention", "session_save", "update_memory", "delete_memory",
+        "restore_memory", "restore_version", "purge_memory", "purge_all_deleted",
+        "bulk_delete", "share_memory", "associate", "create_schema",
+        "episode_start", "episode_add_step", "episode_end",
+        "record_procedure_outcome", "merge_tags", "rename_tag", "delete_tag",
+        "prune_thread", "ingest_file", "register_agent", "send_message",
+        "dream_run",
+    ];
+    if name == "describe_image" {
+        return args["remember"].as_bool().unwrap_or(false).then_some("describe_image");
+    }
+    MUTATING.iter().find(|m| **m == name).copied()
+}
+
+/// Best-effort memory id for an audit row: the id the caller named, else the
+/// id the handler minted (remember returns the node → "id"; others return
+/// memory_id/procedure_id/episode_id/schema_id). Pure — unit-tested.
+fn audit_memory_id(args: &Value, result: &Value) -> Option<String> {
+    for key in ["memory_id", "procedure_id", "episode_id", "schema_id"] {
+        if let Some(s) = args[key].as_str() {
+            return Some(s.to_string());
+        }
+    }
+    for key in ["memory_id", "procedure_id", "episode_id", "schema_id", "id"] {
+        if let Some(s) = result[key].as_str() {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+/// Compact context for an audit row: a content/query preview, capped hard —
+/// the audit log is a timeline, not a second content store.
+fn audit_details(args: &Value) -> Option<String> {
+    let src = args["content"].as_str()
+        .or_else(|| args["session_summary"].as_str())
+        .or_else(|| args["description"].as_str())?;
+    let mut s: String = src.chars().take(120).collect();
+    if src.chars().count() > 120 {
+        s.push('…');
+    }
+    Some(s)
 }
 
 /// Map a handler error message to a JSON-RPC error code (C-RS-006).
@@ -778,8 +848,10 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
         "query_audit" => {
             let limit         = args["limit"].as_u64().unwrap_or(50) as usize;
             let agent_id_filt = args["agent_id"].as_str();
+            let action_filt   = args["action"].as_str().filter(|s| !s.is_empty());
+            let since         = args["since"].as_str().filter(|s| !s.is_empty());
             let entries       = brain.storage.read().await
-                .sqlite.query_audit(limit, agent_id_filt).await?;
+                .sqlite.query_audit(limit, agent_id_filt, action_filt, since).await?;
             Ok(json!(entries))
         }
 
@@ -1851,6 +1923,98 @@ mod tests {
             "semantic query must reach the procedure, got: {result}");
         assert_eq!(result["matched"]["semantic"].as_u64(), Some(1));
         assert_eq!(result["matched"]["exact"].as_u64(), Some(0));
+    }
+
+    // ---- colony C3: the audit log actually gets written now ----------------
+
+    #[tokio::test]
+    async fn mutations_write_the_audit_trail_reads_do_not() {
+        let (brain, _dir) = make_brain().await;
+        let call = |name: &str, args: Value| json!({
+            "jsonrpc":"2.0","id":0,"method":"tools/call",
+            "params":{"name":name,"arguments":args}
+        });
+
+        // Two mutations + one read.
+        let r = dispatch_tool(call("remember", json!({
+            "content": "the mesh relay needs its token refreshed monthly",
+            "agent_id": "APEX"
+        })), Arc::clone(&brain)).await;
+        assert!(r["error"].is_null(), "remember: {}", r["error"]);
+        let r = dispatch_tool(call("store_intention", json!({
+            "content": "refresh the relay token", "agent_id": "APEX"
+        })), Arc::clone(&brain)).await;
+        assert!(r["error"].is_null(), "store_intention: {}", r["error"]);
+        let r = dispatch_tool(call("recall", json!({
+            "query": "relay token", "agent_id": "APEX"
+        })), Arc::clone(&brain)).await;
+        assert!(r["error"].is_null(), "recall: {}", r["error"]);
+
+        // The trail holds exactly the two mutations, newest first, attributed.
+        let resp = dispatch_tool(call("query_audit", json!({})), Arc::clone(&brain)).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let entries: Value = serde_json::from_str(text).unwrap();
+        let entries = entries.as_array().unwrap();
+        assert_eq!(entries.len(), 2, "two mutations, zero reads: {entries:?}");
+        assert_eq!(entries[0]["action"], "store_intention");
+        assert_eq!(entries[1]["action"], "remember");
+        assert_eq!(entries[1]["agent_id"], "APEX");
+        assert!(entries[1]["memory_id"].as_str().is_some_and(|s| !s.is_empty()),
+            "the minted memory id must be recorded: {}", entries[1]);
+        assert!(entries[1]["details"].as_str().unwrap().contains("mesh relay"));
+
+        // Action filter narrows to one verb.
+        let resp = dispatch_tool(call("query_audit", json!({ "action": "remember" })),
+            Arc::clone(&brain)).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let only: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(only.as_array().unwrap().len(), 1);
+        assert_eq!(only[0]["action"], "remember");
+
+        // A future `since` excludes everything; a past one keeps all.
+        let resp = dispatch_tool(call("query_audit", json!({ "since": "2999-01-01T00:00:00Z" })),
+            Arc::clone(&brain)).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let none: Value = serde_json::from_str(text).unwrap();
+        assert!(none.as_array().unwrap().is_empty());
+        let resp = dispatch_tool(call("query_audit", json!({ "since": "2020-01-01T00:00:00Z" })),
+            Arc::clone(&brain)).await;
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let all: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(all.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn audit_action_gates_mutations_only() {
+        assert_eq!(audit_action("remember", &json!({})), Some("remember"));
+        assert_eq!(audit_action("dream_run", &json!({})), Some("dream_run"));
+        assert_eq!(audit_action("recall", &json!({})), None);
+        assert_eq!(audit_action("query_audit", &json!({})), None);
+        assert_eq!(audit_action("find_relevant_procedures", &json!({})), None);
+        // describe_image mutates only when it remembers.
+        assert_eq!(audit_action("describe_image", &json!({})), None);
+        assert_eq!(audit_action("describe_image", &json!({"remember": true})),
+            Some("describe_image"));
+    }
+
+    #[test]
+    fn audit_memory_id_prefers_args_then_result() {
+        let id = audit_memory_id(&json!({"memory_id": "mem_a"}), &json!({"id": "mem_b"}));
+        assert_eq!(id.as_deref(), Some("mem_a"));
+        let id = audit_memory_id(&json!({}), &json!({"id": "mem_b"}));
+        assert_eq!(id.as_deref(), Some("mem_b"));
+        let id = audit_memory_id(&json!({}), &json!({"episode_id": "ep_1"}));
+        assert_eq!(id.as_deref(), Some("ep_1"));
+        assert_eq!(audit_memory_id(&json!({}), &json!({"status": "ok"})), None);
+    }
+
+    #[test]
+    fn audit_details_previews_and_caps() {
+        let long = "x".repeat(300);
+        let d = audit_details(&json!({"content": long})).unwrap();
+        assert_eq!(d.chars().count(), 121, "120 chars + ellipsis");
+        assert!(d.ends_with('…'));
+        assert!(audit_details(&json!({"limit": 5})).is_none());
     }
 
     #[test]

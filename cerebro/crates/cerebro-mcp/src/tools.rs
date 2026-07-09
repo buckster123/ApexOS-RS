@@ -635,12 +635,18 @@ fn tool_schema(name: &str) -> Value {
 
         "query_audit" => json!({
             "name": "query_audit",
-            "description": "Query audit log entries, optionally filtered by agent.",
+            "description": "Your own action timeline: every successful mutating tool call \
+                            (remember/update/delete/episodes/procedures/dream_run/…) leaves one \
+                            row — 'what did I actually do, in order?' answered from one place. \
+                            Newest first; filter by agent, action (tool name), or since \
+                            (RFC3339 timestamp).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "limit":    { "type": "integer", "description": "Max results (default: 50)" },
-                    "agent_id": { "type": "string" }
+                    "agent_id": { "type": "string" },
+                    "action":   { "type": "string", "description": "Filter to one action (tool name, e.g. 'remember')" },
+                    "since":    { "type": "string", "description": "Only entries at/after this RFC3339 timestamp" }
                 },
                 "required": []
             }

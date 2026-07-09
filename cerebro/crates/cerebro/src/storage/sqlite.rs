@@ -1545,9 +1545,10 @@ impl SqliteStore {
         &self,
         limit: usize,
         agent_id_filter: Option<&str>,
+        action_filter: Option<&str>,
+        since: Option<&str>,
     ) -> Result<Vec<serde_json::Value>> {
         let conn = self.conn.lock().await;
-        let limit_val = limit as i64;
         let row_to_entry = |r: &rusqlite::Row<'_>| -> rusqlite::Result<serde_json::Value> {
             Ok(serde_json::json!({
                 "id":        r.get::<_, i64>(0)?,
@@ -1558,23 +1559,39 @@ impl SqliteStore {
                 "details":   r.get::<_, Option<String>>(5)?,
             }))
         };
-        let mut out = Vec::new();
+        // Dynamic WHERE from the optional filters. Timestamps are RFC3339
+        // strings (lexicographically ordered), so `since` is a plain >= compare.
+        let mut clauses: Vec<&str> = Vec::new();
+        let mut bound: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(aid) = agent_id_filter {
-            let aid_s = aid.to_string();
-            let mut stmt = conn.prepare(
-                "SELECT id, timestamp, agent_id, action, memory_id, details \
-                 FROM audit_log WHERE agent_id = ?1 ORDER BY timestamp DESC LIMIT ?2"
-            )?;
-            let rows = stmt.query_map(params![aid_s, limit_val], row_to_entry)?;
-            for r in rows { out.push(r?); }
-        } else {
-            let mut stmt = conn.prepare(
-                "SELECT id, timestamp, agent_id, action, memory_id, details \
-                 FROM audit_log ORDER BY timestamp DESC LIMIT ?1"
-            )?;
-            let rows = stmt.query_map(params![limit_val], row_to_entry)?;
-            for r in rows { out.push(r?); }
+            bound.push(Box::new(aid.to_string()));
+            clauses.push("agent_id = ?");
         }
+        if let Some(act) = action_filter {
+            bound.push(Box::new(act.to_string()));
+            clauses.push("action = ?");
+        }
+        if let Some(ts) = since {
+            bound.push(Box::new(ts.to_string()));
+            clauses.push("timestamp >= ?");
+        }
+        let where_sql = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", clauses.join(" AND "))
+        };
+        bound.push(Box::new(limit as i64));
+        let sql = format!(
+            "SELECT id, timestamp, agent_id, action, memory_id, details \
+             FROM audit_log {where_sql}ORDER BY timestamp DESC LIMIT ?"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(bound.iter().map(|p| p.as_ref())),
+            row_to_entry,
+        )?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r?); }
         Ok(out)
     }
 
