@@ -42,6 +42,11 @@ async fn main() -> Result<()> {
             // Without a valid initialize we cannot continue the handshake.
             return Ok(());
         }
+        Frame::Oversized { bytes } => {
+            tracing::error!("oversized initialize frame ({bytes} bytes) — refusing handshake");
+            transport.write(&dispatch::parse_error()).await?;
+            return Ok(());
+        }
     };
     let init_resp = if init_req["method"].as_str() == Some("initialize") {
         dispatch::handle_initialize(&init_req)
@@ -66,6 +71,13 @@ async fn main() -> Result<()> {
             // next frame instead of taking the whole memory subsystem down.
             Ok(Frame::ParseError(e)) => {
                 tracing::warn!("dropping malformed JSON-RPC frame: {e}");
+                transport.write(&dispatch::parse_error()).await?;
+                continue;
+            }
+            // CB-029: an oversized frame is dropped (its tail already drained
+            // to the next boundary) — bounded memory, daemon stays alive.
+            Ok(Frame::Oversized { bytes }) => {
+                tracing::warn!("dropping oversized JSON-RPC frame ({bytes} bytes > cap)");
                 transport.write(&dispatch::parse_error()).await?;
                 continue;
             }
