@@ -2692,15 +2692,25 @@ fn soul_rehearse_spec() -> ToolSpec {
                       priorities · mid-task scope creep) or supply your own (max 6). Read the \
                       transcripts critically: \
                       wrong tone, wrong priorities, or lost boundaries in a transcript is the \
-                      rehearsal DOING ITS JOB. Use for full rewrites and significant \
+                      rehearsal DOING ITS JOB. Pass compare_to (e.g. your CURRENT soul from \
+                      read_soul_md) for an A/B fitting: every probe answered by both souls, \
+                      returned as aligned pairs with a divergence hint and a \
+                      most_divergent_probe pointer — start reading there (doubles the LLM \
+                      calls). Use for full rewrites and significant \
                       restructures; one-line edits don't need it. Takes up to a few minutes \
-                      (one LLM call per probe).".into(),
+                      (one LLM call per probe, two when comparing).".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "candidate_soul": {
                     "type":        "string",
                     "description": "The complete soul text you are considering becoming (PAC or prose — whatever you'd actually apply)."
+                },
+                "compare_to": {
+                    "type":        "string",
+                    "description": "Optional second full soul for an A/B fitting (usually your current \
+                                    soul). Each probe runs against both; pairs come back aligned with \
+                                    a 0–1 wording-divergence hint (a pointer, not a verdict)."
                 },
                 "probes": {
                     "type":        "array",

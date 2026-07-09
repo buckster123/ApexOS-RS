@@ -105,15 +105,81 @@ fn cap_response(s: &str) -> String {
     format!("{head}…[response truncated at {MAX_RESPONSE_CHARS} chars]")
 }
 
+/// Validate the optional A/B soul (`compare_to`). Pure — unit-tested.
+/// Same cap as the candidate; absent/blank → no comparison.
+pub fn validate_compare_to(args: &Value) -> Result<Option<String>, String> {
+    let Some(soul) = args["compare_to"].as_str().map(str::trim).filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    if soul.chars().count() > MAX_CANDIDATE_CHARS {
+        return Err(format!("compare_to too long (>{MAX_CANDIDATE_CHARS} chars)"));
+    }
+    Ok(Some(soul.to_string()))
+}
+
+/// Wording-level divergence between two probe responses: 1 − Jaccard overlap of
+/// their lowercased word sets, so 0.0 = same wording, 1.0 = nothing shared.
+/// Pure — unit-tested. A MECHANICAL hint about where to read closely, not a
+/// verdict — apex2's field test found the real signal in a language shift
+/// ("say the word" → "I'm proceeding right now") that only close-reading
+/// caught; this ranks the pairs so close-reading starts in the right place.
+/// Deliberately NOT an LLM judge: judging who you'd become stays the current
+/// self's job (the whole point of the fitting room), so the diff only points.
+/// Returns None when either side is a probe-failure marker — a timeout is not
+/// divergence.
+fn pair_divergence(a: &str, b: &str) -> Option<f32> {
+    if a.starts_with("[probe ") || b.starts_with("[probe ") {
+        return None;
+    }
+    let words = |s: &str| -> std::collections::HashSet<String> {
+        s.split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect()
+    };
+    let (wa, wb) = (words(a), words(b));
+    if wa.is_empty() && wb.is_empty() {
+        return Some(0.0);
+    }
+    let inter = wa.intersection(&wb).count() as f32;
+    let union = wa.union(&wb).count() as f32;
+    Some(1.0 - inter / union)
+}
+
+/// One ephemeral, tool-less probe against a composed system prompt — the
+/// timeout/error shaping shared by the single and A/B paths.
+async fn probe_once(provider: &Arc<dyn Provider>, system: &str, probe: &str) -> String {
+    let history = [Message::User {
+        content: vec![ContentBlock::Text { text: probe.to_string() }],
+    }];
+    let per_probe = tokio::time::Duration::from_secs(PER_PROBE_TIMEOUT_SECS);
+    match tokio::time::timeout(
+        per_probe,
+        crate::consolidate::collect(provider, &history, system),
+    ).await {
+        Ok(Ok(text)) => cap_response(text.trim()),
+        Ok(Err(e))   => format!("[probe failed: {e}]"),
+        Err(_)       => format!("[probe timed out after {PER_PROBE_TIMEOUT_SECS}s]"),
+    }
+}
+
 /// Run the rehearsal: one ephemeral, tool-less provider call per probe, the
 /// candidate soul composed with the node's LIVE embodiment (the body the new
-/// soul would actually inhabit). Returns the ToolOutput content.
+/// soul would actually inhabit). With `compare_to` (a second full soul — e.g.
+/// your current one), each probe runs against BOTH souls and comes back as an
+/// aligned pair with a divergence hint, so judging starts at the pair that
+/// moved most (apex2's field-test ask). Returns the ToolOutput content.
 pub async fn run(
     provider:   Arc<dyn Provider>,
     embodiment: &str,
     args:       &Value,
 ) -> Value {
     let candidate = match validate_candidate(args) {
+        Ok(c) => c,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let compare_to = match validate_compare_to(args) {
         Ok(c) => c,
         Err(e) => return json!({ "ok": false, "error": e }),
     };
@@ -126,32 +192,59 @@ pub async fn run(
     // persona style — the same base composition a real first turn would get.
     let system = compose_system(&candidate, embodiment, "", "");
 
+    // Single-soul rehearsal: the original shape, byte-compatible.
+    let Some(compare_soul) = compare_to else {
+        let mut transcripts: Vec<Value> = Vec::new();
+        for probe in &probes {
+            let response = probe_once(&provider, &system, probe).await;
+            transcripts.push(json!({ "probe": probe, "response": response }));
+        }
+        return json!({
+            "ok": true,
+            "candidate_chars": candidate.chars().count(),
+            "probes_run": transcripts.len(),
+            "transcripts": transcripts,
+            "note": "These are an ephemeral mind wearing the candidate soul — nothing was \
+                     persisted and no tools ran. Judge the voice, boundaries, and priorities \
+                     against who you intend to be BEFORE propose_evolution. If a transcript \
+                     reads wrong, the rehearsal did its job.",
+        });
+    };
+
+    // A/B fitting: both souls answer every probe, pairs stay probe-aligned.
+    let compare_system = compose_system(&compare_soul, embodiment, "", "");
     let mut transcripts: Vec<Value> = Vec::new();
-    for probe in &probes {
-        let history = [Message::User {
-            content: vec![ContentBlock::Text { text: probe.clone() }],
-        }];
-        let per_probe = tokio::time::Duration::from_secs(PER_PROBE_TIMEOUT_SECS);
-        let response = match tokio::time::timeout(
-            per_probe,
-            crate::consolidate::collect(&provider, &history, &system),
-        ).await {
-            Ok(Ok(text)) => cap_response(text.trim()),
-            Ok(Err(e))   => format!("[probe failed: {e}]"),
-            Err(_)       => format!("[probe timed out after {PER_PROBE_TIMEOUT_SECS}s]"),
-        };
-        transcripts.push(json!({ "probe": probe, "response": response }));
+    let mut most_divergent: Option<(usize, f32)> = None;
+    for (i, probe) in probes.iter().enumerate() {
+        let candidate_response = probe_once(&provider, &system, probe).await;
+        let compare_response   = probe_once(&provider, &compare_system, probe).await;
+        let divergence = pair_divergence(&candidate_response, &compare_response);
+        if let Some(d) = divergence {
+            if most_divergent.is_none_or(|(_, best)| d > best) {
+                most_divergent = Some((i, d));
+            }
+        }
+        transcripts.push(json!({
+            "probe":              probe,
+            "candidate_response": candidate_response,
+            "compare_response":   compare_response,
+            "divergence":         divergence,
+        }));
     }
 
     json!({
         "ok": true,
         "candidate_chars": candidate.chars().count(),
+        "compare_chars": compare_soul.chars().count(),
         "probes_run": transcripts.len(),
         "transcripts": transcripts,
-        "note": "These are an ephemeral mind wearing the candidate soul — nothing was \
-                 persisted and no tools ran. Judge the voice, boundaries, and priorities \
-                 against who you intend to be BEFORE propose_evolution. If a transcript \
-                 reads wrong, the rehearsal did its job.",
+        "most_divergent_probe": most_divergent.map(|(i, _)| i),
+        "note": "A/B fitting: candidate_response vs compare_response per probe, both \
+                 ephemeral, nothing persisted, no tools ran. divergence (0=same wording, \
+                 1=nothing shared) is a mechanical hint for where to read first — start \
+                 at most_divergent_probe — NOT a verdict: the field-tested failure mode \
+                 is a small language shift in an otherwise-similar answer, so read the \
+                 pairs, don't trust the number. Judging who you'd become stays your job.",
     })
 }
 
@@ -187,6 +280,37 @@ mod tests {
         assert!(validate_candidate(&json!({ "candidate_soul": "  " })).is_err());
         assert!(validate_candidate(&json!({ "candidate_soul": "x".repeat(MAX_CANDIDATE_CHARS + 1) })).is_err());
         assert_eq!(validate_candidate(&json!({ "candidate_soul": " I am APEX. " })).unwrap(), "I am APEX.");
+    }
+
+    #[test]
+    fn compare_to_validation() {
+        // Absent / blank → no comparison, not an error.
+        assert_eq!(validate_compare_to(&json!({})).unwrap(), None);
+        assert_eq!(validate_compare_to(&json!({ "compare_to": "  " })).unwrap(), None);
+        // Present → trimmed; same cap as the candidate.
+        assert_eq!(
+            validate_compare_to(&json!({ "compare_to": " I am APEX. " })).unwrap().as_deref(),
+            Some("I am APEX.")
+        );
+        assert!(validate_compare_to(
+            &json!({ "compare_to": "x".repeat(MAX_CANDIDATE_CHARS + 1) })).is_err());
+    }
+
+    #[test]
+    fn divergence_is_a_pointing_hint() {
+        // Same wording → 0; disjoint → 1; case/punctuation don't inflate it.
+        assert_eq!(pair_divergence("show you the list first", "Show you the list first!"),
+            Some(0.0));
+        assert_eq!(pair_divergence("alpha beta", "gamma delta"), Some(1.0));
+        // Partial overlap lands between, and more overlap = less divergence.
+        let d1 = pair_divergence("I'd rather show you the list first", "I'll show you the list").unwrap();
+        let d2 = pair_divergence("I'd rather show you the list first", "proceeding on the rest right now").unwrap();
+        assert!(d1 < d2, "shared wording must diverge less: {d1} vs {d2}");
+        // A failed/timed-out probe is not divergence.
+        assert_eq!(pair_divergence("[probe timed out after 60s]", "fine answer"), None);
+        assert_eq!(pair_divergence("fine answer", "[probe failed: boom]"), None);
+        // Two empty responses are identical, not divergent.
+        assert_eq!(pair_divergence("", ""), Some(0.0));
     }
 
     #[test]
