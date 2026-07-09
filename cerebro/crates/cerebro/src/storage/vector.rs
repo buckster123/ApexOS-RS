@@ -179,6 +179,37 @@ impl VectorStore {
         self.fts5_search(query, k, scope_sql, scope_params).await
     }
 
+    /// `search` with a caller-supplied query embedding (CB-019): this method
+    /// NEVER embeds — the caller computes the vector lock-free *before* taking
+    /// the storage guard (see `CerebroCortex::embed_lockfree`), so query
+    /// inference can't stall writers for the embed duration. `None` (no
+    /// embedder, or the embed failed upstream) → straight to FTS5.
+    pub async fn search_seeded(
+        &self,
+        query: &str,
+        k: usize,
+        scope_sql:    &str,
+        scope_params: &[String],
+        query_vec:    Option<&[f32]>,
+    ) -> Result<Vec<(MemoryId, f32)>> {
+        if self.vec_available {
+            if let Some(qv) = query_vec {
+                let results = self.vec_search_blob(qv, k, scope_sql, scope_params).await?;
+                if !results.is_empty() {
+                    return Ok(results);
+                }
+                // vec0 returned nothing (e.g. no embeddings stored yet) — fall through to FTS5
+            }
+        }
+        self.fts5_search(query, k, scope_sql, scope_params).await
+    }
+
+    /// Clone of the embedder handle so callers can run inference WITHOUT any
+    /// storage lock held (CB-007/CB-019). `None` on the FTS5-only tier.
+    pub fn embedder_handle(&self) -> Option<Arc<fastembed::TextEmbedding>> {
+        self.embedder.clone()
+    }
+
     pub fn is_vec_available(&self) -> bool { self.vec_available }
     pub fn is_embedder_loaded(&self) -> bool { self.embedder.is_some() }
 
@@ -198,8 +229,20 @@ impl VectorStore {
         let query_vec: Vec<f32> = tokio::task::spawn_blocking(move || {
             embedder.embed(vec![q], None).map(|mut v| v.remove(0))
         }).await??;
+        self.vec_search_blob(&query_vec, k, scope_sql, scope_params).await
+    }
 
-        let query_blob  = vec_to_blob(&query_vec);
+    /// The vec0 KNN body, given an already-computed query vector — shared by
+    /// `vec_search` (embeds itself) and `search_seeded` (caller embedded
+    /// lock-free, CB-019).
+    async fn vec_search_blob(
+        &self,
+        query_vec:    &[f32],
+        k:            usize,
+        scope_sql:    &str,
+        scope_params: &[String],
+    ) -> Result<Vec<(MemoryId, f32)>> {
+        let query_blob  = vec_to_blob(query_vec);
         let candidates  = (k * 5) as i64;
         let k_i64       = k as i64;
 

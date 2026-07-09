@@ -107,14 +107,45 @@ impl CerebroCortex {
         // Temporal: extract and store semantic concepts in metadata
         node = self.temporal.enrich_node(node);
 
-        // Persist across all three storage backends
+        // Embed OUTSIDE any storage lock (CB-007): inference is CPU-bound and
+        // needs only the embedder Arc — holding the write guard across it
+        // serialized every concurrent reader/writer on the embed latency.
+        // Failure is non-fatal by design (CB-009): the memory still lands in
+        // sqlite + FTS5 + graph, just without a vector.
+        let embedding = self.embed_lockfree(&node.content).await;
+
+        // Persist across all three storage backends. Graph node BEFORE the
+        // vector persist (CB-009): add_node is infallible, so a vector-store
+        // error can no longer orphan the memory out of spreading activation
+        // until the next restart.
         let mut storage = self.storage.write().await;
         storage.sqlite.insert_memory(&node).await?;
-        storage.vector.embed_and_store(&node.id, &node.content).await?;
         storage.graph.add_node(node.id.clone());
+        if let Some(vec) = embedding {
+            if let Err(e) = storage.vector.store_raw_embedding(&node.id, &vec).await {
+                tracing::warn!(id = %node.id.0,
+                    "embedding persist failed — memory stored without a vector (FTS5 still finds it): {e}");
+            }
+        }
 
         tracing::info!(id = %node.id.0, memory_type = ?node.memory_type, salience = node.salience, "memory stored");
         Ok(node)
+    }
+
+    /// Compute an embedding with NO storage lock held (CB-007/CB-019): clone
+    /// the embedder handle under a brief read guard, run inference lock-free.
+    /// `None` = no embedder (Nano tier) or a failed embed — logged, non-fatal;
+    /// callers degrade to FTS5/vector-less behaviour.
+    async fn embed_lockfree(&self, text: &str) -> Option<Vec<f32>> {
+        let embedder = self.storage.read().await.vector.embedder_handle()?;
+        let owned = text.to_string();
+        match tokio::task::spawn_blocking(move || {
+            embedder.embed(vec![owned], None).map(|mut v| v.remove(0))
+        }).await {
+            Ok(Ok(v))  => Some(v),
+            Ok(Err(e)) => { tracing::warn!("embedding failed (non-fatal): {e}"); None }
+            Err(e)     => { tracing::warn!("embedding task join failed (non-fatal): {e}"); None }
+        }
     }
 
     /// Recall memories matching a query string.
@@ -127,12 +158,17 @@ impl CerebroCortex {
         k:     usize,
         scope: VisibilityScope,
     ) -> Result<Vec<(MemoryNode, f32)>> {
+        // Embed the query BEFORE taking the read guard (CB-019): a held read
+        // guard blocks writers, so query inference under it stalled every
+        // concurrent remember/associate. A failed embed degrades to FTS5.
+        let query_vec = self.embed_lockfree(query).await;
+
         let storage = self.storage.read().await;
         let (scope_sql, scope_params) = scope.sql_filter();
 
         // 1. Vector / FTS5 candidates (over-fetch for spreading)
         let candidates = storage.vector
-            .search(query, k * 5, scope_sql, &scope_params).await?;
+            .search_seeded(query, k * 5, scope_sql, &scope_params, query_vec.as_deref()).await?;
         if candidates.is_empty() {
             return Ok(vec![]);
         }
