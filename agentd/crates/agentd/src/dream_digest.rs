@@ -11,11 +11,14 @@
 //! stays local; insight travels. The receiving node's own next dream folds the
 //! imports in.
 //!
-//! Two invariants keep it sane:
+//! Three invariants keep it sane:
 //! - **The echo-guard:** federated imports (tags `colony` / `from:*` /
 //!   `dream-digest`) are NEVER digest candidates — knowledge propagates one hop
 //!   per genuine consolidation, so the colony can't ping-pong the same item
 //!   into amplification.
+//! - **The journal stays home:** the node's own `dream-journal` memory is
+//!   deposited inside the dream window before this push runs — it is personal
+//!   wake-priming context, never digest cargo.
 //! - **The window is the dedup:** only memories *created* during this dream's
 //!   run qualify, so a night's digest can't re-send last night's items.
 //!
@@ -45,16 +48,22 @@ pub fn digest_max() -> usize {
         .unwrap_or(DEFAULT_DIGEST_MAX)
 }
 
-/// The echo-guard: a memory that ARRIVED via federation must never be
-/// re-broadcast as this node's own insight.
-fn is_federated(tags: &[&str]) -> bool {
-    tags.iter().any(|t| *t == "colony" || *t == "dream-digest" || t.starts_with("from:"))
+/// Tags that exclude a memory from the digest. Two reasons, one gate:
+/// the echo-guard — a memory that ARRIVED via federation must never be
+/// re-broadcast as this node's own insight — and the dream JOURNAL, a
+/// first-person record deposited inside the dream window BEFORE the digest
+/// push: it is personal wake-priming context, and whether the auto-classifier
+/// happens to type it semantic must not decide whether it broadcasts.
+fn digest_excluded(tags: &[&str]) -> bool {
+    tags.iter().any(|t| {
+        *t == "colony" || *t == "dream-digest" || *t == "dream-journal" || t.starts_with("from:")
+    })
 }
 
 /// Select digest candidates from an `export_memories` result: memories CREATED
 /// after `since` (the dream window — doubles as night-over-night dedup), skipping
-/// federated imports (the echo-guard). Input order (salience DESC) is preserved;
-/// the caller caps the combined list. Pure.
+/// federated imports (the echo-guard) and the node's own dream journal. Input
+/// order (salience DESC) is preserved; the caller caps the combined list. Pure.
 pub fn digest_candidates(exported: &Value, since: &str) -> Vec<String> {
     let Some(arr) = exported.as_array() else { return Vec::new() };
     arr.iter()
@@ -68,7 +77,7 @@ pub fn digest_candidates(exported: &Value, since: &str) -> Vec<String> {
             let tags: Vec<&str> = m["tags"].as_array()
                 .map(|a| a.iter().filter_map(|t| t.as_str()).collect())
                 .unwrap_or_default();
-            if is_federated(&tags) {
+            if digest_excluded(&tags) {
                 return None;
             }
             Some(id.to_string())
@@ -160,6 +169,7 @@ mod tests {
             mem("mem_old",        "2026-07-01T22:00:00+00:00", &["schema"]),        // before window
             mem("mem_import",     "2026-07-02T03:06:00+00:00", &["colony", "from:apex1"]), // echo-guard
             mem("mem_redigest",   "2026-07-02T03:07:00+00:00", &["dream-digest"]),  // echo-guard
+            mem("mem_journal",    "2026-07-02T03:09:00+00:00", &["dream-journal"]), // personal, never broadcast
             mem("mem_fresh",      "2026-07-02T03:08:00+00:00", &["sensors"]),
         ]);
         assert_eq!(
@@ -176,11 +186,14 @@ mod tests {
     }
 
     #[test]
-    fn echo_guard_matches_all_federation_marks() {
-        assert!(is_federated(&["colony"]));
-        assert!(is_federated(&["from:apex2"]));
-        assert!(is_federated(&["dream-digest"]));
-        assert!(!is_federated(&["sensors", "schema"]));
-        assert!(!is_federated(&[]));
+    fn exclusion_matches_federation_marks_and_the_journal() {
+        assert!(digest_excluded(&["colony"]));
+        assert!(digest_excluded(&["from:apex2"]));
+        assert!(digest_excluded(&["dream-digest"]));
+        // The node's own first-person journal is personal — never digest cargo,
+        // regardless of what memory_type the classifier assigned it.
+        assert!(digest_excluded(&["dream-journal"]));
+        assert!(!digest_excluded(&["sensors", "schema"]));
+        assert!(!digest_excluded(&[]));
     }
 }
