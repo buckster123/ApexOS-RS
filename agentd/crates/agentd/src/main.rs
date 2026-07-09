@@ -2618,7 +2618,12 @@ fn agent_spawn_spec() -> ToolSpec {
     ToolSpec {
         name:        "agent_spawn".into(),
         description: "Spawn a focused sub-agent to handle a sub-task and return its \
-                      final text output. Add `node` to run the sub-agent on a mesh \
+                      final text output. By default the sub-agent runs TASK-SCOPED: a \
+                      minimal charter (one task, honest ephemerality, no orientation \
+                      reflex) instead of your full soul — it does the job rather than \
+                      re-orienting as you. Pass inherit_soul:true only when the task \
+                      genuinely needs your full identity/context, or supply your own \
+                      `system`. Add `node` to run the sub-agent on a mesh \
                       PEER (delegation across the colony — e.g. send a research or \
                       compute task to a node with the right senses/tier) and get the \
                       result back; without `node` it runs locally.".into(),
@@ -2633,8 +2638,16 @@ fn agent_spawn_spec() -> ToolSpec {
                 },
                 "system": {
                     "type":        "string",
-                    "description": "Optional system prompt override for the sub-agent. Author in PAC \
+                    "description": "Optional system prompt override for the sub-agent (wins over the \
+                                    default task charter and inherit_soul). Author in PAC \
                                     (docs/pac.md) — PAC operational scaffold + thin prose voice."
+                },
+                "inherit_soul": {
+                    "type":        "boolean",
+                    "description": "Give the sub-agent the executing node's FULL soul instead of the \
+                                    minimal task charter (default false). Use only when the task \
+                                    needs your whole identity — a full-soul child re-orients and \
+                                    burns approval slots instead of doing its one job."
                 },
                 "node": {
                     "type":        "string",
