@@ -19,7 +19,7 @@
 </div>
 
 > [!NOTE]
-> **What if your AI assistant wasn't a chat window to someone else's datacenter — but a *resident* of a $15 computer you own?** One that keeps its own memories across reboots, has a face on a little screen, listens and talks back with a fully-local voice, reads its sensors, shares what it learns with the other nodes in your house — **they consolidate memories together in their sleep** — edits its own personality, and, when it has a better idea for how it should work, **rebuilds and swaps its own binary, with an automatic safety net if the new version misbehaves.** That's ApexOS-RS.
+> **What if your AI assistant wasn't a chat window to someone else's datacenter — but a *resident* of a $150 computer you own?** One that keeps its own memories across reboots, has a face on a little screen, listens and talks back with a fully-local voice, reads its sensors, shares what it learns with the other nodes in your house — **they consolidate memories together in their sleep** — edits its own personality, and, when it has a better idea for how it should work, **rebuilds and swaps its own binary, with an automatic safety net if the new version misbehaves.** That's ApexOS-RS.
 
 ---
 
