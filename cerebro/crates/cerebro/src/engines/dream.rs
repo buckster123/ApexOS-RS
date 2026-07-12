@@ -1536,7 +1536,7 @@ impl DreamEngine {
             // CB-024: only count a prune that actually soft-deleted a live row.
             // Through the coordinator so the node is also pruned from the in-memory
             // graph (write lock; bound first so the guard releases before the match).
-            let prune_result = cortex.storage.write().await.delete_memory(&node.id).await;
+            let prune_result = cortex.storage.write().await.delete_memory(&node.id, scope).await;
             match prune_result {
                 Ok(true)  => {
                     pruned += 1;

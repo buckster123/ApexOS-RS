@@ -388,10 +388,10 @@ async fn main() -> Result<()> {
         Command::Delete { id, force } => {
             let mid = MemoryId(id.clone());
             if force {
-                let ok = brain.storage.read().await.sqlite.purge_memory(&mid).await?;
+                let ok = brain.storage.read().await.sqlite.purge_memory(&mid, &VisibilityScope::global()).await?;
                 if ok { println!("purged {id}"); } else { eprintln!("not found: {id}"); }
             } else {
-                let ok = brain.storage.read().await.sqlite.delete_memory(&mid).await?;
+                let ok = brain.storage.read().await.sqlite.delete_memory(&mid, &VisibilityScope::global()).await?;
                 if ok { println!("deleted {id}"); } else { eprintln!("not found: {id}"); }
             }
         }

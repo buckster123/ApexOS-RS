@@ -348,7 +348,7 @@ async fn delete_memory(
     State(brain): State<Brain>,
 ) -> AppResult {
     let ok = brain.storage.read().await.sqlite
-        .delete_memory(&MemoryId(id.clone())).await?;
+        .delete_memory(&MemoryId(id.clone()), &VisibilityScope::global()).await?;
     Ok(Json(json!({ "deleted": ok })))
 }
 
@@ -631,7 +631,7 @@ async fn rename_tag(
     Json(req): Json<RenameTagReq>,
 ) -> AppResult {
     let count = brain.storage.read().await.sqlite
-        .rename_tag_everywhere(&req.old_tag, &req.new_tag).await?;
+        .rename_tag_everywhere(&req.old_tag, &req.new_tag, &VisibilityScope::global()).await?;
     Ok(Json(json!({ "updated": count })))
 }
 
@@ -642,7 +642,7 @@ async fn merge_tags(
     let mut total = 0usize;
     let storage = brain.storage.read().await;
     for src in &req.source_tags {
-        total += storage.sqlite.rename_tag_everywhere(src, &req.target_tag).await?;
+        total += storage.sqlite.rename_tag_everywhere(src, &req.target_tag, &VisibilityScope::global()).await?;
     }
     Ok(Json(json!({ "updated": total })))
 }
@@ -652,7 +652,7 @@ async fn delete_tag(
     State(brain): State<Brain>,
 ) -> AppResult {
     let count = brain.storage.read().await.sqlite
-        .delete_tag_everywhere(&tag).await?;
+        .delete_tag_everywhere(&tag, &VisibilityScope::global()).await?;
     Ok(Json(json!({ "removed_from": count })))
 }
 
@@ -803,7 +803,7 @@ async fn restore_trash(
     State(brain): State<Brain>,
 ) -> AppResult {
     let ok = brain.storage.read().await.sqlite
-        .restore_memory(&MemoryId(memory_id)).await?;
+        .restore_memory(&MemoryId(memory_id), &VisibilityScope::global()).await?;
     Ok(Json(json!({ "restored": ok })))
 }
 
@@ -812,14 +812,14 @@ async fn purge_trash(
     State(brain): State<Brain>,
 ) -> AppResult {
     let ok = brain.storage.read().await.sqlite
-        .purge_memory(&MemoryId(memory_id)).await?;
+        .purge_memory(&MemoryId(memory_id), &VisibilityScope::global()).await?;
     Ok(Json(json!({ "purged": ok })))
 }
 
 async fn purge_all_trash(
     State(brain): State<Brain>,
 ) -> AppResult {
-    let count = brain.storage.read().await.sqlite.purge_all_deleted().await?;
+    let count = brain.storage.read().await.sqlite.purge_all_deleted(&VisibilityScope::global()).await?;
     Ok(Json(json!({ "purged": count })))
 }
 
@@ -828,7 +828,7 @@ async fn bulk_delete(
     Json(req): Json<BulkDeleteReq>,
 ) -> AppResult {
     let ids: Vec<MemoryId> = req.ids.into_iter().map(MemoryId).collect();
-    let count = brain.storage.read().await.sqlite.bulk_delete(&ids).await?;
+    let count = brain.storage.read().await.sqlite.bulk_delete(&ids, &VisibilityScope::global()).await?.len();
     Ok(Json(json!({ "deleted": count })))
 }
 
@@ -863,7 +863,7 @@ async fn prune_thread(
     Path(thread_id): Path<String>,
     State(brain): State<Brain>,
 ) -> AppResult {
-    let count = brain.storage.read().await.sqlite.prune_thread(&thread_id).await?;
+    let count = brain.storage.read().await.sqlite.prune_thread(&thread_id, &VisibilityScope::global()).await?;
     Ok(Json(json!({ "deleted": count })))
 }
 
