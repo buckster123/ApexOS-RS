@@ -908,6 +908,21 @@ mod storage_basic {
         let ret = all[0]["retrievability"].as_f64().unwrap();
         assert!((ret - 0.9).abs() < 0.02, "expected FSRS R≈0.90, got {ret}");
     }
+
+    #[tokio::test]
+    async fn visibility_meta_chunks_past_the_parameter_limit_shape() {
+        // CB-008: get_visibility_meta chunks its IN-clause at 500 ids — 1,200
+        // ids = 3 chunks, all returned, none dropped at the seams.
+        let (store, _dir) = make_store().await;
+        let mut ids = Vec::new();
+        for i in 0..1200 {
+            let node = MemoryNode::new(format!("chunk fodder {i} padding text"), MemoryType::Semantic);
+            ids.push(node.id.clone());
+            store.sqlite.insert_memory(&node).await.unwrap();
+        }
+        let meta = store.sqlite.get_visibility_meta(&ids).await.unwrap();
+        assert_eq!(meta.len(), 1200, "every chunk's rows must land in the map");
+    }
 }
 
 // =============================================================================
@@ -1269,6 +1284,47 @@ mod cortex_pipeline {
         assert_eq!(fed.len(), 1, "shared_only hides private");
         assert_eq!(fed[0].0.id, published.id);
         assert_eq!(fed[0].0.visibility, Visibility::Shared);
+    }
+
+    #[tokio::test]
+    async fn frontier_bounding_keeps_association_hits_and_scope_denial() {
+        // CB-008: the visibility map is now fetched for the seeds' reachable
+        // frontier only. Two properties must hold end-to-end:
+        // (1) an association-only hit (reachable purely through spreading, no
+        //     keyword match) still surfaces for a caller who may see it — i.e.
+        //     the frontier map isn't under-collected;
+        // (2) another agent's private memory one hop from a seed stays out of
+        //     a scoped recall — the C-RS-003 guarantee survives the bounding.
+        let (cortex, _dir) = make_cortex().await;
+        let alice = AgentId("alice".into());
+
+        let seed = cortex.remember(
+            "zeppelin navigation requires patient barometric discipline",
+            None, None, None, VisibilityScope::global(),
+        ).await.unwrap();
+        // Content deliberately shares NO keywords with the query — reachable
+        // only via the associative link.
+        let private = cortex.remember(
+            "meadow rituals and quiet unrelated things",
+            None, None, None, VisibilityScope::for_agent(alice.clone()),
+        ).await.unwrap();
+        cortex.associate(
+            seed.id.clone(), private.id.clone(),
+            AssociativeLink::new(seed.id.clone(), private.id.clone(), LinkType::Semantic, 1.0),
+        ).await.unwrap();
+
+        // Alice: the private neighbour arrives as an association-only hit.
+        let own = cortex.recall("zeppelin navigation", 10, VisibilityScope::for_agent(alice))
+            .await.unwrap();
+        assert!(own.iter().any(|(n, _)| n.id == private.id),
+            "association-only hit must survive frontier bounding for its owner");
+
+        // Bob: same query, the private neighbour never surfaces.
+        let other = cortex.recall("zeppelin navigation", 10,
+            VisibilityScope::for_agent(AgentId("bob".into()))).await.unwrap();
+        assert!(other.iter().any(|(n, _)| n.id == seed.id), "shared seed visible to bob");
+        assert!(!other.iter().any(|(n, _)| n.id == private.id),
+            "another agent's private memory must stay out of a scoped recall");
     }
 
     #[tokio::test]

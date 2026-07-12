@@ -928,36 +928,43 @@ impl SqliteStore {
     /// Mirrors Python `_build_visibility_cache`. Ids absent from the result are
     /// not in the DB and are treated as visible (then filtered by the final
     /// SQLite scope query), matching Python's `_check_access` fallthrough.
+    /// Chunked at 500 ids per IN-clause (CB-008): a single un-chunked query
+    /// hard-failed past SQLite's ~32k bind-parameter limit, which recall would
+    /// have hit store-wide before the frontier bound; with the chunking, no
+    /// caller can hit the cliff regardless of input size.
     pub async fn get_visibility_meta(
         &self,
         ids: &[MemoryId],
     ) -> Result<HashMap<MemoryId, (Visibility, Option<AgentId>)>> {
         if ids.is_empty() { return Ok(HashMap::new()); }
-        let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-        let sql = format!(
-            "SELECT id, visibility, agent_id FROM memories \
-             WHERE id IN ({placeholders}) AND deleted_at IS NULL"
-        );
+        const CHUNK: usize = 500;
         let conn = self.conn.lock().await;
-        let id_strs: Vec<&str> = ids.iter().map(|id| id.0.as_str()).collect();
-        let dyn_params: Vec<&dyn rusqlite::ToSql> =
-            id_strs.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(dyn_params.as_slice(), |row| {
-            let id:  String = row.get(0)?;
-            let vis: String = row.get(1)?;
-            let agent: Option<String> = row.get(2)?;
-            Ok((id, vis, agent))
-        })?;
         let mut map = HashMap::new();
-        for row in rows {
-            let (id, vis, agent) = row?;
-            let visibility = match vis.as_str() {
-                "private" => Visibility::Private,
-                "thread"  => Visibility::Thread,
-                _         => Visibility::Shared,
-            };
-            map.insert(MemoryId(id), (visibility, agent.map(AgentId)));
+        for chunk in ids.chunks(CHUNK) {
+            let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+            let sql = format!(
+                "SELECT id, visibility, agent_id FROM memories \
+                 WHERE id IN ({placeholders}) AND deleted_at IS NULL"
+            );
+            let id_strs: Vec<&str> = chunk.iter().map(|id| id.0.as_str()).collect();
+            let dyn_params: Vec<&dyn rusqlite::ToSql> =
+                id_strs.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(dyn_params.as_slice(), |row| {
+                let id:  String = row.get(0)?;
+                let vis: String = row.get(1)?;
+                let agent: Option<String> = row.get(2)?;
+                Ok((id, vis, agent))
+            })?;
+            for row in rows {
+                let (id, vis, agent) = row?;
+                let visibility = match vis.as_str() {
+                    "private" => Visibility::Private,
+                    "thread"  => Visibility::Thread,
+                    _         => Visibility::Shared,
+                };
+                map.insert(MemoryId(id), (visibility, agent.map(AgentId)));
+            }
         }
         Ok(map)
     }

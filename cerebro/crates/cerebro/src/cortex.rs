@@ -184,21 +184,31 @@ impl CerebroCortex {
             .filter_map(|(id, sim)| storage.graph.index.get(id).map(|&idx| (idx, *sim)))
             .collect();
 
-        // Scope-visibility map (C-RS-003): a node participates in the spread only
-        // if the caller can see it, so another agent's private/thread memories
-        // can't shape the activations of nodes we *do* return. Global scope
-        // (agent_id == None) short-circuits to all-visible, matching Python's
-        // `agent_id is None` path in `_check_access` — but NOT the shared-only
-        // federation scope, where private nodes must not even influence the
-        // spread (can_access below enforces it per node).
+        // Scope-visibility map (C-RS-003), bounded to the reachable frontier
+        // (CB-008): `spread` can only ever touch the seeds' undirected
+        // ≤MAX_HOPS neighbourhood, so that is ALL the visibility we fetch —
+        // previously this collected every graph id and ran one
+        // one-placeholder-per-memory IN query per recall (O(live-store) on the
+        // hot path, hard-failing past SQLite's ~32k parameter limit). Safe
+        // because spread treats a node missing from the map as NOT visible:
+        // under-collection could only weaken the spread, never leak. Global
+        // scope (agent_id == None) still short-circuits to all-visible —
+        // matching Python's `agent_id is None` path in `_check_access` — but
+        // NOT the shared-only federation scope, where private nodes must not
+        // even influence the spread (can_access below enforces it per node).
+        let frontier = crate::activation::reachable_frontier(&storage.graph.graph, &seeds);
         let visible_nodes: HashMap<NodeIndex, bool> = if scope.agent_id.is_none() && !scope.shared_only {
-            storage.graph.index.values().map(|&idx| (idx, true)).collect()
+            frontier.iter().map(|&idx| (idx, true)).collect()
         } else {
-            let all_ids: Vec<MemoryId> = storage.graph.index.keys().cloned().collect();
-            let vis_meta = storage.sqlite.get_visibility_meta(&all_ids).await?;
-            storage.graph.index.iter()
-                .map(|(id, &idx)| {
-                    let visible = match vis_meta.get(id) {
+            let frontier_ids: Vec<MemoryId> = frontier.iter()
+                .filter_map(|&idx| storage.graph.graph.node_weight(idx).cloned())
+                .collect();
+            let vis_meta = storage.sqlite.get_visibility_meta(&frontier_ids).await?;
+            frontier.iter()
+                .map(|&idx| {
+                    let visible = match storage.graph.graph.node_weight(idx)
+                        .and_then(|id| vis_meta.get(id))
+                    {
                         Some((vis, owner)) => scope.can_access(*vis, owner.as_ref()),
                         None => true, // not in DB → final SQLite filter handles it
                     };
