@@ -5,7 +5,7 @@ pub mod spreading;
 pub use actr::{actr_activation, base_level_activation};
 pub use fsrs::{retrievability, update_difficulty_on_recall,
                update_stability_on_lapse, update_stability_on_recall};
-pub use spreading::spread;
+pub use spreading::{reachable_frontier, spread};
 
 // ---------------------------------------------------------------------------
 // ACT-R recall probability — sigmoid over activation
