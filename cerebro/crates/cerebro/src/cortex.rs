@@ -152,6 +152,22 @@ impl CerebroCortex {
         }
     }
 
+    /// Refresh the in-memory graph if ANOTHER process committed to the shared
+    /// database since it was last built (CB-003 — cerebro-mcp and cerebro-api
+    /// each hold their own graph over one SQLite file). Two-phase: a cheap
+    /// `PRAGMA data_version` check under the read guard; only when stale do we
+    /// take the write guard and rebuild (which re-checks, so a racing caller
+    /// that already refreshed makes it a no-op). Own-process writes never
+    /// trigger this — the pragma only moves on foreign commits, and own writes
+    /// maintain the graph incrementally.
+    pub async fn refresh_graph_if_stale(&self) -> Result<()> {
+        let stale = self.storage.read().await.graph_is_stale().await?;
+        if stale {
+            self.storage.write().await.refresh_graph().await?;
+        }
+        Ok(())
+    }
+
     /// Recall memories matching a query string.
     ///
     /// Pipeline: vector/FTS5 search → spreading activation → bulk SQLite load
@@ -162,6 +178,12 @@ impl CerebroCortex {
         k:     usize,
         scope: VisibilityScope,
     ) -> Result<Vec<(MemoryNode, f32)>> {
+        // Cross-process graph freshness (CB-003): pick up any memories/links
+        // the OTHER front-end committed, so spreading sees them and the
+        // association hits below aren't silently missing. One PRAGMA row when
+        // fresh; a rebuild only after a foreign commit.
+        self.refresh_graph_if_stale().await?;
+
         // Embed the query BEFORE taking the read guard (CB-019): a held read
         // guard blocks writers, so query inference under it stalled every
         // concurrent remember/associate. A failed embed degrades to FTS5.
@@ -371,6 +393,11 @@ impl CerebroCortex {
         link:    AssociativeLink,
     ) -> Result<()> {
         let mut storage = self.storage.write().await;
+        // Cross-process graph freshness (CB-003): without this, an id the
+        // OTHER front-end just committed fails the existence guard below with
+        // a false "memory does not exist". Already under the write guard, so
+        // refresh directly (no-op when nothing foreign was committed).
+        storage.refresh_graph().await?;
 
         // C-RS-010: validate both endpoints exist (and are live) BEFORE writing,
         // so a typo'd/nonexistent id can't leave a dangling orphan row in `links`

@@ -1328,6 +1328,75 @@ mod cortex_pipeline {
     }
 
     #[tokio::test]
+    async fn cross_process_graph_stays_fresh() {
+        // CB-003: two CerebroCortex instances over ONE db file — the real
+        // cerebro-mcp + cerebro-api deployment shape. Each holds its own
+        // in-memory graph; before the data_version refresh, a memory/link
+        // committed by one NEVER appeared in the other's graph until restart
+        // (missing association hits, false "memory does not exist" on
+        // associate). Both directions verified here.
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            db_path:       dir.path().join("shared.db"),
+            anthropic_key: None,
+            embed_model:   "".into(),
+        };
+        let a = CerebroCortex::new(config.clone()).await.unwrap();
+        let b = CerebroCortex::new(config).await.unwrap();
+
+        // A commits a seed + an association-only neighbour AFTER b booted.
+        let seed = a.remember(
+            "gyroscope calibration needs a perfectly level table",
+            None, None, None, VisibilityScope::global(),
+        ).await.unwrap();
+        let neighbor = a.remember(
+            "quiet meadow words sharing no query keywords",
+            None, None, None, VisibilityScope::global(),
+        ).await.unwrap();
+        a.associate(
+            seed.id.clone(), neighbor.id.clone(),
+            AssociativeLink::new(seed.id.clone(), neighbor.id.clone(), LinkType::Semantic, 1.0),
+        ).await.unwrap();
+
+        // B's recall sees A's link: the association-only hit arrives through
+        // B's refreshed graph (pre-fix its graph was empty).
+        let hits = b.recall("gyroscope calibration", 10, VisibilityScope::global())
+            .await.unwrap();
+        assert!(hits.iter().any(|(n, _)| n.id == neighbor.id),
+            "the other process's link must reach this process's spreading");
+
+        // B can associate onto ids A created (pre-fix: false 'does not exist').
+        let third = b.remember(
+            "level tables and spirit bubbles for calibration work",
+            None, None, None, VisibilityScope::global(),
+        ).await.unwrap();
+        b.associate(
+            seed.id.clone(), third.id.clone(),
+            AssociativeLink::new(seed.id.clone(), third.id.clone(), LinkType::Semantic, 1.0),
+        ).await.unwrap();
+
+        // …and A sees B's new memory+link on its next recall, symmetrically.
+        let hits = a.recall("gyroscope calibration", 10, VisibilityScope::global())
+            .await.unwrap();
+        assert!(hits.iter().any(|(n, _)| n.id == third.id),
+            "freshness must work in both directions");
+    }
+
+    #[tokio::test]
+    async fn own_writes_do_not_flag_the_graph_stale() {
+        // PRAGMA data_version moves only on FOREIGN commits — this process's
+        // own writes maintain the graph incrementally and must never trigger
+        // a rebuild (the property the whole CB-003 design leans on).
+        let (cortex, _dir) = make_cortex().await;
+        cortex.remember(
+            "own writes keep the graph warm without rebuilds",
+            None, None, None, VisibilityScope::global(),
+        ).await.unwrap();
+        assert!(!cortex.storage.read().await.graph_is_stale().await.unwrap(),
+            "an own-connection commit must not read as foreign");
+    }
+
+    #[tokio::test]
     async fn recall_empty_when_no_match() {
         let (cortex, _dir) = make_cortex().await;
         let results = cortex.recall("completely unrelated query xyz", 5, VisibilityScope::global())

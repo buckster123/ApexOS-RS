@@ -373,6 +373,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let id    = args["memory_id"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("memory_id is required"))?;
             let scope = agent_scope(args);
+            brain.refresh_graph_if_stale().await?; // CB-003: see the other front-end's links
             let storage = brain.storage.read().await;
             let neighbor_ids: Vec<MemoryId> = storage.graph
                 .neighbors(&MemoryId(id.to_string()))
@@ -386,6 +387,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 .ok_or_else(|| anyhow::anyhow!("source_id is required"))?;
             let tgt = args["target_id"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("target_id is required"))?;
+            brain.refresh_graph_if_stale().await?; // CB-003
             let storage = brain.storage.read().await;
             let path = brain.association.find_path(
                 &storage.graph, &MemoryId(src.to_string()), &MemoryId(tgt.to_string()),
@@ -402,6 +404,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let b = args["memory_id_b"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("memory_id_b is required"))?;
             let scope   = agent_scope(args);
+            brain.refresh_graph_if_stale().await?; // CB-003
             let storage = brain.storage.read().await;
             let common  = brain.association.get_common_neighbors(
                 &storage.graph, &MemoryId(a.to_string()), &MemoryId(b.to_string()),
@@ -417,6 +420,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
         }
 
         "memory_graph_stats" => {
+            brain.refresh_graph_if_stale().await?; // CB-003
             let storage = brain.storage.read().await;
             Ok(json!({
                 "node_count": storage.graph.graph.node_count(),
