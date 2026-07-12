@@ -11,14 +11,43 @@ pub struct StorageCoordinator {
     pub sqlite: SqliteStore,
     pub graph:  graph::GraphStore,
     pub vector: vector::VectorStore,
+    /// `PRAGMA data_version` at the time the graph was last (re)built (CB-003).
+    /// The pragma changes only when ANOTHER connection commits, so comparing it
+    /// detects cross-process writes (cerebro-api ↔ cerebro-mcp over one file)
+    /// without ever flagging this process's own incremental graph updates.
+    graph_data_version: i64,
 }
 
 impl StorageCoordinator {
     pub async fn new(config: &crate::config::Config) -> anyhow::Result<Self> {
         let sqlite = SqliteStore::open(&config.db_path).await?;
+        // Version read BEFORE the rebuild: a foreign commit racing the rebuild
+        // then re-flags as stale (one redundant refresh, never a missed one).
+        let graph_data_version = sqlite.data_version().await?;
         let graph  = graph::GraphStore::rebuild_from_db(&sqlite).await?;
         let vector = vector::VectorStore::new(&sqlite, &config.embed_model).await?;
-        Ok(Self { sqlite, graph, vector })
+        Ok(Self { sqlite, graph, vector, graph_data_version })
+    }
+
+    /// Whether another process has committed to the database since this
+    /// process last (re)built its graph (CB-003). Cheap — one PRAGMA row.
+    pub async fn graph_is_stale(&self) -> anyhow::Result<bool> {
+        Ok(self.sqlite.data_version().await? != self.graph_data_version)
+    }
+
+    /// Rebuild the in-memory graph if a foreign commit made it stale (CB-003).
+    /// Returns whether a rebuild happened. Callers hold the write lock; the
+    /// re-check inside means a racing caller that already refreshed makes this
+    /// a no-op.
+    pub async fn refresh_graph(&mut self) -> anyhow::Result<bool> {
+        let current = self.sqlite.data_version().await?;
+        if current == self.graph_data_version {
+            return Ok(false);
+        }
+        self.graph = graph::GraphStore::rebuild_from_db(&self.sqlite).await?;
+        self.graph_data_version = current;
+        tracing::debug!("graph rebuilt after foreign commit (data_version {current})");
+        Ok(true)
     }
 
     /// Soft-delete a memory and prune it from the in-memory graph so spreading
@@ -79,6 +108,9 @@ impl StorageCoordinator {
     ) -> anyhow::Result<bool> {
         let restored = self.sqlite.restore_memory(id, scope).await?;
         if restored {
+            // Re-baseline the staleness marker too (CB-003): this rebuild
+            // already reflects everything committed so far.
+            self.graph_data_version = self.sqlite.data_version().await?;
             self.graph = graph::GraphStore::rebuild_from_db(&self.sqlite).await?;
         }
         Ok(restored)

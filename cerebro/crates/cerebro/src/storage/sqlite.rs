@@ -1646,6 +1646,17 @@ impl SqliteStore {
         Ok(ids.into_iter().filter(|id| seen.insert(id.clone())).map(MemoryId).collect())
     }
 
+    /// SQLite's cross-connection change counter (`PRAGMA data_version`): the
+    /// value changes when ANOTHER connection commits to the database, and is
+    /// deliberately UNCHANGED by this connection's own commits — exactly the
+    /// staleness signal the in-memory graph cache needs (CB-003): own writes
+    /// already update the graph incrementally; foreign writes (the other
+    /// front-end process over the same file) are what require a rebuild.
+    pub async fn data_version(&self) -> Result<i64> {
+        let conn = self.conn.lock().await;
+        Ok(conn.query_row("PRAGMA data_version", [], |r| r.get(0))?)
+    }
+
     // -----------------------------------------------------------------------
     // Audit log (table already in SCHEMA_SQL)
     // -----------------------------------------------------------------------
