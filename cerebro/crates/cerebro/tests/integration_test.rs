@@ -473,6 +473,87 @@ mod storage_basic {
     }
 
     #[tokio::test]
+    async fn destructive_ops_are_scope_enforced() {
+        // CB-018: a scoped caller can only destroy/restore what it can see.
+        let (mut store, _dir) = make_store().await;
+        let mut node = MemoryNode::new("alice's private plan", MemoryType::Semantic);
+        node.visibility = Visibility::Private;
+        node.agent_id   = Some(AgentId("alice".into()));
+        node.thread_id  = Some("thread-x".into());
+        let id = node.id.clone();
+        store.sqlite.insert_memory(&node).await.unwrap();
+        store.graph.add_node(id.clone());
+        let alice = VisibilityScope::for_agent(AgentId("alice".into()));
+        let bob   = VisibilityScope::for_agent(AgentId("bob".into()));
+
+        // Bob can't delete what he can't see — and the coordinator must NOT
+        // evict the graph node on a denied delete.
+        assert!(!store.delete_memory(&id, &bob).await.unwrap());
+        assert!(store.graph.index.contains_key(&id), "denied delete must not evict the graph node");
+        assert!(store.sqlite.get_memory(&id, &alice).await.unwrap().is_some());
+
+        // Bob can't purge it either — the row survives.
+        assert!(!store.sqlite.purge_memory(&id, &bob).await.unwrap());
+        assert!(store.sqlite.get_memory(&id, &alice).await.unwrap().is_some());
+
+        // Bulk delete under bob skips it; under alice it lands.
+        assert_eq!(store.bulk_delete(&[id.clone()], &bob).await.unwrap(), 0);
+        assert_eq!(store.bulk_delete(&[id.clone()], &alice).await.unwrap(), 1);
+
+        // Bob can't resurrect alice's deleted memory; alice can.
+        assert!(!store.sqlite.restore_memory(&id, &bob).await.unwrap());
+        assert!(store.sqlite.restore_memory(&id, &alice).await.unwrap());
+
+        // Scoped prune_thread: a shared row in the thread dies, alice's private
+        // row survives bob's prune.
+        let mut shared = MemoryNode::new("shared thread note", MemoryType::Semantic);
+        shared.thread_id = Some("thread-x".into());
+        store.sqlite.insert_memory(&shared).await.unwrap();
+        assert_eq!(store.sqlite.prune_thread("thread-x", &bob).await.unwrap(), 1);
+        assert!(store.sqlite.get_memory(&id, &alice).await.unwrap().is_some(),
+            "another agent's private memory survives a scoped thread prune");
+
+        // Scoped tag surgery: bob's rename doesn't touch alice's private tags.
+        let mut tagged = MemoryNode::new("alice's tagged secret", MemoryType::Semantic);
+        tagged.visibility = Visibility::Private;
+        tagged.agent_id   = Some(AgentId("alice".into()));
+        tagged.tags       = vec!["ritual".into()];
+        store.sqlite.insert_memory(&tagged).await.unwrap();
+        assert_eq!(store.sqlite.rename_tag_everywhere("ritual", "habit", &bob).await.unwrap(), 0);
+        assert_eq!(store.sqlite.delete_tag_everywhere("ritual", &bob).await.unwrap(), 0);
+        assert_eq!(store.sqlite.rename_tag_everywhere("ritual", "habit", &alice).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn share_memory_requires_ownership() {
+        // CB-018: only the owner (or admin/global) may re-scope a memory —
+        // before this, one call could seize any agent's memory by id.
+        let (store, _dir) = make_store().await;
+        let mut node = MemoryNode::new("alice's discovery", MemoryType::Semantic);
+        node.visibility = Visibility::Private;
+        node.agent_id   = Some(AgentId("alice".into()));
+        let id = node.id.clone();
+        store.sqlite.insert_memory(&node).await.unwrap();
+        let alice = VisibilityScope::for_agent(AgentId("alice".into()));
+        let bob   = VisibilityScope::for_agent(AgentId("bob".into()));
+
+        // Bob can't even see it → honest not-found (false), not an error.
+        assert!(!store.sqlite.share_memory(&id, Some("bob"), &bob).await.unwrap());
+
+        // Alice shares her own memory to the commons.
+        assert!(store.sqlite.share_memory(&id, None, &alice).await.unwrap());
+
+        // Now bob CAN see it (shared) — but seizing it is refused LOUDLY.
+        let err = store.sqlite.share_memory(&id, Some("bob"), &bob).await.unwrap_err();
+        assert!(err.to_string().contains("not owned by bob"), "got: {err}");
+        // Alice no longer owns it either (commons memory) — also refused.
+        assert!(store.sqlite.share_memory(&id, Some("alice"), &alice).await.is_err());
+
+        // The admin (global scope) may re-own — the fossil-heal/operator path.
+        assert!(store.sqlite.share_memory(&id, Some("alice"), &VisibilityScope::global()).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn remember_lands_in_graph_even_without_a_vector() {
         // CB-007/CB-009: the embed runs lock-free before the write guard and a
         // missing/failed embedding is non-fatal — the memory must still land in
@@ -633,7 +714,7 @@ mod storage_basic {
         let id   = node.id.clone();
         store.sqlite.insert_memory(&node).await.unwrap();
 
-        let deleted = store.sqlite.delete_memory(&id).await.unwrap();
+        let deleted = store.sqlite.delete_memory(&id, &VisibilityScope::global()).await.unwrap();
         assert!(deleted, "first delete returns true");
 
         // Should be invisible now
@@ -641,7 +722,7 @@ mod storage_basic {
         assert!(got.is_none(), "deleted memory must not appear in get_memory");
 
         // Second delete returns false (already deleted)
-        let deleted2 = store.sqlite.delete_memory(&id).await.unwrap();
+        let deleted2 = store.sqlite.delete_memory(&id, &VisibilityScope::global()).await.unwrap();
         assert!(!deleted2, "double-delete returns false");
     }
 
@@ -720,8 +801,8 @@ mod storage_basic {
         ).await.unwrap();
 
         // Soft-delete then purge the linked source — must not hit a FK error.
-        store.sqlite.delete_memory(&a_id).await.unwrap();
-        let purged = store.sqlite.purge_memory(&a_id).await.unwrap();
+        store.sqlite.delete_memory(&a_id, &VisibilityScope::global()).await.unwrap();
+        let purged = store.sqlite.purge_memory(&a_id, &VisibilityScope::global()).await.unwrap();
         assert!(purged, "purge of a linked memory should succeed");
 
         // The dependent link is gone too (both directions).
@@ -746,9 +827,9 @@ mod storage_basic {
         ).await.unwrap();
 
         // Soft-delete both ends, then bulk-purge — no FK error.
-        store.sqlite.delete_memory(&a_id).await.unwrap();
-        store.sqlite.delete_memory(&b_id).await.unwrap();
-        let n = store.sqlite.purge_all_deleted().await.unwrap();
+        store.sqlite.delete_memory(&a_id, &VisibilityScope::global()).await.unwrap();
+        store.sqlite.delete_memory(&b_id, &VisibilityScope::global()).await.unwrap();
+        let n = store.sqlite.purge_all_deleted(&VisibilityScope::global()).await.unwrap();
         assert_eq!(n, 2, "both soft-deleted memories purged");
         assert!(store.sqlite.list_links_from(&a_id).await.unwrap().is_empty());
     }
@@ -773,7 +854,7 @@ mod storage_basic {
         };
         assert_eq!(count_before, 1, "memory should be indexed before soft-delete");
 
-        store.sqlite.delete_memory(&id).await.unwrap();
+        store.sqlite.delete_memory(&id, &VisibilityScope::global()).await.unwrap();
         let count_after: i64 = {
             let conn = store.sqlite.shared_conn();
             let conn = conn.lock().await;
@@ -785,7 +866,7 @@ mod storage_basic {
         assert_eq!(count_after, 0, "soft-delete must evict the row from the FTS index");
 
         // Restore re-indexes (memories_au trigger re-inserts).
-        store.sqlite.restore_memory(&id).await.unwrap();
+        store.sqlite.restore_memory(&id, &VisibilityScope::global()).await.unwrap();
         let count_restored: i64 = {
             let conn = store.sqlite.shared_conn();
             let conn = conn.lock().await;
@@ -940,7 +1021,7 @@ mod vector_store {
         let node = MemoryNode::new("unique xyzzy content", MemoryType::Semantic);
         let id = node.id.clone();
         store.sqlite.insert_memory(&node).await.unwrap();
-        store.sqlite.delete_memory(&id).await.unwrap();
+        store.sqlite.delete_memory(&id, &VisibilityScope::global()).await.unwrap();
 
         let (scope_sql, scope_params) = VisibilityScope::global().sql_filter();
         let results = store.vector.search("xyzzy", 10, scope_sql, &scope_params).await.unwrap();
@@ -992,7 +1073,7 @@ mod graph_store {
         config::Config,
         models::{AssociativeLink, MemoryNode},
         storage::{graph::GraphStore, StorageCoordinator},
-        types::{LinkType, MemoryType},
+        types::{LinkType, MemoryType, VisibilityScope},
     };
     use tempfile::TempDir;
 
@@ -1066,7 +1147,7 @@ mod graph_store {
         let b_id = b.id.clone();
         store.sqlite.insert_memory(&a).await.unwrap();
         store.sqlite.insert_memory(&b).await.unwrap();
-        store.sqlite.delete_memory(&b_id).await.unwrap();
+        store.sqlite.delete_memory(&b_id, &VisibilityScope::global()).await.unwrap();
 
         let graph = GraphStore::rebuild_from_db(&store.sqlite).await.unwrap();
         assert_eq!(graph.graph.node_count(), 1, "only non-deleted node expected");
@@ -1088,7 +1169,7 @@ mod graph_store {
         store.sqlite.insert_link(&link).await.unwrap();
 
         // Delete b — the link's target disappears
-        store.sqlite.delete_memory(&b_id).await.unwrap();
+        store.sqlite.delete_memory(&b_id, &VisibilityScope::global()).await.unwrap();
 
         let graph = GraphStore::rebuild_from_db(&store.sqlite).await.unwrap();
         assert_eq!(graph.graph.node_count(), 1);
