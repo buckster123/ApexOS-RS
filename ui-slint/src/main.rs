@@ -113,11 +113,10 @@ thread_local! {
     static ID_USERS: RefCell<Option<Rc<slint::VecModel<UserDef>>>> = const { RefCell::new(None) };
     static ID_AGENTS: RefCell<Option<Rc<slint::VecModel<AgentDef>>>> = const { RefCell::new(None) };
     // Occipital (📖) follow-along reader (Phase 9): the breadcrumb trail of the
-    // agent's reads this session (newest last, capped). SUPPRESS goes true when
-    // the user closes the window — so a later web read won't re-pop it uninvited;
-    // launching it from the menu clears it again.
+    // agent's reads this session (newest last, capped). Auto-reveal suppression
+    // lives in the generalized UI_LATCHED map below (A3) — the reader
+    // force-latches on any user close; a menu launch re-invites.
     static OCCIPITAL_TRAIL: RefCell<Option<Rc<slint::VecModel<ReaderLink>>>> = const { RefCell::new(None) };
-    static OCCIPITAL_SUPPRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     // Adaptive UI (Loop 6, docs/adaptive-ui.md): per-AppKind bitmasks, bit index =
     // the AppKind ordinal (APP_TABLE order). AGENT_OPENED marks windows the agent
     // created via `ui_open`; a USER close of one moves the bit to UI_LATCHED —
@@ -125,6 +124,10 @@ thread_local! {
     // wins). A menu launch by the user clears both bits (re-invitation).
     static AGENT_OPENED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static UI_LATCHED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    // A3 rate rail: ui_* mutations applied in the current turn. Reset on
+    // TurnComplete / cancel / session switch; enforcement in the ToolRequested
+    // arm; the live counter rides /state so the agent can SEE it throttled.
+    static UI_TURN_MUTATIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 // ── Identity boot wizard (3d) state + helpers ───────────────────────────────────
@@ -563,6 +566,11 @@ const ARRANGE_GAP: f32 = 12.0;
 /// Most windows a single arrange touches (grid caps at 3×2) — presets stage a
 /// workspace, they don't tile the world.
 const ARRANGE_MAX: usize = 6;
+/// Most ui_* mutations that APPLY within one agent turn (A3 etiquette rail):
+/// an adaptation is a deliberate act, not a strobe. Beyond the cap, verbs drop
+/// silently; ui_query's `turn_mutations` shows the throttle. Mirrors the tool
+/// descriptions in apexos-tools.
+const UI_TURN_MUTATION_CAP: u32 = 4;
 
 /// Pure preset-topology → rects. `n` participating windows in priority order
 /// (first = main) + the usable desktop area → up to `n` `(x, y, w, h)` rects
@@ -1214,12 +1222,14 @@ fn apply_occipital_render(ui: &AppWindow, r: OccipitalRender) {
 
     ui.set_occipital_scroll_tick(ui.get_occipital_scroll_tick() + 1);
 
-    // Reveal the reader the first time APEX browses, unless the user closed it.
+    // Reveal the reader the first time APEX browses — an agent act through the
+    // SAME latch-aware path as ui_open (A3: the standalone suppress flag folded
+    // into the generalized latch): a user-closed reader stays closed until the
+    // user re-invites it from the menu. Quiet — auto-reveal never toasted.
     WINDOWS.with(|w| {
         if let Some(model) = w.borrow().as_ref() {
-            let exists = wm_index_by_kind(model, AppKind::Occipital).is_some();
-            if !exists && !OCCIPITAL_SUPPRESS.with(|s| s.get()) {
-                wm_launch(ui, model, AppKind::Occipital);
+            if wm_index_by_kind(model, AppKind::Occipital).is_none() {
+                agent_open_window(ui, model, AppKind::Occipital, false);
             }
         }
     });
@@ -1362,18 +1372,12 @@ fn agent_open_window(
     }
     let existed = wm_index_by_kind(model, kind).is_some();
     let was_agent = AGENT_OPENED.with(|m| m.get()) & bit != 0;
-    if kind == AppKind::Occipital {
-        // Raw launch: the menu path clears OCCIPITAL_SUPPRESS, but re-arming
-        // the reader's auto-reveal is the USER's signal (a deliberate menu
-        // launch), never the agent's.
-        wm_launch(ui, model, kind);
-    } else {
-        // The full menu-launch path — per-app refresh included (a raw
-        // wm_launch leaves Settings/Sessions/Terminal windows empty). Runs
-        // synchronously; it also clears this kind's latch bits, so the agent
-        // marks re-land after it returns.
-        ui.invoke_launch_app(kind_ordinal(kind));
-    }
+    // The full menu-launch path — per-app refresh included (a raw wm_launch
+    // leaves Settings/Sessions/Terminal windows empty). Runs synchronously;
+    // it also clears this kind's latch bits, so the agent marks re-land after
+    // it returns. (Occipital is uniform since A3: its auto-reveal suppression
+    // IS the latch, so there's no separate flag an agent open could re-arm.)
+    ui.invoke_launch_app(kind_ordinal(kind));
     if !existed || was_agent {
         AGENT_OPENED.with(|m| m.set(m.get() | bit));
     }
@@ -1392,12 +1396,21 @@ fn apply_ui_verb(ui: &AppWindow, verb: &str, app: &str) {
             agent_open_window(ui, &model, kind, true);
         }
         "ui_close" => {
-            // Agent-close ≠ user-close: no latch, and no occipital auto-reveal
-            // suppression — those encode the human's overrule, not tidying-up.
-            AGENT_OPENED.with(|m| m.set(m.get() & !bit));
+            // Agent-close ≠ user-close: no latch — the latch encodes the
+            // human's overrule, not tidying-up.
             if let Some(i) = wm_index_by_kind(&model, kind) {
+                // Drag guard (A3): never yank a window out from under the
+                // pointer — skip entirely, mark intact.
+                if let Some(d) = model.row_data(i) {
+                    if d.id == ui.global::<WmState>().get_dragging_id() {
+                        return;
+                    }
+                }
+                AGENT_OPENED.with(|m| m.set(m.get() & !bit));
                 model.remove(i);
                 wm_refocus_top(ui, &model);
+            } else {
+                AGENT_OPENED.with(|m| m.set(m.get() & !bit));
             }
         }
         "ui_focus" => {
@@ -1466,9 +1479,16 @@ fn apply_ui_arrange(ui: &AppWindow, layout: &str, apps: &[String]) {
         return;
     }
 
+    // Drag guard (A3): a window under live pointer interaction keeps its
+    // geometry — the frame's local drag deltas would commit over whatever we
+    // set, and fighting the hand is the one thing an adaptation must never do.
+    let dragging = ui.global::<WmState>().get_dragging_id();
     for (i, kind) in kinds.iter().enumerate() {
         let Some(row) = wm_index_by_kind(&model, *kind) else { continue };
         let Some(id) = model.row_data(row).map(|d| d.id) else { continue };
+        if id == dragging {
+            continue;
+        }
         if let Some(&(x, y, w, h)) = rects.get(i) {
             wm_update_row(&model, id, |d| {
                 d.minimized = false;
@@ -1485,7 +1505,7 @@ fn apply_ui_arrange(ui: &AppWindow, layout: &str, apps: &[String]) {
     if layout == "focus" {
         for i in 0..model.row_count() {
             if let Some(d) = model.row_data(i) {
-                if d.kind != main_kind && !d.minimized {
+                if d.kind != main_kind && !d.minimized && d.id != dragging {
                     wm_update_row(&model, d.id, |d| d.minimized = true);
                 }
             }
@@ -3812,6 +3832,11 @@ fn shell_state_json(ui: &AppWindow) -> serde_json::Value {
         "windows": windows,
         "agent_opened": agent_opened,
         "latched": latched,
+        // A3 rate rail: mutations applied this turn vs the cap — visible so
+        // the agent can SEE it throttled instead of wondering why a verb
+        // didn't land.
+        "turn_mutations": UI_TURN_MUTATIONS.with(|m| m.get()),
+        "mutation_cap": UI_TURN_MUTATION_CAP,
         "apps": APP_TABLE.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
     })
 }
@@ -4136,9 +4161,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     AppKind::Sonus => ui.invoke_refresh_sonus(),
                     AppKind::Notes => ui.invoke_refresh_notes(),
                     AppKind::Explorer => ui.invoke_refresh_explorer(),
-                    // Re-enable auto-reveal: opening it from the menu signals the
-                    // user wants to follow along again.
-                    AppKind::Occipital => OCCIPITAL_SUPPRESS.with(|s| s.set(false)),
+                    // (Occipital: the menu launch's generic latch-clear above IS
+                    // the auto-reveal re-invitation since A3 — no separate flag.)
                     _ => {}
                 }
             }
@@ -4158,17 +4182,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ui) = uw.upgrade() {
                 if let Some(i) = wm_index_by_id(&w, id) {
                     if let Some(kind) = w.row_data(i).map(|d| d.kind) {
-                        // Closing the reader suppresses auto-reveal so a later web
-                        // read won't re-pop it uninvited (until relaunched).
-                        if kind == AppKind::Occipital {
-                            OCCIPITAL_SUPPRESS.with(|s| s.set(true));
-                        }
                         // Adaptive UI (the human always wins): closing an
                         // agent-opened window latches that app — ui_open is
-                        // suppressed for the rest of the session. The agent
-                        // sees it in ui_query's `latched` and learns.
+                        // suppressed for the rest of the session; the agent
+                        // sees it in ui_query's `latched` and learns. The
+                        // Occipital reader force-latches on ANY user close:
+                        // its auto-reveal makes it agent-ish even when the
+                        // user opened it (A3 — the old standalone suppress
+                        // flag, folded). A menu launch re-invites.
                         let bit = ui_latch_bit(kind);
-                        if AGENT_OPENED.with(|m| m.get()) & bit != 0 {
+                        if kind == AppKind::Occipital
+                            || AGENT_OPENED.with(|m| m.get()) & bit != 0
+                        {
                             AGENT_OPENED.with(|m| m.set(m.get() & !bit));
                             UI_LATCHED.with(|m| m.set(m.get() | bit));
                         }
@@ -4552,6 +4577,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let payload = serde_json::json!({"type": "user_cancel"}).to_string();
         tx_stop.send(payload).ok();
         clear_pending_tools();
+        // Cancel ends the turn without a TurnComplete — reset the adaptive-UI
+        // rate rail here too, or the next turn starts pre-throttled.
+        UI_TURN_MUTATIONS.with(|m| m.set(0));
         if let Some(ui) = stop_weak.upgrade() {
             ui.set_agent_busy(false);
             ui.set_face_state("idle".into());
@@ -6545,6 +6573,8 @@ fn dispatch_event(
                         ui.set_status(format!("Session {id}").into());
                         ui.set_current_session_id(id as i32);
                     }
+                    // Fresh/restored session — the adaptive-UI rate rail refills.
+                    UI_TURN_MUTATIONS.with(|m| m.set(0));
                     clear_messages();
                     for item in items {
                         push_message(item);
@@ -6679,6 +6709,8 @@ fn dispatch_event(
                     }
                     finish_last_agent_message();
                     ui.set_agent_busy(false);
+                    // Turn boundary — the adaptive-UI rate rail refills.
+                    UI_TURN_MUTATIONS.with(|m| m.set(0));
                     // Turn done — restore APEX's held emote if it set one this turn,
                     // else a calm idle (unless mic is live; see below).
                     if !ui.get_recording() { face_rest(&ui); }
@@ -6804,6 +6836,15 @@ fn dispatch_event(
                 let w = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = w.upgrade() {
+                        // A3 rate rail: at most UI_TURN_MUTATION_CAP staging
+                        // mutations apply per turn — a deliberate act, not a
+                        // strobe. Beyond it verbs drop silently; the counter
+                        // rides /state so the agent can see it throttled.
+                        let spent = UI_TURN_MUTATIONS.with(|m| m.get());
+                        if spent >= UI_TURN_MUTATION_CAP {
+                            return;
+                        }
+                        UI_TURN_MUTATIONS.with(|m| m.set(spent + 1));
                         match verb.as_str() {
                             "ui_arrange" => {
                                 let layout =

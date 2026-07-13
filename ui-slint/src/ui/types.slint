@@ -78,6 +78,14 @@ export struct WindowDesc {
     maximized: bool,
 }
 
+// ── WmState global (adaptive UI A3) ─────────────────────────────────────
+// dragging-id = the window currently under pointer interaction (title-bar
+// drag or resize grip), 0 when none. Rust's ui_arrange / ui_close skip that
+// window — the agent never fights the hand.
+export global WmState {
+    in-out property <int> dragging-id: 0;
+}
+
 // ── AgentBridge global ──────────────────────────────────────────────────
 // Decouples chat tool-approval + scroll from the AppWindow element tree so
 // ChatView can be instantiated freely (Focus surface AND a Desktop window)

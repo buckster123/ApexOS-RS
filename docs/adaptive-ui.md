@@ -114,17 +114,30 @@ in-canvas):
    bit = ordinal): `ui_open` creating a window marks it agent-opened; a **user close**
    of a marked window moves the bit to latched — `ui_open` for that app is silently
    suppressed for the rest of the session. A **user menu-launch** clears both bits
-   (re-invitation, mirroring the occipital reader's suppress-clear). The agent sees
-   latches in `ui_query` and treats them as feedback to learn from (deposit the
-   correction), not an obstacle.
-2. **Agent acts are never user signals.** Agent-close sets no latch; an agent `ui_open`
-   of the occipital reader uses the raw launch path so it can't re-arm auto-reveal
-   (clearing `OCCIPITAL_SUPPRESS` is the *user's* menu-launch signal).
-3. **Attribution.** Creates toast "🪟 APEX opened …" — adaptations are visible acts,
+   (re-invitation). The agent sees latches in `ui_query` and treats them as feedback to
+   learn from (deposit the correction), not an obstacle. **The Occipital reader is fully
+   folded in (A3)**: its auto-reveal goes through the same latch-aware
+   `agent_open_window` (so it lands in `agent_opened`), and it **force-latches on ANY
+   user close** — auto-reveal makes it agent-ish even when the user opened it. The old
+   standalone `OCCIPITAL_SUPPRESS` flag is gone.
+2. **Agent acts are never user signals.** Agent-close sets no latch; since the fold,
+   there is no separate auto-reveal flag an agent open could re-arm — "auto-reveal
+   armed" simply *is* "not latched".
+3. **The rate rail (A3).** At most `UI_TURN_MUTATION_CAP` (4) `ui_*` mutations apply per
+   turn — an adaptation is a deliberate act, not a strobe. Beyond the cap, verbs drop
+   silently; the live counter rides `/state` (`turn_mutations` / `mutation_cap`) so the
+   agent *sees* the throttle. Resets on TurnComplete, cancel, and session switch. The
+   reader's ambient auto-reveal doesn't spend a slot (it isn't a verb).
+4. **The drag guard (A3).** `WmState.dragging-id` (a Slint global set by the frame's
+   title-bar/resize touch areas) marks the window under live pointer interaction:
+   `ui_arrange` skips its geometry (and won't minimize it in `focus`), `ui_close` won't
+   yank it. The agent never fights the hand.
+5. **Attribution.** Creates toast "🪟 APEX opened …" — adaptations are visible acts,
    and the event log + session JSONL journal every call.
-4. **Quiet by default** (soul-level, Phase A3): adapt at task boundaries, show-don't-tell,
-   don't theme unprompted — offer, where the conversational yes IS the confirmation.
-   Rate limit + drag guard land in A3 as mechanism.
+6. **Quiet by default** (soul-level): adapt at task boundaries, show-don't-tell, don't
+   theme unprompted — offer, where the conversational yes IS the confirmation. The seed
+   `config/soul.md` carries the etiquette section ("Your stage"); live nodes adopt it
+   through their own `propose_evolution` (the config-changes discipline).
 
 ## 5. Loop 6 memory (Phase B) — adaptation without accumulation is amnesia
 
@@ -156,9 +169,9 @@ real value. Details + honest cost note: the plan archive
 | Phase | Deliverable | Status |
 |---|---|---|
 | A1 | `/state` + `ui_query` + `ui_open`/`ui_close`/`ui_focus` + latch | **shipped** (#255, latch field-confirmed on the colony) |
-| A2 | `ui_arrange` presets + layout fn; `ui_theme` via `apply_persona` | **shipped** |
-| A3 | Etiquette pass: rate limit, drag guard; soul etiquette section (via `propose_evolution`) | next |
-| B | Loop-6 memory: deposit discipline, UI-prefs procedure, geometry persistence | — |
+| A2 | `ui_arrange` presets + layout fn; `ui_theme` via `apply_persona` | **shipped** (#256, field-confirmed) |
+| A3 | Etiquette pass: rate rail (4/turn, `/state`-visible), drag guard (`WmState.dragging-id`), occipital latch fold, seed-soul etiquette (live nodes via `propose_evolution`) | **shipped** |
+| B | Loop-6 memory: deposit discipline (seeded in the soul's "Your stage"), UI-prefs procedure, geometry persistence | next |
 | C | `ui_reflex` family | — |
 | D | Colony field cycle (apex1 kiosk / apex-3 desktop), dream-consolidation check | — |
 | E | Decision gate: Bevy Tier B — go/no-go on Tier-A evidence | — |

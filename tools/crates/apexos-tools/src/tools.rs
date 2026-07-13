@@ -150,7 +150,7 @@ pub fn list() -> Value {
         },
         {
             "name": "ui_open",
-            "description": format!("Open (or reveal) an app window on this device's ApexOS shell — your hands on your own interface. Stage the workspace to match the moment: show the thing being discussed instead of describing where it is (open `sensor` during an air-quality question, `explorer` when handing files over, `board` when a goal kicks off). Apps: {}. Etiquette (the human always wins): if the user closed a window you opened, re-opening it is suppressed for the rest of the session — ui_query's `latched` list shows this; treat it as feedback to learn from, not an obstacle. Adapt at task boundaries, quietly — an interface set correctly when the user looks up, not one that churns mid-sentence. Works on the Slint UI (kiosk/desktop); a no-op (not an error) on a headless node.", UI_APPS.join(", ")),
+            "description": format!("Open (or reveal) an app window on this device's ApexOS shell — your hands on your own interface. Stage the workspace to match the moment: show the thing being discussed instead of describing where it is (open `sensor` during an air-quality question, `explorer` when handing files over, `board` when a goal kicks off). Apps: {}. Etiquette (the human always wins): if the user closed a window you opened, re-opening it is suppressed for the rest of the session — ui_query's `latched` list shows this; treat it as feedback to learn from, not an obstacle. Adapt at task boundaries, quietly — an interface set correctly when the user looks up, not one that churns mid-sentence (at most ~4 staging mutations apply per turn). Works on the Slint UI (kiosk/desktop); a no-op (not an error) on a headless node.", UI_APPS.join(", ")),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -184,7 +184,7 @@ pub fn list() -> Value {
         },
         {
             "name": "ui_query",
-            "description": "SEE the shell's current structure — the adaptive-UI eyes. Returns JSON: shell_mode (desktop|focus), persona, windows (app, title, minimized, maximized, focused), agent_opened (windows you created), latched (apps the user closed after you opened them — do NOT re-open these this session), and the valid apps catalog. Use it before staging (what's already up?) and after (did it land, or was I overruled?). For pixels use screenshot_mirror. Only meaningful on a node with a display; returns a note when headless.",
+            "description": "SEE the shell's current structure — the adaptive-UI eyes. Returns JSON: shell_mode (desktop|focus), persona, windows (app, title, minimized, maximized, focused), agent_opened (windows you created), latched (apps the user closed after you opened them — do NOT re-open these this session), turn_mutations vs mutation_cap (at most ~4 staging mutations apply per turn — beyond that they drop silently until your next turn), and the valid apps catalog. Use it before staging (what's already up?) and after (did it land, or was I overruled?). For pixels use screenshot_mirror. Only meaningful on a node with a display; returns a note when headless.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
