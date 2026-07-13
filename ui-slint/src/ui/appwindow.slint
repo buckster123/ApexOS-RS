@@ -297,12 +297,25 @@ export component AppWindow inherits Window {
         }
     }
 
+    // ── Shell chrome metrics ────────────────────────────────────────────
+    // Declared at root (not in the desktop container) so the adaptive-UI
+    // layout fn in Rust reads the SAME numbers the window layer clamps to —
+    // desktop-area-w/h is the surface `ui_arrange` tiles into. The desktop
+    // container + taskbar/start-menu children resolve these lexically.
+    property <length> title-bar-h: 42px;
+    property <bool> win98: Personas.chrome == ChromeKind.win;
+    property <length> tb-h: win98 ? 34px : 56px;
+    property <length> tb-margin: win98 ? 0px : 16px;
+    property <length> tb-zone: tb-h + tb-margin * 2;
+    out property <length> desktop-area-w: self.width;
+    out property <length> desktop-area-h: self.height - title-bar-h - tb-zone;
+
     // ── Root layout ────────────────────────────────────────────────────
     VerticalLayout {
 
-        // ── Title bar (42 px) ─────────────────────────────────────────
+        // ── Title bar ─────────────────────────────────────────────────
         Rectangle {
-            height: 42px;
+            height: root.title-bar-h;
             background: Palette.surface;
 
             Rectangle {
@@ -673,10 +686,8 @@ export component AppWindow inherits Window {
 
                 // Win-98 chrome flushes the taskbar to the bottom edge (no float,
                 // no rounding) and shortens it; everyone else gets the floating bar.
-                property <bool> win98: Personas.chrome == ChromeKind.win;
-                property <length> tb-h: win98 ? 34px : 56px;
-                property <length> tb-margin: win98 ? 0px : 16px;
-                property <length> tb-zone: tb-h + tb-margin * 2;
+                // (win98 / tb-h / tb-margin / tb-zone live on root now — shared
+                // with the desktop-area export the Rust layout fn reads.)
 
                 // Wallpaper — per-persona themed gradient (cheap; tier-safe).
                 // Style id from Personas.wallpaper drives angle + wash strength:

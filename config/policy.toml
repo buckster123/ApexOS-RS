@@ -42,6 +42,12 @@ mode = "suggest"
 "ui_close"           = "allow"
 "ui_focus"           = "allow"
 "ui_query"           = "allow"
+# A2: preset-topology staging (focus/split/main-side/grid — the layout fn owns
+# every pixel) + persona-skin switch via the same chokepoint as the picker.
+# ui_theme's etiquette (offer, don't theme unprompted) is soul-side — the
+# conversational yes is the confirmation, and a skin flip is one tap to revert.
+"ui_arrange"         = "allow"
+"ui_theme"           = "allow"
 # Camera eyes: read-only "look", same vision flow as screenshot_mirror. Allowed so
 # APEX can see fluidly; privacy-conscious operators may set this to "ask".
 "camera_capture"     = "allow"

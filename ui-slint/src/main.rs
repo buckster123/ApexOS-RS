@@ -556,6 +556,64 @@ fn ui_latch_bit(k: AppKind) -> u32 {
     1u32 << kind_ordinal(k)
 }
 
+/// The `ui_arrange` preset vocabulary (A2). Mirrors apexos-tools' UI_LAYOUTS.
+const ARRANGE_LAYOUTS: &[&str] = &["focus", "split", "main-side", "grid"];
+/// Gap between tiles and at the desktop edges, logical px.
+const ARRANGE_GAP: f32 = 12.0;
+/// Most windows a single arrange touches (grid caps at 3×2) — presets stage a
+/// workspace, they don't tile the world.
+const ARRANGE_MAX: usize = 6;
+
+/// Pure preset-topology → rects. `n` participating windows in priority order
+/// (first = main) + the usable desktop area → up to `n` `(x, y, w, h)` rects
+/// in the SAME order. `focus` returns exactly ONE rect — the applier minimizes
+/// the remaining participants (that is the preset's meaning). Geometry is
+/// unspeakable agent-side; this fn and the WM own every pixel.
+fn arrange_rects(layout: &str, n: usize, area_w: f32, area_h: f32) -> Vec<(f32, f32, f32, f32)> {
+    let g = ARRANGE_GAP;
+    // Degenerate areas (boot races, tiny windows) still produce sane rects.
+    let aw = (area_w - 2.0 * g).max(200.0);
+    let ah = (area_h - 2.0 * g).max(150.0);
+    if n == 0 || !ARRANGE_LAYOUTS.contains(&layout) {
+        return vec![];
+    }
+    let full = vec![(g, g, aw, ah)];
+    match layout {
+        "focus" => full, // one rect; the applier minimizes the rest
+        _ if n == 1 => full,
+        "split" => {
+            // n equal columns, left→right in priority order.
+            let w = (aw - g * (n as f32 - 1.0)) / n as f32;
+            (0..n).map(|i| (g + i as f32 * (w + g), g, w, ah)).collect()
+        }
+        "main-side" => {
+            // Main pane ~62% left; the rest stack equally in the right column.
+            let main_w = (aw - g) * 0.62;
+            let side_w = aw - g - main_w;
+            let side_n = n - 1;
+            let side_h = (ah - g * (side_n as f32 - 1.0)) / side_n as f32;
+            let mut rects = vec![(g, g, main_w, ah)];
+            let side_x = g + main_w + g;
+            rects.extend((0..side_n).map(|i| (side_x, g + i as f32 * (side_h + g), side_w, side_h)));
+            rects
+        }
+        "grid" => {
+            // ceil(sqrt) columns; uniform cells, row-major in priority order.
+            let cols = (n as f32).sqrt().ceil() as usize;
+            let rows = n.div_ceil(cols);
+            let w = (aw - g * (cols as f32 - 1.0)) / cols as f32;
+            let h = (ah - g * (rows as f32 - 1.0)) / rows as f32;
+            (0..n)
+                .map(|i| {
+                    let (c, r) = (i % cols, i / cols);
+                    (g + c as f32 * (w + g), g + r as f32 * (h + g), w, h)
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
+}
+
 // ── Persona system (G4) ───────────────────────────────────────────────────────
 // A persona bundles theme + chrome + wallpaper + default shell mode. Resolution
 // lives here (CLAUDE.md / ui-glowup.md §5): apply_persona sets the Slint
@@ -1288,35 +1346,50 @@ fn wm_launch(ui: &AppWindow, model: &Rc<slint::VecModel<WindowDesc>>, kind: AppK
 /// outcomes by looking (`ui_query`), not from acks. The latch enforces "the
 /// human always wins": an app the user closed after the agent opened it will
 /// not re-open this session.
+/// Open-or-reveal `kind` on the agent's behalf: latch-guarded, agent-marked,
+/// per-app refresh included. Returns false when the latch suppressed it.
+/// `toast` is false when `ui_arrange` stages several windows under its own
+/// single attribution toast. Slint thread only.
+fn agent_open_window(
+    ui: &AppWindow,
+    model: &Rc<slint::VecModel<WindowDesc>>,
+    kind: AppKind,
+    toast: bool,
+) -> bool {
+    let bit = ui_latch_bit(kind);
+    if UI_LATCHED.with(|m| m.get()) & bit != 0 {
+        return false; // user overruled this app earlier — the overrule stands
+    }
+    let existed = wm_index_by_kind(model, kind).is_some();
+    let was_agent = AGENT_OPENED.with(|m| m.get()) & bit != 0;
+    if kind == AppKind::Occipital {
+        // Raw launch: the menu path clears OCCIPITAL_SUPPRESS, but re-arming
+        // the reader's auto-reveal is the USER's signal (a deliberate menu
+        // launch), never the agent's.
+        wm_launch(ui, model, kind);
+    } else {
+        // The full menu-launch path — per-app refresh included (a raw
+        // wm_launch leaves Settings/Sessions/Terminal windows empty). Runs
+        // synchronously; it also clears this kind's latch bits, so the agent
+        // marks re-land after it returns.
+        ui.invoke_launch_app(kind_ordinal(kind));
+    }
+    if !existed || was_agent {
+        AGENT_OPENED.with(|m| m.set(m.get() | bit));
+    }
+    if !existed && toast {
+        notify(ToastKind::Info, format!("🪟 APEX opened {}", kind_title(kind)));
+    }
+    true
+}
+
 fn apply_ui_verb(ui: &AppWindow, verb: &str, app: &str) {
     let Some(kind) = kind_from_slug(app) else { return };
     let Some(model) = WINDOWS.with(|w| w.borrow().clone()) else { return };
     let bit = ui_latch_bit(kind);
     match verb {
         "ui_open" => {
-            if UI_LATCHED.with(|m| m.get()) & bit != 0 {
-                return; // user overruled this app earlier — the overrule stands
-            }
-            let existed = wm_index_by_kind(&model, kind).is_some();
-            let was_agent = AGENT_OPENED.with(|m| m.get()) & bit != 0;
-            if kind == AppKind::Occipital {
-                // Raw launch: the menu path clears OCCIPITAL_SUPPRESS, but
-                // re-arming the reader's auto-reveal is the USER's signal (a
-                // deliberate menu launch), never the agent's.
-                wm_launch(ui, &model, kind);
-            } else {
-                // The full menu-launch path — per-app refresh included (a raw
-                // wm_launch leaves Settings/Sessions/Terminal windows empty).
-                // Runs synchronously; it also clears this kind's latch bits,
-                // so the agent marks re-land after it returns.
-                ui.invoke_launch_app(kind_ordinal(kind));
-            }
-            if !existed || was_agent {
-                AGENT_OPENED.with(|m| m.set(m.get() | bit));
-            }
-            if !existed {
-                notify(ToastKind::Info, format!("🪟 APEX opened {}", kind_title(kind)));
-            }
+            agent_open_window(ui, &model, kind, true);
         }
         "ui_close" => {
             // Agent-close ≠ user-close: no latch, and no occipital auto-reveal
@@ -1336,6 +1409,121 @@ fn apply_ui_verb(ui: &AppWindow, verb: &str, app: &str) {
             }
         }
         _ => {}
+    }
+}
+
+/// Apply `ui_arrange` (adaptive UI A2): stage participants into a preset
+/// topology. Desktop-mode only — the Focus shell has no window layer, so
+/// there it is a structural no-op the agent can read via ui_query's
+/// shell_mode. Participants: the agent's explicit `apps` (validated,
+/// de-duped, latch-respecting, missing windows opened quietly — one arrange
+/// = one toast) or, when omitted, the currently visible windows topmost-first
+/// (minimized ones the user tucked away are not resurrected). Slint thread only.
+fn apply_ui_arrange(ui: &AppWindow, layout: &str, apps: &[String]) {
+    if !ARRANGE_LAYOUTS.contains(&layout) {
+        return;
+    }
+    if ui.get_shell_mode() != ShellMode::Desktop {
+        return;
+    }
+    let Some(model) = WINDOWS.with(|w| w.borrow().clone()) else { return };
+
+    // Resolve participants in priority order (first = main).
+    let mut kinds: Vec<AppKind> = Vec::new();
+    if apps.is_empty() {
+        for i in (0..model.row_count()).rev() {
+            if let Some(d) = model.row_data(i) {
+                if !d.minimized && !kinds.contains(&d.kind) {
+                    kinds.push(d.kind);
+                }
+            }
+        }
+        kinds.truncate(ARRANGE_MAX);
+    } else {
+        let cap = if layout == "focus" { 1 } else { ARRANGE_MAX };
+        for slug in apps {
+            if kinds.len() >= cap {
+                break; // don't open windows that couldn't participate anyway
+            }
+            let Some(k) = kind_from_slug(slug) else { continue };
+            if kinds.contains(&k) {
+                continue;
+            }
+            if agent_open_window(ui, &model, k, false) {
+                kinds.push(k);
+            }
+        }
+    }
+    let Some(&main_kind) = kinds.first() else { return };
+
+    let rects = arrange_rects(
+        layout,
+        kinds.len(),
+        ui.get_desktop_area_w(),
+        ui.get_desktop_area_h(),
+    );
+    if rects.is_empty() {
+        return;
+    }
+
+    for (i, kind) in kinds.iter().enumerate() {
+        let Some(row) = wm_index_by_kind(&model, *kind) else { continue };
+        let Some(id) = model.row_data(row).map(|d| d.id) else { continue };
+        if let Some(&(x, y, w, h)) = rects.get(i) {
+            wm_update_row(&model, id, |d| {
+                d.minimized = false;
+                d.maximized = false;
+                d.x = x;
+                d.y = y;
+                d.w = w;
+                d.h = h;
+            });
+        }
+    }
+    // `focus` means ONE thing on stage: every other open window minimizes
+    // (reversible from the taskbar — and `arrange_rects` returned one rect).
+    if layout == "focus" {
+        for i in 0..model.row_count() {
+            if let Some(d) = model.row_data(i) {
+                if d.kind != main_kind && !d.minimized {
+                    wm_update_row(&model, d.id, |d| d.minimized = true);
+                }
+            }
+        }
+    }
+    // The main participant ends on top.
+    if let Some(row) = wm_index_by_kind(&model, main_kind) {
+        if let Some(id) = model.row_data(row).map(|d| d.id) {
+            wm_focus(ui, &model, id);
+        }
+    }
+    notify(ToastKind::Info, format!("🪟 APEX arranged the desktop ({layout})"));
+}
+
+/// Apply `ui_theme` (adaptive UI A2): switch the persona skin through the
+/// same chokepoint as the picker — theme + chrome + wallpaper + shell mode +
+/// the agent's voice (`set_persona` → the style layer), persisted like a
+/// human pick. Policy is allow; the etiquette (offer, don't theme unprompted
+/// — the conversational yes is the confirmation) lives soul-side. Slint
+/// thread only.
+fn apply_ui_theme(ui: &AppWindow, persona: &str) {
+    let Some(p) = persona_from_slug(persona) else { return };
+    apply_persona(ui, p, true);
+    notify(
+        ToastKind::Info,
+        format!("🎨 APEX switched the skin to {}", persona_title(p)),
+    );
+}
+
+/// Display names matching the persona catalogue tiles (`persona_defs`).
+fn persona_title(p: Persona) -> &'static str {
+    match p {
+        Persona::Apex => "Apex",
+        Persona::Mom => "Simple",
+        Persona::UbuntuDad => "Ubuntu",
+        Persona::WindowsDad => "Classic",
+        Persona::TechKid => "HUD",
+        Persona::Aurum => "Aurum",
     }
 }
 
@@ -2342,6 +2530,61 @@ mod tests {
         // Unknown slugs are inexpressible.
         assert_eq!(kind_from_slug("xterm"), None);
         assert_eq!(kind_from_slug(""), None);
+    }
+
+    #[test]
+    fn arrange_rects_presets() {
+        use super::{arrange_rects, ARRANGE_GAP};
+        let (aw, ah) = (1200.0, 700.0);
+        let g = ARRANGE_GAP;
+
+        // focus: exactly ONE near-full rect regardless of n (applier minimizes the rest).
+        let f = arrange_rects("focus", 4, aw, ah);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0], (g, g, aw - 2.0 * g, ah - 2.0 * g));
+
+        // Any layout with one window degrades to the full rect.
+        assert_eq!(arrange_rects("split", 1, aw, ah), f);
+        assert_eq!(arrange_rects("grid", 1, aw, ah), f);
+
+        // split: n equal columns, left→right, tiling the width exactly.
+        let s = arrange_rects("split", 2, aw, ah);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].2, s[1].2);
+        assert!(s[0].0 < s[1].0);
+        let right_edge = s[1].0 + s[1].2;
+        assert!((right_edge - (aw - g)).abs() < 0.5, "columns must fill the width");
+
+        // main-side: first pane is the wide one; sides stack in one right column.
+        let m = arrange_rects("main-side", 3, aw, ah);
+        assert_eq!(m.len(), 3);
+        assert!(m[0].2 > m[1].2, "main pane must be wider than the side panes");
+        assert_eq!(m[1].0, m[2].0, "side panes share the same column");
+        assert!(m[1].1 < m[2].1, "side panes stack top→down");
+        assert_eq!(m[0].3, ah - 2.0 * g, "main pane spans the full height");
+
+        // grid: 4 → 2×2, uniform cells, row-major.
+        let gr = arrange_rects("grid", 4, aw, ah);
+        assert_eq!(gr.len(), 4);
+        assert_eq!(gr[0].1, gr[1].1, "first row shares y");
+        assert!(gr[2].1 > gr[0].1, "second row below the first");
+        assert_eq!(gr[0].0, gr[2].0, "columns align");
+        assert_eq!(gr[0].2, gr[3].2, "uniform cell width");
+
+        // Order is priority order: rect[0] is always the main slot.
+        for layout in ["split", "main-side", "grid"] {
+            let r = arrange_rects(layout, 3, aw, ah);
+            assert_eq!(r.len(), 3, "{layout} must place every participant");
+            assert_eq!((r[0].0, r[0].1), (g, g), "{layout}: main slot sits top-left");
+        }
+
+        // Degenerate inputs stay sane: no rects for n=0 / unknown layout;
+        // a tiny area clamps instead of going negative.
+        assert!(arrange_rects("split", 0, aw, ah).is_empty());
+        assert!(arrange_rects("cascade", 3, aw, ah).is_empty());
+        assert!(arrange_rects("cascade", 1, aw, ah).is_empty());
+        let tiny = arrange_rects("grid", 4, 50.0, 40.0);
+        assert!(tiny.iter().all(|r| r.2 > 0.0 && r.3 > 0.0));
     }
 
     #[test]
@@ -6494,7 +6737,13 @@ fn dispatch_event(
             // agent moving its own windows) aren't work steps — skip them.
             let is_ui_effect = matches!(
                 tool_name.as_str(),
-                "display_face" | "sketch_draw" | "ui_open" | "ui_close" | "ui_focus"
+                "display_face"
+                    | "sketch_draw"
+                    | "ui_open"
+                    | "ui_close"
+                    | "ui_focus"
+                    | "ui_arrange"
+                    | "ui_theme"
             );
             if !is_ui_effect {
                 let t = tool_name.clone();
@@ -6543,16 +6792,40 @@ fn dispatch_event(
                     }
                 })
                 .ok();
-            } else if matches!(tool_name.as_str(), "ui_open" | "ui_close" | "ui_focus") {
+            } else if matches!(
+                tool_name.as_str(),
+                "ui_open" | "ui_close" | "ui_focus" | "ui_arrange" | "ui_theme"
+            ) {
                 // Adaptive UI (Loop 6): the agent staging its own shell. Same
-                // idiom as display_face — no tool card; the window moving IS
-                // the feedback (plus a toast on open, for attribution).
+                // idiom as display_face — no tool card; the shell changing IS
+                // the feedback (plus an attribution toast).
                 let verb = tool_name.clone();
-                let app = call.args["app"].as_str().unwrap_or("").to_string();
+                let args = call.args.clone();
                 let w = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = w.upgrade() {
-                        apply_ui_verb(&ui, &verb, &app);
+                        match verb.as_str() {
+                            "ui_arrange" => {
+                                let layout =
+                                    args["layout"].as_str().unwrap_or("").to_string();
+                                let apps: Vec<String> = args["apps"]
+                                    .as_array()
+                                    .map(|a| {
+                                        a.iter()
+                                            .filter_map(|v| v.as_str())
+                                            .map(str::to_string)
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                apply_ui_arrange(&ui, &layout, &apps);
+                            }
+                            "ui_theme" => {
+                                apply_ui_theme(&ui, args["persona"].as_str().unwrap_or(""));
+                            }
+                            _ => {
+                                apply_ui_verb(&ui, &verb, args["app"].as_str().unwrap_or(""));
+                            }
+                        }
                     }
                 })
                 .ok();
