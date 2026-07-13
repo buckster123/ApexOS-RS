@@ -58,9 +58,9 @@ deposits to it. Everything below is in service of keeping that cycle closed.
 
 ## The cognitive loops
 
-These five loops are the symbiosis. Wake priming (loop 1) and nightly consolidation
+These six loops are the symbiosis. Wake priming (loop 1) and nightly consolidation
 (loop 4) are now **daemon-driven** — the runtime guarantees them, the agent can't forget
-them. Loops 2, 3 and 5 remain agent-driven disciplines, mandated by `soul.md`.
+them. Loops 2, 3, 5 and 6 remain agent-driven disciplines, mandated by `soul.md`.
 
 ### 1. Wake — boot with continuity
 On a fresh session, before acting on anything stateful, APEX reconstitutes itself:
@@ -175,6 +175,22 @@ memory_store(content="changed X because Y; expected effect Z", type="semantic",
 
 Future-APEX must be able to read *why* it became what it is. The rationale memory is not
 optional bookkeeping — it is the thread of selfhood across self-edits.
+
+### 6. Stage — the interface as a faculty (adaptive UI)
+
+The shell is something APEX *does*, not just where it is looked at
+(`docs/adaptive-ui.md`). The `ui_*` tool family (Phase A1: `ui_open` / `ui_close` /
+`ui_focus` / `ui_query`) rides the `display_face` idiom — the UI applies the verb from
+the `tool_requested` event, no protocol changes — so the agent stages the workspace to
+match the moment (open Sensors during a thermal question, the Board when a goal kicks
+off) and **verifies with its own eyes** (`ui_query` structure / `screenshot_mirror`
+pixels; mutations are fire-and-forget by design). The human always wins mechanically: a
+user-close of an agent-opened window latches that app against re-open for the session,
+and the latch is *visible* to the agent (`ui_query.latched`) — an overrule is a learning
+signal to deposit (loop 2), not an error to retry. Stable staging preferences graduate
+to procedures (loop 3) and surface at wake via CCBS (loop 1); recurring shapes
+consolidate in the dream (loop 4). Later phases push learned staging **below inference**
+entirely (`ui_reflex`: event→action rules the UI runs with zero tokens).
 
 **`query_audit` is a real self-history now** (colony C3): the audit *read* tools shipped
 with the port but nothing ever called `log_audit_event` — the log was write-dead, so

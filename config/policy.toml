@@ -33,6 +33,15 @@ mode = "suggest"
 # Drawing on the Sketchpad — a benign UI effect (renders to the canvas + a
 # workspace PNG), same trust basis as display_face.
 "sketch_draw"        = "allow"
+# Adaptive UI (docs/adaptive-ui.md): the agent staging its own shell — open/
+# reveal, close, focus app windows + read the shell structure. Same trust basis
+# as display_face/sketch_draw: benign, reversible, in-canvas — and the human
+# always wins (a user-close of an agent-opened window latches re-open for the
+# session). ui_query is a read.
+"ui_open"            = "allow"
+"ui_close"           = "allow"
+"ui_focus"           = "allow"
+"ui_query"           = "allow"
 # Camera eyes: read-only "look", same vision flow as screenshot_mirror. Allowed so
 # APEX can see fluidly; privacy-conscious operators may set this to "ask".
 "camera_capture"     = "allow"

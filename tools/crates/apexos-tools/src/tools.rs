@@ -149,6 +149,45 @@ pub fn list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "ui_open",
+            "description": format!("Open (or reveal) an app window on this device's ApexOS shell — your hands on your own interface. Stage the workspace to match the moment: show the thing being discussed instead of describing where it is (open `sensor` during an air-quality question, `explorer` when handing files over, `board` when a goal kicks off). Apps: {}. Etiquette (the human always wins): if the user closed a window you opened, re-opening it is suppressed for the rest of the session — ui_query's `latched` list shows this; treat it as feedback to learn from, not an obstacle. Adapt at task boundaries, quietly — an interface set correctly when the user looks up, not one that churns mid-sentence. Works on the Slint UI (kiosk/desktop); a no-op (not an error) on a headless node.", UI_APPS.join(", ")),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "app":  { "type": "string", "description": "App to open — one of the catalog slugs, e.g. 'sensor', 'terminal', 'event-log'" },
+                    "hint": { "type": "string", "description": "Optional free-text hint for what to show inside the app (reserved — app-specific, may be ignored)" }
+                },
+                "required": ["app"]
+            }
+        },
+        {
+            "name": "ui_close",
+            "description": "Close an app window on the shell — tidy the stage when a task wraps (typically a window you opened). A no-op if it isn't open. Same app catalog as ui_open.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "app": { "type": "string", "description": "App to close — one of the ui_open catalog slugs" }
+                },
+                "required": ["app"]
+            }
+        },
+        {
+            "name": "ui_focus",
+            "description": "Raise and focus an app window that is already open (un-minimizes it) — bring the relevant thing to the front. A no-op if it isn't open; use ui_open to open-or-reveal instead. Same app catalog as ui_open.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "app": { "type": "string", "description": "App to focus — one of the ui_open catalog slugs" }
+                },
+                "required": ["app"]
+            }
+        },
+        {
+            "name": "ui_query",
+            "description": "SEE the shell's current structure — the adaptive-UI eyes. Returns JSON: shell_mode (desktop|focus), persona, windows (app, title, minimized, maximized, focused), agent_opened (windows you created), latched (apps the user closed after you opened them — do NOT re-open these this session), and the valid apps catalog. Use it before staging (what's already up?) and after (did it land, or was I overruled?). For pixels use screenshot_mirror. Only meaningful on a node with a display; returns a note when headless.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "camera_capture",
             "description": "SEE the physical world through this device's camera — take a photo and look at it. Use this when the user asks what you see, to look at something they're holding up, check the room, or read a label/screen in front of the camera. Auto-detects the camera backend (Raspberry Pi CSI camera via rpicam/libcamera, or a USB/laptop webcam via V4L2), captures one frame, and returns it inline so you see it directly. Returns a note (not an error) when no camera is attached.",
             "inputSchema": {
@@ -516,6 +555,10 @@ pub fn call(name: &str, args: &Value) -> Value {
         "sketch_snapshot" => sketch_snapshot(),
         "sketch_draw" => sketch_draw(args),
         "screenshot_mirror" => screenshot_mirror(),
+        "ui_open" => ui_open(args),
+        "ui_close" => ui_close(args),
+        "ui_focus" => ui_focus(args),
+        "ui_query" => ui_query(),
         "camera_capture" => camera_capture(args),
         "eject_media" => eject_media(args),
         "create_dir" => create_dir(args),
@@ -2803,6 +2846,110 @@ fn sketch_draw(args: &Value) -> Value {
     }))
 }
 
+// ─── Adaptive UI (Loop 6, docs/adaptive-ui.md) ───────────────────────────────
+// The ui_* family rides the display_face idiom: the Slint UI applies each verb
+// from the `tool_requested` event it already receives; this process only
+// validates + echoes. Mutations are fire-and-forget by design — when the agent
+// cares whether an adaptation landed, it LOOKS (ui_query for structure,
+// screenshot_mirror for pixels). The ui_query eyes fetch the UI's loopback
+// /state route exactly the way screenshot_mirror fetches /snapshot.
+
+/// The app catalog the agent may target. Mirrors ui-slint's `AppKind` enum
+/// (src/ui/types.slint) and its `APP_TABLE` slugs — a new AppKind needs a slug
+/// in BOTH places to be agent-reachable. Closed enum: malformed targets are
+/// inexpressible, not caught downstream.
+const UI_APPS: &[&str] = &[
+    "chat", "system", "sensor", "sessions", "settings", "terminal", "council",
+    "event-log", "mesh", "inference", "audio-editor", "sonus", "notes", "face",
+    "sketchpad", "web", "calculator", "explorer", "occipital", "board",
+];
+
+fn ui_app_arg(args: &Value) -> Result<&str, Value> {
+    match args["app"].as_str() {
+        Some(a) if UI_APPS.contains(&a.trim()) => Ok(a.trim()),
+        Some(a) => Err(tool_error(format!(
+            "unknown app '{}' — use one of: {}", a, UI_APPS.join(", ")
+        ))),
+        None => Err(tool_error(format!(
+            "missing `app` — use one of: {}", UI_APPS.join(", ")
+        ))),
+    }
+}
+
+fn ui_state_url() -> String {
+    std::env::var("APEXOS_UI_STATE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8788/state".to_string())
+}
+
+/// Best-effort loopback fetch of the shell's /state JSON. None on any failure —
+/// callers degrade gracefully (a remote-UI dev setup or a headless node must
+/// never break a mutation echo).
+fn ui_shell_state() -> Option<Value> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let resp = client.get(ui_state_url()).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json::<Value>().ok()
+}
+
+fn ui_open(args: &Value) -> Value {
+    let app = match ui_app_arg(args) { Ok(a) => a, Err(e) => return e };
+    // Best-effort latch pre-check so the echo is honest when the shell will
+    // suppress the open (the user closed this window after the agent opened it).
+    // The UI enforces the latch regardless — this only improves the echo.
+    let latched = ui_shell_state()
+        .and_then(|s| s["latched"].as_array().map(|l| l.iter().any(|v| v == app)))
+        .unwrap_or(false);
+    if latched {
+        return tool_ok(json!({
+            "ok": true, "app": app, "action": "open", "suppressed": "latched",
+            "note": "The user closed this window after you opened it — the shell suppresses re-opening it for the rest of this session. Respect the signal (worth remembering); ui_query lists current latches.",
+        }));
+    }
+    let mut echo = json!({
+        "ok": true, "app": app, "action": "open",
+        "note": "Dispatched to the shell. On a node with a display it opens (or reveals) live; verify with ui_query or screenshot_mirror when it matters.",
+    });
+    if let Some(hint) = args["hint"].as_str().filter(|h| !h.is_empty()) {
+        echo["hint"] = json!(hint);
+    }
+    tool_ok(echo)
+}
+
+fn ui_close(args: &Value) -> Value {
+    let app = match ui_app_arg(args) { Ok(a) => a, Err(e) => return e };
+    tool_ok(json!({
+        "ok": true, "app": app, "action": "close",
+        "note": "Dispatched to the shell. A no-op if the window wasn't open.",
+    }))
+}
+
+fn ui_focus(args: &Value) -> Value {
+    let app = match ui_app_arg(args) { Ok(a) => a, Err(e) => return e };
+    tool_ok(json!({
+        "ok": true, "app": app, "action": "focus",
+        "note": "Dispatched to the shell. A no-op if the window isn't open — ui_open opens-or-reveals instead.",
+    }))
+}
+
+fn ui_query() -> Value {
+    match ui_shell_state() {
+        Some(state) => tool_ok(state),
+        // Connection refused / unreachable = no UI on this node (headless, or the
+        // kiosk UI is down). Not an error — same contract as screenshot_mirror.
+        None => tool_ok(json!({
+            "shell": null,
+            "message": "No display attached — the ApexOS-RS UI isn't running on this node (headless, or the kiosk display is down). No shell to query.",
+        })),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3195,6 +3342,48 @@ mod tests {
         // Legitimate refs/branches/paths (dashes not leading) still pass.
         for v in ["main", "HEAD~3", "feature/x-y", "release-1.2", "a/b/c.txt"] {
             assert!(git_safe_arg("ref", v).is_ok(), "must allow {v:?}");
+        }
+    }
+
+    // ─── Adaptive UI: the ui_* verbs are a closed vocabulary ────────────────────
+
+    #[test]
+    fn ui_app_arg_is_a_closed_enum() {
+        // Every catalog slug validates (and trims).
+        for app in UI_APPS {
+            assert!(ui_app_arg(&json!({ "app": app })).is_ok(), "must allow {app}");
+            assert_eq!(ui_app_arg(&json!({ "app": format!(" {app} ") })).unwrap(), *app);
+        }
+        // Anything else — misspellings, titles, injections — is inexpressible.
+        for bad in ["Settings", "sensors", "event_log", "../etc", "", "xterm"] {
+            assert!(ui_app_arg(&json!({ "app": bad })).is_err(), "must reject {bad:?}");
+        }
+        assert!(ui_app_arg(&json!({})).is_err(), "missing app must be rejected");
+    }
+
+    #[test]
+    fn ui_mutations_echo_the_request() {
+        // ui_open/close/focus never touch a window themselves — the Slint UI
+        // applies the verb from the tool_requested event. The echo must carry
+        // the validated request so the transcript journals what was asked.
+        // Pin the latch pre-check at a dead port: the test must not observe a
+        // LIVE shell on this machine (a latched real UI would flip the echo).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("APEXOS_UI_STATE_URL", "http://127.0.0.1:1/state");
+        let open = ui_open(&json!({ "app": "sensor", "hint": "thermal" }));
+        std::env::remove_var("APEXOS_UI_STATE_URL");
+        let text = open["content"][0]["text"].as_str().unwrap();
+        let body: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(body["app"], "sensor");
+        assert_eq!(body["action"], "open");
+        assert_eq!(body["hint"], "thermal");
+
+        for (f, action) in [(ui_close as fn(&Value) -> Value, "close"), (ui_focus, "focus")] {
+            let out = f(&json!({ "app": "terminal" }));
+            let body: Value =
+                serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["app"], "terminal");
+            assert_eq!(body["action"], action);
         }
     }
 }
