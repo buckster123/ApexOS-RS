@@ -118,6 +118,13 @@ thread_local! {
     // launching it from the menu clears it again.
     static OCCIPITAL_TRAIL: RefCell<Option<Rc<slint::VecModel<ReaderLink>>>> = const { RefCell::new(None) };
     static OCCIPITAL_SUPPRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Adaptive UI (Loop 6, docs/adaptive-ui.md): per-AppKind bitmasks, bit index =
+    // the AppKind ordinal (APP_TABLE order). AGENT_OPENED marks windows the agent
+    // created via `ui_open`; a USER close of one moves the bit to UI_LATCHED —
+    // `ui_open` for that app is then suppressed for the session (the human always
+    // wins). A menu launch by the user clears both bits (re-invitation).
+    static AGENT_OPENED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static UI_LATCHED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 // ── Identity boot wizard (3d) state + helpers ───────────────────────────────────
@@ -502,6 +509,51 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         19 => AppKind::Board,
         _ => AppKind::Chat,
     }
+}
+
+// ── Adaptive UI (Loop 6, docs/adaptive-ui.md) ─────────────────────────────────
+// AppKind ↔ ordinal ↔ agent-facing slug. Index in this table IS the ordinal —
+// it must mirror `kind_from_ordinal` and the AppKind declaration order
+// (types.slint); a unit test locks the agreement. The slugs are the `ui_*` tool
+// vocabulary and also live in apexos-tools' UI_APPS — a new AppKind needs a slug
+// in both places to be agent-reachable.
+const APP_TABLE: &[(AppKind, &str)] = &[
+    (AppKind::Chat, "chat"),
+    (AppKind::System, "system"),
+    (AppKind::Sensor, "sensor"),
+    (AppKind::Sessions, "sessions"),
+    (AppKind::Settings, "settings"),
+    (AppKind::Terminal, "terminal"),
+    (AppKind::Council, "council"),
+    (AppKind::EventLog, "event-log"),
+    (AppKind::Mesh, "mesh"),
+    (AppKind::Inference, "inference"),
+    (AppKind::AudioEditor, "audio-editor"),
+    (AppKind::Sonus, "sonus"),
+    (AppKind::Notes, "notes"),
+    (AppKind::Face, "face"),
+    (AppKind::Sketchpad, "sketchpad"),
+    (AppKind::Web, "web"),
+    (AppKind::Calculator, "calculator"),
+    (AppKind::Explorer, "explorer"),
+    (AppKind::Occipital, "occipital"),
+    (AppKind::Board, "board"),
+];
+
+fn kind_ordinal(k: AppKind) -> i32 {
+    APP_TABLE.iter().position(|(kk, _)| *kk == k).unwrap_or(0) as i32
+}
+
+fn kind_slug(k: AppKind) -> &'static str {
+    APP_TABLE.iter().find(|(kk, _)| *kk == k).map(|(_, s)| *s).unwrap_or("chat")
+}
+
+fn kind_from_slug(s: &str) -> Option<AppKind> {
+    APP_TABLE.iter().find(|(_, sl)| *sl == s.trim()).map(|(k, _)| *k)
+}
+
+fn ui_latch_bit(k: AppKind) -> u32 {
+    1u32 << kind_ordinal(k)
 }
 
 // ── Persona system (G4) ───────────────────────────────────────────────────────
@@ -1228,6 +1280,63 @@ fn wm_launch(ui: &AppWindow, model: &Rc<slint::VecModel<WindowDesc>>, kind: AppK
         maximized: false,
     });
     wm_focus(ui, model, id);
+}
+
+/// Apply an agent `ui_open` / `ui_close` / `ui_focus` verb (adaptive UI, Loop 6
+/// — docs/adaptive-ui.md). Slint thread only. Unknown or inapplicable targets
+/// are ignored, not errors — the UI is the last validator; the agent discovers
+/// outcomes by looking (`ui_query`), not from acks. The latch enforces "the
+/// human always wins": an app the user closed after the agent opened it will
+/// not re-open this session.
+fn apply_ui_verb(ui: &AppWindow, verb: &str, app: &str) {
+    let Some(kind) = kind_from_slug(app) else { return };
+    let Some(model) = WINDOWS.with(|w| w.borrow().clone()) else { return };
+    let bit = ui_latch_bit(kind);
+    match verb {
+        "ui_open" => {
+            if UI_LATCHED.with(|m| m.get()) & bit != 0 {
+                return; // user overruled this app earlier — the overrule stands
+            }
+            let existed = wm_index_by_kind(&model, kind).is_some();
+            let was_agent = AGENT_OPENED.with(|m| m.get()) & bit != 0;
+            if kind == AppKind::Occipital {
+                // Raw launch: the menu path clears OCCIPITAL_SUPPRESS, but
+                // re-arming the reader's auto-reveal is the USER's signal (a
+                // deliberate menu launch), never the agent's.
+                wm_launch(ui, &model, kind);
+            } else {
+                // The full menu-launch path — per-app refresh included (a raw
+                // wm_launch leaves Settings/Sessions/Terminal windows empty).
+                // Runs synchronously; it also clears this kind's latch bits,
+                // so the agent marks re-land after it returns.
+                ui.invoke_launch_app(kind_ordinal(kind));
+            }
+            if !existed || was_agent {
+                AGENT_OPENED.with(|m| m.set(m.get() | bit));
+            }
+            if !existed {
+                notify(ToastKind::Info, format!("🪟 APEX opened {}", kind_title(kind)));
+            }
+        }
+        "ui_close" => {
+            // Agent-close ≠ user-close: no latch, and no occipital auto-reveal
+            // suppression — those encode the human's overrule, not tidying-up.
+            AGENT_OPENED.with(|m| m.set(m.get() & !bit));
+            if let Some(i) = wm_index_by_kind(&model, kind) {
+                model.remove(i);
+                wm_refocus_top(ui, &model);
+            }
+        }
+        "ui_focus" => {
+            if let Some(i) = wm_index_by_kind(&model, kind) {
+                if let Some(id) = model.row_data(i).map(|d| d.id) {
+                    wm_update_row(&model, id, |d| d.minimized = false);
+                    wm_focus(ui, &model, id);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Strip ANSI/VT escape sequences for the line-mode terminal (no cursor grid).
@@ -2210,6 +2319,30 @@ fn ws_to_http(ws_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ws_to_http, ironbow, build_thermal_image, parse_agent_strokes};
+    use super::{kind_from_ordinal, kind_from_slug, kind_ordinal, kind_slug, APP_TABLE};
+
+    #[test]
+    fn app_table_is_the_ordinal_order() {
+        // APP_TABLE index IS the AppKind ordinal — the adaptive-UI verbs route
+        // through invoke_launch_app(ordinal), so a drift between the table and
+        // kind_from_ordinal would open the wrong app.
+        for (i, (kind, slug)) in APP_TABLE.iter().enumerate() {
+            assert_eq!(kind_from_ordinal(i as i32), *kind, "ordinal {i} ({slug}) drifted");
+            assert_eq!(kind_ordinal(*kind), i as i32);
+            assert_eq!(kind_from_slug(slug), Some(*kind));
+            assert_eq!(kind_slug(*kind), *slug);
+        }
+        assert_eq!(APP_TABLE.len(), 20);
+        // Slugs fit the u32 latch bitmasks and stay unique.
+        assert!(APP_TABLE.len() <= 32);
+        let mut slugs: Vec<_> = APP_TABLE.iter().map(|(_, s)| *s).collect();
+        slugs.sort_unstable();
+        slugs.dedup();
+        assert_eq!(slugs.len(), APP_TABLE.len(), "duplicate slug in APP_TABLE");
+        // Unknown slugs are inexpressible.
+        assert_eq!(kind_from_slug("xterm"), None);
+        assert_eq!(kind_from_slug(""), None);
+    }
 
     #[test]
     fn ironbow_spans_black_to_white() {
@@ -3336,7 +3469,7 @@ async fn run_snapshot_server(addr: String, ui_weak: slint::Weak<AppWindow>) {
             return;
         }
     };
-    eprintln!("[mirror] screen-snapshot server on http://{addr}/snapshot");
+    eprintln!("[mirror] screen-snapshot server on http://{addr}/snapshot (+ /state)");
     loop {
         let (mut stream, _) = match listener.accept().await {
             Ok(p) => p,
@@ -3344,12 +3477,26 @@ async fn run_snapshot_server(addr: String, ui_weak: slint::Weak<AppWindow>) {
         };
         let uw = ui_weak.clone();
         tokio::spawn(async move {
-            // Drain the request head; any GET is served the same way (no parse).
+            // Read the request head for the target only: `/state` serves the
+            // shell-structure JSON (adaptive UI's ui_query eyes); anything else
+            // keeps the historical behaviour — the snapshot PNG.
             let mut scratch = [0u8; 1024];
-            let _ = stream.read(&mut scratch).await;
-            let (status, ctype, body) = match capture_png(uw).await {
-                Ok(png) => ("200 OK", "image/png", png),
-                Err(e) => ("500 Internal Server Error", "text/plain", e.into_bytes()),
+            let n = stream.read(&mut scratch).await.unwrap_or(0);
+            let is_state = std::str::from_utf8(&scratch[..n])
+                .ok()
+                .and_then(|h| h.lines().next())
+                .and_then(|l| l.split_whitespace().nth(1))
+                .is_some_and(|t| t == "/state" || t.starts_with("/state?"));
+            let (status, ctype, body) = if is_state {
+                match capture_state(uw).await {
+                    Ok(json) => ("200 OK", "application/json", json.into_bytes()),
+                    Err(e) => ("500 Internal Server Error", "text/plain", e.into_bytes()),
+                }
+            } else {
+                match capture_png(uw).await {
+                    Ok(png) => ("200 OK", "image/png", png),
+                    Err(e) => ("500 Internal Server Error", "text/plain", e.into_bytes()),
+                }
             };
             let head = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\n\
@@ -3361,6 +3508,69 @@ async fn run_snapshot_server(addr: String, ui_weak: slint::Weak<AppWindow>) {
             let _ = stream.shutdown().await;
         });
     }
+}
+
+/// The shell's structure as JSON — the adaptive-UI eyes (`ui_query`, Loop 6).
+/// Built on the Slint thread (window model + latch masks are thread-local),
+/// handed back over a oneshot like `capture_png`. Deliberately structural, not
+/// geometric: window rects stay the WM's business (topology, never geometry).
+async fn capture_state(ui_weak: slint::Weak<AppWindow>) -> Result<String, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    slint::invoke_from_event_loop(move || {
+        let res = match ui_weak.upgrade() {
+            Some(ui) => Ok(shell_state_json(&ui).to_string()),
+            None => Err("UI window gone".to_string()),
+        };
+        let _ = tx.send(res);
+    })
+    .map_err(|e| format!("event loop: {e}"))?;
+    rx.await.map_err(|_| "state capture canceled".to_string())?
+}
+
+/// Assemble the /state payload. Slint thread only.
+fn shell_state_json(ui: &AppWindow) -> serde_json::Value {
+    let focused_id = ui.get_focused_id();
+    let mode = match ui.get_shell_mode() {
+        ShellMode::Focus => "focus",
+        _ => "desktop",
+    };
+    let windows: Vec<serde_json::Value> = WINDOWS.with(|w| {
+        w.borrow()
+            .as_ref()
+            .map(|m| {
+                (0..m.row_count())
+                    .filter_map(|i| m.row_data(i))
+                    .map(|d| {
+                        serde_json::json!({
+                            "app": kind_slug(d.kind),
+                            "title": d.title.as_str(),
+                            "minimized": d.minimized,
+                            "maximized": d.maximized,
+                            "focused": d.id == focused_id,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    let mask_slugs = |mask: u32| -> Vec<&'static str> {
+        APP_TABLE
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask & (1u32 << i) != 0)
+            .map(|(_, (_, s))| *s)
+            .collect::<Vec<_>>()
+    };
+    let latched = UI_LATCHED.with(|m| mask_slugs(m.get()));
+    let agent_opened = AGENT_OPENED.with(|m| mask_slugs(m.get()));
+    serde_json::json!({
+        "shell_mode": mode,
+        "persona": current_persona_slug(),
+        "windows": windows,
+        "agent_opened": agent_opened,
+        "latched": latched,
+        "apps": APP_TABLE.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+    })
 }
 
 /// Snapshot the live window on the Slint thread, then PNG-encode off-thread.
@@ -3660,6 +3870,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_launch_app(move |ord| {
             if let Some(ui) = uw.upgrade() {
                 let kind = kind_from_ordinal(ord);
+                // Adaptive UI: a menu launch is the user's own act — clear any
+                // ui_open latch for this app (re-invitation) and release the
+                // agent-opened mark (the user owns the window now). The agent
+                // path re-marks after this returns, so its bookkeeping holds.
+                let bit = ui_latch_bit(kind);
+                UI_LATCHED.with(|m| m.set(m.get() & !bit));
+                AGENT_OPENED.with(|m| m.set(m.get() & !bit));
                 wm_launch(&ui, &w, kind);
                 // Fire the per-app refresh the legacy tab strip used to trigger on
                 // open-view — without it Settings/Sessions windows launch empty.
@@ -3697,10 +3914,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_close_window(move |id| {
             if let Some(ui) = uw.upgrade() {
                 if let Some(i) = wm_index_by_id(&w, id) {
-                    // Closing the reader suppresses auto-reveal so a later web
-                    // read won't re-pop it uninvited (until relaunched).
-                    if w.row_data(i).map(|d| d.kind) == Some(AppKind::Occipital) {
-                        OCCIPITAL_SUPPRESS.with(|s| s.set(true));
+                    if let Some(kind) = w.row_data(i).map(|d| d.kind) {
+                        // Closing the reader suppresses auto-reveal so a later web
+                        // read won't re-pop it uninvited (until relaunched).
+                        if kind == AppKind::Occipital {
+                            OCCIPITAL_SUPPRESS.with(|s| s.set(true));
+                        }
+                        // Adaptive UI (the human always wins): closing an
+                        // agent-opened window latches that app — ui_open is
+                        // suppressed for the rest of the session. The agent
+                        // sees it in ui_query's `latched` and learns.
+                        let bit = ui_latch_bit(kind);
+                        if AGENT_OPENED.with(|m| m.get()) & bit != 0 {
+                            AGENT_OPENED.with(|m| m.set(m.get() & !bit));
+                            UI_LATCHED.with(|m| m.set(m.get() | bit));
+                        }
                     }
                     w.remove(i);
                 }
@@ -6262,8 +6490,13 @@ fn dispatch_event(
             let tool_name = call.tool.clone();
 
             // Work Board: reflect the running tool on the Active card. display_face
-            // (emoting) and sketch_draw (drawing) aren't work steps — skip them.
-            if tool_name != "display_face" && tool_name != "sketch_draw" {
+            // (emoting), sketch_draw (drawing) and the ui_* staging verbs (the
+            // agent moving its own windows) aren't work steps — skip them.
+            let is_ui_effect = matches!(
+                tool_name.as_str(),
+                "display_face" | "sketch_draw" | "ui_open" | "ui_close" | "ui_focus"
+            );
+            if !is_ui_effect {
                 let t = tool_name.clone();
                 slint::invoke_from_event_loop(move || board_active(&format!("running {t}"))).ok();
             }
@@ -6307,6 +6540,19 @@ fn dispatch_event(
                             }
                             notify(ToastKind::Success, "🎨 APEX drew on the Sketchpad");
                         }
+                    }
+                })
+                .ok();
+            } else if matches!(tool_name.as_str(), "ui_open" | "ui_close" | "ui_focus") {
+                // Adaptive UI (Loop 6): the agent staging its own shell. Same
+                // idiom as display_face — no tool card; the window moving IS
+                // the feedback (plus a toast on open, for attribution).
+                let verb = tool_name.clone();
+                let app = call.args["app"].as_str().unwrap_or("").to_string();
+                let w = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = w.upgrade() {
+                        apply_ui_verb(&ui, &verb, &app);
                     }
                 })
                 .ok();
