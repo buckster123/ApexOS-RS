@@ -2,7 +2,7 @@
 
 > The shell stops being static chrome the human arranges and becomes something the
 > agent **stages, looks at, and is corrected through** — journaled and reversible like
-> every other faculty. Phase A1 shipped; this doc is the durable contract.
+> every other faculty. Phases A1 + A2 shipped; this doc is the durable contract.
 > (Graduated from the grounded plan v0.2, 2026-07-06; verified against live code at ship time.)
 
 The one-sentence version: **the agent speaks a small closed vocabulary of staging verbs
@@ -41,14 +41,44 @@ Design rules (violating any of these is a regression):
 | `ui_open` | `app`, `hint?` | Open-or-reveal the single window of that kind (full menu-launch path, per-app refresh included). Latch-guarded. Toast on create ("🪟 APEX opened …") for attribution. `hint` is reserved (echoed, not yet interpreted) |
 | `ui_close` | `app` | Remove the window. Agent-close ≠ user-close: sets **no** latch and never arms the occipital auto-reveal suppression |
 | `ui_focus` | `app` | Un-minimize + raise + focus an existing window. No-op if not open |
+| `ui_arrange` | `layout`, `apps?` | Stage a preset topology (A2, below). One toast per arrange |
+| `ui_theme` | `persona` | Switch the persona skin via the `apply_persona` chokepoint (A2, below) |
 | `ui_query` | — | GET the shell's `/state` → structure JSON (below). Graceful "no display" note on headless |
-
-Phase A2 adds `ui_arrange {layout, apps?}` (closed preset topologies: focus / split /
-main-side / grid) and `ui_theme {persona}` (via the `apply_persona` chokepoint).
 
 The app catalog = the 20 `AppKind` slugs: `chat system sensor sessions settings terminal
 council event-log mesh inference audio-editor sonus notes face sketchpad web calculator
 explorer occipital board`.
+
+### `ui_arrange` — preset topologies (A2)
+
+`layout ∈ focus | split | main-side | grid` — a closed set; the pure, unit-tested
+`arrange_rects` (ui-slint) turns *(layout, n, desktop area)* into rects, and the WM owns
+every pixel. The desktop area is exported from Slint (`desktop-area-w/h` out-properties
+on AppWindow, sharing the root taskbar-zone metrics) so Rust tiles into exactly the
+surface windows clamp to.
+
+- **Participants**: `apps` in **priority order** (first = the main slot). Listed windows
+  not yet open are opened through the same latch-respecting path as `ui_open` but
+  *quietly* — one arrange, one toast. Latched apps sit out. `apps` omitted = the
+  currently visible windows topmost-first (minimized ones the user tucked away are NOT
+  resurrected). Capped at 6 (`ARRANGE_MAX`, grid 3×2); the tool rejects longer lists.
+- **`focus`** means one thing on stage: the main window gets the near-full rect and
+  every other open window minimizes (reversible from the taskbar).
+- **`split`** = n equal columns left→right; **`main-side`** = first pane ~62% left, the
+  rest stacked in the right column; **`grid`** = ceil-sqrt uniform cells, row-major.
+- **Desktop shell mode only** — the Focus shell has no window layer, so an arrange
+  there is a structural no-op (`ui_query.shell_mode` tells the agent which it is; the
+  femtovg Nano tier is Focus-clamped by design).
+
+### `ui_theme` — persona skin (A2)
+
+`persona ∈ apex | mom | ubuntu-dad | windows-dad | tech-kid | aurum` (closed, mirrors
+`persona_from_slug`). Routes through `apply_persona` — the SAME chokepoint as the
+picker: theme + chrome + wallpaper + the persona's default shell mode (tech-kid boots
+the Focus face) + the agent voice (`set_persona` → the style layer) + persistence.
+Attribution toast ("🎨 APEX switched the skin to Simple"). Open question #1 resolved:
+policy `allow` — the etiquette is *offer first, the conversational yes is the
+confirmation* (the `eject_media` trust pattern), and a skin flip is one tap to revert.
 
 ## 3. The eyes — `/state` on the snapshot server
 
@@ -125,9 +155,9 @@ real value. Details + honest cost note: the plan archive
 
 | Phase | Deliverable | Status |
 |---|---|---|
-| A1 | `/state` + `ui_query` + `ui_open`/`ui_close`/`ui_focus` + latch | **shipped** |
-| A2 | `ui_arrange` presets + layout fn; `ui_theme` via `apply_persona` | next |
-| A3 | Etiquette pass: rate limit, drag guard; soul etiquette section (via `propose_evolution`) | — |
+| A1 | `/state` + `ui_query` + `ui_open`/`ui_close`/`ui_focus` + latch | **shipped** (#255, latch field-confirmed on the colony) |
+| A2 | `ui_arrange` presets + layout fn; `ui_theme` via `apply_persona` | **shipped** |
+| A3 | Etiquette pass: rate limit, drag guard; soul etiquette section (via `propose_evolution`) | next |
 | B | Loop-6 memory: deposit discipline, UI-prefs procedure, geometry persistence | — |
 | C | `ui_reflex` family | — |
 | D | Colony field cycle (apex1 kiosk / apex-3 desktop), dream-consolidation check | — |
@@ -141,6 +171,9 @@ real value. Details + honest cost note: the plan archive
 | App slugs | tools.rs `UI_APPS` ↔ ui-slint `APP_TABLE` | test each side (count + closed-enum); a new `AppKind` needs both + a slug in the `ui_open` description (auto — it interpolates `UI_APPS`) |
 | Ordinals | `APP_TABLE` index ↔ `kind_from_ordinal` ↔ types.slint declaration order | ui-slint test `app_table_is_the_ordinal_order` |
 | Latch bits | `u32` masks | test asserts catalog ≤ 32 |
+| Layout presets | tools.rs `UI_LAYOUTS` ↔ ui-slint `ARRANGE_LAYOUTS` (+ `UI_ARRANGE_MAX` ↔ `ARRANGE_MAX`) | tests each side; `arrange_rects` rejects unknown layouts regardless |
+| Persona slugs | tools.rs `UI_PERSONAS` ↔ ui-slint `persona_from_slug` | tool test; UI ignores unknowns |
+| Desktop area | AppWindow `desktop-area-w/h` out-props ↔ the window layer's `area-w/h` clamps | both derive from the SAME root props (`title-bar-h`, `tb-zone`) — keep new chrome metrics on root |
 
 ## 10. Design principles
 

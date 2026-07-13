@@ -188,6 +188,29 @@ pub fn list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "ui_arrange",
+            "description": format!("Stage the desktop into a preset topology — one verb instead of a window-by-window shuffle. Layouts: `focus` (ONE window near-fullscreen, every other window minimizes — reversible from the taskbar), `split` (equal side-by-side columns), `main-side` (first app large on the left ~62%, the rest stacked in a right column), `grid` (uniform cells). `apps` lists the participants IN PRIORITY ORDER (first = the main slot) — windows not yet open are opened for you (latched apps sit out, see ui_open), capped at 6; omit `apps` to arrange the currently visible windows topmost-first. Desktop shell mode only — in focus shell mode this is a structural no-op (check ui_query's shell_mode). Same etiquette as ui_open: stage at task boundaries, an interface set correctly when the user looks up. Apps: {}.", UI_APPS.join(", ")),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "layout": { "type": "string", "description": "Preset topology: focus | split | main-side | grid" },
+                    "apps":   { "type": "array", "items": { "type": "string" }, "description": "Participating apps in priority order (first = main). Omit to arrange the currently visible windows." }
+                },
+                "required": ["layout"]
+            }
+        },
+        {
+            "name": "ui_theme",
+            "description": "Switch the shell's persona skin — theme, chrome, wallpaper, AND your interaction voice change together (the persona style layer), persisted exactly like a pick from the persona picker. Personas: apex (terse, technical), mom (Simple — big text, warm), ubuntu-dad (Ubuntu), windows-dad (Classic Windows), tech-kid (HUD — telemetry-rich; boots the focus-face shell), aurum (gold Cerebro dashboard). Etiquette: do NOT theme unprompted — offer first (\"want me to switch you to the simple face?\"); the user's conversational yes is the confirmation, and a skin flip is one tap to revert.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "persona": { "type": "string", "description": "Persona slug: apex | mom | ubuntu-dad | windows-dad | tech-kid | aurum" }
+                },
+                "required": ["persona"]
+            }
+        },
+        {
             "name": "camera_capture",
             "description": "SEE the physical world through this device's camera — take a photo and look at it. Use this when the user asks what you see, to look at something they're holding up, check the room, or read a label/screen in front of the camera. Auto-detects the camera backend (Raspberry Pi CSI camera via rpicam/libcamera, or a USB/laptop webcam via V4L2), captures one frame, and returns it inline so you see it directly. Returns a note (not an error) when no camera is attached.",
             "inputSchema": {
@@ -558,6 +581,8 @@ pub fn call(name: &str, args: &Value) -> Value {
         "ui_open" => ui_open(args),
         "ui_close" => ui_close(args),
         "ui_focus" => ui_focus(args),
+        "ui_arrange" => ui_arrange(args),
+        "ui_theme" => ui_theme(args),
         "ui_query" => ui_query(),
         "camera_capture" => camera_capture(args),
         "eject_media" => eject_media(args),
@@ -2938,6 +2963,76 @@ fn ui_focus(args: &Value) -> Value {
     }))
 }
 
+/// The `ui_arrange` preset vocabulary. Mirrors ui-slint's ARRANGE_LAYOUTS.
+const UI_LAYOUTS: &[&str] = &["focus", "split", "main-side", "grid"];
+/// Most windows one arrange touches. Mirrors ui-slint's ARRANGE_MAX.
+const UI_ARRANGE_MAX: usize = 6;
+/// The persona-skin catalog. Mirrors ui-slint's `persona_from_slug`.
+const UI_PERSONAS: &[&str] = &["apex", "mom", "ubuntu-dad", "windows-dad", "tech-kid", "aurum"];
+
+fn ui_arrange(args: &Value) -> Value {
+    let layout = match args["layout"].as_str().map(str::trim) {
+        Some(l) if UI_LAYOUTS.contains(&l) => l,
+        Some(l) => {
+            return tool_error(format!(
+                "unknown layout '{}' — use one of: {}", l, UI_LAYOUTS.join(", ")
+            ))
+        }
+        None => {
+            return tool_error(format!(
+                "missing `layout` — use one of: {}", UI_LAYOUTS.join(", ")
+            ))
+        }
+    };
+    // `apps` is optional; when present every slug must be catalog-valid (the
+    // closed-enum contract — a typo is a loud teaching error, not a silent skip)
+    // and the set bounded.
+    let mut apps: Vec<&str> = Vec::new();
+    if let Some(list) = args["apps"].as_array() {
+        for v in list {
+            let a = v.as_str().map(str::trim).unwrap_or("");
+            if !UI_APPS.contains(&a) {
+                return tool_error(format!(
+                    "unknown app '{}' in `apps` — use: {}", a, UI_APPS.join(", ")
+                ));
+            }
+            if !apps.contains(&a) {
+                apps.push(a);
+            }
+        }
+        if apps.len() > UI_ARRANGE_MAX {
+            return tool_error(format!(
+                "too many apps ({}) — an arrange stages at most {} windows",
+                apps.len(), UI_ARRANGE_MAX
+            ));
+        }
+    }
+    tool_ok(json!({
+        "ok": true, "action": "arrange", "layout": layout, "apps": apps,
+        "note": "Dispatched to the shell (desktop mode only — a no-op in focus shell mode; latched apps sit out). Verify with ui_query or screenshot_mirror when it matters.",
+    }))
+}
+
+fn ui_theme(args: &Value) -> Value {
+    let persona = match args["persona"].as_str().map(str::trim) {
+        Some(p) if UI_PERSONAS.contains(&p) => p,
+        Some(p) => {
+            return tool_error(format!(
+                "unknown persona '{}' — use one of: {}", p, UI_PERSONAS.join(", ")
+            ))
+        }
+        None => {
+            return tool_error(format!(
+                "missing `persona` — use one of: {}", UI_PERSONAS.join(", ")
+            ))
+        }
+    };
+    tool_ok(json!({
+        "ok": true, "action": "theme", "persona": persona,
+        "note": "Dispatched to the shell: skin + your interaction voice switch together and persist (same path as the persona picker). tech-kid boots the focus-face shell.",
+    }))
+}
+
 fn ui_query() -> Value {
     match ui_shell_state() {
         Some(state) => tool_ok(state),
@@ -3385,6 +3480,55 @@ mod tests {
             assert_eq!(body["app"], "terminal");
             assert_eq!(body["action"], action);
         }
+    }
+
+    #[test]
+    fn ui_arrange_validates_layout_and_apps() {
+        let ok = ui_arrange(&json!({ "layout": "main-side", "apps": ["sensor", "chat"] }));
+        let body: Value =
+            serde_json::from_str(ok["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["layout"], "main-side");
+        assert_eq!(body["apps"], json!(["sensor", "chat"]));
+
+        // Omitted apps = arrange what's visible; still a valid call.
+        let bare = ui_arrange(&json!({ "layout": "grid" }));
+        let body: Value =
+            serde_json::from_str(bare["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["apps"], json!([]));
+
+        // Closed enums: bad layout, bad app, oversized set — loud errors.
+        for bad in [
+            json!({ "layout": "cascade" }),
+            json!({}),
+            json!({ "layout": "split", "apps": ["sensor", "xterm"] }),
+            json!({ "layout": "grid",
+                    "apps": ["chat","system","sensor","sessions","settings","terminal","mesh"] }),
+        ] {
+            assert_eq!(ui_arrange(&bad)["isError"], json!(true), "must reject {bad}");
+        }
+        // Duplicates collapse instead of erroring (a retry-ish call stays valid).
+        let dup = ui_arrange(&json!({ "layout": "split", "apps": ["chat", "chat", "sensor"] }));
+        let body: Value =
+            serde_json::from_str(dup["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["apps"], json!(["chat", "sensor"]));
+    }
+
+    #[test]
+    fn ui_theme_is_a_closed_persona_enum() {
+        for p in UI_PERSONAS {
+            let out = ui_theme(&json!({ "persona": p }));
+            let body: Value =
+                serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["persona"], *p);
+        }
+        for bad in ["jarvis", "Mom", "", "hud"] {
+            assert_eq!(
+                ui_theme(&json!({ "persona": bad }))["isError"],
+                json!(true),
+                "must reject {bad:?}"
+            );
+        }
+        assert_eq!(ui_theme(&json!({}))["isError"], json!(true));
     }
 }
 
