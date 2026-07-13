@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, BoardCard } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, BoardCard, WmState } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -331,6 +331,11 @@ export component AppWindowFrame inherits Rectangle {
             caption-ta := TouchArea {
                 mouse-cursor: move;
                 pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) {
+                        // Adaptive-UI drag guard: while the hand is on this
+                        // window, agent verbs leave it alone.
+                        WmState.dragging-id = root.win-id;
+                    }
                     if (ev.kind == PointerEventKind.down && !root.maximized) {
                         root.orig-a = root.dx;
                         root.orig-b = root.dy;
@@ -338,6 +343,7 @@ export component AppWindowFrame inherits Rectangle {
                         root.press-ay = self.absolute-position.y + self.mouse-y;
                     }
                     if (ev.kind == PointerEventKind.up) {
+                        WmState.dragging-id = 0;
                         if (!root.maximized) {
                             root.commit-move(root.base-x + root.dx, root.base-y + root.dy);
                             root.dx = 0;
@@ -749,12 +755,14 @@ export component AppWindowFrame inherits Rectangle {
             mouse-cursor: nwse-resize;
             pointer-event(ev) => {
                 if (ev.kind == PointerEventKind.down) {
+                    WmState.dragging-id = root.win-id;   // drag guard (see caption)
                     root.orig-a = root.dw;
                     root.orig-b = root.dh;
                     root.press-ax = self.absolute-position.x + self.mouse-x;
                     root.press-ay = self.absolute-position.y + self.mouse-y;
                 }
                 if (ev.kind == PointerEventKind.up) {
+                    WmState.dragging-id = 0;
                     root.commit-resize(root.base-w + root.dw, root.base-h + root.dh);
                     root.dw = 0;
                     root.dh = 0;
