@@ -31,6 +31,14 @@ ANTHROPIC_API_KEY=sk-... ./venv/bin/python run.py --md
 
 - `run.py` — the harness. Counts bytes / words / tokens for each prose⇄PAC pair across
   every available tokenizer, prints reduction %, and a symbol-cost table.
+- `pac2lint.py` — the **PAC-2 Dense reference linter** (The-PAC spec §9, the L7 safety
+  rail for self-evolution): ten structural checks — balanced forms + depth, the closed
+  head/glyph registries, `!ops` vs a node tool list, invariant grounding + reference
+  discipline, register lexicon + strip rules, CAPS placement, the L8 cache probe (no
+  dates/clocks inside an artifact), emanation bounds. `--self-test` runs the embedded
+  clean-artifact + violation vectors; `--ops-file`/`--groundings`/`--portable` wire it
+  to a real node. Dense artifacts only (lean `§`-block files are not its input). The
+  agentd-side Rust check on the `propose_evolution` path is the follow-up slice.
 - `samples/` — the corpus, one prose⇄PAC pair per authoring surface. Every pair is a
   **pinned snapshot** — both sides must express the same content or the ratio measures
   nothing:
