@@ -1645,6 +1645,23 @@ async fn mesh_inbox_read_handler(
     Json(serde_json::json!({ "ok": true }))
 }
 
+/// Compose the prompt text injected for POST /api/sessions/:id/message. A message
+/// from a registered peer carries `[from <node>]:` provenance (mirrors local a2a's
+/// `[Agent N]:`). When the sender also stamped its asking session
+/// (`origin_session`, system-stamped by its supervisor), the prefix carries the
+/// ready-made reply route — the receiving agent continues the conversation by
+/// copying that call verbatim, and the answer lands in the session that asked
+/// instead of vanishing into the asker's per-peer mesh thread. Pure — unit-tested.
+fn a2a_prompt_text(from: Option<&str>, origin_session: Option<u64>, message: &str) -> String {
+    match (from, origin_session) {
+        (Some(peer), Some(o)) => format!(
+            "[from {peer} — to reply: send_to_agent(node=\"{peer}\", session_id={o})]: {message}"
+        ),
+        (Some(peer), None) => format!("[from {peer}]: {message}"),
+        (None, _)          => message.to_string(),
+    }
+}
+
 /// POST /api/sessions/:id/message — inject a message into an agent session from
 /// external code (scripts, other services, the desktop UI) or a mesh peer (a2a).
 /// Emits UserPrompt on the bus so the target session starts a new turn.
@@ -1655,9 +1672,11 @@ async fn mesh_inbox_read_handler(
 /// a2a default), the message is routed to that peer's own thread via
 /// [`mesh_session_for`] and a global `MeshMessage` notification is broadcast to
 /// every client — so a user watching any session sees the mesh traffic arrive.
-/// An explicit non-zero `:id` is always honored; a missing/unknown `from` falls
-/// back to `:id` (session 0) — byte-identical to the pre-mesh-routing behaviour
-/// for generic external injectors (scripts, the desktop UI).
+/// An explicit non-zero `:id` is always honored (this is how a peer's reply
+/// reaches the session that asked — see [`a2a_prompt_text`]); a missing/unknown
+/// `from` falls back to `:id` (session 0) — byte-identical to the
+/// pre-mesh-routing behaviour for generic external injectors (scripts, the
+/// desktop UI).
 async fn session_message_handler(
     State(state): State<GatewayState>,
     Path(id):     Path<u64>,
@@ -1683,12 +1702,11 @@ async fn session_message_handler(
         _ => SessionId(id),
     };
 
-    // Bake the peer into the prompt so the agent (and the replayed thread) sees who
-    // is speaking — mirrors local a2a's `[Agent N]:` provenance prefix.
-    let text = match &from {
-        Some(peer) => format!("[from {peer}]: {message}"),
-        None       => message.clone(),
-    };
+    // Bake the peer into the prompt so the agent (and the replayed thread) sees
+    // who is speaking; a sender-stamped origin session adds the reply route
+    // (only meaningful from a registered peer — ignored otherwise).
+    let origin = body["origin_session"].as_u64().filter(|o| *o != 0);
+    let text = a2a_prompt_text(from.as_deref(), origin, &message);
     state.bus.emit(Event::UserPrompt { session, text, images: vec![] }).await;
 
     // Global notification so it surfaces regardless of the user's active session.
@@ -5976,6 +5994,25 @@ mod ws_filter_tests {
         let back: HashMap<u64, MeshUnread> = serde_json::from_str(&json).unwrap();
         assert_eq!(back[&24].preview, "ping");
         assert_eq!(back[&23].unread, 0);
+    }
+
+    #[test]
+    fn a2a_prompt_text_carries_provenance_and_reply_route() {
+        // Peer + origin → provenance AND the verbatim reply call (the continuity
+        // affordance the receiving agent copies to answer into the asking session).
+        assert_eq!(
+            a2a_prompt_text(Some("ApexOS-2"), Some(42), "status?"),
+            "[from ApexOS-2 — to reply: send_to_agent(node=\"ApexOS-2\", session_id=42)]: status?"
+        );
+        // Peer without origin → the classic provenance prefix, byte-identical to
+        // the pre-continuity wire format (old-node senders keep working).
+        assert_eq!(
+            a2a_prompt_text(Some("ApexOS-2"), None, "status?"),
+            "[from ApexOS-2]: status?"
+        );
+        // No registered peer → the raw message, whatever the body claimed —
+        // origin is only meaningful with trusted provenance.
+        assert_eq!(a2a_prompt_text(None, Some(42), "status?"), "status?");
     }
 }
 
