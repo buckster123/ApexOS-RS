@@ -67,8 +67,8 @@ is why it holds across tokenizer families (see the benchmark).
 | `!x` | imperative op | a **real tool or named procedure** (`!session_recall`, `!save`) |
 | `?x` | trigger | a condition that fires (`?trigger: …`) |
 | `cond → act` | rule | threshold/condition to action |
-| `>x` | param | a named field on an op (`>node`, `>top_k=3`) |
-| `key.w` | weighted ratio | e.g. `vec.8/key.2` (80% vector, 20% keyword) |
+| `>x` | param | a named field on an op (`>node`, `>limit=3`) |
+| `key.w` | weighted ratio | e.g. `vec.35/act.30` (recall score weights) |
 | `[ … ]` | inline constraint | a caveat or hard rule attached to a line |
 | `CAPS` | emphasis | MUST / MANDATORY — never bury a hard rule |
 
@@ -87,7 +87,7 @@ single token-cheap handle. Extend per node; keep every entry pinned to a real op
 |---|---|
 | `!boot` | `cognitive_bootstrap → session_recall → check_inbox → list_intentions` (session startup) |
 | `!save` | `session_save` deposit — summary · key-discoveries · unfinished (session shutdown) |
-| `vec.8/key.2` | Cerebro hybrid recall ratio — 80% semantic vector, 20% keyword |
+| `vec.35/act.30/fsrs.20/sal.15` | Cerebro recall scoring — the four-way blend: vector sim · (ACT-R + spreading) activation · FSRS retrievability · salience (`cerebro config.rs SCORE_WEIGHT_*`) |
 | `R3` | 3-layer recall rule — *don't search what you already know* |
 | `darwin` | procedure Wilson-lower-bound competition inside `dream_run` |
 | `cache-law` | keep per-turn-volatile text **out** of the cached system prefix (the timeless-soul rule) |
@@ -100,6 +100,15 @@ single token-cheap handle. Extend per node; keep every entry pinned to a real op
 The distinction `agent_spawn(blocks)` vs `send_to_agent(fire-forget)` is a good example of the
 dialect earning its keep: two tokens of grounded shorthand replace a paragraph of prose, and the
 live test confirmed the agent kept the distinction intact.
+
+*(Corrected 2026-07-15, code-grounding audit for PAC-2 Dense: the earlier `vec.8/key.2` def —
+"Cerebro hybrid recall ratio, 80% vector / 20% keyword" — grounded to nothing in cerebro. The
+real scoring is the four-way blend above; keyword/FTS5 is the embeddings-off seeding fallback,
+not a weighted term. Likewise `find_relevant_procedures(top_k=3)` named a parameter the tool
+doesn't have — the param is `limit`, tool default 5 — so the cap was silently ignored for three
+generations of artifacts (seed soul → this doc's sample → PAC-2 Dense v0.1). Both fossils are
+exactly what the grounding law exists to catch; a def that fails to ground is noise, however
+long it survives.)*
 
 ---
 

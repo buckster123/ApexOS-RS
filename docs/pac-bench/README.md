@@ -39,8 +39,14 @@ ANTHROPIC_API_KEY=sk-... ./venv/bin/python run.py --md
   clean-artifact + violation vectors; `--ops-file`/`--groundings`/`--portable` wire it
   to a real node. Dense artifacts only (lean `§`-block files are not its input). The
   agentd-side Rust check on the `propose_evolution` path is the follow-up slice.
-- `samples/` — the corpus, one prose⇄PAC pair per authoring surface:
-  - `soul.*` — prose side is the **real shipped** `config/soul.md`; PAC side is `soul.pac.md`.
+- `samples/` — the corpus, one prose⇄PAC pair per authoring surface. Every pair is a
+  **pinned snapshot** — both sides must express the same content or the ratio measures
+  nothing:
+  - `soul.*` — `soul.prose.md` is `config/soul.md` **as of the porting commit** (659b3ea);
+    `soul.pac.md` is its PAC port. (This originally read the *live* soul.md, which kept
+    evolving while the port stayed frozen — by 2026-07-15 the drift inflated the "cut"
+    to a fictional 60%. To re-bench a newer soul: re-port the PAC side first, then
+    re-snapshot the prose side in the same commit.)
   - `procedure.*` — a `store_procedure` skill (command-heavy → compresses least).
   - `evolution.*` — a `propose_evolution` payload (all rationale → compresses most).
 - `RESULTS.md` — committed snapshot of the numbers (4 tokenizers, 3 families).

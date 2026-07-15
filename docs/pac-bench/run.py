@@ -22,9 +22,16 @@ import os, sys, pathlib
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent.parent  # repo root
 
-# (label, prose_path, pac_path) — prose soul is the REAL shipped config/soul.md
+# (label, prose_path, pac_path) — every pair is a PINNED SNAPSHOT. The soul pair
+# originally read the LIVE config/soul.md, but the live soul evolves while the
+# pac port stays frozen — by 2026-07-15 the prose side had grown ~1.5k tokens the
+# pac side never ported, silently inflating the "cut" to 60% (the two sides were
+# no longer the same content, so the ratio wasn't a compression ratio). L1: a
+# bench compares equivalent content or it measures nothing. soul.prose.md is
+# config/soul.md as of the porting commit (659b3ea). To re-bench a newer soul:
+# re-port the pac side first, then re-snapshot the prose side in the same commit.
 SAMPLES = [
-    ("soul",      ROOT / "config/soul.md",              HERE / "samples/soul.pac.md"),
+    ("soul",      HERE / "samples/soul.prose.md",       HERE / "samples/soul.pac.md"),
     ("procedure", HERE / "samples/procedure.prose.md",  HERE / "samples/procedure.pac.md"),
     ("evolution", HERE / "samples/evolution.prose.md",  HERE / "samples/evolution.pac.md"),
 ]
