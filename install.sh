@@ -516,7 +516,23 @@ if [[ "$TIER" == "auto" ]]; then
 fi
 
 if [[ "$MODE" == "auto" ]]; then
-  $IS_PI && MODE="kiosk" || MODE="headless"
+  if $IS_PI; then
+    # Lite-OS vs Desktop-OS Pi: a Pi whose OS boots to a graphical session (or is
+    # being installed from inside one) gets DESKTOP mode — a native window on the
+    # DE, like an x86 desktop install. Kiosk on a desktop-OS Pi is not just the
+    # wrong default, it's a broken one: the kiosk service needs DRM master, which
+    # the running compositor already holds, so the two fight over the display.
+    # Plenty of Pi 5s daily-drive as desktops now; APEX joins them as a window.
+    # Lite-OS Pis (multi-user.target, no session) keep the classic kiosk default.
+    if [[ "$(systemctl get-default 2>/dev/null)" == "graphical.target" ]] \
+       || [[ -n "${WAYLAND_DISPLAY:-}" ]] || [[ -n "${DISPLAY:-}" ]]; then
+      MODE="desktop"
+    else
+      MODE="kiosk"
+    fi
+  else
+    MODE="headless"
+  fi
 fi
 
 TIER_DESC=""
@@ -575,7 +591,7 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
     "How will you use this device?" \
     "kiosk"    "Kiosk    — dedicated HDMI display (Pi + monitor)" \
     "headless" "Headless — browser/mobile UI, no local display" \
-    "desktop"  "Desktop  — shared monitor, native window (x86/Mac)")
+    "desktop"  "Desktop  — shared monitor, native window (x86 / Mac / desktop-OS Pi)")
   [[ -n "$MODE_CHOICE" ]] && MODE="$MODE_CHOICE"
 fi
 # Headless = no local UI. Desktop = build the UI but run it as a winit window in the
