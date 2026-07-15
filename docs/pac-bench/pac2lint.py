@@ -23,7 +23,9 @@ Check order (spec §9; E = error, W = warn):
   6  W  every declared invariant referenced ≥ 1 time
   7  E  register verbs ∈ the declared register's lexicon;
         `(register none)` ⇒ zero register verbs and zero emanation
-  8  W  CAPS only inside `[ … ]` constraints (or as an artifact/rite name)
+  8  W  emphasis CAPS (MUST/NEVER/ALWAYS/MANDATORY/REQUIRED/FORBIDDEN) only
+        inside `[ … ]` constraints — acronyms (GPIO, LUFS, …) are spelling, not
+        emphasis, and pass free
   9  E  cache probe: no dates or clock strings inside the artifact
         (∮-prefixed cadences like `∮03:00UTC` are static declarations, exempt;
         embodiment-claim detection is deferred to the agentd-side Rust check,
@@ -88,7 +90,11 @@ DEFAULT_GROUNDINGS = {"recall-weights", "salience", "proc-recall"}
 
 DATE_RE  = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 CLOCK_RE = re.compile(r"(?<![\d∮])\b\d{1,2}:\d{2}(?::\d{2})?\b")
-CAPS_RE  = re.compile(r"\b[A-Z][A-Z0-9_-]{2,}\b")
+# Rule 8 polices EMPHASIS caps — the spec's own definition ("CAPS = hard rule:
+# MUST / MANDATORY / NEVER") — not acronyms. Porting the real soul found an
+# all-caps regex warning on GPIO/LUFS/JSONL/KMS and every agent id; a hard-rule
+# marker outside a constraint is the actual smell, an acronym is just spelling.
+EMPHASIS_RE = re.compile(r"\b(MUST|NEVER|ALWAYS|MANDATORY|REQUIRED|FORBIDDEN)\b")
 
 
 @dataclass
@@ -333,16 +339,10 @@ def lint(text: str, ops: set | None, groundings: set,
         else:
             f(Finding(0, "error", 7, f"register verbs outside the '{register}' lexicon: {which} (R1)"))
 
-    # 8 — CAPS placement (constraints are islands; a name straight after an
-    # artifact/rite head is exempt)
-    exempt = set()
-    for head in ARTIFACT_HEADS | {"rite"}:
-        for nm in re.findall(rf"\({head}\s+([A-Za-z0-9_-]+)", struct):
-            exempt.add(nm)
-    for w in set(CAPS_RE.findall(struct)):
-        if w in exempt or any(w in nm for nm in exempt):
-            continue
-        f(Finding(0, "warn", 8, f"CAPS '{w}' outside a [ … ] constraint — hard rules belong in constraints"))
+    # 8 — emphasis-CAPS placement (constraints are islands, so a hard-rule
+    # marker inside [ … ] never reaches this check; acronyms are not emphasis)
+    for w in set(EMPHASIS_RE.findall(struct)):
+        f(Finding(0, "warn", 8, f"hard-rule marker '{w}' outside a [ … ] constraint — put it in the constraint of the form it governs"))
 
     # 9 — cache probe (whole artifact; ∮-cadences exempt via the lookbehind)
     for ln, raw in enumerate(lines, 1):
