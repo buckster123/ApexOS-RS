@@ -1,5 +1,6 @@
 mod session_store;
 use session_store::SessionStore;
+mod pac_lint;
 mod scheduler;
 use scheduler::{load_schedules, run_scheduler, spawn_scheduler_handler, SchedulerState};
 mod council_handler;
@@ -802,6 +803,46 @@ fn spawn_evolution_applier(
                     // agent_id null, which is also what made them Shared).
                     let evo_agent = apexos_core::resolve_agent_id(&session_bindings, session);
 
+                    // PAC-2 Dense structural gate (The-PAC spec §9 — the "tiny
+                    // Rust check"; reference impl: docs/pac-bench/pac2lint.py).
+                    // FORMAT-GATED: only a payload that claims to be dense (the
+                    // ∴ seal / an artifact-head form) is linted — prose and lean
+                    // souls pass untouched, so there is no compliance tax to
+                    // route around (red line 6). Errors refuse BEFORE any
+                    // snapshot work (pure check first, no wasted episode); the
+                    // refusal is honest (the H4 pattern) because a structurally
+                    // broken identity file would reload broken. Warnings ride
+                    // the deferred ack below.
+                    let mut lint_warnings: Vec<String> = Vec::new();
+                    if let EvolutionProposal::UpdateSystemPrompt { content, .. } = &proposal {
+                        if pac_lint::is_dense_artifact(content) {
+                            let findings = pac_lint::lint(content);
+                            let errs: Vec<_> =
+                                findings.iter().filter(|f| f.error).cloned().collect();
+                            if !errs.is_empty() {
+                                let report = pac_lint::render_report(&errs);
+                                eprintln!("[evolution] pac2lint refused {:?}:\n{report}", id);
+                                bus.emit(Event::ToolResult {
+                                    session, call: call_id,
+                                    output: ToolOutput {
+                                        ok: false,
+                                        content: serde_json::json!(format!(
+                                            "evolution refused: the proposed soul is a PAC-2 Dense \
+                                             artifact with structural lint errors — fix and re-propose \
+                                             (nothing was applied):\n{report}"
+                                        )),
+                                    },
+                                }).await;
+                                continue;
+                            }
+                            lint_warnings = findings
+                                .iter()
+                                .filter(|f| !f.error)
+                                .map(|f| f.msg.clone())
+                                .collect();
+                        }
+                    }
+
                     // Snapshot current state for rollback BEFORE applying.
                     let undo = compute_undo(
                         &proposal, &soul_arc, &soul_path, &policy_path, &plugins_path,
@@ -864,7 +905,12 @@ fn spawn_evolution_applier(
                         id, proposal,
                         &soul_arc, &soul_path, &policy_path, &plugins_path,
                         &policy_arc, &sv_cmd_tx, agent_soul.as_ref(),
-                    ).await;
+                    ).await
+                    // Lint warnings ride the ack so the agent sees the
+                    // discipline nudges without the apply being blocked.
+                    .map(|s| if lint_warnings.is_empty() { s } else {
+                        format!("{s} · pac2lint warnings: {}", lint_warnings.join(" | "))
+                    });
 
                     // DEFERRED ACK — the propose_evolution tool result now carries the
                     // true apply outcome. Emitted BEFORE the Cerebro episode bookkeeping
