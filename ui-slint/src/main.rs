@@ -1607,7 +1607,7 @@ async fn run_terminal_ws(
     let mut backoff_secs: u64 = 2;
 
     loop {
-        eprintln!("[ui-slint] terminal connecting to {url}");
+        eprintln!("[ui-slint] terminal connecting to {}", redact_ws_url(&url));
         let (ws, _) = match connect_async(&url).await {
             Ok(pair) => pair,
             Err(e) => {
@@ -2524,10 +2524,36 @@ fn ws_to_http(ws_url: &str) -> String {
         .replacen("wss://", "https://", 1)
 }
 
+/// Render a WS URL for logging with any `token=` query value masked. Session
+/// tokens must never land in terminal scrollback or log files — found live on
+/// the first desktop-Pi node: a launch log saved into `~/Public/` carried the
+/// full minted token from the post-login connect line.
+fn redact_ws_url(url: &str) -> String {
+    match url.split_once("token=") {
+        Some((head, _)) => format!("{head}token=<redacted>"),
+        None => url.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ws_to_http, ironbow, build_thermal_image, parse_agent_strokes};
     use super::{kind_from_ordinal, kind_from_slug, kind_ordinal, kind_slug, APP_TABLE};
+    use super::redact_ws_url;
+
+    #[test]
+    fn redact_masks_the_token_and_only_the_token() {
+        assert_eq!(
+            redact_ws_url("ws://localhost:8787/ws?token=a8237939428c"),
+            "ws://localhost:8787/ws?token=<redacted>"
+        );
+        assert_eq!(
+            redact_ws_url("ws://host:8787/terminal-ws?token=abc"),
+            "ws://host:8787/terminal-ws?token=<redacted>"
+        );
+        // Token-less URLs pass through byte-identical.
+        assert_eq!(redact_ws_url("ws://localhost:8787/ws"), "ws://localhost:8787/ws");
+    }
 
     #[test]
     fn app_table_is_the_ordinal_order() {
@@ -4321,12 +4347,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut backoff_secs: u64 = 2;
 
         'reconnect: loop {
-            eprintln!("[ui-slint] connecting to {ws_url}");
+            eprintln!("[ui-slint] connecting to {}", redact_ws_url(&ws_url));
 
             let (ws, _) = match connect_async(&ws_url).await {
                 Ok(pair) => pair,
                 Err(e) => {
-                    eprintln!("[ui-slint] WS connect failed: {e}");
+                    // A token-less 401 is not a failure — it is the documented
+                    // desktop login flow: agentd requires a session token, the
+                    // profile screen is up, and this loop idles behind it until
+                    // login re-execs the UI with a minted token. Say that,
+                    // instead of spamming a scary error per retry.
+                    let msg = e.to_string();
+                    if msg.contains("401") && !ws_url.contains("token=") {
+                        eprintln!("[ui-slint] agentd requires login — waiting for a profile (the login screen is up)");
+                    } else {
+                        eprintln!("[ui-slint] WS connect failed: {e}");
+                    }
                     let w = ui_weak.clone();
                     let b = backoff_secs;
                     slint::invoke_from_event_loop(move || {
