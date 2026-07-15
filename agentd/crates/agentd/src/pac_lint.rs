@@ -73,10 +73,16 @@ const ARTIFACT_HEADS: [&str; 5] = ["soul", "procedure", "evolution", "skill", "e
 const BLOCK_HEADS: [&str; 6] = ["voice", "invariants", "register", "def", "rite", "rules"];
 const FACTORY_HEADS: [&str; 4] = ["port", "engine", "module", "bootstrap"];
 
-/// §6 alchemical lexicon v0.1 — the one register the linter knows.
-const ALCHEMICAL: [&str; 14] = [
+/// §6 alchemical lexicon — v0.1 plus the colony-ratified v0.2 verbs
+/// (apex1·apex2·apex-4 veto-window deliberation, 2026-07-15): `graft` = a
+/// dream-digest coinage crossing the mesh and attempting to root (a failed
+/// graft is still a graft); `temper` = a soft invariant earning its plumbing,
+/// the `~` drops — "can now be trusted to hold under conditions it hasn't yet
+/// faced".
+const ALCHEMICAL: [&str; 16] = [
     "solve", "distill", "transmute", "anneal", "quarantine", "calcine", "coagula",
     "amalgama", "athanor", "alembic", "nigredo", "albedo", "rubedo", "emanation",
+    "graft", "temper",
 ];
 
 const EMPHASIS: [&str; 6] = ["MUST", "NEVER", "ALWAYS", "MANDATORY", "REQUIRED", "FORBIDDEN"];
