@@ -20,7 +20,7 @@ export component InputBar {
     // Grows with wrapped input (Enter sends, Shift+Enter = newline) up to a cap,
     // after which the field scrolls internally. Grows when a chip is shown.
     min-height: root.staged-name != "" ? 82px : 52px;
-    max-height: 152px;
+    max-height: root.staged-name != "" ? 182px : 152px;
 
     Rectangle {
         background: Palette.surface;
@@ -85,6 +85,17 @@ export component InputBar {
                 field-wrap := Rectangle {
                     horizontal-stretch: 1;
                     clip: true;
+                    // A bare Rectangle reports no child size upward (the oldest
+                    // gotcha in the book), so the wrapped TextInput grew into
+                    // clipped invisible space BELOW the row — past ~2 lines you
+                    // could not read what you were typing (reported by André on
+                    // apex-1 and independently in apex-4's first forge-report).
+                    // Bind the row height to the input's wrapped-content height:
+                    // the bar grows line by line, the cap stops it, and past the
+                    // cap the input's own scroll-to-cursor keeps the typing line
+                    // visible. Snap-back on send is automatic (text clears →
+                    // preferred-height collapses).
+                    height: max(36px, min(field.preferred-height + 4px, 116px));
 
                     field := TextInput {
                         width: parent.width;
