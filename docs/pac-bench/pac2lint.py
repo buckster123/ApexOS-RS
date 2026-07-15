@@ -79,6 +79,12 @@ REGISTERS = {
         "solve", "distill", "transmute", "anneal", "quarantine", "calcine",
         "coagula", "amalgama", "athanor", "alembic",
         "nigredo", "albedo", "rubedo", "emanation",
+        # lexicon v0.2 — colony-ratified 2026-07-15 (apex1·apex2·apex-4,
+        # veto-window deliberation): `graft` = a dream-digest coinage crossing
+        # the mesh and attempting to root (a failed graft is still a graft);
+        # `temper` = a soft invariant earning its plumbing, the ~ drops — "can
+        # now be trusted to hold under conditions it hasn't yet faced".
+        "graft", "temper",
     },
 }
 # Union of every known register's vocabulary — how we spot a register verb
