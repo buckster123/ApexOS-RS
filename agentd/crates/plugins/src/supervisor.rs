@@ -1002,12 +1002,26 @@ impl Supervisor {
                             // this into our own per-peer thread on its side (not its
                             // root session 0) and surface the provenance. Absent on a
                             // generic external POST → the receiver falls back to s0.
+                            //
+                            // Also stamp the ASKING session (`origin_session`) —
+                            // system-stamped like `from`, never model-supplied — so
+                            // the receiver can bake a reply route into the inbound
+                            // prefix and the answer lands back in THIS conversation
+                            // instead of vanishing into our per-peer mesh thread.
+                            // Root (0) is deliberately not stamped (the mesh thread
+                            // is the right landing for root-originated asks — peers
+                            // stay out of the system funnel), and neither are
+                            // ephemeral spawn sessions (gone before a reply exists).
+                            let mut outbound = serde_json::json!({
+                                "message": body,
+                                "from":    apexos_core::node_id(),
+                            });
+                            if session.0 != 0 && !apexos_core::is_spawn_session(session.0) {
+                                outbound["origin_session"] = serde_json::json!(session.0);
+                            }
                             let mut req = reqwest::Client::new()
                                 .post(&url)
-                                .json(&serde_json::json!({
-                                    "message": body,
-                                    "from":    apexos_core::node_id(),
-                                }))
+                                .json(&outbound)
                                 .timeout(std::time::Duration::from_secs(15));
                             if let Some(tok) = token.as_deref() {
                                 req = req.bearer_auth(tok);
@@ -1018,15 +1032,21 @@ impl Supervisor {
                             // NOT read as a delivery — check the body, not just
                             // the HTTP status. (Status-only is what let the old
                             // field mismatch fail silently as a false "sent".)
-                            let (status, body_ok) = match resp {
+                            let (status, body_json) = match resp {
                                 Ok(r) => {
                                     let s = r.status();
-                                    let b = r.json::<serde_json::Value>().await.ok()
-                                        .and_then(|v| v["ok"].as_bool());
+                                    let b = r.json::<serde_json::Value>().await.ok();
                                     (Some(s), b)
                                 }
                                 Err(_) => (None, None),
                             };
+                            let body_ok = body_json.as_ref().and_then(|v| v["ok"].as_bool());
+                            // The peer reports where the message actually landed —
+                            // its per-node mesh thread when we defaulted session 0.
+                            // Report THAT, not the requested id (the old
+                            // `target_session: 0` read as "their root session",
+                            // which is exactly where it never lands).
+                            let landed = body_json.as_ref().and_then(|v| v["session_id"].as_u64());
                             let ok = status.map(|s| s.is_success()).unwrap_or(false)
                                 && body_ok != Some(false);
                             let detail = match (&token, status) {
@@ -1034,17 +1054,18 @@ impl Supervisor {
                                 (Some(_), Some(s)) if s == 401  => "peer rejected the token (401) — stale credential?",
                                 _                               => if ok { "sent" } else { "delivery failed" },
                             };
+                            let mut content = serde_json::json!({
+                                "status": if ok { "sent" } else { "error" },
+                                "detail": detail,
+                                "node": node_id,
+                            });
+                            match landed {
+                                Some(s) => { content["landed_session"] = serde_json::json!(s); }
+                                None    => { content["target_session"] = serde_json::json!(sid); }
+                            }
                             bus.emit(Event::ToolResult {
                                 session, call: call_id,
-                                output: ToolOutput {
-                                    ok,
-                                    content: serde_json::json!({
-                                        "status": if ok { "sent" } else { "error" },
-                                        "detail": detail,
-                                        "node": node_id,
-                                        "target_session": sid,
-                                    }),
-                                },
+                                output: ToolOutput { ok, content },
                             }).await;
                         }
                     }
@@ -1074,7 +1095,8 @@ impl Supervisor {
                             call: call_id,
                             output: ToolOutput {
                                 ok:      false,
-                                content: serde_json::json!("send_to_agent: missing or invalid session_id"),
+                                content: serde_json::json!("send_to_agent: local delivery needs a session_id \
+                                                            (to reach a mesh peer instead, pass node)"),
                             },
                         }).await;
                     });

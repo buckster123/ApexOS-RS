@@ -44,8 +44,19 @@ Grounding for the plan — several roadmap items are closer than the agents assu
   peer's `AGENTD_TOKEN`). Not mTLS, but a peer needs the token. The LAN bind (`AGENTD_BIND=0.0.0.0`)
   is safe *because* of the token (F036).
 - **a2a messaging** — `send_to_agent(node=…)` proxies to a peer's token-gated
-  `POST /api/sessions/{id}/message`. Now per-peer-session-routed + globally notified (#143). Currently
-  **fire-and-forget** (no return value).
+  `POST /api/sessions/{id}/message`. Per-peer-session-routed + globally notified (#143), and
+  **reply-session-continuous** (2026-07-15): the sender's supervisor auto-stamps `origin_session`
+  on the wire (system-stamped, like `from`; root 0 + spawn sessions excluded), the receiver's
+  prefix becomes `[from X — to reply: send_to_agent(node="X", session_id=N)]`, and the reply —
+  an ordinary explicit-id send — lands in the session that asked. The tool result carries
+  `landed_session` (the peer's real landing thread, from its response). Still **fire-and-forget**
+  ("sent" = delivered, not answered) — `mesh_agent_spawn` remains the blocking request/response
+  path. Wire-compatible with pre-continuity nodes in both directions (missing `origin_session` →
+  the classic `[from X]:` prefix). The field driver: the colony was routing around invisible
+  replies with workspace file-drops ("filed not messaged — send_to_agent session routing is
+  buggy per André", apex2, 2026-07-13). The wedge that *looked* like this bug — apex1's
+  session-35 inbound turns 400ing — was the separate session-persist interleave, fixed in its
+  own PR (see the CLAUDE.md persist-ordering gotcha).
 - **Embodiment** — `build_embodiment` (agentd) already computes this node's **live senses + the full
   tool registry** every 30s. Capability advertisement is mostly a matter of *exposing* this.
 - **Sub-agents** — `SpawnAgent` machinery exists with non-session-gated child ids — the basis for a

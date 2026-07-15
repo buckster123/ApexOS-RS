@@ -3047,21 +3047,32 @@ fn query_event_log_spec() -> ToolSpec {
 fn send_to_agent_spec() -> ToolSpec {
     ToolSpec {
         name:        "send_to_agent".into(),
-        description: "Send an asynchronous message to another agent session (fire-and-forget). \
-                      Without node: routes locally on this machine. \
-                      With node: proxies to a registered mesh peer. Omit session_id (or use 0) \
-                      and the peer lands your message in its own dedicated thread for this node \
-                      (kept out of its root/active chat) and notifies its operator — the normal \
-                      way to reach a peer. \
-                      Returns immediately — use agent_spawn if you need the result.".into(),
+        description: "Send an asynchronous message to another agent (fire-and-forget: 'sent' means \
+                      delivered, not answered — any reply arrives later as a new [from <node>] \
+                      message in one of YOUR sessions; use agent_spawn for a blocking result). \
+                      Without node: local delivery to another session on this machine \
+                      (session_id required). \
+                      With node: delivers to a registered mesh peer. Omit session_id (or 0) and it \
+                      lands in the peer's dedicated per-node thread for THIS node — its standing \
+                      conversation with you, NOT its root/session-0 system funnel and not its \
+                      operator's active chat — and its operator is notified. The result's \
+                      landed_session is that thread's id on the peer. Your asking session is \
+                      stamped on the wire automatically, so the peer knows where to aim its reply. \
+                      REPLYING: an inbound mesh message prefixed \
+                      '[from X — to reply: send_to_agent(node=\"X\", session_id=N)]' hands you the \
+                      exact call — use it and your answer lands in the conversation that asked. \
+                      Only use session_ids given to you (a reply prefix, a landed_session); never \
+                      guess one. (Mesh messages are session traffic, not memories — cerebro's \
+                      check_inbox is a different mechanism and will not show them.)".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "session_id": {
                     "type":        "integer",
-                    "description": "Target session ID. Omit (or 0) to land in the peer's dedicated \
-                                    per-node mesh thread (recommended); set a specific id only to \
-                                    target an existing session you know."
+                    "description": "Target session on the destination. Cross-node: omit (or 0) for \
+                                    the peer's per-node mesh thread (the default conversation with \
+                                    you), or pass the session_id from an inbound reply-prefix to \
+                                    answer into the session that asked. Local: required."
                 },
                 "message": {
                     "type":        "string",
@@ -3069,11 +3080,11 @@ fn send_to_agent_spec() -> ToolSpec {
                 },
                 "node": {
                     "type":        "string",
-                    "description": "Optional mesh node_id (hostname) to route to a peer node. \
-                                   Omit for local routing."
+                    "description": "Optional mesh node_id (a hostname from list_mesh_peers) to \
+                                   route to a peer node. Omit for local routing."
                 }
             },
-            "required": ["session_id", "message"]
+            "required": ["message"]
         }),
     }
 }
