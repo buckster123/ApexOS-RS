@@ -2561,12 +2561,47 @@ fn fmt_uptime(s: u64) -> String {
     if d > 0 { format!("{d}d {h}h {m}m") } else if h > 0 { format!("{h}h {m}m") } else { format!("{m}m") }
 }
 
-/// A camera is reachable if there's a V4L2 node (USB/laptop) or a Pi CSI capture
-/// utility on PATH — mirrors camera_capture's own backend detection.
+/// A camera is reachable when the platform's own enumeration says so. The old
+/// probe was wrong twice over on a Pi: `rpicam-jpeg` is on PATH on EVERY Pi
+/// (install.sh ships rpicam-apps), and a Pi 5 exposes ISP/codec `/dev/video*`
+/// nodes with no camera attached — so a camera-less desktop Pi reported
+/// `camera ✓` in its embodiment (apex-4's first field day; she had to store a
+/// correction in Cerebro so she wouldn't act on a false capability — the
+/// embodiment must never need correcting).
+///
+/// Pi: ask libcamera itself, ONCE (cached — a CSI module can only be reseated
+/// powered-off, so presence is boot-stable; next-boot ✗→✓ is exactly the EDK
+/// request-hardware story, and the embodiment loop must not spawn a process
+/// every 30s refresh). Non-Pi keeps the live `/dev/video*` check, so a
+/// hot-plugged USB webcam still flips ✓ without a restart.
 fn has_camera() -> bool {
-    let v4l2 = std::fs::read_dir("/dev").map(|rd| rd.flatten()
-        .any(|e| e.file_name().to_string_lossy().starts_with("video"))).unwrap_or(false);
-    v4l2 || which_on_path("rpicam-jpeg") || which_on_path("libcamera-jpeg")
+    if is_raspberry_pi() {
+        static PI_CAM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        return *PI_CAM.get_or_init(|| {
+            for bin in ["rpicam-hello", "rpicam-jpeg", "libcamera-hello", "libcamera-jpeg"] {
+                if !which_on_path(bin) {
+                    continue;
+                }
+                if let Ok(out) = std::process::Command::new(bin).arg("--list-cameras").output() {
+                    let text = format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                    // Enumeration prints an indexed list ("0 : imx708 [4608x2592]…")
+                    // per detected camera — CSI and libcamera-visible UVC alike —
+                    // and "No cameras available!" when the node has none.
+                    return text.lines().any(|l| {
+                        let t = l.trim_start();
+                        t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains(" : ")
+                    });
+                }
+            }
+            false
+        });
+    }
+    std::fs::read_dir("/dev").map(|rd| rd.flatten()
+        .any(|e| e.file_name().to_string_lossy().starts_with("video"))).unwrap_or(false)
 }
 
 fn is_raspberry_pi() -> bool {
