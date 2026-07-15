@@ -41,6 +41,12 @@ ANTHROPIC_API_KEY=sk-... ./venv/bin/python run.py --md
     re-snapshot the prose side in the same commit.)
   - `procedure.*` — a `store_procedure` skill (command-heavy → compresses least).
   - `evolution.*` — a `propose_evolution` payload (all rationale → compresses most).
+  - `*.dense.md` — the **PAC-2 Dense** ports (The-PAC spec v0.1.1): same pinned prose
+    sources, S-expression forms, `register: none` (the register's cost/benefit is the
+    behavior bench's question, §10 H6). Authored via the §8 port rite — fact ledger →
+    probe → emit → **anneal** (pac2lint-clean + a fresh-model expansion test per
+    artifact: a subagent given only the artifact decodes it back to prose; every
+    ledger fact must be recovered, nothing invented).
 - `RESULTS.md` — committed snapshot of the numbers (4 tokenizers, 3 families).
 
 ## Why three samples
