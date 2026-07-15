@@ -50,9 +50,21 @@ impl SessionStore {
                 .and_then(|s| s.parse().ok()) { Some(n) => n, None => continue };
 
             let text = match fs::read_to_string(&path).await { Ok(t) => t, Err(_) => continue };
-            let messages: Vec<Message> = text.lines()
+            let mut messages: Vec<Message> = text.lines()
                 .filter_map(|line| serde_json::from_str(line).ok())
                 .collect();
+            // Self-heal: a file written under the old racing persist path (or
+            // truncated by a crash mid-batch) can reload in an order the provider
+            // API rejects — which permanently wedges the session (every turn
+            // 400s before the model runs). Repair restores API validity with
+            // honest markers; the on-disk file stays as-written (append-only
+            // doctrine — replay keeps the original record).
+            if apexos_core::history::repair_history(&mut messages) {
+                eprintln!(
+                    "[session] repaired {} ({} messages) — restored tool pairing/ordering from a corrupted file",
+                    id, messages.len()
+                );
+            }
             if !messages.is_empty() {
                 eprintln!("[session] restored {} ({} messages)", id, messages.len());
                 result.insert(SessionId(id), messages);

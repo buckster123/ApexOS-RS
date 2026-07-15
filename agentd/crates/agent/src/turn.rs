@@ -288,6 +288,18 @@ pub async fn run_turn(
         } // permit dropped here — tool execution + approval wait run unthrottled
 
         // Commit full assistant turn — text + thinking + tool_use all together.
+        // An empty stream (the model closed a tool round with no blocks at all)
+        // is committed as an honest marker instead of `content: []` — an empty
+        // message says nothing and is an API-validity landmine once the session
+        // reloads from disk. Mirrors the "⊘ turn cancelled" marker idiom.
+        // (Tool rounds can't be empty: a pending tool implies a tool_use block.)
+        if assistant_blocks.is_empty() && pending_tools.is_empty() {
+            history.push(Message::Assistant {
+                content: vec![ContentBlock::Text { text: "⊘ (empty reply)".into() }],
+            });
+            bus.emit(Event::TurnComplete { session }).await;
+            return Ok(history);
+        }
         history.push(Message::Assistant { content: assistant_blocks });
 
         if pending_tools.is_empty() {

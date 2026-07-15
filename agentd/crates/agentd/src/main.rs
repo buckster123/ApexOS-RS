@@ -1652,8 +1652,11 @@ fn spawn_agent_router(
                         }
                     };
                     if let Some(m) = marker {
-                        let store = Arc::clone(&session_store);
-                        tokio::spawn(async move { store.append(session, &m).await; });
+                        // Awaited inline: session-file appends must land in
+                        // conversation order (see the persist-ordering gotcha) —
+                        // a detached spawn here can interleave with the next
+                        // prompt's user-message append.
+                        session_store.append(session, &m).await;
                     }
                 }
 
@@ -1756,11 +1759,15 @@ fn spawn_agent_router(
                 let snapshot_len = snapshot.len();
                 drop(hist);
 
-                // Persist user message immediately.
-                {
-                    let store = Arc::clone(&session_store);
-                    tokio::spawn(async move { store.append(session, &user_msg).await; });
-                }
+                // Persist the user message, awaited inline BEFORE the turn spawns.
+                // This append used to be a detached spawn, which raced the
+                // PREVIOUS turn's delta persist for the same session: a queued
+                // prompt admitted at turn_done could land its user line between
+                // that turn's tool_use and tool_result lines. Harmless in memory
+                // (the map held the true order), but the JSONL reloads in file
+                // order — one restart later the split pair 400s every turn and
+                // the session is wedged (apex1 session 35, found 2026-07-15).
+                session_store.append(session, &user_msg).await;
 
                 let tools  = gather_tools(&tool_reg).await;
                 let gen    = next_turn_gen.fetch_add(1, Ordering::SeqCst);
@@ -2144,13 +2151,16 @@ async fn root_turn(
 
     match run_turn(session, history, bus.clone(), bcast, tools, engine).await {
         Ok(updated) => {
-            // Persist the assistant messages added during this turn.
+            // Persist the turn's delta, awaited inline so it is fully on disk
+            // before this task ends — the slot guard's Drop is what admits the
+            // next queued prompt, whose user-message append must land AFTER
+            // these lines. (A detached spawn here is the other half of the
+            // JSONL-interleave race; TurnComplete already went out in run_turn,
+            // so nothing user-visible waits on these writes.)
             if updated.len() > snapshot_len {
-                let delta: Vec<Message> = updated[snapshot_len..].to_vec();
-                let store = session_store.clone();
-                tokio::spawn(async move {
-                    for msg in &delta { store.append(session, msg).await; }
-                });
+                for msg in &updated[snapshot_len..] {
+                    session_store.append(session, msg).await;
+                }
             }
             histories.lock().await.insert(session, updated);
         }
