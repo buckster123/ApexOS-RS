@@ -264,6 +264,8 @@ falls back to 2D when no GL context exists.
 **`apexos-protocol` — the thin wire-types crate** ✅
 A lean, serde-only crate of the wire `Event`/message types, shared by the daemon and every client,
 depended on without dragging in the whole daemon. The model for every clean seam in the repo.
+`no_std`-capable (`default = ["std"]`, `--features alloc` for bare metal) — first external consumer:
+[ApexOS-RV](https://github.com/buckster123/ApexOS-RV), a `no_std` RISC-V kernel speaking this wire over UART.
 · [`apexos-protocol/`](apexos-protocol/) · **Lift:** `cargo add`-grade. This is what "factored for theft" looks like in code.
 
 **`apexos-confine` — the FS-sandbox algorithm** ✅

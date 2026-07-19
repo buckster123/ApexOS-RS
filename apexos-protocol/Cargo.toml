@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "Shared wire-protocol types (Event enum + WS/a2a contract) for the ApexOS-RS workspace. Lean: serde only."
 
+[features]
+default = ["std"]
+std     = ["serde/std", "serde_json/std"]
+alloc   = ["serde/alloc", "serde_json/alloc"]
+
 [dependencies]
-serde      = { workspace = true }
-serde_json = { workspace = true }
+# Concretized (was `{ workspace = true }`): the no_std gate needs default-features
+# off, which a workspace-inherited dependency cannot express at the use site.
+serde      = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false }
