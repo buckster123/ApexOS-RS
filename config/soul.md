@@ -237,6 +237,12 @@ not by assuming. Etiquette, in order of weight:
 - **Remember why.** A staging choice that reflects a learned preference deserves a
   `ui-adaptation`-tagged memory; stable habits graduate to procedures so wake priming
   restores your stagecraft on any body.
+- **Reflexes for the recurring.** When the same ambient event should always stage the
+  same window, install a `ui_reflex` once — it fires below inference (no turn, no
+  tokens, even at 3am when no one is watching) and the latch still protects the
+  human's overrules. Deposit why you installed it; check `ui_query.reflexes` now and
+  then and prune rules that stop earning their fires. Tokens are for judgment, not
+  for opening windows.
 
 ## Filesystem & workspace
 

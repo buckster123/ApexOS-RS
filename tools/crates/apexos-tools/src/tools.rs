@@ -184,7 +184,7 @@ pub fn list() -> Value {
         },
         {
             "name": "ui_query",
-            "description": "SEE the shell's current structure — the adaptive-UI eyes. Returns JSON: shell_mode (desktop|focus), persona, windows (app, title, minimized, maximized, focused), agent_opened (windows you created), latched (apps the user closed after you opened them — do NOT re-open these this session), turn_mutations vs mutation_cap (at most ~4 staging mutations apply per turn — beyond that they drop silently until your next turn), and the valid apps catalog. Use it before staging (what's already up?) and after (did it land, or was I overruled?). For pixels use screenshot_mirror. Only meaningful on a node with a display; returns a note when headless.",
+            "description": "SEE the shell's current structure — the adaptive-UI eyes. Returns JSON: shell_mode (desktop|focus), persona, windows (app, title, minimized, maximized, focused), agent_opened (windows you created), latched (apps the user closed after you opened them — do NOT re-open these this session), turn_mutations vs mutation_cap (at most ~4 staging mutations apply per turn — beyond that they drop silently until your next turn), reflexes (installed ui_reflex rules + per-rule fire counts), and the valid apps catalog. Use it before staging (what's already up?) and after (did it land, or was I overruled?). For pixels use screenshot_mirror. Only meaningful on a node with a display; returns a note when headless.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -208,6 +208,20 @@ pub fn list() -> Value {
                     "persona": { "type": "string", "description": "Persona slug: apex | mom | ubuntu-dad | windows-dad | tech-kid | aurum" }
                 },
                 "required": ["persona"]
+            }
+        },
+        {
+            "name": "ui_reflex",
+            "description": format!("Install a REFLEX — an event→action rule the shell executes by itself, below inference: zero tokens, zero latency, fires even at 3am with no turn running. When a recurring ambient event should always stage the same window, install a reflex once instead of spending turns on it (tokens are for judgment, not for opening windows). Triggers: {}. Actions: open | focus | close, on one app (same catalog as ui_open). Rails: one reflex per (trigger, app) — reinstalling updates it; at most {} total; a fired reflex cools down 30s so bursts don't strobe; the human-wins latch applies (a latched app's reflex stays silent — the overrule stands). `remove: true` uninstalls the (trigger, app) rule. The live table + per-reflex fire counts ride ui_query's `reflexes` — check it to see what's installed and what's actually firing; prune what stops earning its fires. Installing counts as a staging mutation (the ~4/turn rail); the FIRING never does. Deposit a `ui-adaptation` memory for WHY you installed one — a reflex is a learned preference.", UI_REFLEX_TRIGGERS.join(", "), UI_REFLEX_MAX),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "on":     { "type": "string", "description": "Trigger event: wake_triggered | mesh_message | mesh_node_status | goal_state_changed | council_started | evolution_proposed | error" },
+                    "do":     { "type": "string", "description": "Action: open | focus | close (required unless remove)" },
+                    "app":    { "type": "string", "description": "Target app — one of the ui_open catalog slugs" },
+                    "remove": { "type": "boolean", "description": "true = uninstall the (on, app) reflex instead of installing" }
+                },
+                "required": ["on", "app"]
             }
         },
         {
@@ -583,6 +597,7 @@ pub fn call(name: &str, args: &Value) -> Value {
         "ui_focus" => ui_focus(args),
         "ui_arrange" => ui_arrange(args),
         "ui_theme" => ui_theme(args),
+        "ui_reflex" => ui_reflex(args),
         "ui_query" => ui_query(),
         "camera_capture" => camera_capture(args),
         "eject_media" => eject_media(args),
@@ -3033,6 +3048,59 @@ fn ui_theme(args: &Value) -> Value {
     }))
 }
 
+/// The `ui_reflex` trigger vocabulary (Phase C). Mirrors ui-slint's
+/// REFLEX_TRIGGERS — every entry is a GLOBAL event type the shell receives on
+/// its own WS regardless of which session a socket follows (that's the point:
+/// a root-session 3am event still fires the reflex UI-side). Closed enum.
+const UI_REFLEX_TRIGGERS: &[&str] = &[
+    "wake_triggered", "mesh_message", "mesh_node_status", "goal_state_changed",
+    "council_started", "evolution_proposed", "error",
+];
+/// The reflex action vocabulary. Mirrors ui-slint's REFLEX_ACTIONS.
+const UI_REFLEX_ACTIONS: &[&str] = &["open", "focus", "close"];
+/// Most reflexes the shell holds at once. Mirrors ui-slint's REFLEX_MAX.
+const UI_REFLEX_MAX: usize = 8;
+
+fn ui_reflex(args: &Value) -> Value {
+    let on = match args["on"].as_str().map(str::trim) {
+        Some(t) if UI_REFLEX_TRIGGERS.contains(&t) => t,
+        Some(t) => {
+            return tool_error(format!(
+                "unknown trigger '{}' — use one of: {}", t, UI_REFLEX_TRIGGERS.join(", ")
+            ))
+        }
+        None => {
+            return tool_error(format!(
+                "missing `on` — use one of: {}", UI_REFLEX_TRIGGERS.join(", ")
+            ))
+        }
+    };
+    let app = match ui_app_arg(args) { Ok(a) => a, Err(e) => return e };
+    if args["remove"].as_bool().unwrap_or(false) {
+        return tool_ok(json!({
+            "ok": true, "action": "reflex_remove", "on": on, "app": app,
+            "note": "Dispatched to the shell — the (trigger, app) reflex is uninstalled. ui_query's `reflexes` confirms.",
+        }));
+    }
+    let action = match args["do"].as_str().map(str::trim) {
+        Some(a) if UI_REFLEX_ACTIONS.contains(&a) => a,
+        Some(a) => {
+            return tool_error(format!(
+                "unknown action '{}' — use one of: {}", a, UI_REFLEX_ACTIONS.join(", ")
+            ))
+        }
+        None => {
+            return tool_error(format!(
+                "missing `do` — use one of: {}", UI_REFLEX_ACTIONS.join(", ")
+            ))
+        }
+    };
+    tool_ok(json!({
+        "ok": true, "action": "reflex_install", "on": on, "do": action, "app": app,
+        "note": format!("Dispatched to the shell. From now on `{on}` → {action} {app} directly, below inference — no turn, no tokens, fires even when no session is watching. One reflex per (trigger, app) — reinstalling updates it; at most {UI_REFLEX_MAX} total; a fired reflex cools down 30s; the human-wins latch applies (a latched app's reflex stays silent). ui_query's `reflexes` shows the table + fire counts. Worth a `ui-adaptation` memory: a reflex is a learned preference — record why."),
+    }))
+}
+
 fn ui_query() -> Value {
     match ui_shell_state() {
         Some(state) => tool_ok(state),
@@ -3529,6 +3597,50 @@ mod tests {
             );
         }
         assert_eq!(ui_theme(&json!({}))["isError"], json!(true));
+    }
+
+    #[test]
+    fn ui_reflex_validates_closed_vocabularies() {
+        // Mirror-locked against ui-slint's REFLEX_TRIGGERS/REFLEX_ACTIONS — a
+        // drift means this tool accepts a trigger the shell never fires.
+        // Change BOTH crates together, and only additively.
+        assert_eq!(
+            UI_REFLEX_TRIGGERS,
+            &[
+                "wake_triggered", "mesh_message", "mesh_node_status",
+                "goal_state_changed", "council_started", "evolution_proposed",
+                "error",
+            ]
+        );
+        assert_eq!(UI_REFLEX_ACTIONS, &["open", "focus", "close"]);
+        // Every (trigger, action) pair installs; the echo carries the rule.
+        for on in UI_REFLEX_TRIGGERS {
+            let out = ui_reflex(&json!({ "on": on, "do": "open", "app": "mesh" }));
+            let body: Value =
+                serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["action"], "reflex_install");
+            assert_eq!(body["on"], *on);
+        }
+        for act in UI_REFLEX_ACTIONS {
+            let out = ui_reflex(&json!({ "on": "error", "do": act, "app": "event-log" }));
+            assert_ne!(out["isError"], json!(true), "action {act} must install");
+        }
+        // Unknown trigger / action / app all reject loudly (teaching errors).
+        for bad in [
+            json!({ "on": "sensor_reading", "do": "open", "app": "sensor" }),
+            json!({ "on": "error", "do": "arrange", "app": "mesh" }),
+            json!({ "on": "error", "do": "open", "app": "nope" }),
+            json!({ "do": "open", "app": "mesh" }),
+            json!({ "on": "error", "app": "mesh" }), // missing `do` on install
+        ] {
+            assert_eq!(ui_reflex(&bad)["isError"], json!(true), "must reject {bad}");
+        }
+        // Remove needs no `do` and echoes the (trigger, app) key.
+        let out = ui_reflex(&json!({ "on": "error", "app": "event-log", "remove": true }));
+        let body: Value =
+            serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["action"], "reflex_remove");
+        assert_eq!(body["app"], "event-log");
     }
 }
 
