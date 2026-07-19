@@ -2,7 +2,7 @@
 
 > The shell stops being static chrome the human arranges and becomes something the
 > agent **stages, looks at, and is corrected through** — journaled and reversible like
-> every other faculty. Phases A1–A3 + B shipped; this doc is the durable contract.
+> every other faculty. Phases A1–A3 + B + C shipped; this doc is the durable contract.
 > (Graduated from the grounded plan v0.2, 2026-07-06; verified against live code at ship time.)
 
 The one-sentence version: **the agent speaks a small closed vocabulary of staging verbs
@@ -44,6 +44,7 @@ Design rules (violating any of these is a regression):
 | `ui_arrange` | `layout`, `apps?` | Stage a preset topology (A2, below). One toast per arrange |
 | `ui_theme` | `persona` | Switch the persona skin via the `apply_persona` chokepoint (A2, below) |
 | `ui_query` | — | GET the shell's `/state` → structure JSON (below). Graceful "no display" note on headless |
+| `ui_reflex` | `on`, `do`, `app`, `remove?` | Install (or `remove: true` uninstall) an event→action rule the shell runs below inference (C, below) |
 
 The app catalog = the 20 `AppKind` slugs: `chat system sensor sessions settings terminal
 council event-log mesh inference audio-editor sonus notes face sketchpad web calculator
@@ -177,12 +178,45 @@ persistence** (ui-slint):
 
 ## 6. Reflexes (Phase C) — below-inference adaptation
 
-`ui_reflex {on, do, app}`: the agent installs event→action rules the UI executes
-directly off its own event stream — zero tokens, zero latency ("sensor_alert → open
-sensor"). A lookup table in `dispatch_event`, persisted UI-locally; installs deposit
-rationale memories; latches apply. Also the answer to session-scoping: `tool_requested`
-is session-scoped, so a root-session 3am alert can't reach a UI socket following another
-session — reflexes fire UI-side off *global* events, which is exactly the alert case.
+`ui_reflex {on, do, app}` (+ `remove: true`): the agent installs event→action rules
+the UI executes directly off its own event stream — zero tokens, zero latency. Also
+the answer to session-scoping: the conversation stream is session-scoped, so a
+root-session 3am event can't reach a UI socket following another session — reflexes
+fire UI-side off *global* events, which is exactly the ambient case.
+
+- **Trigger vocabulary** (closed, mirror-locked both crates — tools
+  `UI_REFLEX_TRIGGERS` ↔ ui-slint `REFLEX_TRIGGERS`; every entry is a GLOBAL event
+  type): `wake_triggered · mesh_message · mesh_node_status · goal_state_changed ·
+  council_started · evolution_proposed · error`. Actions: `open | focus | close`
+  (`open` is latch-aware via the same `agent_open_window` path; `close` carries
+  agent-close semantics — no latch — and respects the drag guard). A `sensor_alert`
+  trigger awaits a global alert event from agentd (the raw `sensor_reading` stream
+  fires every few seconds — threshold judgment stays in agentd's classifier, not
+  the shell).
+- **Rails**: one rule per `(on, app)` key — reinstalling updates the action and
+  resets the ledger; at most `REFLEX_MAX` (8) rules; a fired rule cools down
+  `REFLEX_COOLDOWN_SECS` (30s) so event bursts (goal steps, mesh chatter) can't
+  strobe the shell — the cooldown is consumed per *attempt*, so a latch-suppressed
+  open doesn't retry on every event of a burst. **Installs spend a turn-mutation
+  slot** (they're staging verbs in a turn, the A3 rail applies); **fires never do**
+  (they're ambient, like the reader auto-reveal).
+- **One fire chokepoint**: `dispatch_event` checks the trigger set at the top,
+  before any dispatch arm (string-handled and typed events alike, so an arm's early
+  `return` can't skip it) → `reflex_fire` on the Slint thread.
+- **Visible + attributed**: the table + per-rule `fires` ledger ride `/state`
+  (`reflexes`) so the agent sees what's installed and what's earning its keep; every
+  fire toasts ("⚡ reflex opened Mesh (on mesh_message)"). `fires` counts actual
+  applies, not attempts.
+- **Persisted UI-locally**: `reflexes.json` beside the persona/geometry files
+  (immediate save — installs and fires are human-scale rare). Survives restarts,
+  ledger included; the runtime cooldown stamp does not persist.
+- **Human-wins recovery**: a reflex-opened window is agent-marked, so a user close
+  latches that app — the reflex then stays silent for the session (the overrule
+  stands, mechanically). Removing the rule for good is the agent's job (`remove:
+  true`), prompted by the latch showing up in `ui_query`.
+- **Deposit discipline**: installs deserve a `ui-adaptation` memory (why this
+  event→this window) — soul-seeded ("Reflexes for the recurring", config/soul.md);
+  live nodes adopt via their own `propose_evolution`.
 
 ## 7. Tier B — Bevy, evidence-gated
 
@@ -200,8 +234,8 @@ real value. Details + honest cost note: the plan archive
 | A2 | `ui_arrange` presets + layout fn; `ui_theme` via `apply_persona` | **shipped** (#256, field-confirmed) |
 | A3 | Etiquette pass: rate rail (4/turn, `/state`-visible), drag guard (`WmState.dragging-id`), occipital latch fold, seed-soul etiquette (live nodes via `propose_evolution`) | **shipped** |
 | B | Loop-6 memory: deposit discipline + procedure promotion (seeded in the soul's "Your stage", A3), geometry persistence (per-kind shape file, clamp-on-restore, boot-seed area wait — §5) | **shipped** (E2E-verified: restore, clamp, arrange→write, restart continuity) |
-| C | `ui_reflex` family | next |
-| D | Colony field cycle (apex1 kiosk / apex-3 desktop), dream-consolidation check | — |
+| C | `ui_reflex` family: 7 global triggers × open/focus/close, (on,app)-keyed table of 8, 30s cooldown, fires ledger on `/state`, soul "Reflexes for the recurring" (§6) | **shipped** (E2E-verified: install→persist→fire→ledger, cooldown swallows bursts, restart-proof) |
+| D | Colony field cycle (apex1 kiosk / apex-3 desktop), dream-consolidation check | next |
 | E | Decision gate: Bevy Tier B — go/no-go on Tier-A evidence | — |
 | F | Fast-model field test (APEX-on-Cerebras via the OAI-compat backend) | independent |
 
@@ -214,6 +248,7 @@ real value. Details + honest cost note: the plan archive
 | Latch bits | `u32` masks | test asserts catalog ≤ 32 |
 | Layout presets | tools.rs `UI_LAYOUTS` ↔ ui-slint `ARRANGE_LAYOUTS` (+ `UI_ARRANGE_MAX` ↔ `ARRANGE_MAX`) | tests each side; `arrange_rects` rejects unknown layouts regardless |
 | Persona slugs | tools.rs `UI_PERSONAS` ↔ ui-slint `persona_from_slug` | tool test; UI ignores unknowns |
+| Reflex vocab | tools.rs `UI_REFLEX_TRIGGERS`/`UI_REFLEX_ACTIONS`/`UI_REFLEX_MAX` ↔ ui-slint `REFLEX_TRIGGERS`/`REFLEX_ACTIONS`/`REFLEX_MAX` | literal-locked test EACH side (change both crates together, additively; a trigger must be a GLOBAL event type) |
 | Desktop area | AppWindow `desktop-area-w/h` out-props ↔ the window layer's `area-w/h` clamps | both derive from the SAME root props (`title-bar-h`, `tb-zone`) — keep new chrome metrics on root |
 
 ## 10. Design principles

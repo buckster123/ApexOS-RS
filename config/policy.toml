@@ -48,6 +48,9 @@ mode = "suggest"
 # conversational yes is the confirmation, and a skin flip is one tap to revert.
 "ui_arrange"         = "allow"
 "ui_theme"           = "allow"
+# C: reflexes — agent-installed event→action rules the shell runs below
+# inference (bounded: 8 max, 30s cooldown, latch applies; fires are ambient).
+"ui_reflex"          = "allow"
 # Camera eyes: read-only "look", same vision flow as screenshot_mirror. Allowed so
 # APEX can see fluidly; privacy-conscious operators may set this to "ask".
 "camera_capture"     = "allow"
