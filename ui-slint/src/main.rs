@@ -852,6 +852,205 @@ fn geom_flush_if_dirty() {
     }
 }
 
+// ── Adaptive UI Phase C — reflexes (docs/adaptive-ui.md §6) ──────────────────
+// Agent-installed event→action rules the shell executes directly off its own
+// event stream — below inference: zero tokens, zero latency, and they fire off
+// GLOBAL events, so a root-session 3am event reaches the shell even when the
+// socket follows another session. Installs/removes arrive as `ui_reflex` tool
+// events (they spend a turn-mutation slot like any staging verb); FIRES are
+// ambient and never spend one. The human-wins latch applies to `open` fires.
+
+/// Trigger vocabulary. Mirrors apexos-tools `UI_REFLEX_TRIGGERS` — every entry
+/// is a global event type this file's `dispatch_event` receives.
+const REFLEX_TRIGGERS: &[&str] = &[
+    "wake_triggered", "mesh_message", "mesh_node_status", "goal_state_changed",
+    "council_started", "evolution_proposed", "error",
+];
+/// Action vocabulary. Mirrors apexos-tools `UI_REFLEX_ACTIONS`.
+const REFLEX_ACTIONS: &[&str] = &["open", "focus", "close"];
+/// Most reflexes held at once. Mirrors apexos-tools `UI_REFLEX_MAX`.
+const REFLEX_MAX: usize = 8;
+/// A fired reflex cools down this long — event bursts (goal steps, mesh
+/// chatter) must not strobe the shell.
+const REFLEX_COOLDOWN_SECS: u64 = 30;
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct ReflexRec {
+    on: String,
+    #[serde(rename = "do")]
+    action: String,
+    app: String,
+    #[serde(default)]
+    fires: u32,
+    /// Cooldown stamp — runtime-only, never persisted.
+    #[serde(skip)]
+    last_fired: Option<std::time::Instant>,
+}
+
+thread_local! {
+    static REFLEXES: RefCell<Vec<ReflexRec>> = const { RefCell::new(Vec::new()) };
+}
+
+fn reflexes_config_path() -> std::path::PathBuf {
+    persona_config_path().with_file_name("reflexes.json")
+}
+
+fn reflex_load() {
+    let table: Vec<ReflexRec> = std::fs::read_to_string(reflexes_config_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    REFLEXES.with(|r| *r.borrow_mut() = table);
+}
+
+/// Immediate save — installs and fires are human-scale rare (no debounce needed).
+fn reflex_save() {
+    let json = REFLEXES.with(|r| serde_json::to_string(&*r.borrow()).unwrap_or_default());
+    let path = reflexes_config_path();
+    let write = || -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, &path)
+    };
+    if let Err(e) = write() {
+        eprintln!("[ui-slint] reflex persist failed: {e}");
+    }
+}
+
+/// Install (or update) a rule. Keyed by (on, app) — reinstalling updates the
+/// action and resets the fire ledger. Returns false only when the table is
+/// full and the key is new. Pure; unit-tested.
+fn reflex_table_install(
+    table: &mut Vec<ReflexRec>,
+    on: &str,
+    action: &str,
+    app: &str,
+    max: usize,
+) -> bool {
+    if let Some(r) = table.iter_mut().find(|r| r.on == on && r.app == app) {
+        r.action = action.to_string();
+        r.fires = 0;
+        r.last_fired = None;
+        return true;
+    }
+    if table.len() >= max {
+        return false;
+    }
+    table.push(ReflexRec {
+        on: on.to_string(),
+        action: action.to_string(),
+        app: app.to_string(),
+        fires: 0,
+        last_fired: None,
+    });
+    true
+}
+
+/// Remove the (on, app) rule. Returns whether one was removed. Pure; unit-tested.
+fn reflex_table_remove(table: &mut Vec<ReflexRec>, on: &str, app: &str) -> bool {
+    let before = table.len();
+    table.retain(|r| !(r.on == on && r.app == app));
+    table.len() != before
+}
+
+/// Apply a `ui_reflex` install/remove verb (the UI is the last validator —
+/// unknown vocab is ignored, not an error). Slint thread only.
+fn apply_ui_reflex(_ui: &AppWindow, args: &serde_json::Value) {
+    let on = args["on"].as_str().unwrap_or("");
+    let app = args["app"].as_str().unwrap_or("");
+    if !REFLEX_TRIGGERS.contains(&on) || kind_from_slug(app).is_none() {
+        return;
+    }
+    if args["remove"].as_bool().unwrap_or(false) {
+        let removed = REFLEXES.with(|r| reflex_table_remove(&mut r.borrow_mut(), on, app));
+        if removed {
+            reflex_save();
+            notify(ToastKind::Info, format!("⚡ APEX removed a reflex: {on} → {app}"));
+        }
+        return;
+    }
+    let action = args["do"].as_str().unwrap_or("");
+    if !REFLEX_ACTIONS.contains(&action) {
+        return;
+    }
+    let installed =
+        REFLEXES.with(|r| reflex_table_install(&mut r.borrow_mut(), on, action, app, REFLEX_MAX));
+    if installed {
+        reflex_save();
+        notify(
+            ToastKind::Success,
+            format!("⚡ APEX installed a reflex: {on} → {action} {app}"),
+        );
+    }
+}
+
+/// Fire the reflexes registered for `trigger` — the below-inference path.
+/// Cooldown is consumed per attempt (a latch-suppressed open doesn't retry on
+/// every event of a burst); `fires` counts only actual applies. Slint thread.
+fn reflex_fire(ui: &AppWindow, trigger: &str) {
+    let Some(model) = WINDOWS.with(|w| w.borrow().clone()) else { return };
+    // Collect due rules first — never hold the table borrow across apply calls
+    // (they notify → touch other thread-local models).
+    let due: Vec<(String, String)> = REFLEXES.with(|r| {
+        let mut tbl = r.borrow_mut();
+        let mut due = Vec::new();
+        for rec in tbl.iter_mut().filter(|r| r.on == trigger) {
+            let cooled = rec
+                .last_fired
+                .is_none_or(|t| t.elapsed().as_secs() >= REFLEX_COOLDOWN_SECS);
+            if cooled {
+                rec.last_fired = Some(std::time::Instant::now());
+                due.push((rec.action.clone(), rec.app.clone()));
+            }
+        }
+        due
+    });
+    let mut applied: Vec<(String, String)> = Vec::new();
+    for (action, app) in due {
+        let Some(kind) = kind_from_slug(&app) else { continue };
+        let did = match action.as_str() {
+            // Latch-aware, no built-in toast — the reflex attribution below
+            // names the trigger instead.
+            "open" => agent_open_window(ui, &model, kind, false),
+            "focus" | "close" => {
+                let existed = wm_index_by_kind(&model, kind).is_some();
+                apply_ui_verb(ui, if action == "focus" { "ui_focus" } else { "ui_close" }, &app);
+                existed
+            }
+            _ => false,
+        };
+        if did {
+            let verb = match action.as_str() {
+                "open" => "opened",
+                "focus" => "focused",
+                _ => "closed",
+            };
+            notify(
+                ToastKind::Info,
+                format!("⚡ reflex {verb} {} (on {trigger})", kind_title(kind)),
+            );
+            applied.push((action, app));
+        }
+    }
+    if !applied.is_empty() {
+        REFLEXES.with(|r| {
+            let mut tbl = r.borrow_mut();
+            for (action, app) in &applied {
+                if let Some(rec) = tbl
+                    .iter_mut()
+                    .find(|r| r.on == trigger && &r.app == app && &r.action == action)
+                {
+                    rec.fires += 1;
+                }
+            }
+        });
+        reflex_save();
+    }
+}
+
 /// Boot seed (Phase B): launch the seed windows once the desktop area is LIVE,
 /// so remembered shapes clamp against the real display. Re-arms itself every
 /// 50ms while the area still reads dead (pre-first-configure); after ~2s gives
@@ -2739,6 +2938,76 @@ mod tests {
     }
 
     #[test]
+    fn reflex_table_install_updates_caps_and_removes() {
+        use super::{reflex_table_install, reflex_table_remove, ReflexRec, REFLEX_MAX};
+        let mut t: Vec<ReflexRec> = Vec::new();
+        assert!(reflex_table_install(&mut t, "error", "open", "event-log", REFLEX_MAX));
+        assert!(reflex_table_install(&mut t, "mesh_message", "open", "mesh", REFLEX_MAX));
+        assert_eq!(t.len(), 2);
+        // Same (on, app) updates in place — action swaps, ledger resets, no new row.
+        t[0].fires = 5;
+        assert!(reflex_table_install(&mut t, "error", "focus", "event-log", REFLEX_MAX));
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0].action, "focus");
+        assert_eq!(t[0].fires, 0);
+        // The cap rejects only NEW keys.
+        for i in 0..REFLEX_MAX {
+            reflex_table_install(&mut t, "wake_triggered", "open", &format!("app{i}"), REFLEX_MAX);
+        }
+        assert_eq!(t.len(), REFLEX_MAX);
+        assert!(!reflex_table_install(&mut t, "wake_triggered", "open", "one-more", REFLEX_MAX));
+        assert!(reflex_table_install(&mut t, "error", "close", "event-log", REFLEX_MAX)); // update still fine
+        // Remove is keyed the same way.
+        assert!(reflex_table_remove(&mut t, "mesh_message", "mesh"));
+        assert!(!reflex_table_remove(&mut t, "mesh_message", "mesh"));
+        assert_eq!(t.len(), REFLEX_MAX - 1);
+    }
+
+    #[test]
+    fn reflex_rec_serde_uses_do_and_skips_runtime_state() {
+        use super::ReflexRec;
+        let rec = ReflexRec {
+            on: "mesh_message".into(),
+            action: "open".into(),
+            app: "mesh".into(),
+            fires: 3,
+            last_fired: Some(std::time::Instant::now()),
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        // The wire/file field is `do` (the tool arg name), and the cooldown
+        // stamp never persists.
+        assert!(json.contains("\"do\":\"open\""));
+        assert!(!json.contains("last_fired"));
+        let back: ReflexRec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.action, "open");
+        assert_eq!(back.fires, 3);
+        assert!(back.last_fired.is_none());
+        // A hand-trimmed file without `fires` still loads.
+        let old: ReflexRec = serde_json::from_str(
+            r#"{"on":"error","do":"open","app":"event-log"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.fires, 0);
+    }
+
+    #[test]
+    fn reflex_triggers_are_the_locked_global_set() {
+        use super::{REFLEX_ACTIONS, REFLEX_TRIGGERS};
+        // Mirrors apexos-tools UI_REFLEX_TRIGGERS/UI_REFLEX_ACTIONS — a drift
+        // means the tool accepts a trigger the shell never fires (or vice
+        // versa). Change BOTH crates together, and only additively.
+        assert_eq!(
+            REFLEX_TRIGGERS,
+            &[
+                "wake_triggered", "mesh_message", "mesh_node_status",
+                "goal_state_changed", "council_started", "evolution_proposed",
+                "error",
+            ]
+        );
+        assert_eq!(REFLEX_ACTIONS, &["open", "focus", "close"]);
+    }
+
+    #[test]
     fn geom_rec_json_roundtrips_and_tolerates_missing_maximized() {
         let rec = GeomRec { x: 12.5, y: 30.0, w: 640.0, h: 480.0, maximized: true };
         let json = serde_json::to_string(&rec).unwrap();
@@ -4072,6 +4341,16 @@ fn shell_state_json(ui: &AppWindow) -> serde_json::Value {
         // didn't land.
         "turn_mutations": UI_TURN_MUTATIONS.with(|m| m.get()),
         "mutation_cap": UI_TURN_MUTATION_CAP,
+        // Phase C: the installed reflex table + per-rule fire ledger — the
+        // agent sees what's installed and what's actually earning its fires.
+        "reflexes": REFLEXES.with(|r| {
+            r.borrow()
+                .iter()
+                .map(|x| serde_json::json!({
+                    "on": x.on, "do": x.action, "app": x.app, "fires": x.fires,
+                }))
+                .collect::<Vec<_>>()
+        }),
         "apps": APP_TABLE.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
     })
 }
@@ -4320,8 +4599,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Window manager (G2): model + seed the Chat window ─────────────────────
     // Phase B: seed remembered shapes BEFORE the first launch, so even the boot
-    // Chat window wears its last one.
+    // Chat window wears its last one. Phase C: reflexes survive a restart too.
     geom_load();
+    reflex_load();
     let windows: Rc<slint::VecModel<WindowDesc>> = Rc::new(slint::VecModel::default());
     ui.set_windows(slint::ModelRc::from(windows.clone()));
     WINDOWS.with(|w| *w.borrow_mut() = Some(windows.clone()));
@@ -6817,6 +7097,21 @@ fn dispatch_event(
 ) {
     let ev_type = ev["type"].as_str().unwrap_or("").to_string();
 
+    // Adaptive UI Phase C: reflexes — below-inference event→action rules. ONE
+    // chokepoint for every trigger type (string-handled and typed arms alike),
+    // before the arms so a `return` above can't skip it. Cooldown + latch are
+    // enforced inside reflex_fire, on the Slint thread.
+    if REFLEX_TRIGGERS.contains(&ev_type.as_str()) {
+        let w = ui_weak.clone();
+        let t = ev_type.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(ui) = w.upgrade() {
+                reflex_fire(&ui, &t);
+            }
+        })
+        .ok();
+    }
+
     match ev_type.as_str() {
         // Server greeting: sent on connect (empty history) and on session resume
         // (with full history). Rust agentd: type="session_init".
@@ -7037,6 +7332,7 @@ fn dispatch_event(
                     | "ui_focus"
                     | "ui_arrange"
                     | "ui_theme"
+                    | "ui_reflex"
             );
             if !is_ui_effect {
                 let t = tool_name.clone();
@@ -7087,7 +7383,7 @@ fn dispatch_event(
                 .ok();
             } else if matches!(
                 tool_name.as_str(),
-                "ui_open" | "ui_close" | "ui_focus" | "ui_arrange" | "ui_theme"
+                "ui_open" | "ui_close" | "ui_focus" | "ui_arrange" | "ui_theme" | "ui_reflex"
             ) {
                 // Adaptive UI (Loop 6): the agent staging its own shell. Same
                 // idiom as display_face — no tool card; the shell changing IS
@@ -7123,6 +7419,9 @@ fn dispatch_event(
                             }
                             "ui_theme" => {
                                 apply_ui_theme(&ui, args["persona"].as_str().unwrap_or(""));
+                            }
+                            "ui_reflex" => {
+                                apply_ui_reflex(&ui, &args);
                             }
                             _ => {
                                 apply_ui_verb(&ui, &verb, args["app"].as_str().unwrap_or(""));
