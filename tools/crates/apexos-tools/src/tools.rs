@@ -212,11 +212,11 @@ pub fn list() -> Value {
         },
         {
             "name": "ui_reflex",
-            "description": format!("Install a REFLEX — an event→action rule the shell executes by itself, below inference: zero tokens, zero latency, fires even at 3am with no turn running. When a recurring ambient event should always stage the same window, install a reflex once instead of spending turns on it (tokens are for judgment, not for opening windows). Triggers: {}. Actions: open | focus | close, on one app (same catalog as ui_open). Rails: one reflex per (trigger, app) — reinstalling updates it; at most {} total; a fired reflex cools down 30s so bursts don't strobe; the human-wins latch applies (a latched app's reflex stays silent — the overrule stands). `remove: true` uninstalls the (trigger, app) rule. The live table + per-reflex fire counts ride ui_query's `reflexes` — check it to see what's installed and what's actually firing; prune what stops earning its fires. Installing counts as a staging mutation (the ~4/turn rail); the FIRING never does. Deposit a `ui-adaptation` memory for WHY you installed one — a reflex is a learned preference.", UI_REFLEX_TRIGGERS.join(", "), UI_REFLEX_MAX),
+            "description": format!("Install a REFLEX — an event→action rule the shell executes by itself, below inference: zero tokens, zero latency, fires even at 3am with no turn running. When a recurring ambient event should always stage the same window, install a reflex once instead of spending turns on it (tokens are for judgment, not for opening windows) — the canonical: sensor_alert → open sensor, so a persistence-filtered alert stages the Sensors window before your own turn even starts. Triggers: {}. Actions: open | focus | close, on one app (same catalog as ui_open). Rails: one reflex per (trigger, app) — reinstalling updates it; at most {} total; a fired reflex cools down 30s so bursts don't strobe; the human-wins latch applies (a latched app's reflex stays silent — the overrule stands). `remove: true` uninstalls the (trigger, app) rule. The live table + per-reflex fire counts ride ui_query's `reflexes` — check it to see what's installed and what's actually firing; prune what stops earning its fires. Installing counts as a staging mutation (the ~4/turn rail); the FIRING never does. Deposit a `ui-adaptation` memory for WHY you installed one — a reflex is a learned preference.", UI_REFLEX_TRIGGERS.join(", "), UI_REFLEX_MAX),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "on":     { "type": "string", "description": "Trigger event: wake_triggered | mesh_message | mesh_node_status | goal_state_changed | council_started | evolution_proposed | error" },
+                    "on":     { "type": "string", "description": "Trigger event: sensor_alert | wake_triggered | mesh_message | mesh_node_status | goal_state_changed | council_started | evolution_proposed | error" },
                     "do":     { "type": "string", "description": "Action: open | focus | close (required unless remove)" },
                     "app":    { "type": "string", "description": "Target app — one of the ui_open catalog slugs" },
                     "remove": { "type": "boolean", "description": "true = uninstall the (on, app) reflex instead of installing" }
@@ -3053,8 +3053,8 @@ fn ui_theme(args: &Value) -> Value {
 /// its own WS regardless of which session a socket follows (that's the point:
 /// a root-session 3am event still fires the reflex UI-side). Closed enum.
 const UI_REFLEX_TRIGGERS: &[&str] = &[
-    "wake_triggered", "mesh_message", "mesh_node_status", "goal_state_changed",
-    "council_started", "evolution_proposed", "error",
+    "sensor_alert", "wake_triggered", "mesh_message", "mesh_node_status",
+    "goal_state_changed", "council_started", "evolution_proposed", "error",
 ];
 /// The reflex action vocabulary. Mirrors ui-slint's REFLEX_ACTIONS.
 const UI_REFLEX_ACTIONS: &[&str] = &["open", "focus", "close"];
@@ -3607,9 +3607,9 @@ mod tests {
         assert_eq!(
             UI_REFLEX_TRIGGERS,
             &[
-                "wake_triggered", "mesh_message", "mesh_node_status",
-                "goal_state_changed", "council_started", "evolution_proposed",
-                "error",
+                "sensor_alert", "wake_triggered", "mesh_message",
+                "mesh_node_status", "goal_state_changed", "council_started",
+                "evolution_proposed", "error",
             ]
         );
         assert_eq!(UI_REFLEX_ACTIONS, &["open", "focus", "close"]);

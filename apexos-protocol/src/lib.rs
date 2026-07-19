@@ -272,6 +272,23 @@ pub enum Event {
     // ── sensor bridge ─────────────────────────────────────
     /// Emitted by the /sensor-bridge WS handler when a body-pi node sends data.
     SensorReading { node_id: String, reading: SensorReading, timestamp: u64 },
+    /// A threshold-crossing that SURVIVED the persistence filter + cooldown —
+    /// the daemon's considered "this is real" signal, fired once per sustained
+    /// event (the raw stream above fires every few seconds). GLOBAL in the
+    /// gateway's `event_session` (falls to the every-client default), so any
+    /// frontend can react ambiently — it is also a `ui_reflex` trigger
+    /// ("sensor_alert → open sensor"). The same alert is injected into the
+    /// root session as a prompt for the agent; this is the machine-readable
+    /// twin. `kind` = the stable alert-key suffix: `cpu_temp` | `motion` |
+    /// `air_quality` | `thermal_hotspot`. Motion (instantaneous, no
+    /// threshold) carries value 1.0 / threshold 0.0.
+    SensorAlert {
+        node_id:   String,
+        kind:      String,
+        value:     f32,
+        threshold: f32,
+        sensor_id: String,
+    },
 
     // ── voice / wake word ─────────────────────────────────
     /// Emitted by gateway after piper ding plays; frontend auto-records + submits.
@@ -537,6 +554,32 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn sensor_alert_wire_shape_round_trips() {
+        // The machine-readable twin of the root-session alert prompt — a
+        // ui_reflex trigger, so the flat field names ARE the contract.
+        let j = r#"{"type":"sensor_alert","node_id":"apex1","kind":"air_quality",
+            "value":304.0,"threshold":300.0,"sensor_id":"bme688"}"#;
+        match serde_json::from_str::<Event>(j).unwrap() {
+            Event::SensorAlert { node_id, kind, value, threshold, sensor_id } => {
+                assert_eq!(node_id, "apex1");
+                assert_eq!(kind, "air_quality");
+                assert!((value - 304.0).abs() < 0.01);
+                assert!((threshold - 300.0).abs() < 0.01);
+                assert_eq!(sensor_id, "bme688");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        let ev = Event::SensorAlert {
+            node_id: "apex1".into(), kind: "thermal_hotspot".into(),
+            value: 120.5, threshold: 110.0, sensor_id: "mlx90640".into(),
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        assert_eq!(v["type"], "sensor_alert");
+        assert_eq!(v["kind"], "thermal_hotspot");
     }
 
     #[test]

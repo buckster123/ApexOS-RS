@@ -91,6 +91,12 @@ impl SystemState {
 
             Event::SensorReading { .. } => {}
 
+            // A persistence-filtered alert (the machine-readable twin of the
+            // root-session alert prompt). Ambient signal for frontends/reflexes;
+            // the agent's involvement arrives as the paired UserPrompt, so
+            // state tracks nothing here — the event log is the audit trail.
+            Event::SensorAlert { .. } => {}
+
             Event::WakeTriggered => {}
 
             Event::CouncilStarted    { .. } => {}

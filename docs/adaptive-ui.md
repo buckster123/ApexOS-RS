@@ -186,13 +186,17 @@ fire UI-side off *global* events, which is exactly the ambient case.
 
 - **Trigger vocabulary** (closed, mirror-locked both crates — tools
   `UI_REFLEX_TRIGGERS` ↔ ui-slint `REFLEX_TRIGGERS`; every entry is a GLOBAL event
-  type): `wake_triggered · mesh_message · mesh_node_status · goal_state_changed ·
-  council_started · evolution_proposed · error`. Actions: `open | focus | close`
-  (`open` is latch-aware via the same `agent_open_window` path; `close` carries
-  agent-close semantics — no latch — and respects the drag guard). A `sensor_alert`
-  trigger awaits a global alert event from agentd (the raw `sensor_reading` stream
-  fires every few seconds — threshold judgment stays in agentd's classifier, not
-  the shell).
+  type): `sensor_alert · wake_triggered · mesh_message · mesh_node_status ·
+  goal_state_changed · council_started · evolution_proposed · error`. Actions:
+  `open | focus | close` (`open` is latch-aware via the same `agent_open_window`
+  path; `close` carries agent-close semantics — no latch — and respects the drag
+  guard). **`sensor_alert` is the persistence-filtered global `Event::SensorAlert`**
+  (agentd emits it beside the root-session alert prompt — once per sustained
+  event, post-persistence post-cooldown), NOT the raw `sensor_reading` stream
+  (fires every few seconds; threshold judgment stays in agentd's classifier).
+  The canonical reflex — `sensor_alert → open sensor` — stages the Sensors
+  window before the agent's own turn even starts; the UI also surfaces every
+  alert as a warn toast independent of any reflex.
 - **Rails**: one rule per `(on, app)` key — reinstalling updates the action and
   resets the ledger; at most `REFLEX_MAX` (8) rules; a fired rule cools down
   `REFLEX_COOLDOWN_SECS` (30s) so event bursts (goal steps, mesh chatter) can't
