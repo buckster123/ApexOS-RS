@@ -863,8 +863,8 @@ fn geom_flush_if_dirty() {
 /// Trigger vocabulary. Mirrors apexos-tools `UI_REFLEX_TRIGGERS` — every entry
 /// is a global event type this file's `dispatch_event` receives.
 const REFLEX_TRIGGERS: &[&str] = &[
-    "wake_triggered", "mesh_message", "mesh_node_status", "goal_state_changed",
-    "council_started", "evolution_proposed", "error",
+    "sensor_alert", "wake_triggered", "mesh_message", "mesh_node_status",
+    "goal_state_changed", "council_started", "evolution_proposed", "error",
 ];
 /// Action vocabulary. Mirrors apexos-tools `UI_REFLEX_ACTIONS`.
 const REFLEX_ACTIONS: &[&str] = &["open", "focus", "close"];
@@ -2999,9 +2999,9 @@ mod tests {
         assert_eq!(
             REFLEX_TRIGGERS,
             &[
-                "wake_triggered", "mesh_message", "mesh_node_status",
-                "goal_state_changed", "council_started", "evolution_proposed",
-                "error",
+                "sensor_alert", "wake_triggered", "mesh_message",
+                "mesh_node_status", "goal_state_changed", "council_started",
+                "evolution_proposed", "error",
             ]
         );
         assert_eq!(REFLEX_ACTIONS, &["open", "focus", "close"]);
@@ -7289,6 +7289,22 @@ fn dispatch_event(
                         }
                     }
                 }
+            })
+            .ok();
+        }
+
+        Event::SensorAlert { node_id, kind, value, threshold, .. } => {
+            // The persistence-filtered "this is real" signal — surface it as a
+            // warn toast (lands in the notif center too). Any staging is the
+            // reflex layer's job (the chokepoint above fired before this arm);
+            // the agent's own response arrives via the paired root prompt.
+            let body = if kind == "motion" {
+                format!("⚠ {node_id}: motion detected")
+            } else {
+                format!("⚠ {node_id}: {kind} alert — {value:.0} (threshold {threshold:.0})")
+            };
+            slint::invoke_from_event_loop(move || {
+                notify(ToastKind::Warn, body);
             })
             .ok();
         }

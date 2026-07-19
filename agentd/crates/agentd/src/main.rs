@@ -1734,24 +1734,37 @@ fn spawn_agent_router(
                     // (read per reading so a live Settings toggle takes effect at once).
                     let profile = sensor_profile.read().map(|p| p.clone()).unwrap_or_else(|_| "standard".into());
                     let (active_th, active_persist) = profile_thresholds(&profile, &base_thresholds, persist_dur);
-                    let to_fire: Option<(String, String)> = match classify_reading(&reading, &node_id, &active_th) {
+                    let to_fire: Option<(String, String, AlertInfo)> = match classify_reading(&reading, &node_id, &active_th) {
                         AlertEval::None => None,
                         AlertEval::Clear { key } => { elevated_since.remove(&key); None }
-                        AlertEval::Candidate { key, prompt, persist: false } => Some((key, prompt)),
-                        AlertEval::Candidate { key, prompt, persist: true } => {
+                        AlertEval::Candidate { key, prompt, persist: false, info } => Some((key, prompt, info)),
+                        AlertEval::Candidate { key, prompt, persist: true, info } => {
                             if persistence_passed(&mut elevated_since, &key, now, active_persist) {
-                                Some((key, prompt))
+                                Some((key, prompt, info))
                             } else {
                                 None // elevated but not yet sustained — likely a transient
                             }
                         }
                     };
-                    if let Some((alert_key, prompt)) = to_fire {
+                    if let Some((alert_key, prompt, info)) = to_fire {
                         let cooled_down = last_alert.get(&alert_key)
                             .map(|t| now.duration_since(*t).as_secs() >= alert_cooldown_secs)
                             .unwrap_or(true);
                         if cooled_down {
                             last_alert.insert(alert_key, now);
+                            // The machine-readable twin FIRST — a global event
+                            // every client sees (and the ui_reflex trigger), so
+                            // a reflex can stage the Sensors window before the
+                            // agent's own turn even starts. Fires exactly as
+                            // often as the prompt (post-persistence, post-
+                            // cooldown) — never per raw reading.
+                            bus.emit(Event::SensorAlert {
+                                node_id:   node_id.clone(),
+                                kind:      info.kind.to_string(),
+                                value:     info.value,
+                                threshold: info.threshold,
+                                sensor_id: info.sensor_id,
+                            }).await;
                             let root = SessionId(0);
                             session_depths.lock().await.entry(root).or_insert(0);
                             bus.emit(Event::UserPrompt { session: root, text: prompt, images: vec![] }).await;
@@ -3691,6 +3704,19 @@ fn profile_thresholds(profile: &str, base: &SensorThresholds, base_persist: std:
     }
 }
 
+/// Structured facts of one alert — the machine-readable twin of the prompt,
+/// emitted as the global `Event::SensorAlert` when the candidate survives
+/// persistence + cooldown (a `ui_reflex` trigger; frontends react ambiently).
+/// `kind` = the stable alert-key suffix; motion (instantaneous, no threshold)
+/// carries value 1.0 / threshold 0.0.
+#[derive(Debug, Clone, PartialEq)]
+struct AlertInfo {
+    kind:      &'static str,
+    value:     f32,
+    threshold: f32,
+    sensor_id: String,
+}
+
 /// Outcome of evaluating one sensor reading.
 ///
 /// `Candidate` is over-threshold and may fire (subject to persistence + cooldown);
@@ -3699,7 +3725,7 @@ fn profile_thresholds(profile: &str, base: &SensorThresholds, base_persist: std:
 /// tracked condition is back to normal → reset its persistence streak. `None` =
 /// nothing to do (incl. an untrusted low-accuracy reading).
 enum AlertEval {
-    Candidate { key: String, prompt: String, persist: bool },
+    Candidate { key: String, prompt: String, persist: bool, info: AlertInfo },
     Clear { key: String },
     None,
 }
@@ -3718,6 +3744,7 @@ fn classify_reading(reading: &SensorReading, node_id: &str, th: &SensorThreshold
                     prompt: format!("[sensor alert] {node_id}/{sensor_id} CPU temperature critical: {celsius:.1}°C (threshold {:.0}°C, sustained) — please investigate", th.cpu_temp),
                     key,
                     persist: true,
+                    info: AlertInfo { kind: "cpu_temp", value: *celsius, threshold: th.cpu_temp, sensor_id: sensor_id.clone() },
                 }
             } else {
                 AlertEval::Clear { key }
@@ -3727,6 +3754,7 @@ fn classify_reading(reading: &SensorReading, node_id: &str, th: &SensorThreshold
             key: format!("{node_id}:motion"),
             prompt: format!("[sensor alert] {node_id}/{sensor_id} motion detected"),
             persist: false, // motion is inherently a single instant
+            info: AlertInfo { kind: "motion", value: 1.0, threshold: 0.0, sensor_id: sensor_id.clone() },
         },
         // BME688 IAQ — only trust readings the sensor marks accuracy >= 2; an
         // unreliable reading is neither an alert nor a "clear" (falls to None).
@@ -3737,6 +3765,7 @@ fn classify_reading(reading: &SensorReading, node_id: &str, th: &SensorThreshold
                     prompt: format!("[sensor alert] {node_id}/{sensor_id} air quality degraded: IAQ {iaq:.0} (threshold {:.0}, accuracy {accuracy}/3, sustained) — consider ventilating", th.iaq),
                     key,
                     persist: true,
+                    info: AlertInfo { kind: "air_quality", value: *iaq, threshold: th.iaq, sensor_id: sensor_id.clone() },
                 }
             } else {
                 AlertEval::Clear { key }
@@ -3749,6 +3778,7 @@ fn classify_reading(reading: &SensorReading, node_id: &str, th: &SensorThreshold
                     prompt: format!("[sensor alert] {node_id}/{sensor_id} thermal hotspot: {max_c:.1}°C max, {mean_c:.1}°C mean (threshold {:.0}°C, sustained) — check for overheating devices", th.thermal),
                     key,
                     persist: true,
+                    info: AlertInfo { kind: "thermal_hotspot", value: *max_c, threshold: th.thermal, sensor_id: sensor_id.clone() },
                 }
             } else {
                 AlertEval::Clear { key }
@@ -4070,6 +4100,42 @@ tmpfs /var/lib/agentd/workspace/media tmpfs rw 0 0
     fn classify_iaq_high_accuracy_over_and_under() {
         assert!(matches!(classify_reading(&air(200.0, 3), "n1", &th()), AlertEval::Candidate { persist: true, .. }));
         assert!(matches!(classify_reading(&air(80.0, 3), "n1", &th()), AlertEval::Clear { .. }));
+    }
+
+    #[test]
+    fn classify_carries_structured_alert_info() {
+        // The machine-readable twin (Event::SensorAlert) is built from
+        // AlertInfo — kind is the stable alert-key suffix, value/threshold are
+        // the crossing facts, sensor_id names the physical sensor.
+        match classify_reading(&air(200.0, 3), "n1", &th()) {
+            AlertEval::Candidate { info, .. } => {
+                assert_eq!(info.kind, "air_quality");
+                assert!((info.value - 200.0).abs() < 0.01);
+                assert!((info.threshold - th().iaq).abs() < 0.01);
+                assert_eq!(info.sensor_id, "bme688");
+            }
+            _ => panic!("expected Candidate"),
+        }
+        let hot = SensorReading::ThermalFrame {
+            min_c: 20.0, max_c: 120.5, mean_c: 40.0, sensor_id: "mlx90640".into(),
+        };
+        match classify_reading(&hot, "n1", &th()) {
+            AlertEval::Candidate { info, .. } => {
+                assert_eq!(info.kind, "thermal_hotspot");
+                assert!((info.value - 120.5).abs() < 0.01);
+            }
+            _ => panic!("expected Candidate"),
+        }
+        // Motion: instantaneous — value 1.0, threshold 0.0 by convention.
+        let mv = SensorReading::Motion { detected: true, sensor_id: "pir".into() };
+        match classify_reading(&mv, "n1", &th()) {
+            AlertEval::Candidate { info, .. } => {
+                assert_eq!(info.kind, "motion");
+                assert!((info.value - 1.0).abs() < 0.01);
+                assert!((info.threshold - 0.0).abs() < 0.01);
+            }
+            _ => panic!("expected Candidate"),
+        }
     }
 
     #[test]
