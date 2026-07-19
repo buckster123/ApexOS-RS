@@ -1317,44 +1317,115 @@ fi
 # config but absent from the live file is appended (inside [rules], before the
 # next section header); an existing key is NEVER touched — the split is: soul =
 # self-evolved, policy = follows the repo additively, self-evolved values win.
+# Best-effort TOML validation (python3 ≥3.11 tomllib; absent → accept). A file
+# that fails this makes agentd fall back to defaults = EVERY tool gates ask.
+policy_toml_valid() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$1" 2>/dev/null <<'PYEOF'
+import sys
+try:
+    import tomllib
+except ImportError:
+    sys.exit(0)  # too old to validate — accept
+try:
+    tomllib.load(open(sys.argv[1], "rb"))
+except Exception:
+    sys.exit(1)
+PYEOF
+}
+
+# Drop LATER duplicate rule keys, quote-insensitively ("key" = and key = are
+# the SAME TOML key — toml_edit's evolution writer emits bare keys, this file
+# ships quoted ones). Keep-first = the live/self-evolved line wins; the later
+# copy is a re-append. $1 in → $2 out.
+policy_dedupe() {
+  awk '
+    /^[[:space:]]*"?[A-Za-z_0-9.*-]+"?[[:space:]]*=/ {
+      k = $0
+      sub(/^[[:space:]]*/, "", k); sub(/[[:space:]]*=.*$/, "", k); gsub(/"/, "", k)
+      if (k != "mode" && seen[k]++) next
+    }
+    { print }
+  ' "$1" > "$2"
+}
+
 sync_policy_rules() {
   local shipped="$1" live="$2"
   [[ -f "$shipped" && -f "$live" ]] || return 0
-  local missing=() key
+
+  # 0) HEAL duplicate keys first. The pre-2026-07-20 sync greped only for the
+  #    QUOTED key form, so a rule the node self-evolved in (bare key, via
+  #    toml_edit) was re-appended quoted → TOML duplicate-key → the whole file
+  #    refused to parse → agentd fell back to gate-EVERYTHING (seen live on the
+  #    colony 2026-07-19: 10 duped keys per node). Keep-first, validate, only
+  #    then commit; a failed repair leaves the file untouched.
+  local deduped; deduped=$(mktemp)
+  policy_dedupe "$live" "$deduped"
+  if ! cmp -s "$live" "$deduped"; then
+    if policy_toml_valid "$deduped"; then
+      cat "$deduped" > "$live"   # cat-over keeps owner + mode
+      ok "policy-repair: removed duplicate [rules] keys from $live"
+    else
+      warn "policy-repair: dedupe still doesn't parse — leaving $live untouched"
+    fi
+  fi
+  rm -f "$deduped"
+
+  # 1) Missing-scan, quote-insensitive on the live side (a rule counts whether
+  #    written \"key\" = or key =); shipped keys may carry . and * (patterns).
+  local missing=() key esc
   while IFS= read -r key; do
-    grep -qE "^\"${key}\"[[:space:]]*=" "$live" || missing+=("$key")
-  done < <(grep -oE '^"[a-z_]+"' "$shipped" | tr -d '"')
-  [[ ${#missing[@]} -gt 0 ]] || return 0
+    esc=$(printf '%s' "$key" | sed 's/[][().*+?^$|\\{}]/\\&/g')
+    grep -qE "^[[:space:]]*\"?${esc}\"?[[:space:]]*=" "$live" || missing+=("$key")
+  done < <(grep -oE '^"[a-z_0-9.*-]+"' "$shipped" | tr -d '"')
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    policy_toml_valid "$live" || warn "policy.toml does NOT parse — agentd gates EVERY tool as ask until it is repaired"
+    return 0
+  fi
+
   local block; block=$(mktemp)
   {
     echo ""
     echo "# --- rules added by apexos policy-sync $(date -u +%F) (new in this release; existing values never touched) ---"
     for key in "${missing[@]}"; do
-      grep -E "^\"${key}\"[[:space:]]*=" "$shipped" | head -1
+      esc=$(printf '%s' "$key" | sed 's/[][().*+?^$|\\{}]/\\&/g')
+      grep -E "^\"${esc}\"[[:space:]]*=" "$shipped" | head -1
     done
   } > "$block"
-  # Insert inside [rules]: before the first section header after it, else EOF.
-  # (A degenerate live file with no [rules] gets the header appended first.)
+
+  # 2) Build the candidate: insert inside [rules] — before the first section
+  #    header after it, else EOF. (A degenerate live file with no [rules] gets
+  #    the header appended first.) The candidate is validated BEFORE it lands;
+  #    an append that would break the file is dropped with a loud warn.
+  local cand; cand=$(mktemp)
+  cat "$live" > "$cand"
   local rules_ln next_ln=""
-  rules_ln=$(grep -n '^\[rules\]' "$live" | head -1 | cut -d: -f1 || true)
+  rules_ln=$(grep -n '^\[rules\]' "$cand" | head -1 | cut -d: -f1 || true)
   if [[ -n "$rules_ln" ]]; then
-    next_ln=$(awk -v s="$rules_ln" 'NR>s && /^\[/{print NR; exit}' "$live")
+    next_ln=$(awk -v s="$rules_ln" 'NR>s && /^\[/{print NR; exit}' "$cand")
   else
-    printf '\n[rules]' >> "$live"
+    printf '\n[rules]' >> "$cand"
   fi
   if [[ -n "$next_ln" ]]; then
     local tmp; tmp=$(mktemp)
-    head -n $((next_ln-1)) "$live" > "$tmp"
+    head -n $((next_ln-1)) "$cand" > "$tmp"
     cat "$block" >> "$tmp"
     echo "" >> "$tmp"
-    tail -n +"$next_ln" "$live" >> "$tmp"
-    cat "$tmp" > "$live"   # cat-over keeps the live file's owner + mode
+    tail -n +"$next_ln" "$cand" >> "$tmp"
+    cat "$tmp" > "$cand"
     rm -f "$tmp"
   else
-    cat "$block" >> "$live"
+    cat "$block" >> "$cand"
   fi
   rm -f "$block"
-  ok "policy-sync: ${#missing[@]} new rule(s) → $live (${missing[*]})"
+
+  if policy_toml_valid "$cand"; then
+    cat "$cand" > "$live"   # cat-over keeps the live file's owner + mode
+    ok "policy-sync: ${#missing[@]} new rule(s) → $live (${missing[*]})"
+  else
+    warn "policy-sync: appending ${missing[*]} would break $live — skipped (file left untouched)"
+  fi
+  rm -f "$cand"
 }
 
 # policy.toml (don't overwrite an existing policy — but DO additively sync new rules)
