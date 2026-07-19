@@ -2,7 +2,7 @@
 
 > The shell stops being static chrome the human arranges and becomes something the
 > agent **stages, looks at, and is corrected through** — journaled and reversible like
-> every other faculty. Phases A1 + A2 shipped; this doc is the durable contract.
+> every other faculty. Phases A1–A3 + B shipped; this doc is the durable contract.
 > (Graduated from the grounded plan v0.2, 2026-07-06; verified against live code at ship time.)
 
 The one-sentence version: **the agent speaks a small closed vocabulary of staging verbs
@@ -147,6 +147,34 @@ André checks visuals first"); stable preferences promoted to procedures (CCBS s
 them at wake); mechanical geometry persistence stays UI-local beside the persona file.
 Cerebro remembers the *why*; the UI remembers its *shape*. Don't blur these.
 
+The behavioral half (deposits + procedure promotion) seeded with A3's soul "Your
+stage" section ("Remember why"). The mechanical half shipped as **geometry
+persistence** (ui-slint):
+
+- **Per-AppKind shape** — `{x, y, w, h, maximized}` keyed by app slug in
+  `$XDG_CONFIG_HOME/apexos-rs/geometry.json` (beside the `persona` file). Every
+  open of a kind wears its last shape; first-ever opens cascade as before.
+- **Noted at every geometry-changing chokepoint** — user move/resize/maximize,
+  user close and agent `ui_close` (captured *before* row removal), and
+  `ui_arrange` (an APEX tidy-up is the new remembered shape — it survives a
+  restart the same as a hand-placed one). `geom_note` dedups, so idle pointer
+  traffic never schedules a write; a 2s Slint Timer debounces the actual flush
+  (move/resize fire per pointer-move), temp+rename so a crash can't tear the file.
+- **Restore clamps to the live desktop area** (pure `restore_geom`, unit-tested):
+  sizes floor to the frame minimums and cap to the area; positions pull fully
+  on-stage — a shape remembered on the kiosk 1080p can't strand a window on a
+  smaller display. When the area isn't believable yet, sizes still floor but no
+  fictional edge is invented.
+- **The boot seed waits for the area** (`seed_windows_when_area_live`): pre-run
+  the window has no real size (winit/Wayland deliver it at first configure), so
+  seed launches re-arm a 50ms timer until the area is live (bounded ~2s, then
+  launch anyway). Caught live in the E2E clamp test — an off-screen remembered
+  shape stranded the boot Chat window until the deferral. Don't move seed
+  launches back before `run()`.
+- **Shape, not session** — the open window SET is deliberately never restored: a
+  fresh boot starts clean (Chat seed), windows re-open on demand wearing their
+  last shape. Losing the file costs a cascade, nothing more.
+
 ## 6. Reflexes (Phase C) — below-inference adaptation
 
 `ui_reflex {on, do, app}`: the agent installs event→action rules the UI executes
@@ -171,8 +199,8 @@ real value. Details + honest cost note: the plan archive
 | A1 | `/state` + `ui_query` + `ui_open`/`ui_close`/`ui_focus` + latch | **shipped** (#255, latch field-confirmed on the colony) |
 | A2 | `ui_arrange` presets + layout fn; `ui_theme` via `apply_persona` | **shipped** (#256, field-confirmed) |
 | A3 | Etiquette pass: rate rail (4/turn, `/state`-visible), drag guard (`WmState.dragging-id`), occipital latch fold, seed-soul etiquette (live nodes via `propose_evolution`) | **shipped** |
-| B | Loop-6 memory: deposit discipline (seeded in the soul's "Your stage"), UI-prefs procedure, geometry persistence | next |
-| C | `ui_reflex` family | — |
+| B | Loop-6 memory: deposit discipline + procedure promotion (seeded in the soul's "Your stage", A3), geometry persistence (per-kind shape file, clamp-on-restore, boot-seed area wait — §5) | **shipped** (E2E-verified: restore, clamp, arrange→write, restart continuity) |
+| C | `ui_reflex` family | next |
 | D | Colony field cycle (apex1 kiosk / apex-3 desktop), dream-consolidation check | — |
 | E | Decision gate: Bevy Tier B — go/no-go on Tier-A evidence | — |
 | F | Fast-model field test (APEX-on-Cerebras via the OAI-compat backend) | independent |
