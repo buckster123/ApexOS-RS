@@ -14,19 +14,37 @@
 //! glob), so every existing `apexos_core::Event` / `apexos_core::types::Event`
 //! path keeps resolving unchanged.
 
-use std::collections::HashMap;
-use std::fmt;
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+use core::fmt;
 use serde::{Deserialize, Serialize};
+
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
+#[cfg(feature = "std")]
+use std::collections::HashMap;
+
+/// Map type for protocol fields: `HashMap` under `std` (unchanged behavior),
+/// `BTreeMap` under `no_std + alloc`. Serializes to an identical JSON object
+/// either way — JSON objects are unordered; `tests/wire_compat.rs` locks this.
+/// Keys must be `Ord` for the `no_std` side (protocol keys are `String`s).
+#[cfg(feature = "std")]
+pub type Map<K, V> = HashMap<K, V>;
+#[cfg(not(feature = "std"))]
+pub type Map<K, V> = BTreeMap<K, V>;
 
 // ── ID newtypes (cheap, copyable, type-safe) ───────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ActionId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct GoalId(pub u64);
 
 /// Lifecycle state of an autonomous Goal run (docs/ideas/goal-driver-design.md).
@@ -45,7 +63,7 @@ pub enum GoalState {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PluginId(pub String);
 
 impl fmt::Display for PluginId {
@@ -54,7 +72,7 @@ impl fmt::Display for PluginId {
 
 // ── Evolution types ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EvolutionId(pub u64);
 
 /// Policy mode — lives here so EvolutionProposal (also in core) can reference
@@ -124,7 +142,7 @@ pub enum EvolutionProposal {
     RegisterMcpServer {
         name:    String,
         command: String,
-        env:     HashMap<String, String>,
+        env:     Map<String, String>,
         reason:  String,
     },
     UnregisterMcpServer {
