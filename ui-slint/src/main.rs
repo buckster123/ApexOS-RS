@@ -756,6 +756,157 @@ fn load_persona() -> Option<Persona> {
         .and_then(|s| persona_from_slug(&s))
 }
 
+// ── Adaptive UI Phase B — geometry persistence (docs/adaptive-ui.md §5) ──────
+// The UI remembers its *shape*: per-AppKind last-known window rect + maximized,
+// persisted UI-locally beside the persona file. Cerebro remembers the *why*
+// (`ui-adaptation` deposits); this file is the mechanical half — don't blur
+// them. Deliberately shape-not-session: the open window SET is never restored
+// (a fresh boot starts clean; windows re-open on demand wearing their last
+// shape). move/resize callbacks fire per pointer-move, so notes only mark a
+// dirty flag and a 2s Slint Timer debounces the actual file write.
+
+/// Mirrors app_window_frame.slint `min-w`/`min-h` — keep in sync.
+const GEOM_MIN_W: f32 = 220.0;
+const GEOM_MIN_H: f32 = 140.0;
+/// Below this the desktop area is not believable (pre-first-frame or a broken
+/// backend) — restore then floors sizes but won't invent an edge to clamp to.
+const GEOM_AREA_LIVE_W: f32 = 320.0;
+const GEOM_AREA_LIVE_H: f32 = 240.0;
+
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+struct GeomRec {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    #[serde(default)]
+    maximized: bool,
+}
+
+thread_local! {
+    // slug → last-known shape. Loaded once at startup (Slint thread), upserted
+    // by geom_note, flushed by the debounce timer.
+    static GEOM_STORE: RefCell<std::collections::HashMap<String, GeomRec>> =
+        RefCell::new(std::collections::HashMap::new());
+    static GEOM_DIRTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn geometry_config_path() -> std::path::PathBuf {
+    persona_config_path().with_file_name("geometry.json")
+}
+
+/// Seed the store from disk. Missing or corrupt file = empty store (the file
+/// is a cache of preference, never load-bearing — losing it costs a cascade).
+fn geom_load() {
+    let map: std::collections::HashMap<String, GeomRec> =
+        std::fs::read_to_string(geometry_config_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+    GEOM_STORE.with(|s| *s.borrow_mut() = map);
+}
+
+/// Upsert one app's shape. No-op (no dirty mark) when unchanged, so idle
+/// pointer traffic never schedules a write.
+fn geom_note(kind: AppKind, x: f32, y: f32, w: f32, h: f32, maximized: bool) {
+    let rec = GeomRec { x, y, w, h, maximized };
+    GEOM_STORE.with(|s| {
+        let mut map = s.borrow_mut();
+        let slug = kind_slug(kind);
+        if map.get(slug) != Some(&rec) {
+            map.insert(slug.to_string(), rec);
+            GEOM_DIRTY.with(|d| d.set(true));
+        }
+    });
+}
+
+/// Note the current shape of window `id` straight off the model row.
+fn geom_note_id(model: &Rc<slint::VecModel<WindowDesc>>, id: i32) {
+    if let Some(d) = wm_index_by_id(model, id).and_then(|i| model.row_data(i)) {
+        geom_note(d.kind, d.x, d.y, d.w, d.h, d.maximized);
+    }
+}
+
+fn geom_lookup(kind: AppKind) -> Option<GeomRec> {
+    GEOM_STORE.with(|s| s.borrow().get(kind_slug(kind)).copied())
+}
+
+/// Debounced flush — the 2s timer body. Temp+rename so a mid-write crash
+/// can't leave a torn file (the loader tolerates one anyway).
+fn geom_flush_if_dirty() {
+    if !GEOM_DIRTY.with(|d| d.replace(false)) {
+        return;
+    }
+    let json = GEOM_STORE.with(|s| serde_json::to_string(&*s.borrow()).unwrap_or_default());
+    let path = geometry_config_path();
+    let write = || -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, &path)
+    };
+    if let Err(e) = write() {
+        eprintln!("[ui-slint] geometry persist failed: {e}");
+    }
+}
+
+/// Boot seed (Phase B): launch the seed windows once the desktop area is LIVE,
+/// so remembered shapes clamp against the real display. Re-arms itself every
+/// 50ms while the area still reads dead (pre-first-configure); after ~2s gives
+/// up waiting and launches anyway — restore then floors sizes but can't clamp
+/// position (exactly the pre-deferral behavior, now only on a broken backend).
+fn seed_windows_when_area_live(
+    uw: slint::Weak<AppWindow>,
+    w: Rc<slint::VecModel<WindowDesc>>,
+    tries: u32,
+) {
+    let Some(ui) = uw.upgrade() else { return };
+    let live = ui.get_desktop_area_w() >= GEOM_AREA_LIVE_W
+        && ui.get_desktop_area_h() >= GEOM_AREA_LIVE_H;
+    if !live && tries < 40 {
+        slint::Timer::single_shot(std::time::Duration::from_millis(50), move || {
+            seed_windows_when_area_live(uw, w, tries + 1);
+        });
+        return;
+    }
+    wm_launch(&ui, &w, AppKind::Chat);
+    // Dev: APEX_FACE_AUTOOPEN=1 opens the Face window at launch (single-command
+    // verification of the face, GL or 2D). Independent of the render path.
+    if std::env::var_os("APEX_FACE_AUTOOPEN").is_some() {
+        wm_launch(&ui, &w, AppKind::Face);
+    }
+    if std::env::var_os("APEX_SKETCH_AUTOOPEN").is_some() {
+        wm_launch(&ui, &w, AppKind::Sketchpad);
+    }
+    // Dev: APEX_OCCIPITAL_DEMO=1 opens the Occipital reader at launch with a
+    // sample page so the follow-along window can be verified without agentd
+    // (snapshot server). =results|recall previews those modes. (Its
+    // auto-reveal places a window too — same wait applies.)
+    if let Some(demo) = std::env::var_os("APEX_OCCIPITAL_DEMO") {
+        apply_occipital_render(&ui, occipital_demo_render(&demo.to_string_lossy()));
+    }
+}
+
+/// Clamp a restored shape into the live desktop area — displays change between
+/// sessions (kiosk 1080p ⇄ laptop hidpi), and a remembered rect must never
+/// strand a window off-stage. Pure; unit-tested.
+fn restore_geom(rec: GeomRec, area_w: f32, area_h: f32) -> (f32, f32, f32, f32) {
+    let mut w = rec.w.max(GEOM_MIN_W);
+    let mut h = rec.h.max(GEOM_MIN_H);
+    if area_w < GEOM_AREA_LIVE_W || area_h < GEOM_AREA_LIVE_H {
+        // Area not believable yet — floor sizes, keep the window on-canvas
+        // top-left-wards, but don't invent a right/bottom edge.
+        return (rec.x.max(0.0), rec.y.max(0.0), w, h);
+    }
+    w = w.min(area_w);
+    h = h.min(area_h);
+    let x = rec.x.clamp(0.0, area_w - w);
+    let y = rec.y.clamp(0.0, area_h - h);
+    (x, y, w, h)
+}
+
 fn persona_rgb(hex: u32) -> slint::Color {
     slint::Color::from_rgb_u8((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
@@ -1335,7 +1486,19 @@ fn wm_launch(ui: &AppWindow, model: &Rc<slint::VecModel<WindowDesc>>, kind: AppK
         c.set(v + 1);
         v
     });
-    let (x, y, w, h) = default_geom(kind, model.row_count() as i32);
+    // Phase B: a kind we've seen before re-opens wearing its last shape
+    // (clamped to the live desktop area); first-ever opens cascade as always.
+    let (x, y, w, h, maximized) = match geom_lookup(kind) {
+        Some(rec) => {
+            let (x, y, w, h) =
+                restore_geom(rec, ui.get_desktop_area_w(), ui.get_desktop_area_h());
+            (x, y, w, h, rec.maximized)
+        }
+        None => {
+            let (x, y, w, h) = default_geom(kind, model.row_count() as i32);
+            (x, y, w, h, false)
+        }
+    };
     model.push(WindowDesc {
         id,
         kind,
@@ -1345,7 +1508,7 @@ fn wm_launch(ui: &AppWindow, model: &Rc<slint::VecModel<WindowDesc>>, kind: AppK
         w,
         h,
         minimized: false,
-        maximized: false,
+        maximized,
     });
     wm_focus(ui, model, id);
 }
@@ -1405,6 +1568,8 @@ fn apply_ui_verb(ui: &AppWindow, verb: &str, app: &str) {
                     if d.id == ui.global::<WmState>().get_dragging_id() {
                         return;
                     }
+                    // Phase B: capture the final shape before removal.
+                    geom_note(d.kind, d.x, d.y, d.w, d.h, d.maximized);
                 }
                 AGENT_OPENED.with(|m| m.set(m.get() & !bit));
                 model.remove(i);
@@ -1498,6 +1663,9 @@ fn apply_ui_arrange(ui: &AppWindow, layout: &str, apps: &[String]) {
                 d.w = w;
                 d.h = h;
             });
+            // Phase B: an arranged shape is the new remembered shape — APEX's
+            // tidy-up survives a restart the same as a hand-placed one.
+            geom_note(*kind, x, y, w, h, false);
         }
     }
     // `focus` means ONE thing on stage: every other open window minimizes
@@ -2540,6 +2708,47 @@ mod tests {
     use super::{ws_to_http, ironbow, build_thermal_image, parse_agent_strokes};
     use super::{kind_from_ordinal, kind_from_slug, kind_ordinal, kind_slug, APP_TABLE};
     use super::redact_ws_url;
+    use super::{restore_geom, GeomRec, GEOM_MIN_H, GEOM_MIN_W};
+
+    #[test]
+    fn restore_geom_clamps_into_live_area() {
+        // Remembered on a big display, restored on a smaller one: size caps to
+        // the area, position pulls fully on-stage.
+        let rec = GeomRec { x: 1700.0, y: 950.0, w: 900.0, h: 700.0, maximized: false };
+        let (x, y, w, h) = restore_geom(rec, 1024.0, 600.0);
+        assert_eq!((w, h), (900.0_f32.min(1024.0), 600.0));
+        assert_eq!(x, 1024.0 - w);
+        assert_eq!(y, 0.0); // h fills the area → y clamps to 0
+        // Negative coords (window parked off the left edge) come back on-stage.
+        let rec = GeomRec { x: -400.0, y: -50.0, w: 300.0, h: 200.0, maximized: false };
+        assert_eq!(restore_geom(rec, 1024.0, 600.0), (0.0, 0.0, 300.0, 200.0));
+        // A shape already inside the area is untouched.
+        let rec = GeomRec { x: 40.0, y: 30.0, w: 500.0, h: 400.0, maximized: true };
+        assert_eq!(restore_geom(rec, 1024.0, 600.0), (40.0, 30.0, 500.0, 400.0));
+    }
+
+    #[test]
+    fn restore_geom_floors_sizes_and_never_invents_an_edge_when_area_dead() {
+        // Pre-first-frame / broken backend: area reads 0×0. Sizes floor to the
+        // frame minimums, x/y stay non-negative, and nothing clamps against a
+        // fictional right/bottom edge.
+        let rec = GeomRec { x: -10.0, y: 5000.0, w: 10.0, h: 10.0, maximized: false };
+        let (x, y, w, h) = restore_geom(rec, 0.0, 0.0);
+        assert_eq!((x, y), (0.0, 5000.0));
+        assert_eq!((w, h), (GEOM_MIN_W, GEOM_MIN_H));
+    }
+
+    #[test]
+    fn geom_rec_json_roundtrips_and_tolerates_missing_maximized() {
+        let rec = GeomRec { x: 12.5, y: 30.0, w: 640.0, h: 480.0, maximized: true };
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: GeomRec = serde_json::from_str(&json).unwrap();
+        assert!(back == rec);
+        // A pre-maximized-era file (or hand-trimmed one) still loads.
+        let old: GeomRec =
+            serde_json::from_str(r#"{"x":1.0,"y":2.0,"w":300.0,"h":200.0}"#).unwrap();
+        assert!(!old.maximized);
+    }
 
     #[test]
     fn redact_masks_the_token_and_only_the_token() {
@@ -4110,24 +4319,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_sys_stats(empty_sys_stats());
 
     // ── Window manager (G2): model + seed the Chat window ─────────────────────
+    // Phase B: seed remembered shapes BEFORE the first launch, so even the boot
+    // Chat window wears its last one.
+    geom_load();
     let windows: Rc<slint::VecModel<WindowDesc>> = Rc::new(slint::VecModel::default());
     ui.set_windows(slint::ModelRc::from(windows.clone()));
     WINDOWS.with(|w| *w.borrow_mut() = Some(windows.clone()));
-    wm_launch(&ui, &windows, AppKind::Chat);
-    // Dev: APEX_FACE_AUTOOPEN=1 opens the Face window at launch (single-command
-    // verification of the face, GL or 2D). Independent of the render path.
-    if std::env::var_os("APEX_FACE_AUTOOPEN").is_some() {
-        wm_launch(&ui, &windows, AppKind::Face);
-    }
-    if std::env::var_os("APEX_SKETCH_AUTOOPEN").is_some() {
-        wm_launch(&ui, &windows, AppKind::Sketchpad);
-    }
-    // Dev: APEX_OCCIPITAL_DEMO=1 opens the Occipital reader at launch with a
-    // sample page so the follow-along window can be verified without agentd
-    // (snapshot server). APEX_OCCIPITAL_DEMO=results|recall previews those modes.
-    if let Some(demo) = std::env::var_os("APEX_OCCIPITAL_DEMO") {
-        apply_occipital_render(&ui, occipital_demo_render(&demo.to_string_lossy()));
-    }
+    // The seed launches wait for the desktop area to go LIVE (Phase B): before
+    // the window has its real size (winit/Wayland deliver it at first
+    // configure, a few ticks into the loop) the area reads dead, so a
+    // remembered shape can't clamp to the live display — a display shrink
+    // between sessions stranded the boot Chat window off-stage (caught in the
+    // Phase B E2E clamp test). seed_windows_when_area_live re-arms a 50ms
+    // timer until the area is real (bounded ~2s, then launches anyway — a
+    // broken backend still gets its Chat window). Imperceptible in practice:
+    // the area goes live before or with the first frame.
+    seed_windows_when_area_live(ui.as_weak(), windows.clone(), 0);
 
     // ── Terminal (G3d): stdin channel + WS URL (parked until first launch) ────
     let term_url = {
@@ -4207,7 +4414,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_close_window(move |id| {
             if let Some(ui) = uw.upgrade() {
                 if let Some(i) = wm_index_by_id(&w, id) {
-                    if let Some(kind) = w.row_data(i).map(|d| d.kind) {
+                    if let Some(d) = w.row_data(i) {
                         // Adaptive UI (the human always wins): closing an
                         // agent-opened window latches that app — ui_open is
                         // suppressed for the rest of the session; the agent
@@ -4216,13 +4423,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // its auto-reveal makes it agent-ish even when the
                         // user opened it (A3 — the old standalone suppress
                         // flag, folded). A menu launch re-invites.
-                        let bit = ui_latch_bit(kind);
-                        if kind == AppKind::Occipital
+                        let bit = ui_latch_bit(d.kind);
+                        if d.kind == AppKind::Occipital
                             || AGENT_OPENED.with(|m| m.get()) & bit != 0
                         {
                             AGENT_OPENED.with(|m| m.set(m.get() & !bit));
                             UI_LATCHED.with(|m| m.set(m.get() | bit));
                         }
+                        // Phase B: the row is about to vanish — capture its
+                        // final shape so the next open wears it.
+                        geom_note(d.kind, d.x, d.y, d.w, d.h, d.maximized);
                     }
                     w.remove(i);
                 }
@@ -4246,6 +4456,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_maximize_window(move |id| {
             if let Some(ui) = uw.upgrade() {
                 wm_update_row(&w, id, |d| d.maximized = !d.maximized);
+                geom_note_id(&w, id);
                 wm_focus(&ui, &w, id);
             }
         });
@@ -4277,12 +4488,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let w = windows.clone();
         ui.on_move_window(move |id, x, y| {
             wm_update_row(&w, id, |d| { d.x = x; d.y = y; });
+            geom_note_id(&w, id); // fires per pointer-move; the flush is debounced
         });
     }
     {
         let w = windows.clone();
         ui.on_resize_window(move |id, ww, hh| {
             wm_update_row(&w, id, |d| { d.w = ww; d.h = hh; });
+            geom_note_id(&w, id);
         });
     }
 
@@ -6572,6 +6785,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Phase B: debounce the geometry file — move/resize note per pointer-move,
+    // this timer turns that into at most one write per 2s. Lives on the stack
+    // so it runs for the life of the event loop.
+    let geom_flush_timer = slint::Timer::default();
+    geom_flush_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_secs(2),
+        geom_flush_if_dirty,
+    );
+
     // Don't swallow the event-loop error. On linuxkms a GL/DRM fault can make
     // `run()` return Err — previously `?` propagated it as a bare exit-1 with no
     // message (the "render gremlin"), dropping the kiosk with zero diagnostics.
@@ -6580,6 +6803,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[ui-slint] FATAL: Slint event loop exited with error: {e:?}");
         return Err(e.into());
     }
+    // Final flush — a shape changed in the last debounce window still lands.
+    geom_flush_if_dirty();
     Ok(())
 }
 
