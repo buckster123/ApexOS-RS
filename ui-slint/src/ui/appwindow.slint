@@ -952,9 +952,12 @@ export component AppWindow inherits Window {
                     x: 0; y: 0; width: parent.width; height: parent.height;
                     clicked => { root.start-menu-open = false; }
                 }
+                // y-floor on both menus: a menu taller than the space above the
+                // taskbar slides its top edge to the frame instead of rendering
+                // off-screen (short laptop displays).
                 if root.start-menu-open && !win98: StartMenu {
                     x: tb-margin;
-                    y: parent.height - tb-h - tb-margin - self.height - 8px;
+                    y: max(8px, parent.height - tb-h - tb-margin - self.height - 8px);
                     mesh-unread: root.mesh-unread;
                     launch(ord) => {
                         root.launch-app(ord);
@@ -963,7 +966,7 @@ export component AppWindow inherits Window {
                 }
                 if root.start-menu-open && win98: Win98StartMenu {
                     x: tb-margin;
-                    y: parent.height - tb-h - self.height;
+                    y: max(0px, parent.height - tb-h - self.height);
                     launch(ord) => {
                         root.launch-app(ord);
                         root.start-menu-open = false;
