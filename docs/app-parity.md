@@ -38,7 +38,7 @@ except Camera and the IDE is shipped**:
 | 🧠 Cerebro | ✅ `web_view` tile | D | external-browser tile (`:8765`, host from agentd) |
 | 👁 Sensor Head | ✅ `web_view` tile | D | external-browser tile (`:8080`, host from agentd) |
 | 🌐 Browser | ✅ `web_view` URL bar | D | open-arbitrary-URL bar in the Web launcher |
-| 🖥 IDE (Monaco) | ✗ | D | external editor / SSH+vim (deferred, CLAUDE.md) |
+| 🖥 IDE (Monaco) | ✗ | D | external editor / SSH+vim (deferred, docs/build-roadmap.md ledger) |
 
 **Tiers** = real build effort, not priority:
 - **A** — UI-only over agentd routes that already exist. Cheapest, no backend risk.
@@ -65,7 +65,7 @@ Separately, the **`web/` PWA** is a parallel -RS-owned browser/mobile frontend
 2. **PR: Audio Editor** — ✅ shipped (`audio_editor_view` + the `audio_*` tool belt).
 3. **PR: Sonus player** — ✅ shipped. Library UI over `/api/sonus/files` +
    server-side playback on the device speakers via a new `/api/sonus/{play,stop}`
-   (agentd → `ffmpeg -f alsa` — not ffplay; see the Sonus gotcha in CLAUDE.md).
+   (agentd → `ffmpeg -f alsa` — not ffplay; see the Sonus gotcha in docs/gotchas.md).
    The actual song *generation* is an **external** Python MCP
    (`hermes-sonus`), not -RS code. Diagnosis of the live flakiness:
    - It's a **3-step async flow** the model must drive: `generate_song` → `task_id`,

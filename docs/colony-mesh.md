@@ -39,7 +39,7 @@ apex3 has not yet self-declared a constitutional role — that's the colony's to
 Grounding for the plan — several roadmap items are closer than the agents assumed:
 
 - **Discovery** — mDNS browse (`avahi-browse _apexos._tcp`) + advertise (static avahi service file).
-  Every node both advertises and browses (symmetric). See the mesh-discovery gotcha in CLAUDE.md.
+  Every node both advertises and browses (symmetric). See the mesh-discovery gotcha in docs/gotchas.md.
 - **Trust** — cross-node calls are **per-peer bearer-token-gated** (the pairing exchange stores each
   peer's `AGENTD_TOKEN`). Not mTLS, but a peer needs the token. The LAN bind (`AGENTD_BIND=0.0.0.0`)
   is safe *because* of the token (F036).
@@ -56,7 +56,7 @@ Grounding for the plan — several roadmap items are closer than the agents assu
   replies with workspace file-drops ("filed not messaged — send_to_agent session routing is
   buggy per André", apex2, 2026-07-13). The wedge that *looked* like this bug — apex1's
   session-35 inbound turns 400ing — was the separate session-persist interleave, fixed in its
-  own PR (see the CLAUDE.md persist-ordering gotcha).
+  own PR (see the persist-ordering gotcha in docs/gotchas.md).
 - **Embodiment** — `build_embodiment` (agentd) already computes this node's **live senses + the full
   tool registry** every 30s. Capability advertisement is mostly a matter of *exposing* this.
 - **Sub-agents** — `SpawnAgent` machinery exists with non-session-gated child ids — the basis for a
@@ -147,7 +147,7 @@ dark mid-thermal-alert, I need to know. Silence and 'everything fine' look ident
   **✅ Shipped** as the sensor-alert **profiles** selector: `profile_thresholds`
   (`standard`/`smoker`/`kitchen`/`workshop`, pure + unit-tested in agentd `main.rs`) feeding the alert
   loop live, `GET`/`POST /api/sensors/config` (gateway, canonical `SENSOR_PROFILES` list, persisted),
-  and the Settings **SENSOR ALERTS** chip row. See the sensor-profiles gotcha in CLAUDE.md.
+  and the Settings **SENSOR ALERTS** chip row. See the sensor-profiles gotcha in docs/gotchas.md.
 
 ---
 

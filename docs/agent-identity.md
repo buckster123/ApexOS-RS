@@ -58,7 +58,7 @@ the Cerebro space key and the thing the system stamps everywhere.
 - **Agent ≠ node.** The body ([edk.md](edk.md)) is per-node and physical; identity is portable
   and rides the mesh. The same APEX can inhabit the Pi 5 today and a GPU node tomorrow — the
   soul and memory travel, the embodiment block is swapped underneath (see the soul-vs-embodiment
-  rule in CLAUDE.md).
+  rule in docs/gotchas.md).
 - **Agent ≠ session.** A `SessionId` is one conversation/turn-stream; an agent identity spans
   many sessions (and reboots). One agent, many sessions; the binding is session → identity.
   Ephemeral **spawn sessions** (`SessionId ≥ apexos_core::SPAWN_SESSION_BASE`, the `1<<63`

@@ -1,7 +1,7 @@
 # ApexOS-RS — Build Roadmap
 
 10 steps — **all shipped ✅** (live on the Pi 5 KMS/DRM kiosk; per-step gates in
-CLAUDE.md's build-order table). Each was independently testable: steps 1-9 develop
+this file — CLAUDE.md now carries only the summary). Each was independently testable: steps 1-9 develop
 and test on any Linux desktop with `SLINT_BACKEND=winit`; step 10 deploys to Pi
 with KMS/DRM.
 

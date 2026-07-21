@@ -53,7 +53,7 @@ Connect `ws(s)://<host>/ws?token=<token>`. The gateway pushes
 `session_init{session_id, history}` on connect (history is replayed). The client
 sends `{type:user_prompt|user_approval|user_cancel}` and `{type:hello,new:true}`
 (new chat). Inbound events handled (the typed `Event` enum, snake_case, ids as bare
-numbers — see CLAUDE.md "agentd WebSocket protocol"):
+numbers — see docs/agentd-protocol.md):
 
 | Event | UI |
 |-------|-----|

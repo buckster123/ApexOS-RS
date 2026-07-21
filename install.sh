@@ -802,7 +802,7 @@ fi
 
 # Sensor head (BME688 + MLX90640): provision the I2C prerequisite on a Pi when the
 # sensor head was selected. The sensors live on the ARM I2C bus, read by an EXTERNAL
-# SensorHead dashboard (not -RS itself — see the sensor-head gotcha in CLAUDE.md), so
+# SensorHead dashboard (not -RS itself — see the sensor-head gotcha in docs/gotchas.md), so
 # here we only enable the bus + tools the dashboard needs. Pi-5 gotcha: `dtparam=
 # i2c_arm=on` enables the controller but leaves NO /dev/i2c-* until the i2c-dev module
 # loads (raspi-config's do_i2c adds both; a manual config.txt edit does not) — so we
@@ -1748,7 +1748,7 @@ if $SENSOR_I2C_PROVISIONED; then
   echo -e "  ${YELLOW}  🌡  Sensor head: I2C enabled — ${BOLD}reboot${NC}${YELLOW} to activate /dev/i2c-*.${NC}"
   echo -e "  ${DIM}     BME688/MLX90640 readings also need the external SensorHead dashboard"
   echo -e "       (github.com/buckster123/SensorHead) running + SENSORHEAD_URL set on the"
-  echo -e "       bridge — see the sensor-head recipe in CLAUDE.md.${NC}"
+  echo -e "       bridge — see the sensor-head recipe in docs/gotchas.md.${NC}"
   echo ""
 fi
 
