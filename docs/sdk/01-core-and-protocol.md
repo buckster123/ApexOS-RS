@@ -1,8 +1,10 @@
 # SDK 01 — Core types & the WebSocket/event protocol
 
-> **Surface:** `apexos-core` (`agentd/crates/core/`) — the `Event`/`Intent` wire
-> types and the in-process event bus — plus the gateway WS read/write path that
-> translates that bus to JSON over `ws://localhost:8787/ws`.
+> **Surface:** `apexos-protocol` (`apexos-protocol/`, the extracted wire-type
+> crate — `apexos-core` re-exports it) for the `Event`/`Intent` wire types, plus
+> `apexos-core` (`agentd/crates/core/`) for the in-process event bus, plus the
+> gateway WS read/write path that translates that bus to JSON over
+> `ws://localhost:8787/ws`.
 >
 > **Extend this when** you need a new kind of message to flow through the system:
 > a new agent/tool/sensor/mesh event, a new frontend intent, or a new field on an
@@ -11,9 +13,10 @@
 > daemon and every client. Read this before adding any `Event` variant or writing
 > a new frontend (browser, PWA, alternate UI).
 
-This guide is ground-truthed against the source. **Where it contradicts the
-CLAUDE.md protocol table, this file is correct and the table is stale** — see
-[Gotchas vs. CLAUDE.md](#gotchas-vs-claudemd).
+This guide was ground-truthed against the source **as of a June 2026 snapshot**.
+Where it contradicts CLAUDE.md / `docs/gotchas.md` / `docs/agentd-protocol.md`
+(all maintained continuously), **those win and this guide is stale**, pending an
+SDK refresh.
 
 ---
 
@@ -22,7 +25,9 @@ CLAUDE.md protocol table, this file is correct and the table is stale** — see
 ### One enum is the protocol
 
 There is no separate `Intent` type. **`Event`** (the `Event` enum in
-`agentd/crates/core/src/types.rs`) is a single tagged enum that carries *both*
+`apexos-protocol/src/lib.rs:235` — `agentd/crates/core/src/types.rs` was folded
+into the extracted `apexos-protocol` crate, which `apexos-core` re-exports so
+`apexos_core::Event` still resolves) is a single tagged enum that carries *both*
 directions:
 
 - **Inbound (frontend → daemon)** — `UserPrompt`, `UserApproval`, `UserCancel`.
@@ -30,7 +35,10 @@ directions:
   `Intent` type.
 - **Outbound (daemon → frontend)** — everything else: `AgentText`, `ToolRequested`,
   `ToolResult`, `ApprovalPending`, `TurnComplete`, `SensorReading`, council/mesh/
-  vast/evolution variants, etc.
+  vast/evolution/goal variants (`SensorAlert`, `MeshNodeStatus`, `MeshMessage`,
+  `MeshMemoryShared`, `GoalStateChanged`, … have shipped since this guide's
+  snapshot — the enum in `apexos-protocol/src/lib.rs:235` is the authoritative
+  inventory), etc.
 
 Serde config: `#[serde(tag = "type", rename_all = "snake_case")]`
 (the container attribute on `enum Event`). So every frame on the wire is a JSON object with a `"type"`
@@ -43,7 +51,8 @@ discriminant in **snake_case** and the variant's fields flattened alongside it:
 ### ID newtypes serialize as bare numbers
 
 `SessionId(pub u64)`, `ActionId(pub u64)`, `EvolutionId(pub u64)`
-(the ID newtypes in `types.rs`) are `#[derive(Serialize, Deserialize)]` tuple structs. Serde
+(the ID newtypes in `apexos-protocol/src/lib.rs`; they also derive `Ord` for the
+`no_std` consumer) are `#[derive(Serialize, Deserialize)]` tuple structs. Serde
 serializes a single-field tuple struct **transparently** — as the inner number,
 **not** as `{"0": 42}` and **not** as a string. So on the wire:
 
@@ -137,9 +146,10 @@ Adding to the wire protocol touches **four layers in order**. Skipping any one
 produces the silent-drop failure mode (a frame that doesn't deserialize is
 discarded with no error — see [Reference](#reference)).
 
-### 1. Declare the variant — `core/src/types.rs`
+### 1. Declare the variant — `apexos-protocol/src/lib.rs`
 
-Add to the `Event` enum (in `core/src/types.rs`). Snake_case is automatic via the
+Add to the `Event` enum (in `apexos-protocol/src/lib.rs` — the extracted
+wire-contract crate; `apexos-core` re-exports it). Snake_case is automatic via the
 container attribute; just name the variant in PascalCase and the fields:
 
 ```rust
@@ -155,6 +165,13 @@ Rules:
   gateway injects it (see step 4); your client omits it.
 - Field names are the **wire contract**. Renaming a field is a breaking change to
   every client. There is no version negotiation.
+- **The crate is `no_std`-capable** (an external bare-metal consumer, ApexOS-RV,
+  pins it): a map-bearing field uses the crate's **`Map<K,V>` alias**
+  (`HashMap` under `std` ⇄ `BTreeMap` under `no_std` — identical JSON shape),
+  never `HashMap` directly; no bare `std::` paths (`core::`/`alloc::` instead);
+  ID newtypes derive `Ord`. Run **both** build gates:
+  `cargo test -p apexos-protocol` AND
+  `cargo test -p apexos-protocol --no-default-features --features alloc`.
 
 ### 2. Handle it in `SystemState::apply` — `core/src/state.rs`
 
@@ -181,7 +198,7 @@ Producers call `bus.emit(Event::BatteryStatus { .. }).await`. Consumers
 | Plugin supervisor | `Supervisor::run` (`plugins/src/supervisor.rs`) | the event affects tool dispatch/approval |
 | Evolution applier | `spawn_evolution_applier` (`agentd/src/main.rs`) | it's an `Evolution*` variant |
 | Store writer | `store/src/lib.rs` | **automatic** — it logs *every* `Event` as JSONL; no change needed |
-| Gateway WS write task | the broadcast-relay loop in `gateway/src/lib.rs` | **automatic** — it relays *every* broadcast `Event` to every socket; no change needed |
+| Gateway WS write task | the broadcast-relay loop in `gateway/src/lib.rs` | **automatic** — it relays every broadcast `Event` (session-scoped per-socket via `event_session`; session-less events go to all sockets); no change needed |
 
 Most new outbound events need **no consumer edits** — the store and gateway relay
 everything. You only edit a consumer to make the daemon *act* on the event.
@@ -221,7 +238,7 @@ Goal: a mesh node periodically reports liveness; the daemon logs it (free, via
 the store) and broadcasts it; clients show a green dot. This is a pure
 *outbound* event — no new intent, no state mutation — the minimal end-to-end case.
 
-**1. `core/src/types.rs`** — add to `enum Event` (after the mesh variants):
+**1. `apexos-protocol/src/lib.rs`** — add to `enum Event` (after the mesh variants):
 
 ```rust
 /// Emitted by the mesh heartbeat task ~every 30s per known peer.
@@ -259,8 +276,9 @@ every gateway WS write task already relays it (the broadcast-relay loop in `gate
 {"type": "node_status", "node_id": "pi-zero-3", "rss_mb": 41, "load1": 0.7, "healthy": true}
 ```
 
-Add an inbound case for `node_status` (filtering is N/A — it carries `node_id`,
-not `session`; see the multi-client note below). Done — the full path works
+Add an inbound case for `node_status` (it carries `node_id`, not `session`, so
+the gateway's `event_session` scoping treats it as a global and delivers it to
+every client). Done — the full path works
 without touching the agent loop, the supervisor, or the policy engine.
 
 > **If this were an inbound intent instead** (say `set_node_label`), you would
@@ -298,11 +316,25 @@ This is the exact handshake — and it **differs from CLAUDE.md** (see Gotchas).
    socket to it and replies with a fresh `session_init` carrying the full
    `history`. If it doesn't exist, you keep your freshly-assigned id (no error).
 
+   `hello` has grown since the original snapshot (all optional, all handled in
+   the gateway read task):
+   - `{"type":"hello","new":true}` mints a **new** session id with empty history
+     on the live socket (the ui-slint "+ New" button).
+   - `agent_id` binds the session to an agent identity (Cerebro space + soul);
+     session-token connections are gated through `gate_agent_bind` — a human may
+     only bind an agent they own.
+   - `persona` carries the active persona voice; there is also a standalone
+     `{"type":"set_persona","persona":"…"}` frame for a live switch (gateway-consumed,
+     never re-emitted as an `Event`).
+
 4. **Send a prompt:**
    ```json
    {"type": "user_prompt", "text": "hello"}
    ```
-   Omit `session` — the gateway injects it.
+   Omit `session` — the gateway injects it. It may also carry `images`
+   (`UserPrompt.images`, `apexos-protocol/src/lib.rs:237`): each `{path}` or
+   `{b64, media_type}` ref is shimmed through `vision::prepare` (decode →
+   downscale ≤`VISION_MAX_EDGE` → re-encode) before the event.
 
 5. **Approve/reject a tool** when you receive `approval_pending`. Use the numeric
    `call.id` as `action`, and `granted` (boolean) — **not** `call_id`/`approved`:
@@ -318,11 +350,15 @@ This is the exact handshake — and it **differs from CLAUDE.md** (see Gotchas).
    children) but emits **no** `TurnComplete`. Your client must clear its own busy
    state and any pending tool cards.
 
-7. **Filter on `session`.** The gateway broadcasts **every session's events to
-   every connected socket** with no server-side filter. Outbound frames carry the
-   same `session` number the gateway injected inbound. A multi-client browser/PWA
-   deployment MUST drop frames whose `session` ≠ its own, or it renders another
-   session's output. (A single-display kiosk never hits this.)
+7. **Outbound frames are scoped server-side — don't filter them yourself.** The
+   gateway write task filters per-socket via `event_session`
+   (`gateway/src/lib.rs:468`): a session-scoped event (the conversation stream —
+   `agent_text`/`tool_requested`/`turn_complete`/`approval_pending`/…) reaches
+   only the socket bound to that session; global/status events (sensors, council,
+   mesh, vast, evolution) go to every client. So a client receives **only its own
+   session's stream + globals** — clients don't (and shouldn't) re-filter.
+   (This replaced the original broadcast-everything contract, under which clients
+   had to drop foreign-session frames themselves.)
 
 ### Minimal client (pseudocode)
 
@@ -332,7 +368,8 @@ let mySession = null;
 ws.onmessage = ({data}) => {
   const ev = JSON.parse(data);
   if (ev.type === "session_init") { mySession = ev.session_id; renderHistory(ev.history); return; }
-  if ("session" in ev && ev.session !== mySession) return;   // multi-client filter
+  // no session filter needed — the gateway's event_session scoping already
+  // delivers only this socket's session stream + global events
   switch (ev.type) {
     case "agent_text":       appendDelta(ev.delta); break;          // also: set busy
     case "tool_requested":   pushToolCard(String(ev.call.id), ev.call); break;
@@ -403,12 +440,13 @@ protocol tables in the same commit.
 
 | `type` | Fields (client sends) | Effect |
 |--------|-----------------------|--------|
-| `hello` | `resume_session: u64?` | resume a session; server replies `session_init` with history |
-| `user_prompt` | `text: string` | start/continue a turn |
+| `hello` | `resume_session: u64?`, `new: bool?`, `agent_id: string?`, `persona: string?` | resume (or mint, with `new:true`) a session; server replies `session_init` with history. `agent_id` = identity bind (gated for session-token humans); `persona` = voice |
+| `set_persona` | `persona: string` | live persona switch — gateway-consumed, never re-emitted as an `Event` |
+| `user_prompt` | `text: string`, `images: [{path}\|{b64, media_type}]?` | start/continue a turn; images are shimmed via `vision::prepare` |
 | `user_approval` | `action: u64` (= `ToolCall.id`), `granted: bool` | resolve a pending approval |
 | `user_cancel` | — | cascade-abort the turn (no `turn_complete` follows) |
 
-### Outbound events (daemon → frontend), selected — client filters on `session`
+### Outbound events (daemon → frontend), selected — scoped per-socket by `event_session`
 
 | `type` | Key fields | Notes |
 |--------|-----------|-------|
@@ -424,33 +462,38 @@ protocol tables in the same commit.
 | `sensor_reading` | `node_id: string`, `reading: SensorReading`, `timestamp: u64` | from `/sensor-bridge` |
 | `wake_triggered` | — | flash wake indicator |
 | `agent_message` / `agent_message_ack` | A2A routing | router re-injects as `user_prompt` |
-| `council_*` | see `types.rs:217–224` | multi-agent deliberation stream |
+| `council_*` | see `apexos-protocol/src/lib.rs:305–312` | multi-agent deliberation stream |
 | `error` | `session: u64?`, `message` | `session` is optional |
-| `vast_*` | instance/tunnel lifecycle | `types.rs:230–237` |
-| `peer_seen` / `peer_registered` / `peer_lost` | mesh discovery | `types.rs:241–245` |
-| `evolution_proposed` / `evolution_applied` / `evolution_rolled_back` | self-modification audit | `types.rs:250–267` |
+| `vast_*` | instance/tunnel lifecycle | `apexos-protocol/src/lib.rs:318–329` |
+| `peer_seen` / `peer_registered` / `peer_lost` | mesh discovery | `apexos-protocol/src/lib.rs:347–351` |
+| `evolution_proposed` / `evolution_applied` / `evolution_rolled_back` | self-modification audit | `apexos-protocol/src/lib.rs:363–376` |
 
 > `turn_started` is **not** emitted by the Rust daemon. Do not depend on it.
 
-### Nested struct shapes (`types.rs`)
+> This table is a mid-2026 selection. Variants shipped since — `sensor_alert`,
+> `mesh_node_status`, `mesh_message`, `mesh_memory_shared`, `goal_state_changed`,
+> among others — are not listed; the full enum at `apexos-protocol/src/lib.rs:235`
+> is the authoritative inventory.
+
+### Nested struct shapes (`apexos-protocol/src/lib.rs`)
 
 | Struct | JSON | Source |
 |--------|------|--------|
-| `ToolCall` | `{ "id": <num>, "tool": <str>, "args": {…}, "needs_approval": <bool> }` | `:272` |
-| `ToolOutput` | `{ "ok": <bool>, "content": <any> }` | `:281` |
-| `ToolSpec` | `{ "name", "description", "input_schema": {…} }` | `:287` |
-| `ContentBlock` | tagged `type`: `text`/`thinking`(`+signature`)/`tool_use`/`tool_result` | `:329` |
-| `SensorReading` | tagged `kind`: `temperature`/`humidity`/`pressure`/`motion`/`distance`/`gpio_level`/`air_quality`/`thermal_frame` | `:121` |
-| `EvolutionProposal` | tagged `kind`: `register_mcp_server`/`unregister_mcp_server`/`update_policy_rule`/`update_system_prompt`/`hot_reload_subsystem` | `:88` |
+| `ToolCall` | `{ "id": <num>, "tool": <str>, "args": {…}, "needs_approval": <bool> }` | `:406` |
+| `ToolOutput` | `{ "ok": <bool>, "content": <any> }` | `:415` |
+| `ToolSpec` | `{ "name", "description", "input_schema": {…} }` | `:421` |
+| `ContentBlock` | tagged `type`: `text`/`thinking`(`+signature`)/`tool_use`/`tool_result` | `:464` |
+| `SensorReading` | tagged `kind`: `temperature`/`humidity`/`pressure`/`motion`/`distance`/`gpio_level`/`air_quality`/`thermal_frame` | `:192` |
+| `EvolutionProposal` | tagged `kind`: `register_mcp_server`/`unregister_mcp_server`/`update_policy_rule`/`update_system_prompt`/`hot_reload_subsystem`/`request_hardware` | `:141` |
 
 ### Enums
 
 | Type | Wire values | Source |
 |------|-------------|--------|
-| `PolicyMode` (global) | `suggest` \| `auto-edit` \| `yolo` (kebab-case) | `:29` |
-| `PolicyRule` (per-tool) | `allow` \| `ask` \| `workspace` (kebab-case) | `:45` |
-| `Subsystem` | `plugins` \| `policy` \| `agent` \| `gateway` (snake_case) | `:77` |
-| `Message` role | `user` \| `assistant` (tagged `role`) | `:322` |
+| `PolicyMode` (global) | `suggest` \| `auto-edit` \| `yolo` (kebab-case) | `:82` |
+| `PolicyRule` (per-tool) | `allow` \| `ask` \| `workspace` (kebab-case) | `:98` |
+| `Subsystem` | `plugins` \| `policy` \| `agent` \| `gateway` (snake_case) | `:130` |
+| `Message` role | `user` \| `assistant` (tagged `role`) | `:457` |
 
 ### Bus / state facts
 
@@ -473,11 +516,13 @@ The CLAUDE.md and (older) protocol tables contain stale claims. Trust the source
 | client sends `{type:"session_init"}` on connect | server **pushes** `session_init` first; client sends nothing to start (the connect handler in `gateway/src/lib.rs`) |
 | resume via `{type:"session_init", session_id}` | resume via `{type:"hello", resume_session:<id>}` (the `hello` handling in `gateway/src/lib.rs`) |
 | `turn_started` clears buffer / sets busy | Rust daemon **never emits** `turn_started`; busy is driven by `agent_text` |
-| `tool_result` has `call: <id>` | correct — `call` is a **bare number** here, *unlike* `tool_requested` where `call` is a full `ToolCall` object (`types.rs:177` vs `:173`) |
+| `tool_result` has `call: <id>` | correct — `call` is a **bare number** here, *unlike* `tool_requested` where `call` is a full `ToolCall` object (`apexos-protocol/src/lib.rs:248` vs `:244`) |
 
 ### The four-layer checklist for a new variant
 
-1. `core/src/types.rs` — add the `Event` variant (snake_case auto).
+1. `apexos-protocol/src/lib.rs` — add the `Event` variant (snake_case auto;
+   respect the `no_std` rules — `Map<K,V>` alias, no bare `std::` — and run both
+   protocol test gates).
 2. `core/src/state.rs` — add an `apply` arm (no-op unless it holds canonical state).
 3. consumers — add a match arm **only** where the daemon must *act* (router /
    supervisor / evolution applier); store + gateway relay automatically.

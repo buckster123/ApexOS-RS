@@ -49,11 +49,13 @@ Four facts to hold in your head:
    returned tool name into a flat `tool_registry: HashMap<String, PluginId>`
    (the insert in `Supervisor::spawn_plugin`). Names are global; a name collision means
    last plugin to start wins. Namespace yours (`weather_now`, not `now`).
-3. **No request timeout on the call path.** `McpClient` has no per-request timeout
-   (`mcp.rs` — a `tools/call` that never replies blocks that call's oneshot forever).
-   The agent turn engine has its own bounded wait that synthesizes an error so a turn
-   never wedges, but your plugin must always reply to every request that carries an
-   `id`. Don't hang.
+3. **The call path is time-bounded now.** `McpClient` bounds every request wait with
+   the same knob + default as the turn-level tool timeout
+   (`AGENTD_TOOL_RESULT_TIMEOUT_SECS`, 1800s — the `tokio::time::timeout` in
+   `McpClient::request`, `mcp.rs`), so a `tools/call` that never replies errors out
+   and reclaims its pending entry instead of blocking the oneshot forever. The agent
+   turn engine has its own bounded wait too, but your plugin must still reply to
+   every request that carries an `id`. Don't hang.
 4. **The protocol version is pinned.** agentd negotiates MCP `2024-11-05`
    (`mcp.rs:16`). Echo it back.
 
@@ -70,7 +72,7 @@ Four facts to hold in your head:
 | `Supervisor::handle_died` | `agentd/crates/plugins/src/supervisor.rs` | restart logic keyed on `RestartPolicy`. |
 | `PluginConfig` / `RestartPolicy` | `agentd/crates/plugins/src/config.rs` | the `[[plugin]]` stanza shape. |
 | `ToolProxy::call` | `agentd/crates/plugins/src/supervisor.rs` | direct call path (10 s timeout) used by daemon-internal code, bypasses policy. |
-| `ToolSpec` / `ToolOutput` / `ToolCall` | `agentd/crates/core/src/types.rs` | the in-daemon representations. |
+| `ToolSpec` / `ToolOutput` / `ToolCall` | `apexos-protocol/src/lib.rs` (re-exported by `apexos-core`) | the in-daemon representations. |
 | Reference server (Rust, sync) | `tools/crates/apexos-tools/src/main.rs` | minimal stdio loop — the template to copy. |
 | Reference server (Rust, async + state) | `cerebro/crates/cerebro-mcp/src/{main.rs,transport.rs}` | tokio loop holding an `Arc<CerebroCortex>`. |
 
@@ -200,6 +202,12 @@ Restart agentd: `sudo systemctl restart agentd`. On boot the supervisor spawns e
 > The default `config/plugins.toml` in the repo is the install-time template; the
 > *live* file is `/etc/agentd/plugins.toml` (chowned to `agentd` so self-evolution can
 > append to it). Edit the deployed file, not just the repo template, for an existing node.
+> Note the deployment semantics: install.sh treats the live file as **seed-if-absent**
+> (preserving self-evolved `register_mcp_server` entries), so a *new* stock plugin does
+> **not** reach already-deployed nodes via `apexos-update` — it needs a live edit or a
+> `register_mcp_server` evolution on each node. (The one exception is the occipital
+> stanza, which install.sh auto-appends after a successful build, guarded by an
+> uncommented-`id = "occipital"` grep so the append stays idempotent.)
 
 **7. Non-Rust plugins.** Any language works — agentd only cares about the stdio
 JSON-RPC contract. Point `cmd` at the interpreter and pass the script in `args`:

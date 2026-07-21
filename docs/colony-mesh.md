@@ -28,9 +28,10 @@ level, where the agents self-organize it. agentd does **not** hard-code node rol
 (transport, delegation, advertisement), not policy; the colony decides how to use it. Revisit only if
 soft self-governance proves insufficient.
 
-*Status note (2026-07): the colony is now **3 live nodes** — apex3 (andre-laptop, x86 desktop-mode,
-pro tier) joined alongside apex1/apex2. The table above records the original 2-node constitution;
-apex3 has not yet self-declared a constitutional role — that's the colony's to deliberate.*
+*Status note (2026-07): the colony is now **4 live nodes** — apex3 (andre-laptop, x86 desktop-mode,
+pro tier) and tvpi (the TV Pi, joined 2026-07-20) alongside apex1/apex2. The table above records the
+original 2-node constitution; neither apex3 nor tvpi has yet self-declared a constitutional role —
+that's the colony's to deliberate.*
 
 ---
 
@@ -155,7 +156,7 @@ dark mid-thermal-alert, I need to know. Silence and 'everything fine' look ident
 
 | # | Item | Why deferred | Revisit when |
 |---|------|--------------|--------------|
-| #5  | NATS / async pub-sub | New transport daemon + dep; at 2 nodes HTTP req/resp + the existing event broadcast + polling cover it. Pub/sub's win is fan-out at scale. | 3+ nodes, or capability-polling proves too chatty. **Trigger FIRED** — the colony is 3 nodes (2026-07). Human steer (André, 2026-07-03): NATS is still overkill at this scale; HTTP req/resp + broadcast held through the federation arc. **Queued for the colony's next deliberation** with federation field data — not building now |
+| #5  | NATS / async pub-sub | New transport daemon + dep; at 2 nodes HTTP req/resp + the existing event broadcast + polling cover it. Pub/sub's win is fan-out at scale. | 3+ nodes, or capability-polling proves too chatty. **Trigger FIRED** — the colony is 4 nodes (2026-07). Human steer (André, 2026-07-03): NATS is still overkill at this scale; HTTP req/resp + broadcast held through the federation arc. **Queued for the colony's next deliberation** with federation field data — not building now |
 | #8/#9 | ~~Cross-cerebro federation / write~~ | **PROMOTED** → the [colony-federation charter](colony-federation.md) (colony deliberation 2026-07-01: unanimous #1) — **shipped** as charter Slices 1–2 (memory relay + federated recall, 2026-07-02, live-verified colony-wide) | — |
 | #15 | mTLS / zero-trust | Per-peer bearer tokens already gate cross-node calls; mTLS is the upgrade for *untrusted networks*. | Before adding an untrusted-network node |
 | #11 | ~~Distributed `dream_run`~~ | **PROMOTED** → federation charter Slice 3 (dream digest exchange; colony's #2, "one arc with A") — **shipped** 2026-07-02 (nightly dream now waits out the run, `AGENTD_DREAM_TIMEOUT_SECS`; digest pushes after it) | — |

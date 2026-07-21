@@ -30,7 +30,9 @@ exactly the order we'd want.
 **PAC — model-agnostic authoring dialect** ✅
 A grounded, glyph-lean control notation for authoring souls / procedures / prompts at ~40% fewer
 tokens than prose, behaviourally lossless, consistent across tokenizer families.
-· lives in [`docs/pac.md`](docs/pac.md) + a reproducible benchmark in [`docs/pac-bench/`](docs/pac-bench/)
+· lives in [`docs/pac.md`](docs/pac.md) + a reproducible benchmark in [`docs/pac-bench/`](docs/pac-bench/);
+the enforcement pair: reference linter [`docs/pac-bench/pac2lint.py`](docs/pac-bench/pac2lint.py) + the
+pure, unit-tested apply-time gate [`agentd/crates/agentd/src/pac_lint.rs`](agentd/crates/agentd/src/pac_lint.rs)
 · **Lift:** the whole thing is a self-contained doc + corpus + harness; reimplement in any language.
 The exemplar for "factored for theft" — an idea you can take without taking any code.
 
@@ -90,8 +92,12 @@ ports to any spawner.
 **Bounded history window** ✅
 Keep a token-bounded in-memory transcript; drop whole oldest turns only at clean user-turn
 boundaries (never orphan a `tool_result` from its `tool_use`); keep the on-disk JSONL append-only.
-· `trim_history()` in [`agentd/crates/core/src/history.rs`](agentd/crates/core/src/history.rs) — pure + unit-tested
-· **Lift:** copy the function and its tests. The boundary rule is the subtle part; the tests encode it.
+Its sibling `repair_history()` self-heals a reloaded transcript at load time (restore
+`tool_use`→`tool_result` adjacency, synthesize an honest `LOST_RESULT_MARKER` for a result missing
+from the file) — deliberately minimal: byte-identical on any history the API would accept, heals in
+memory only.
+· `trim_history()` + `repair_history()` in [`agentd/crates/core/src/history.rs`](agentd/crates/core/src/history.rs) — pure + unit-tested
+· **Lift:** copy the functions and their tests. The boundary rule is the subtle part; the tests encode it.
 
 **Prompt-caching discipline** ✅🟡
 Keep the system+tools prefix byte-stable so it caches at ~0.1×; push everything per-turn-volatile
@@ -105,7 +111,7 @@ stable history for incremental caching on long sessions.
 At most one turn per session in flight; concurrent prompts queue FIFO; the slot is freed by an RAII
 guard that runs on completion, abort, *and* panic, so a crashed turn can't wedge the session.
 · the router loop + `TurnGate` in agentd
-· explained in the turn-serialization note in [`CLAUDE.md`](CLAUDE.md)
+· explained in the turn-serialization note in [`docs/gotchas.md`](docs/gotchas.md)
 · **Lift:** the RAII-guard-frees-the-slot shape is the reusable core.
 
 **Self-evolution loop** ✅🟡
@@ -140,7 +146,7 @@ the std-only [`apexos-confine`](apexos-confine/) crate: pure, unit-tested incl. 
 (TOCTOU) case. `apexos-tools` supplies the *policy* (per-agent workspace, read roots, secret denylist)
 and renders the agent-facing strings.
 · [`apexos-confine/`](apexos-confine/) (the algorithm) ← `confine()` / `confine_git_repo()` in [`tools/crates/apexos-tools/`](tools/crates/apexos-tools/)
-· explained in the FS/git-confinement notes in [`CLAUDE.md`](CLAUDE.md)
+· explained in the FS/git-confinement notes in [`docs/gotchas.md`](docs/gotchas.md)
 · **Lift:** `cargo add apexos-confine` — std-only, no ApexOS deps. The sandbox algorithm on its own.
 
 **Self-update loop** 🟡
@@ -180,16 +186,22 @@ gate — and **failing closed** (a poisoned lock returns false, so a lock error 
 auto-approve).
 · `GoalYoloSessions` + `goal_session_is_yolo()` in [`agentd/crates/core/src/identity.rs`](agentd/crates/core/src/identity.rs)
   (pure check, tested); consulted at the supervisor's Ask arm
-· explained in the goal-scoped-yolo note in [`CLAUDE.md`](CLAUDE.md)
+· explained in the goal-scoped-yolo note in [`docs/gotchas.md`](docs/gotchas.md)
 · **Lift:** the session-scoped set + fails-closed check is the reusable core; the safety property *is* the scoping.
 
 **Additive config sync — repo-follows, user-overrides-win** ✅
-For a seed-if-absent config that users (or the agent itself) evolve at runtime: on every update,
-append any key present in the shipped config but absent from the live file; never touch an existing
-key. New capabilities reach long-deployed nodes automatically while self-evolved values always win —
-retiring a whole class of "already-deployed nodes need the rule added manually" caveats.
-· `sync_policy_rules()` in [`install.sh`](install.sh)
-· **Lift:** ~40 lines of self-contained bash; the split (identity files = seed-only, capability rules = additive-sync) is the idea.
+For a seed-if-absent config that users (or the agent itself) evolve at runtime, a three-leg sync on
+every update: **heal** duplicate keys first (keep-first, so the self-evolved line wins), scan for
+missing keys **quote-insensitively** (`"key" =` and `key =` are the *same* TOML key — a quoted-only
+match re-appends every self-evolved bare-key rule as a duplicate), append any key present in the
+shipped config but absent from the live file, and **validate every transform before it lands**
+(invalid → loud warn, file untouched — an unparseable policy file is a silent full lockdown). An
+existing key's value is never touched: new capabilities reach long-deployed nodes automatically while
+self-evolved values always win — retiring a whole class of "already-deployed nodes need the rule
+added manually" caveats.
+· `policy_dedupe()` + `sync_policy_rules()` in [`install.sh`](install.sh)
+· **Lift:** self-contained bash; the split (identity files = seed-only, capability rules =
+additive-sync, always validate-before-persist) is the idea.
 
 ---
 
@@ -256,6 +268,23 @@ lists; `ScrollView` (not bare `Flickable`) because linuxkms has no wheel events;
 falls back to 2D when no GL context exists.
 · [`ui-slint/`](ui-slint/) · explained (recipe-grade) in [`docs/slint-notes.md`](docs/slint-notes.md), [`docs/ui-glowup.md`](docs/ui-glowup.md)
 · **Lift:** the docs are copy-paste recipes; the code is 🟡 (app-specific) but the patterns are the value.
+
+**Adaptive UI — the agent's hands on its own interface** ✅🟡
+The agent stages its shell through a tool family riding the existing event stream
+(`ui_open`/`ui_close`/`ui_focus`/`ui_arrange`/`ui_theme`/`ui_query` + `ui_reflex`) — never a
+protocol extension. The human always wins: a user-close of an agent-opened window latches that app
+for the session, a drag guard keeps the agent from fighting the hand, mutations cap per turn.
+Windows remember their shape (per-kind geometry persistence, clamped through a pure restore against
+the *live* desktop area), and reflexes are agent-installed event→action rules executed *below*
+inference — the trigger vocabulary is a literal-locked mirror between the tool and UI crates, so
+drift is a test failure.
+· pure cores: `arrange_rects()` (tiling math) + `restore_geom()` (geometry clamp) in
+  [`ui-slint/src/main.rs`](ui-slint/src/main.rs) (unit-tested); the trigger mirror
+  `REFLEX_TRIGGERS` ↔ `UI_REFLEX_TRIGGERS` (`ui-slint/src/main.rs` ↔
+  [`tools/crates/apexos-tools/src/tools.rs`](tools/crates/apexos-tools/src/tools.rs), test-locked)
+· explained (contract-first) in [`docs/adaptive-ui.md`](docs/adaptive-ui.md)
+· **Lift:** the etiquette contract (human-wins latch · per-turn cap · drag guard) + the pure
+tiling/restore math port to any window manager; the verbs are 🟡 (event-stream coupled).
 
 ---
 

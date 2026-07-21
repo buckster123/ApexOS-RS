@@ -2,7 +2,7 @@
 
 > The path **after** the current backlog. mk1 = "works, live, on the colony." Post-mk1 = "hardened, attributable, releasable." This doc is the north star for the v0.1.0 public drop and beyond.
 >
-> **Springboard:** a brainstorm with Gemini (`/home/andre/Downloads/from-gemini.md`) — it had the *gist* from the README + a few files, not the code, so its ideas are kept as **inspiration, corrected against reality** (see the appendix for what it got right vs wrong). The nuggets are real; the misreads are flagged.
+> **Springboard:** a brainstorm with Gemini (the source file is no longer kept — the graded appendix preserves the substance) — it had the *gist* from the README + a few files, not the code, so its ideas are kept as **inspiration, corrected against reality** (see the appendix for what it got right vs wrong). The nuggets are real; the misreads are flagged.
 
 ---
 
@@ -41,7 +41,7 @@ The hardening only makes sense against an explicit trust model. ApexOS-RS has a 
 | **agentd ↔ network** | the gateway (`0.0.0.0:8787`) | a network actor pushes frames / sniffs / abuses the WS | `AGENTD_TOKEN` bearer gate (F036 — non-loopback bind requires a token) + minted session tokens (3e); per-peer a2a tokens |
 | **Self-update ↔ the binary/OS** | the daemon rewriting its own core | a compromised agent persists a backdoor in the binary or OS | LLM-vets-the-diff gate; root watchdog with a health contract; Cerebro-as-recovery; evolution rollback store |
 | **Node ↔ mesh** | paired peers | a rogue/poisoned peer injects work or exfiltrates | trusted peer registry + tokens; hop guard; circuit breaker |
-| **Node ↔ cloud** *(future)* | vast.ai / remote GPU | a poisoned weight/result comes back | **not yet built** — see §6 |
+| **Node ↔ cloud** | vast.ai / remote GPU | a poisoned weight/result comes back | **live** — the vast bridge ships real guards (foreground SSH-tunnel Child, keepalive self-heal + revert-on-loss, boot-model revert); the poisoned-*weights* containment remains **not yet built** — see §7 |
 
 The point of naming these: hardening is *closing specific boundaries*, not a vibe. Each Track-A item below maps to a row.
 
@@ -80,7 +80,7 @@ Before the tag, one deliberate self-review sweep (André: "self-review/audit and
 - **Depth code-review** of the whole surface (the `/code-review` ultra path or a workflow sweep) — correctness + the new hardening.
 - **A5 red-team suite** green ✅ *(shipped + green at the beta cut)*.
 - `cargo clippy` clean (already is) + `cargo test --workspace` green; a UI smoke on each tier.
-- **Docs freshness:** the stale CLAUDE.md Slint examples + the doc-debt items in BACKLOG; confirm CLAUDE.md / docs match the shipped reality.
+- **Docs freshness:** the stale CLAUDE.md Slint examples + the doc-debt items in BACKLOG; confirm CLAUDE.md / docs match the shipped reality. *(Addressed 2026-07-21: CLAUDE.md refactored into a lean core + `docs/gotchas.md`/`env-vars.md`/`agentd-protocol.md`, and the audited docs-hygiene sweep corrected the drift across `docs/`.)*
 - A **live colony pass** — the things only hardware confirms (the live-verify queue that's been accumulating per-PR).
 
 ---

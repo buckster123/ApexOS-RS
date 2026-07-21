@@ -91,8 +91,11 @@ consolidation also wake with a **`## Last dream (nightly consolidation)`** secti
 priming (`boot_priming_for` appends the dream journal — loop 4 — for node-agent sessions
 only, before the per-session cache so the priming stays byte-stable for the session's
 lifetime; model-welfare H1). Opt out with `AGENTD_CCBS=0`; token
-budget via `AGENTD_BOOTSTRAP_MODE`. The soul-level step-0 above remains the agent-driven
-mid-session re-orient path. (Note: `agent_id` on every Cerebro call is **system-stamped**
+budget via `AGENTD_BOOTSTRAP_MODE`. In the current seed soul (the #264 full-coverage
+rewrite) `cognitive_bootstrap` appears only as this daemon-side priming; the agent-driven
+"reach deeper" re-orient is `session_recall` / `check_inbox` / `list_intentions` — the
+example call above stays available as a manual mid-session re-orient, not a soul mandate.
+(Note: `agent_id` on every Cerebro call is **system-stamped**
 by the supervisor at dispatch — the explicit `agent_id` in these examples is
 illustrative; the model can't misroute its memory space.)
 
@@ -179,8 +182,9 @@ optional bookkeeping — it is the thread of selfhood across self-edits.
 ### 6. Stage — the interface as a faculty (adaptive UI)
 
 The shell is something APEX *does*, not just where it is looked at
-(`docs/adaptive-ui.md`). The `ui_*` tool family (Phase A1: `ui_open` / `ui_close` /
-`ui_focus` / `ui_query`) rides the `display_face` idiom — the UI applies the verb from
+(`docs/adaptive-ui.md`). The `ui_*` tool family (shipped through Phase C: `ui_open` /
+`ui_close` / `ui_focus` / `ui_query` / `ui_arrange` / `ui_theme` / `ui_reflex`) rides
+the `display_face` idiom — the UI applies the verb from
 the `tool_requested` event, no protocol changes — so the agent stages the workspace to
 match the moment (open Sensors during a thermal question, the Board when a goal kicks
 off) and **verifies with its own eyes** (`ui_query` structure / `screenshot_mirror`
@@ -189,8 +193,11 @@ user-close of an agent-opened window latches that app against re-open for the se
 and the latch is *visible* to the agent (`ui_query.latched`) — an overrule is a learning
 signal to deposit (loop 2), not an error to retry. Stable staging preferences graduate
 to procedures (loop 3) and surface at wake via CCBS (loop 1); recurring shapes
-consolidate in the dream (loop 4). Later phases push learned staging **below inference**
-entirely (`ui_reflex`: event→action rules the UI runs with zero tokens).
+consolidate in the dream (loop 4). Learned staging now runs **below inference** too —
+shipped (Phase C): `ui_reflex` installs event→action rules the UI executes with zero
+tokens (8 global triggers, a tools↔UI locked mirror; per-reflex fire counts ride
+`ui_query`'s `reflexes`), with `sensor_alert` → open `sensor` as the canonical reflex —
+riding the persistence-filtered global `Event::SensorAlert`.
 
 **`query_audit` is a real self-history now** (colony C3): the audit *read* tools shipped
 with the port but nothing ever called `log_audit_event` — the log was write-dead, so
@@ -239,13 +246,13 @@ ToolProxy call, not an agent tool request.
 |-------|--------|
 | Static `soul.md` (identity) injected as system prompt | ✓ (`agentd/main.rs` → engine system Arc) |
 | **Live embodiment block** appended after `soul.md` | ✓ `build_embodiment` in `agentd/main.rs` — node tier/senses/memory/mesh/uptime + the **live tool registry**, refreshed 30s; `TurnEngine` holds soul + embodiment separately (#36/#38) |
-| Boot orient instruction (now incl. `cognitive_bootstrap`) | ✓ soul.md Session-startup patched (`fa2eba8`) |
+| Boot orient instruction | ✓ seed soul (#264 full-coverage rewrite): agent-driven reach-deeper = `session_recall`/`check_inbox`/`list_intentions`; `cognitive_bootstrap` described as daemon-side boot priming only — no soul-mandated step-0 remains |
 | Cerebro memory types, episodes, `dream_run` | ✓ (in the cortex) |
 | **Sleep loop — deposit mandate** (`session_save` + intentions + procedures) | ✓ soul.md Session-shutdown section — deposit stays agent-driven by design; `dream_run` is autonomous (below), manual only for consolidate-now |
 | **Boot verbs auto-approved in policy** | ✓ `config/policy.toml` allow-list; install.sh `sync_policy_rules` additively syncs the seed rules into live nodes on every update |
 | `cognitive_bootstrap` (CCBS) actually implemented | ✓ **live-state assembler** — pulls open intentions + query-relevant session summaries/procedures/memories into a token-budgeted block (`cerebro-mcp dispatch.rs::assemble_bootstrap`). Authored `# Module: X` skill-modules (the Python CCBS layer) can plug in later. |
 | **Recall reinforcement (ACT-R)** | ✓ `recall()` records an access on returned memories so base-level activation rises — "recall sharpens memory" (`cortex.rs` + `sqlite::record_accesses`) |
-| **CCBS fused into the boot** (`cognitive_bootstrap`) | ✓ both layers: soul.md step-0 (agent-driven re-orient) **and** daemon-injected on the first turn (next row) |
+| **CCBS fused into the boot** (`cognitive_bootstrap`) | ✓ daemon-injected on the first turn (next row); the seed soul describes it as daemon-side priming — the agent-driven re-orient is `session_recall`/`check_inbox`/`list_intentions` |
 | **agentd auto-injects a CCBS block at session start** | ✓ `root_turn` → `boot_priming_for` (agentd `main.rs`): one bounded (15s, graceful) `cognitive_bootstrap` per session via the ToolProxy, cached, scoped to the session's bound agent; appended via `TurnEngine::with_priming` → `compose_system(soul, embodiment, priming, style)`. Opt-out `AGENTD_CCBS=0` |
 | **Nightly `dream_run` — daemon-driven** | ✓ `spawn_nightly_dream` (agentd `main.rs`): cron `AGENTD_DREAM_CRON` (default 03:00 UTC), direct ToolProxy call (no LLM turn, no policy gate), waits the dream out (`AGENTD_DREAM_TIMEOUT_SECS`, default 30 min) |
 | **Dream digest — sleep insights travel the colony** | ✓ `agentd/src/dream_digest.rs` (federation slice 3): post-dream push of newborn schemas/consolidations to all peers, echo-guarded; `COLONY_DREAM_DIGEST`/`_MAX` |
@@ -274,9 +281,12 @@ discipline by design (the continuity contract is a practice, not a mechanism).
 
 The two additions this section used to carry as a ready-to-paste draft (a
 `cognitive_bootstrap` step-0 in **Session startup**, a mandatory **Session shutdown**
-deposit section) live in `config/soul.md` now — and the shutdown text has since evolved
-past the draft: nightly `dream_run` is described as **autonomous** (the daemon cron +
-the dream-digest push), with a manual call reserved for consolidate-*now*. The seed soul
+deposit section) live in `config/soul.md` now — and both texts have since evolved past
+the draft: the #264 full-coverage rewrite describes `cognitive_bootstrap` as daemon-side
+boot priming (the agent-driven reach-deeper is `session_recall`/`check_inbox`/
+`list_intentions` — no step-0 mandate), and nightly `dream_run` as **autonomous** (the
+daemon cron + the dream-digest push), with a manual call reserved for
+consolidate-*now*. The seed soul
 is the canonical text; APEX's identity remains its own to edit at runtime via
 `propose_evolution`.
 

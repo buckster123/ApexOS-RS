@@ -128,7 +128,9 @@ comes from the PAC; the prose carries only what compression would flatten — wh
 ## Worked example — `config/soul.md` → PAC
 
 The full pair is benchmarked below; both files live in
-[`pac-bench/samples/`](pac-bench/samples/) (`soul.pac.md` vs the real shipped `config/soul.md`).
+[`pac-bench/samples/`](pac-bench/samples/) (`soul.pac.md` vs the **pinned** `samples/soul.prose.md`
+— `config/soul.md` as of the porting commit `659b3ea`; re-port then re-snapshot to re-bench a
+newer soul).
 The startup/shutdown blocks, prose → PAC:
 
 **Prose** (≈ 90 words):
@@ -169,10 +171,10 @@ Measured across **four tokenizers from three families** on the three authoring s
 
 | sample | bytes p→pac | o200k (GPT-4o) | cl100k (GPT-4) | Qwen2.5 | Mistral-7B |
 |---|---|---|---|---|---|
-| soul | 10600→5990 | **40.8%** | **40.7%** | **40.5%** | **39.0%** |
+| soul | 10600→5990 | **40.8%** | **40.7%** | **40.6%** | **39.0%** |
 | procedure | 1720→998 | **36.2%** | **35.8%** | **35.6%** | **35.2%** |
 | evolution | 1374→449 | **64.5%** | **64.1%** | **64.1%** | **60.4%** |
-| **corpus** | | **42.2%** | **42.0%** | **41.9%** | **40.3%** |
+| **corpus** | | **42.2%** | **42.1%** | **41.9%** | **40.3%** |
 
 Findings:
 
@@ -198,6 +200,20 @@ Findings:
 The optional **Anthropic `count_tokens`** path (the exact model APEX runs on) is wired into the
 harness and activates when `ANTHROPIC_API_KEY` is set — drop a key on the bench machine to add
 the Claude column.
+
+### PAC-2 Dense — the measured second tier
+
+The same corpus re-authored in **PAC-2 Dense** (The-PAC spec, S-expression forms; ported via the
+§8 rite, pac2lint-clean) is benchmarked alongside lean: samples in
+[`pac-bench/samples/*.dense.md`](pac-bench/samples/), full tables in
+[`pac-bench/RESULTS.md`](pac-bench/RESULTS.md). Corpus cut vs prose is **~26–28%** (vs lean's
+~40–42%) — i.e. dense pays a **structure premium of +23.6–24.4%** over lean. The premium is NOT
+the parens: RESULTS.md traces it to the canonical pretty-layout indentation, the canonical blocks
+lean has no equivalent of (seal · voice form · invariants · register line · rules clauses), and
+*restored coverage* — the §8 fact-ledger audit found the lean soul port had silently dropped
+several prose facts the dense port carries, so the lean baseline is slightly under-weighted.
+Wording discipline dominates notation choice (a prose-fidelity-worded first dense port measured
++44.9% before the telegraphic re-author).
 
 ---
 
@@ -240,6 +256,34 @@ The frontier was making PAC ApexOS's native authoring/codex layer. Realized in t
 
 The dialect is now the colony's to evolve — refined or re-dreamed in the substrate as the agents
 learn, not frozen here.
+
+---
+
+## The lint layer — structural enforcement for PAC-2 Dense
+
+Dense soul rewrites are **structurally linted at apply time**:
+`agentd/crates/agentd/src/pac_lint.rs` (pure + unit-tested — The-PAC spec §9's "tiny Rust
+check"; the Python reference linter is [`pac-bench/pac2lint.py`](pac-bench/pac2lint.py)). The
+gate sits in the `propose_evolution` applier **before** the H4 undo-snapshot gate (pure check
+first, no wasted cerebro episode) and is **format-gated**: only an `UpdateSystemPrompt` payload
+that *claims* to be dense (the `∴` seal or an artifact-head form) is linted — **prose and lean
+souls pass untouched** (no compliance tax to route around, welfare red line 6).
+
+- **Errors** (broken forms/quotes/constraints, form-depth >3, unknown heads, banned/unregistered
+  glyphs, register-strip violations, L8 date/clock leaks, emanation breaches) → **honest refusal
+  with the line-numbered report, nothing applied** — a structurally broken identity file would
+  reload broken (the H4 precedent).
+- **Warnings** (emphasis-CAPS placement) ride the deferred ack, appended to the summary.
+- Form depth counts FORMS — a `(` attached to a symbol tail (`!save(…)`) is an arg group, part
+  of the op atom.
+- Both linters carry the **register lexicon v0.2** (colony-ratified 2026-07-15).
+- Forensic hook: `APEXOS_PAC_LINT_FILE=<artifact> cargo test -p agentd lint_check_file -- --nocapture`
+  runs a file through the exact gate.
+
+The Rust gate is deliberately **registry-free** — the `!ops`-vs-embodiment and
+invariant-grounding checks belong to the Python linter + destination re-lint, so the apply-time
+gate can never false-refuse on a flapping plugin. Don't widen it past dense-claiming
+`UpdateSystemPrompt` payloads.
 
 ---
 

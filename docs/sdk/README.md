@@ -13,9 +13,11 @@ views, mesh routing, and self-evolution are all *downstream* of that contract.
 Read guide 01 first if you touch anything that crosses the daemon↔client
 boundary.
 
-> Every guide is ground-truthed against the source with `file:line` anchors.
-> Where a guide contradicts `CLAUDE.md`, **the guide is correct and CLAUDE.md is
-> stale** — the guides were written after a direct source audit.
+> The guides were ground-truthed against the source with `file:line` anchors —
+> **as of a June 2026 snapshot** (last SDK refresh 2026-06-20). CLAUDE.md and
+> `docs/gotchas.md` (where the gotcha ledger now lives) are maintained
+> continuously; where a guide contradicts them, **CLAUDE.md/gotchas win and the
+> guide is stale**, pending an SDK refresh.
 
 ---
 
@@ -26,7 +28,7 @@ boundary.
 | 01 | [Core types & the WebSocket/event protocol](01-core-and-protocol.md) | Add a new `Event` variant, a new frontend intent, or write an alternate client (browser/PWA/CLI) over the JSON wire contract. |
 | 02 | [MCP plugins](02-mcp-plugins.md) | Add a whole new tool-providing process (any language) that agentd spawns over stdio JSON-RPC and registers in `plugins.toml`. |
 | 03 | [Adding a tool to `apexos-tools`](03-adding-tools.md) | Give the agent a new plain-Rust local-system capability (command, file/device op, small HTTP call) inside the built-in tool plugin. |
-| 04 | [Cerebro: memory for agents](04-cerebro-for-agents.md) | Add a new memory verb to the ~66-tool cortex, or learn the Wake→Perceive→Act→Sleep verbs an agent uses to keep continuity. |
+| 04 | [Cerebro: memory for agents](04-cerebro-for-agents.md) | Add a new memory verb to the ~67-tool cortex, or learn the Wake→Perceive→Act→Sleep verbs an agent uses to keep continuity. |
 | 05 | [Building a desktop app / UI view](05-desktop-apps.md) | Add a new visible window/view to the Slint native UI, fed by WS events or `/api/*` polls. |
 | 06 | [Self-evolution & policy](06-self-evolution-and-policy.md) | Let APEX change its own `soul.md` / `policy.toml` / plugin set at runtime via `propose_evolution`, with audit + rollback. |
 | 07 | [Mesh colony & deployment](07-mesh-and-deploy.md) | Add a hardware tier or deployment mode, join a mesh node, define a vast.ai GPU recipe, or ship a new hardened systemd service. |

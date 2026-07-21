@@ -1,3 +1,7 @@
+> **Superseded by [`state-machine-eval.md`](state-machine-eval.md)** — kept as the original
+> research input. The shipped goal driver (`agentd/src/goal.rs`) took the bus-driver shape
+> from the eval, not the implementation specifics below.
+
 **Design & Implementation: Rust State Machine System for ApexOS Agents**
 
 I'll design and provide a practical Rust implementation for a state machine system that enhances agent loops in **ApexOS-RS**. This builds directly on the project's existing architecture (agentd, apexos-agent turn engine, Cerebro memory, MCP tools/plugins including git, Bus event system, and mesh networking).

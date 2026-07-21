@@ -64,49 +64,71 @@ bare name in `dispatch`. Two consequences:
 ### The policy hop (`config/policy.toml` + `PolicyEngine`)
 
 Before dispatch, every `ToolRequested` runs through the `PolicyEngine`
-(`supervisor.rs:162-163`):
+(`supervisor.rs:379-392`):
 
 ```rust
-let path = call.args["path"].as_str();                 // supervisor.rs, dispatch hop
-let decision = self.policy.read().await.check(&call.tool, path);
+// Inspect every path-typed arg, not just `path` — most-restrictive wins:
+// Ask if ANY candidate path would Ask under the rule.
+let path_keys = ["path", "output_path", "dest", "destination", "target", "to"];
+let candidates: Vec<&str> = path_keys.iter().filter_map(|k| call.args[*k].as_str()).collect();
 ```
 
 `PolicyEngine::check` (`agentd/crates/plugins/src/policy.rs`):
 
 1. `mode == "yolo"` → `Allow` (short-circuit, ignores all rules).
 2. Look up `tool_name` in `[rules]`: **exact match wins**, then `prefix.*` wildcard
-   (`policy.rs:96-107`, `matches_wildcard` :142).
-3. Apply the matched `Rule` (`policy.rs:109`):
+   (`find_rule`, `policy.rs:114`; `matches_wildcard` :166).
+3. Apply the matched `Rule` (`apply_rule`, `policy.rs:127`):
    - `allow` → `Allow`
    - `ask` → `Ask` (emits `ApprovalPending`, UI shows approve/reject)
-   - `workspace` → `workspace_decision(path)` (`policy.rs:118`)
-   - **no rule found → `Ask`** (unknown tool is the safe default — `policy.rs:111`).
+   - `workspace` → `workspace_decision(path)` (`policy.rs:136`)
+   - **no rule found → `Ask`** (unknown tool is the safe default — `policy.rs:129`).
 
-**The single most important fact for a new tool:** the policy engine only ever looks at
-the argument literally named `path` (`supervisor.rs:162`). If your tool's filesystem
-argument is called anything else (`output_path`, `cwd`, `file`), the `workspace` rule
-**cannot see it** and will fall through to `Ask` (no path = Ask, `policy.rs:119`). Name
-your primary path argument `path` if you want `workspace` confinement to work.
+**For a new tool:** the supervisor feeds the policy engine **every** path-typed argument
+(`path`, `output_path`, `dest`, `destination`, `target`, `to` — the `path_keys` list,
+`supervisor.rs:379`), and the `workspace` rule Asks if **any** of them falls outside the
+workspace — a tool can't smuggle a write past the gate by naming its arg `output_path`.
+A filesystem argument named something outside that list is still invisible to the
+`workspace` rule, so stick to the `path_keys` names for filesystem arguments.
 
-### Workspace confinement — the honest version
+### Workspace confinement — `confine()` is the gate
 
-There are **two independent** workspace mechanisms, and they do not cover most tools:
+Filesystem confinement lives **in the tool process**, not the policy layer:
+`read_file`/`list_dir` are policy `allow` (no approval prompt), so the tool is the only
+gate. `tools.rs::confine(path, write)` (`fn confine`) is the single source of truth for
+every FS tool:
 
-1. **Policy-layer `workspace` rule** (`policy.rs:118-138`): canonicalizes `AGENTD_WORKSPACE`
-   and the `path` arg, allows iff `path` is inside the workspace, rejects `..` traversal,
-   else `Ask`. Only `write_file`/`create_dir` use it today (`policy.toml:15-16`).
-2. **Tool-layer self-confinement**: only `delete_path` (`fn delete_path` in `tools.rs`)
-   actually roots itself — it rejects `..`, canonicalizes, and hard-blocks deletions
-   outside `AGENTD_WORKSPACE` (or applies a system-dir denylist when no workspace is set).
+- **writes/creates/deletes** (`write = true`) → confined to the **workspace, hard**;
+- **reads/lists** (`write = false`) → workspace **plus a small read allowlist**
+  (`fn read_roots`: `/etc/agentd/parts`, `/sys`, `/proc/cpuinfo`/`meminfo`,
+  `/var/lib/agentd/update`; extend with `AGENTD_READ_ROOTS`, colon-sep) **minus** an
+  always-blocked secret denylist (`fn is_secret_path`: `/proc/*/environ`,
+  `/etc/agentd/env`, `~/.ssh`, `/etc/shadow`, `*.api_key`).
 
-**Every other tool is unconfined.** `read_file`, `list_dir`, `run_command`, the audio
-tools (which write `output_path`), and all GPIO tools operate on whatever path/device the
-agent passes, limited only by the policy rule and the **systemd sandbox** in
-`deploy/agentd.service` (`ProtectSystem=strict`, `ReadWritePaths=/var/lib/agentd
-/etc/agentd`, `WorkingDirectory=/var/lib/agentd/workspace`). Treat the sandbox — not the
-tool code — as the real filesystem boundary. The `run_command` denylist (`fn denylist_check`
-in `tools.rs`) is a **soft substring heuristic** (blocks `mkfs`, `dd of=/dev/*`, `rm -rf /usr`, fork
-bombs, …); it is trivially bypassable and is **not** a security boundary.
+It rejects `..` (component-based) and operates on the **canonical** path (symlinks
+resolved). The confinement *mechanism* (traversal rejection, lenient canonicalize, root
+containment) lives in the std-only **`apexos-confine`** crate (`confine_fs`/
+`confine_to_roots`, unit-tested incl. the symlink-escape case); `tools.rs::confine`
+supplies the *policy* values (`workspace_root`/`read_roots`/`is_secret_path`) and renders
+the agent-facing error strings. **New confinement *logic* → `apexos-confine` (with a
+test); new policy *values* → `tools.rs`.** The `git_*` tools confine separately to
+`git_roots()` (workspace + `AGENTD_GIT_ROOTS`) via `confine_git_repo`.
+
+**The workspace is per-agent.** The supervisor stamps `__workspace` onto every
+`apexos-tools` call (`apexos_core::agent_workspace_root(agent_id)` — APEX/unbound →
+`AGENTD_WORKSPACE`; a bound non-default agent → `<base>/workspaces/<agent_id>`),
+overwriting any model-supplied value so the model can't widen its own confinement. The
+tool pins it in a thread-local for the dispatch and `resolve_path`/`workspace_root`
+resolve against it (env fallback for direct-MCP/tests). **Don't read `AGENTD_WORKSPACE`
+directly in a new tool — route every path through `confine()`/`resolve_path`** or you
+bypass the per-agent root.
+
+The **systemd sandbox** in `deploy/agentd.service` (`ProtectSystem=strict`,
+`ReadWritePaths=/var/lib/agentd /etc/agentd`, `WorkingDirectory=/var/lib/agentd/workspace`)
+remains the outer boundary beneath all of this. The `run_command` denylist
+(`fn denylist_check` in `tools.rs`) is a **soft substring heuristic** (blocks `mkfs`,
+`dd of=/dev/*`, `rm -rf /usr`, fork bombs, …); it is trivially bypassable and is **not**
+a security boundary.
 
 ### The vision-tool convention — give the agent eyes without touching agentd
 
@@ -156,7 +178,7 @@ MCP: `name`, `description`, `inputSchema` (JSON Schema, `type: "object"`).
     "inputSchema": {
         "type": "object",
         "properties": {
-            "path":   { "type": "string", "description": "Target file — named `path` so the workspace policy rule applies" },
+            "path":   { "type": "string", "description": "Target file — a `path_keys` name, so the workspace policy rule sees it" },
             "factor": { "type": "integer", "description": "Optional multiplier (default 1)" }
         },
         "required": ["path"]
@@ -166,8 +188,9 @@ MCP: `name`, `description`, `inputSchema` (JSON Schema, `type: "object"`).
 
 Guidance:
 - A no-arg tool uses `"inputSchema": { "type": "object", "properties": {} }` (see `cpu_temp`).
-- Name the primary filesystem argument **`path`** if you want `workspace`/policy path
-  checks to engage (see Concepts).
+- Name filesystem arguments with one of the **`path_keys`** names (`path`, `output_path`,
+  `dest`, `destination`, `target`, `to`) so the policy layer can see them, and route them
+  through `confine()` in the impl (see Concepts).
 - The description is the *only* thing the LLM reads to choose the tool. Front-load the
   verb and the side effects; note hardware/safety limits inline (the GPIO specs in
   `list()` are the model — see `gpio_servo`).
@@ -204,9 +227,10 @@ fn my_tool(args: &Value) -> Value {
 }
 ```
 
-If you want workspace self-confinement (like `delete_path`), copy the canonicalize +
-`AGENTD_WORKSPACE` `starts_with` guard from `fn delete_path` in `tools.rs` — don't rely on
-policy alone for a destructive op.
+Any filesystem path your tool touches must go through `confine(path, write)` (see
+Concepts) — `confine(p, true)` for a write/create/delete, `confine(p, false)` for a
+read/list — never a raw `std::fs` call on the agent-supplied string. Don't rely on policy
+alone for a destructive op.
 
 ### 4. Add a policy rule in `config/policy.toml`
 
@@ -226,7 +250,10 @@ for any tool invoked during the wake-loop boot (those must be `allow`, see
 Pick by analogy to the existing matrix: read-only telemetry/reads → `allow`
 (`policy.toml:7-13`); writes targeting a `path` → `workspace` (`:15-16`); deletes /
 shell / outbound HTTP → `ask` (`:18-20`); hardware that actuates → `ask` (`:32-35`).
-This is the repo default that `install.sh` writes to `/etc/agentd/policy.toml`; an
+`install.sh` seeds `config/policy.toml` to `/etc/agentd/policy.toml` on a fresh node and
+**additively syncs** it on every re-run (`sync_policy_rules`): a `[rules]` key present in
+the shipped config but missing live is appended, an existing key is never overwritten — so
+a new tool's rule reaches already-deployed nodes on their next `apexos-update`. An
 operator (or APEX via `propose_evolution` with `kind=update_policy_rule`) can loosen it later.
 
 ### 5. Build + hot-swap
@@ -247,8 +274,8 @@ sudo journalctl -u agentd -n 20 --no-pager   # look for: [supervisor] plugin 'ap
 
 On restart the supervisor re-runs `tools/list` and re-registers the registry, so the new
 tool is live with no manifest edit. If you also edited `config/policy.toml`, re-run
-`install.sh` (or hand-edit `/etc/agentd/policy.toml`) so the deployed policy picks up the
-new rule — the repo `config/policy.toml` is only the install-time default.
+`install.sh` / `apexos-update` — its `sync_policy_rules` appends the new `[rules]` key
+additively to the live `/etc/agentd/policy.toml` (or hand-edit the live file).
 
 ---
 
@@ -343,23 +370,23 @@ prompt. Verify by asking the agent: *"is port 8787 open on localhost?"*
 ## Policy / safety
 
 - **Approval policy.** Your tool's behavior is governed entirely by its `config/policy.toml`
-  rule resolved through `PolicyEngine::check` (`policy.rs:88`). No rule = `Ask` every time.
-  `yolo` mode bypasses all rules. The `workspace` rule **only** reads the `path` argument
-  (`supervisor.rs:162`) — a path-mutating tool that names its arg `output_path` is invisible
-  to it and will `Ask`. Default to `ask` for anything that writes outside the workspace,
+  rule resolved through `PolicyEngine::check` (`policy.rs:106`). No rule = `Ask` every time.
+  `yolo` mode bypasses all rules. The `workspace` rule is fed **every** path-typed argument
+  (`path`/`output_path`/`dest`/`destination`/`target`/`to` — `path_keys`, `supervisor.rs:379`),
+  most-restrictive wins. Default to `ask` for anything that writes outside the workspace,
   runs a shell, makes outbound requests, actuates hardware, or could exfiltrate/destroy.
 - **Direct-call bypass.** `SupervisorCmd::DirectCall` (`supervisor.rs:31`, reached via the
   `ToolProxy::call` handle, `supervisor.rs:52`) dispatches a tool **without** the policy
   check — it's how agentd-internal machinery (e.g. the evolution rollback journal) calls
   tools. Agent turns always go through the policy hop; only trusted in-process callers use
   the bypass. Don't assume your tool is always policy-gated.
-- **systemd sandbox is the real boundary.** agentd (and therefore `apexos-tools`, its child)
+- **systemd sandbox is the outer boundary.** agentd (and therefore `apexos-tools`, its child)
   runs as the unprivileged `agentd` user under `NoNewPrivileges`, `ProtectSystem=strict`,
   `ProtectHome`, `PrivateTmp`, with writes confined to `ReadWritePaths=/var/lib/agentd
-  /etc/agentd` (`deploy/agentd.service`). A tool that "writes a file" can only write where
-  the sandbox permits regardless of what `path` it's handed. Lean on this; do not invent a
-  parallel allowlist in tool code unless the op is genuinely destructive (then copy
-  `delete_path`'s canonicalize guard, `fn delete_path` in `tools.rs`).
+  /etc/agentd` (`deploy/agentd.service`). Inside it, `confine()` is the per-tool gate —
+  route every agent-supplied path through it rather than inventing a parallel allowlist
+  (new confinement *logic* belongs in the `apexos-confine` crate with a test; new policy
+  *values* in `tools.rs`).
 - **The `run_command` denylist is not a sandbox.** `denylist_check` (`fn denylist_check` in
   `tools.rs`) is a substring heuristic and is bypassable (e.g. via env-indirection, base64, or paths it
   doesn't enumerate). If you add a tool that shells out, do not treat the denylist as
@@ -404,49 +431,57 @@ prompt. Verify by asking the agent: *"is port 8787 open on localhost?"*
 |-----------|--------|----------------|---------|
 | `"allow"` | `Allow` | always `Allow` (unless `mode=yolo` anyway) | read-only / telemetry / safe |
 | `"ask"` | `Ask` | always `Ask` → `ApprovalPending` | delete / shell / outbound / hardware actuate |
-| `"workspace"` | `Workspace` | `Allow` iff `path` arg inside `AGENTD_WORKSPACE` (rejects `..`), else `Ask` | writes whose arg is literally `path` |
-| *(absent)* | — | `Ask` (safe default, `policy.rs:111`) | never intentional — always add a rule |
+| `"workspace"` | `Workspace` | `Allow` iff every path-typed arg is inside `AGENTD_WORKSPACE` (rejects `..`), else `Ask` | writes targeting a filesystem path |
+| *(absent)* | — | `Ask` (safe default, `policy.rs:129`) | never intentional — always add a rule |
 
 Modes (`policy.toml:3`): `suggest` (default — confirm everything not `allow`), `auto-edit`,
 `yolo` (no gates).
 
-### Policy resolution order (`PolicyEngine::check`, `policy.rs:88`)
+### Policy resolution order (`PolicyEngine::check`, `policy.rs:106`)
 
 1. `mode == yolo` → `Allow`.
 2. exact `[rules]` key match.
-3. `prefix.*` wildcard match (`matches_wildcard`, `policy.rs:142` — matches `prefix.<x>`, not bare `prefix`).
+3. `prefix.*` wildcard match (`matches_wildcard`, `policy.rs:166` — matches `prefix.<x>`, not bare `prefix`).
 4. no match → `Ask`.
 
-Policy reads **only** `call.args["path"]` (`supervisor.rs:162`). No other arg name is inspected.
+The supervisor feeds `check` every path-typed arg (`path`/`output_path`/`dest`/
+`destination`/`target`/`to` — `path_keys`, `supervisor.rs:379`); the result is `Ask` if
+any candidate path would `Ask`.
 
 ### Existing tools (the full `list()` / `call()` registry)
 
-The 31 tools `apexos-tools` exposes today (verify against `list()` / `call()` in
+The 50 tools `apexos-tools` exposes today (verify against `list()` / `call()` in
 `tools.rs`):
 
 `run_command`, `read_file`, `write_file`, `list_dir`, `create_dir`, `delete_path`,
-`notes_list`, `notes_read`, `notes_append`, `sketch_snapshot`, `screenshot_mirror`,
-`camera_capture`, `http_fetch`, `cpu_temp`, `disk_usage`, `memory_info`, `uptime`,
-`notify`, `audio_analyze`, `audio_trim_silence`, `audio_normalize`, `audio_peak_limit`,
-`audio_trim`, `audio_clean`, `gpio_info`, `gpio_read`, `gpio_write`, `gpio_pulse`,
-`gpio_pwm`, `gpio_servo`, `display_face`. Names are global across all plugins — don't
-collide with these or with `cerebro-mcp`'s tools (`TOOL_NAMES`, 66 entries — 64 functional
-+ 2 stubs: `ingest_file`, `search_vision`).
+`notes_list`, `notes_read`, `notes_append`, `sketch_snapshot`, `sketch_draw`,
+`screenshot_mirror`, `ui_open`, `ui_close`, `ui_focus`, `ui_query`, `ui_arrange`,
+`ui_theme`, `ui_reflex`, `camera_capture`, `http_fetch`, `cpu_temp`, `disk_usage`,
+`memory_info`, `uptime`, `notify`, `audio_analyze`, `audio_trim_silence`,
+`audio_normalize`, `audio_peak_limit`, `audio_trim`, `audio_clean`, `gpio_info`,
+`gpio_read`, `gpio_write`, `gpio_pulse`, `gpio_pwm`, `gpio_servo`, `display_face`,
+`git_status`, `git_diff`, `git_log`, `git_branch`, `git_init`, `git_commit`, `git_push`,
+`git_checkout`, `git_reset`, `git_merge`, `eject_media`. Names are global across all
+plugins — don't collide with these or with `cerebro-mcp`'s tools (`TOOL_NAMES`, 67
+entries — 66 functional + 1 stub: `ingest_file`).
 
-### Workspace confinement coverage (honest)
+### Workspace confinement coverage
 
 | Mechanism | Where | Covers |
 |-----------|-------|--------|
-| Policy `workspace` rule | `workspace_decision` in `policy.rs` | `write_file`, `create_dir` (any tool whose `path` arg is set to `workspace`) |
-| Tool self-confinement | `fn delete_path` in `tools.rs` | `delete_path` only (canonicalize + `AGENTD_WORKSPACE` `starts_with`) |
-| systemd sandbox | `deploy/agentd.service` | **everything** — the real filesystem boundary |
+| Tool confinement gate | `fn confine` in `tools.rs` (mechanism: the `apexos-confine` crate) | **all FS tools** — writes → per-agent workspace only; reads → workspace + read allowlist minus secret denylist |
+| Git-root confinement | `fn confine_git_repo` in `tools.rs` | the `git_*` tools — workspace + `AGENTD_GIT_ROOTS` |
+| Policy `workspace` rule | `workspace_decision` in `policy.rs` | approval gating only (`write_file`, `create_dir`) — fed all path-typed args by the supervisor |
+| systemd sandbox | `deploy/agentd.service` | **everything** — the outer filesystem boundary |
 | `run_command` denylist | `fn denylist_check` in `tools.rs` | nothing (soft heuristic, bypassable — not a boundary) |
 
 ### Relevant env vars
 
 | Var | Read by | Effect |
 |-----|---------|--------|
-| `AGENTD_WORKSPACE` | `workspace_decision` (`policy.rs`), `fn delete_path` (`tools.rs`) | workspace root for `workspace` rule + `delete_path` confinement |
+| `AGENTD_WORKSPACE` | `workspace_decision` (`policy.rs`), `fn workspace_base` (`tools.rs` — fallback when no `__workspace` stamp) | global workspace root; per-agent roots nest under it |
+| `AGENTD_READ_ROOTS` | `fn read_roots` (`tools.rs`) | colon-sep extra read-only roots for `confine()` reads |
+| `AGENTD_GIT_ROOTS` | `fn git_roots` (`tools.rs`) | colon-sep extra repo roots for the `git_*` tools |
 | `APEX_GPIO_RESERVED=none` | GPIO tool fns (`tools.rs`) | bypass reserved-pin checks (unsafe with sensor head) |
 | `PIPER_MODEL`/`NTFY_TOPIC`/`TELEGRAM_*` | `fn notify` (`tools.rs`) | enable optional notify surfaces |
 | `APEXOS_CAMERA_DEVICE`/`APEXOS_CAMERA_CMD` | `fn camera_capture` (`tools.rs`) | force a V4L2 node / fully override the capture command for `camera_capture` |

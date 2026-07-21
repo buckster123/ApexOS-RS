@@ -107,6 +107,11 @@ when you build the app (no big upfront abstraction).
 | 📁 Explorer | `list_dir`/`read_file`/`write_file` + `eject_media` (exist) | both |
 | 🗓 Calendar (new) | `schedule_event` / `list_agenda` | both |
 
+Beyond per-app tools, **every app is agent-drivable at the window level** via the
+cross-app `ui_*` family — `ui_open`/`ui_close`/`ui_focus`/`ui_query`/`ui_arrange`/
+`ui_theme`/`ui_reflex` (below-inference event→action rules) — see
+`docs/adaptive-ui.md`.
+
 ---
 
 ## New ideas — OS-standard gaps
@@ -126,7 +131,13 @@ Reverse-engineered from the shipped set (20 `AppKind`s and counting). To add app
 1. **`ui-slint/src/ui/types.slint`** — add `foo` to the `AppKind` enum. Add a
    `struct FooItem { … }` if the app has list data.
 2. **`ui-slint/src/main.rs`** — add the variant to the three mappers:
-   `kind_from_ordinal`, `kind_title`, `default_geom`.
+   `kind_from_ordinal`, `kind_title`, `default_geom`, **and register
+   `(AppKind::Foo, "foo")` in `APP_TABLE`** (table index = the AppKind ordinal;
+   bump the `assert_eq!(APP_TABLE.len(), …)` in the
+   `app_table_is_the_ordinal_order` lock test or it fails). If the agent should
+   reach the app via `ui_open`/`ui_arrange`/`ui_reflex`, add the same slug to
+   `UI_APPS` in `tools/crates/apexos-tools/src/tools.rs` (the two catalogs are
+   a locked mirror — docs/adaptive-ui.md).
 3. **`ui-slint/src/ui/components/foo_view.slint`** — the view component. Take
    `in property`s for its data; emit callbacks for actions.
 4. **`app_window_frame.slint`** — import `FooView`; add `in property`s for its

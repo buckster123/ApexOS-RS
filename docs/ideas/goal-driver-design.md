@@ -53,6 +53,12 @@ enum GoalPosture {
 }
 ```
 
+> **As shipped** (`agentd/src/goal.rs`): the `Goal` carries
+> `objective/session/state/step/max_steps/step_started/pending/episode/yolo` — no
+> `token_budget`, `consecutive_failures`, or `posture` (see the guards + posture notes
+> below) — and the shipped `GoalState` (apexos-protocol) adds a seventh variant,
+> **`Cancelled`** (terminal, not resumable; field-test fix #2 below).
+
 A goal runs in its **own `SessionId`** (allocated from `next_session_id`, like a mesh session), so
 its turns serialize through the `TurnGate` independently and never pollute root session 0 (the
 sensor/scheduler funnel). The board gets a lane per goal.
@@ -79,7 +85,9 @@ emit Event::GoalStateChanged on every transition (board + event log).
 
 **Hard guards, enforced in code (never the LLM):** `max_steps`, `token_budget`, the consecutive-
 failure breaker. The LLM's `done` is *advisory* — the guards always win. This is what makes an
-overnight run safe to leave alone.
+overnight run safe to leave alone. *(As shipped, the guards are `max_steps` + the per-step
+stall timeout — `GOAL_STEP_TIMEOUT_SECS`, a stalled step → `Failed`; `token_budget` and the
+consecutive-failure breaker were not built — open ideas, not code.)*
 
 Every step is **one gated turn** (`UserPrompt → TurnGate → run_turn`), so the driver never spawns a
 turn outside the gate — it reuses the exact serialization invariant. A goal step may itself
@@ -114,9 +122,18 @@ That's the entire LLM surface: do the work, and propose the next move. Everythin
 - **Never silently stall** — the rule the snag exposed. A step that can't proceed becomes a
   `Blocked`/`Failed` card with a reason, never a turn hanging on an approval no one sees.
 
+*(Shipped governor: `max_steps` + the `GOAL_STEP_TIMEOUT_SECS` per-step stall window; the
+`token_budget` and failure-breaker bullets above remain unbuilt ideas.)*
+
 ---
 
 ## Policy stance for unattended steps (reviving `inherit_mode`)
+
+> **Superseded as designed:** `GoalPosture` never shipped, and `inherit_mode` remains
+> defined-but-unread. The shipped mechanism is the per-goal `yolo: bool` +
+> `GoalYoloSessions` set (field-test fix #3 below) for the `Yolo` half, and
+> block-on-approval (the goal parks **Blocked: "awaiting approval — \<tool\>"**) for the
+> `AskBlocks` half.
 
 The first live multi-agent run surfaced two facts: sub-agents run under the **one node-global
 `PolicyEngine`** (so on a yolo node they auto-approve, on a suggest node a sub-agent's `ask` tool

@@ -8,11 +8,15 @@
 > SDK). A UI app is a Slint component hosted in a window frame, fed by Rust from
 > WebSocket events or `/api/*` polls.
 
-A new app touches exactly four files and (almost always) **zero agentd code**:
-a Slint view component, the `types.slint` shared structs it reads, the
-`AppKind` enum + window-manager wiring, and the `main.rs` data plumbing. The UI
-is "a thin stateless renderer" over agentd's wire protocol — it has no Cargo
-dependency on agentd, only the JSON contract.
+A new app touches four `ui-slint` files and (almost always) **zero agentd
+code**: a Slint view component, the `types.slint` shared structs it reads, the
+`AppKind` enum + window-manager wiring, and the `main.rs` data plumbing — plus
+**one cross-crate edit**: since Adaptive UI (Loop 6), the app catalog is a
+closed dual-crate enum, so the app's slug must land in ui-slint's `APP_TABLE`
+*and* apexos-tools' `UI_APPS` for the agent's `ui_open`/`ui_arrange` verbs to
+reach it (`docs/adaptive-ui.md`, invariant 1). The UI is "a thin stateless
+renderer" over agentd's wire protocol — it has no Cargo dependency on agentd,
+only the JSON contract.
 
 > **Sizes (measured, not aspirational).** The `apexos-rs-ui` release binary is
 > **~32 MB** and its RSS on the Pi 5 is **~160 MB** (`ps` rss — it links the GL
@@ -23,13 +27,15 @@ dependency on agentd, only the JSON contract.
 
 ---
 
-## The 18 apps
+## The 20 apps
 
-`AppKind` has **18 variants** (`types.slint`, `export enum AppKind`). The
-ordinal is positional and mirrored in Rust by `kind_ordinal` /
-`kind_from_ordinal` in `main.rs` — **these must agree with the enum order.**
-Grouped by shape (this is also a map of which existing view to copy when you
-build a new one):
+`AppKind` has **20 variants** (`types.slint`, `export enum AppKind`). The
+ordinal is positional and mirrored in Rust by `APP_TABLE` (the
+`(AppKind, slug)` table whose **index IS the ordinal** — `kind_ordinal` /
+`kind_slug` / `kind_from_slug` derive from it) plus the `kind_from_ordinal`
+match in `main.rs` — **these must agree with the enum order** (a unit test,
+`app_table_is_the_ordinal_order`, locks the agreement). Grouped by shape (this
+is also a map of which existing view to copy when you build a new one):
 
 | Group | Apps (ordinal) | View component | Driven by |
 |-------|----------------|----------------|-----------|
@@ -37,6 +43,7 @@ build a new one):
 | **Data-driven** (a `VecModel` + a `refresh`) | `sessions`=3, `event-log`=7, `mesh`=8, `inference`=9, `notes`=12, `explorer`=17 | `session_view.slint`, `event_log_view.slint`, `mesh_view.slint`, `inference_view.slint`, `notes_view.slint`, `explorer_view.slint` | `/api/*` GET → `VecModel` rows, refresh on open |
 | **Complex multi-pane** (state + editors + sub-panels) | `chat`=0, `sensor`=2, `settings`=4, `council`=6, `audio-editor`=10, `sonus`=11 | `chat_view.slint`, `sensor_view.slint`, `settings_view.slint`, `council_view.slint`, `audio_editor_view.slint`, `sonus_view.slint` | WS event stream + several `/api/*` |
 | **Canvas / GL** (custom painter or raw OpenGL) | `terminal`=5, `sketchpad`=14, `face`=13 | `terminal_view.slint`, `sketchpad_view.slint`, `face_view.slint` (+ `face_gl.rs`) | PTY WS, tiny-skia raster, rendering-notifier GL |
+| **Event-driven overlays** (WS stream, agent-facing) | `occipital`=18, `board`=19 | `occipital_view.slint`, `work_board.slint` | occipital `tool_result` payloads (auto-reveal reader), goal/turn events → the `BOARD` models |
 
 Notes on the less-obvious members:
 
@@ -57,7 +64,8 @@ Notes on the less-obvious members:
 (`MenuRow` / `WinMenuRow`) all key off this same ordinal. Core apps (chat,
 system, sonus, notes, **APEX/face**, sketchpad, sessions, settings, calculator,
 files) are always shown; deep-tech apps (sensors, terminal, council, event-log,
-mesh, inference, audio-editor, web) sit behind `if Personas.show-tech-apps`.
+mesh, inference, audio-editor, web, occipital, work board) sit behind
+`if Personas.show-tech-apps`.
 
 ---
 
@@ -107,10 +115,11 @@ and stashed in its thread-local. `VecModel<T>`'s `T` is a **struct defined in
   is a single instance.
 
 **`AppKind`** (`types.slint`) is the discriminant that ties everything
-together: it's the window's `kind`, the launcher ordinal, and the `if
-root.kind == AppKind.x` content switch in `AppWindowFrame`. Its ordinal is
-mirrored in Rust by `kind_ordinal` / `kind_from_ordinal` in `main.rs` —
-**these two must agree with the enum order.**
+together: it's the window's `kind`, the launcher ordinal, the agent-facing
+slug, and the `if root.kind == AppKind.x` content switch in `AppWindowFrame`.
+Its ordinal is mirrored in Rust by `APP_TABLE` (index = ordinal; `kind_ordinal`
+derives from it) + the `kind_from_ordinal` match in `main.rs` — **these must
+agree with the enum order** (test-locked by `app_table_is_the_ordinal_order`).
 
 **Personas** (glowup G4, `personas.slint`) bundle theme + chrome + wallpaper +
 default shell mode. The `Personas` global derives structural bits from
@@ -126,8 +135,8 @@ everything it imports) at build time via `slint_build::compile`. If you edit a
 
 ## Add a new app/view
 
-We'll add an app of `AppKind` `myapp`. Five edits; the first is pure Slint, the
-rest wire it into the WM and Rust.
+We'll add an app of `AppKind` `myapp`. Six edits; the first is pure Slint, the
+rest wire it into the WM, Rust, and the agent's `ui_*` vocabulary.
 
 ### 1. Write the view component — `ui-slint/src/ui/components/myapp_view.slint`
 
@@ -162,11 +171,12 @@ export component MyAppView {
 ```slint
 export enum AppKind { chat, system, sensor, sessions, settings, terminal,
                       council, event-log, mesh, inference, audio-editor, sonus,
-                      notes, face, sketchpad, web, calculator, explorer, myapp }
+                      notes, face, sketchpad, web, calculator, explorer,
+                      occipital, board, myapp }
 ```
 
 Append, don't reorder — ordinals are positional and Rust hard-codes them. The
-next free ordinal is **18** (chat=0 … explorer=17).
+next free ordinal is **20** (chat=0 … board=19).
 
 If your app needs structured rows (a list), define the row struct here too, e.g.
 `export struct MyRow { name: string, value: float }`. It becomes a Rust struct
@@ -174,20 +184,26 @@ via `include_modules!()`.
 
 ### 3. Mirror the ordinal in Rust — `ui-slint/src/main.rs`
 
-Add the arm to **both** `kind_ordinal` and `kind_from_ordinal`, plus
-`kind_title` and `default_geom` (all four are small `match` functions in
-`main.rs`):
+Append the `(kind, slug)` pair to **`APP_TABLE`** (its index IS the ordinal;
+`kind_ordinal`/`kind_slug`/`kind_from_slug` all derive from it), add the arm to
+the `kind_from_ordinal` match, plus `kind_title` and `default_geom`:
 
 ```rust
-// kind_ordinal
-AppKind::MyApp => 18,
+// APP_TABLE — append at the end (index 20 = the ordinal); the slug is the
+// agent-facing ui_* vocabulary
+(AppKind::MyApp, "myapp"),
 // kind_from_ordinal
-18 => AppKind::MyApp,
+20 => AppKind::MyApp,
 // kind_title
 AppKind::MyApp => "My App",
 // default_geom  (w, h)
 AppKind::MyApp => (520.0, 460.0),
 ```
+
+Then bump the count assertion in the `app_table_is_the_ordinal_order` unit test
+(`assert_eq!(APP_TABLE.len(), 20)` → `21`) — it locks `APP_TABLE` against
+`kind_from_ordinal` and the Slint enum order, so a drifted ordinal fails the
+build's tests instead of opening the wrong app.
 
 ### 4. Host the content in the window frame — `app_window_frame.slint`
 
@@ -226,13 +242,13 @@ myapp-do-thing => { root.myapp-do-thing(); }
 
 **Launcher** — `start_menu.slint` (and its sibling `WinMenuRow` block for the
 Windows-persona menu — add the row in **both**). Core app → always-shown row;
-deep-tech → gate it. Use the new ordinal (18):
+deep-tech → gate it. Use the new ordinal (20):
 
 ```slint
 // always-shown:
-MenuRow { glyph: "✨"; label: "My App"; clicked => { root.launch(18); } }
+MenuRow { glyph: "✨"; label: "My App"; clicked => { root.launch(20); } }
 // or deep-tech, hidden by the simple persona:
-if Personas.show-tech-apps: MenuRow { glyph: "✨"; label: "My App"; clicked => { root.launch(18); } }
+if Personas.show-tech-apps: MenuRow { glyph: "✨"; label: "My App"; clicked => { root.launch(20); } }
 ```
 
 `launch(ord)` already routes to `ui.on_launch_app` in `main()`, which calls
@@ -269,6 +285,24 @@ event router in `main.rs`) keyed on the event's `type`, exactly like the
 `sensor_reading` or `council_*` arms already there. Push into your `VecModel`
 (parked in a new thread-local) or `ui.set_…` a property — always inside
 `invoke_from_event_loop`.
+
+### 6. Register the slug for the agent — apexos-tools `UI_APPS`
+
+Add the same slug to the **`UI_APPS`** const in
+`tools/crates/apexos-tools/src/tools.rs` (a closed `&[&str]` catalog mirroring
+`APP_TABLE` — the `ui_open`/`ui_close`/`ui_focus`/`ui_arrange` tools validate
+targets against it, so a slug missing here makes the app unreachable by the
+agent; Phase B geometry persistence also keys off the `APP_TABLE` slug):
+
+```rust
+const UI_APPS: &[&str] = &[
+    // …existing slugs…, "occipital", "board",
+    "myapp",
+];
+```
+
+Skipping this step doesn't break the human launcher — only the agent's hands.
+`docs/adaptive-ui.md` is the contract for this dual-crate sync point.
 
 That's the whole loop. `cargo build`, and the app launches from Start in
 Desktop mode.
@@ -327,12 +361,15 @@ export component LogsView {
 }
 ```
 
-**2. `types.slint`** — append `logs` to `AppKind` (next free ordinal **18**):
-`export enum AppKind { …, calculator, explorer, logs }`
+**2. `types.slint`** — append `logs` to `AppKind` (next free ordinal **20**):
+`export enum AppKind { …, calculator, explorer, occipital, board, logs }`
 
-**3. `main.rs`** — add `AppKind::Logs => 18` to `kind_ordinal`, `18 =>
-AppKind::Logs` to `kind_from_ordinal`, `AppKind::Logs => "Logs"` to
-`kind_title`, `AppKind::Logs => (640.0, 440.0)` to `default_geom`.
+**3. `main.rs`** — append `(AppKind::Logs, "logs")` to `APP_TABLE` (index 20 =
+the ordinal), add `20 => AppKind::Logs` to `kind_from_ordinal`, `AppKind::Logs
+=> "Logs"` to `kind_title`, `AppKind::Logs => (640.0, 440.0)` to
+`default_geom`; bump the `app_table_is_the_ordinal_order` count assert to 21.
+Then add `"logs"` to `UI_APPS` in `tools/crates/apexos-tools/src/tools.rs` so
+the agent's `ui_open` can reach it.
 
 **4. `app_window_frame.slint`** — `import { LogsView } from "logs_view.slint";`,
 add `in property <string> logs-text;`, `in property <int>
@@ -354,7 +391,7 @@ logs-refresh => { root.logs-refresh(); }` into the `AppWindowFrame` instance.
 
 **5. `start_menu.slint`** — deep-tech, so gate it (in both the `MenuRow` and
 `WinMenuRow` blocks):
-`if Personas.show-tech-apps: MenuRow { glyph: "📜"; label: "Logs"; clicked => { root.launch(18); } }`
+`if Personas.show-tech-apps: MenuRow { glyph: "📜"; label: "Logs"; clicked => { root.launch(20); } }`
 
 **6. `main.rs` wiring** — refresh on open (the `on_launch_app` match):
 `AppKind::Logs => ui.invoke_logs_refresh(),`. Then the callback:
@@ -629,9 +666,10 @@ entirely **agentd's**, reached over the wire.
 | `ui-slint/src/ui/components/app_window_frame.slint` | import + `in` props + `callback`s + `if root.kind == AppKind.<x>` content arm |
 | `ui-slint/src/ui/appwindow.slint` | matching `in-out`/`callback` on `AppWindow` + pass-through into the `for w in root.windows` `AppWindowFrame` |
 | `ui-slint/src/ui/components/start_menu.slint` | a `MenuRow` (core) or `if Personas.show-tech-apps: MenuRow` (deep-tech) — **and the matching `WinMenuRow`** — launching the ordinal |
-| `ui-slint/src/main.rs` | `kind_ordinal`/`kind_from_ordinal`/`kind_title`/`default_geom` arms; `on_launch_app` refresh hook; the refresh callback or `dispatch_event` arm |
+| `ui-slint/src/main.rs` | `APP_TABLE` `(kind, slug)` entry + `kind_from_ordinal`/`kind_title`/`default_geom` arms (+ bump the `app_table_is_the_ordinal_order` count assert); `on_launch_app` refresh hook; the refresh callback or `dispatch_event` arm |
+| `tools/crates/apexos-tools/src/tools.rs` | the slug in `UI_APPS` — makes the app reachable by the agent's `ui_open`/`ui_arrange` (`docs/adaptive-ui.md`) |
 
-### `AppKind` ordinals (`types.slint` `export enum AppKind`, mirrored by `kind_ordinal` / `kind_from_ordinal` / `kind_title` / `default_geom` in `main.rs`)
+### `AppKind` ordinals (`types.slint` `export enum AppKind`, mirrored by `APP_TABLE` / `kind_from_ordinal` / `kind_title` / `default_geom` in `main.rs` + the slugs in apexos-tools `UI_APPS`)
 
 | Variant | Ordinal | Title | Default geom (w,h) | Launcher |
 |---------|---------|-------|--------------------|----------|
@@ -653,6 +691,8 @@ entirely **agentd's**, reached over the wire.
 | `web` | 15 | Web | 460×400 | tech |
 | `calculator` | 16 | Calculator | 300×440 | core |
 | `explorer` | 17 | Files | 680×520 | core |
+| `occipital` | 18 | Occipital | 720×620 | tech |
+| `board` | 19 | Work Board | 880×600 | tech |
 
 ("tech" = gated behind `Personas.show-tech-apps`.)
 

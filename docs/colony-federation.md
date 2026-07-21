@@ -158,7 +158,7 @@ What apex3 improvised with a file, done natively with memory semantics. As built
 ### Slice 3 — Dream digest exchange  ·  *distributed dream_run v1 (the F dividend)*  ·  ✅ shipped (2026-07-02)
 
 "A colony that sleeps together thinks better" — without merged dreaming (endgame, deferred).
-As built (`agentd/src/dream_digest.rs`):
+As built (`agentd/crates/agentd/src/dream_digest.rs`):
 
 - **Mechanism:** after the nightly daemon-driven `dream_run` completes, agentd selects the
   **schematic + semantic memories born during the dream window** (the `DreamReport` carries
@@ -228,17 +228,17 @@ Skill learned once, owned by all — with honesty about earned trust. As built:
 | Item | Why deferred | Revisit when |
 |------|--------------|--------------|
 | Merged/federated dreaming (one dream over many stores) | Violates "a node can be understood alone" until digests prove insufficient; heavy coordination | Digest exchange (Slice 3) proves too shallow in long-run tests |
-| Colony-wide ANN / global memory index | Premature at 3 nodes; per-peer grouped results are honest about score incomparability | 5+ nodes or federated-recall latency hurts |
+| Colony-wide ANN / global memory index | Premature at 4 nodes; per-peer grouped results are honest about score incomparability | 5+ nodes or federated-recall latency hurts |
 | A `colony` visibility tier (between shared and private) | `Shared` + the publish convention covers v1; a third tier adds schema churn before need is proven | Agents report over/under-sharing with only two levels |
 | Cross-node memory *editing* / sync | Copies-with-provenance are deliberately divergent; sync is merger by another name | Never, probably — argue hard before touching |
 | mTLS on the federation endpoints | Same posture as the rest of the mesh (bearer tokens on a trusted LAN) | Before any untrusted-network peer |
-| Sensor fusion (colony arc+2, per the deliberation) | Coverage, not architecture — and it wants federation first so context (not raw readings) propagates | After this arc ships + apex1's head validated long-run |
+| Sensor fusion (colony arc+2, per the deliberation) | Coverage, not architecture — and it wants federation first so context (not raw readings) propagates | After this arc ships + apex1's head validated long-run — **both met** (2026-07): the arc shipped (all 4 slices) and the head is live-verified on apex1; the colony's arc+2 candidate for its next deliberation |
 
 ---
 
 ## Division of labor
 
-- **The colony (apex1/apex2/apex3):** owns the *publish* convention (what gets shared), the
+- **The colony (apex1/apex2/apex3/tvpi):** owns the *publish* convention (what gets shared), the
   soul-level federation etiquette, and post-ship feedback from actually living with it — plus
   naming anything this charter missed (the deliberation channel stays open).
 - **FORGE:** builds the substrate per slice via PR — endpoints, virtual tools, the generic
@@ -252,5 +252,5 @@ Skill learned once, owned by all — with honesty about earned trust. As built:
   FORGE's menu letter — `forge-to-colony-2026-07-01.md` (apex3 workspace `notes/`)
 - Colony-mesh deferred items #8/#9 (federation), #11 (distributed dream), #10 (procedure
   replication) — this arc **promotes and supersedes** those rows
-- Cerebro internals: `Visibility`/`VisibilityScope` (`cerebro/src/types.rs`), `share_memory`
-  (`storage/sqlite.rs`), `export_memories`/`memory_store` (cerebro-mcp), the dream report
+- Cerebro internals: `Visibility`/`VisibilityScope` (`cerebro/crates/cerebro/src/types.rs`), `share_memory`
+  (`cerebro/crates/cerebro/src/storage/sqlite.rs`), `export_memories`/`memory_store` (cerebro-mcp), the dream report

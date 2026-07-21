@@ -101,13 +101,15 @@ component IaqBadge {
 
 ```rust
 match ev_type {
-    "hello"           => set session_id, update status label
+    "session_init"    => set session_id, update status label
+                         ("hello" is the Python-agentd legacy name — handle both)
     "turn_started"    => Python agentd only — Rust agentd never emits it;
                          "agent_text" lazily creates the bubble + sets busy
     "agent_text"      => append delta to agent text buffer
     "turn_complete"   => set agent_busy = false, speak if speaker_on
     "tool_requested"  => push ToolBlock to tool list (status=running)
-    "tool_result"     => update ToolBlock by call.id (nested `call`, no flat call_id)
+    "tool_result"     => update ToolBlock by the bare `call` id (a number;
+                         the nested call.id shape is tool_requested's)
     "approval_pending"=> update ToolBlock (status=pending, show buttons)
     "sensor_reading"  => update IAQ / thermal frame state
     "wake_triggered"  => flash wake indicator, enable mic
