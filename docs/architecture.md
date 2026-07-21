@@ -52,7 +52,9 @@ Seven binaries come out of `cargo build --release --workspace` (resolver 2, rele
 profile `lto=thin`, `strip`). Library crates are listed alongside the binaries that use
 them. Two shared **root crates** sit above the three directory groups:
 `apexos-protocol` (the serde-only wire contract — the `Event` enum + id newtypes,
-re-exported by `apexos-core`) and `apexos-confine` (std-only path-confinement primitives —
+re-exported by `apexos-core`; **no_std-capable**: default `std`, with
+`--no-default-features --features alloc` as a second build gate, consumed bare-metal by
+ApexOS-RV) and `apexos-confine` (std-only path-confinement primitives —
 `confine_fs`/`confine_to_roots`, used by `apexos-tools`). The two voice sidecars
 (`tools/crates/apex-tts` Kokoro TTS, `tools/crates/apex-stt` Whisper STT) are
 **workspace-excluded** — they pin their own `ort`/C++ deps and are built separately by
@@ -67,7 +69,7 @@ re-exported by `apexos-core`) and `apexos-confine` (std-only path-confinement pr
 | `apexos-plugins` | lib | MCP plugin host + policy engine. `Supervisor::run` (`supervisor.rs`) multiplexes bus events (`ToolRequested` → `PolicyEngine.check` → dispatch or `ApprovalPending`; `UserApproval` resolves pending) and `SupervisorCmd` messages, spawns/supervises stdio MCP child processes (`mcp.rs`, newline-delimited JSON-RPC), and intercepts ~thirty *virtual tools* (propose/rollback_evolution, read_soul_md, soul_rehearse, schedule_* incl. the wakeup family, the goal_* family, convene_council, send_to_agent, the mesh_* family — file/memory/procedure relay, recall, capabilities — agent_spawn local + cross-node, query_event_log, apply_daemon_update, bootstrap_node, vast_*) before falling through to a real plugin. Dispatch also **system-stamps** plugin calls: `agent_id` on every cerebro call (`stamp_agent_id`), `__workspace` on every apexos-tools call, and a `spawn-derived` provenance tag on Cerebro mints from spawn sessions (`is_spawn_session`); an `agent_spawn` with no explicit `system` gets a minimal task charter (`resolve_spawn_system` — `inherit_soul:true` opts into full identity). `policy.rs` is pure rule eval (Allow/Ask, Yolo short-circuit, exact-then-`prefix.*` wildcard, Workspace rule). `config.rs` loads `plugins.toml`; `vast.rs` wraps vast.ai GPU recipes. |
 | `apexos-agent` | lib | Turn engine. `turn.rs` `run_turn` streams from the provider, emits `AgentText` deltas + `ToolRequested`, awaits matching `ToolResult` (a bounded timeout synthesizes an **honest blocker** via the pure `missing_result_message` — still-awaiting-approval / approved-but-silent / dispatched-stalled / bus-lagged — so a turn never wedges and never misreads a pending approval as a decline), loops to `TurnComplete`. `provider.rs` = `Provider` trait + `Chunk` stream; `anthropic.rs`/`oai.rs` are the two impls; `routing.rs` `RoutingProvider` dispatches per-call off a live-swappable backend `Arc<RwLock<String>>` so hot-swaps land on the next turn with no restart; `council.rs` runs parallel multi-agent deliberation. |
 | `apexos-store` | lib | `run_log_writer` — subscribes to the broadcast bus and appends every `Event` as date-rolling JSONL. |
-| `agentd` | **bin** | The daemon. Manual multi-thread tokio runtime (never `#[tokio::main]`). Wires `Bus::new`/`run` + gateway + supervisor + turn engine + scheduler + council; loads soul (`AGENTD_SOUL` or `config/soul.md`) and keys. `spawn_agent_router` is the central dispatcher (consumes broadcast `Event`s, owns abort handles / session children / depths, routes `UserPrompt`→`root_turn`, handles `SpawnAgent`/`AgentMessage`/`UserCancel`/sensor-alert→prompt). `spawn_evolution_applier` consumes `EvolutionProposed`, snapshots undo state, applies via `apply_evolution` (writes `soul.md`/`policy.toml`/`plugins.toml`, hot-reloads policy/agent), and journals undo into Cerebro episodes; the pure evolution core (kind/invert, the undo codec, the TOML edits) lives in `evolution.rs`. The **consolidate/rehearse worker seam**: `consolidate.rs` (session → Cerebro distillation) and `rehearse.rs` (`soul_rehearse` — tool-less probes of a candidate soul) run as agentd-side workers that own the provider + `ToolProxy`; the gateway/supervisor forward requests over dedicated mpscs and await the reply (never the lag-droppable broadcast bus). `scheduler.rs` (cron, polls every 60s), `council_handler.rs`, `session_store.rs` (per-root-session history JSONL), and `dream_digest.rs` (post-dream mesh push) round it out. |
+| `agentd` | **bin** | The daemon. Manual multi-thread tokio runtime (never `#[tokio::main]`). Wires `Bus::new`/`run` + gateway + supervisor + turn engine + scheduler + council; loads soul (`AGENTD_SOUL` or `config/soul.md`) and keys. `spawn_agent_router` is the central dispatcher (consumes broadcast `Event`s, owns abort handles / session children / depths, routes `UserPrompt`→`root_turn`, handles `SpawnAgent`/`AgentMessage`/`UserCancel`/sensor-alert→prompt). `spawn_evolution_applier` consumes `EvolutionProposed`, snapshots undo state, applies via `apply_evolution` (writes `soul.md`/`policy.toml`/`plugins.toml`, hot-reloads policy/agent), and journals undo into Cerebro episodes; the pure evolution core (kind/invert, the undo codec, the TOML edits) lives in `evolution.rs`. The **consolidate/rehearse worker seam**: `consolidate.rs` (session → Cerebro distillation) and `rehearse.rs` (`soul_rehearse` — tool-less probes of a candidate soul) run as agentd-side workers that own the provider + `ToolProxy`; the gateway/supervisor forward requests over dedicated mpscs and await the reply (never the lag-droppable broadcast bus). `scheduler.rs` (cron, polls every 60s), `council_handler.rs`, `session_store.rs` (per-root-session history JSONL), `goal.rs` (the autonomous goal driver), `self_update.rs` + `health.rs` (the self-update loop + health contract), `sensor_config.rs` (alert-profile persistence), `pac_lint.rs` (the pure PAC-2 Dense lint gate on `UpdateSystemPrompt` payloads), and `dream_digest.rs` (post-dream mesh push) round it out. |
 
 ### `cerebro/crates/` — cognitive memory
 
@@ -82,7 +84,7 @@ re-exported by `apexos-core`) and `apexos-confine` (std-only path-confinement pr
 
 | Crate | Kind | Role |
 |-------|------|------|
-| `apexos-tools` | **bin** | MCP-over-stdio system-tool plugin spawned by the supervisor: shell (`run_command`), file (read/write/list/create/delete), git (`git_*`, argv-only — never `/bin/sh`), `http_fetch`, system telemetry (cpu_temp/disk/memory/uptime via `/proc`+`df`), notify (jsonl/notify-send/TTS/ntfy/telegram), audio (ffmpeg), GPIO/PWM/servo (sysfs + libgpiod), display_face/sketch_draw, camera_capture/screenshot_mirror, eject_media. **FS and git tools self-confine in-process** — `tools.rs::confine` (policy) over the std-only `apexos-confine` root crate (mechanism): writes are workspace-rooted, reads get the workspace + a small allowlist minus a secret denylist; the agentd `PolicyEngine` plus the systemd sandbox layer on top (see Security). |
+| `apexos-tools` | **bin** | MCP-over-stdio system-tool plugin spawned by the supervisor: shell (`run_command`), file (read/write/list/create/delete), git (`git_*`, argv-only — never `/bin/sh`), `http_fetch`, system telemetry (cpu_temp/disk/memory/uptime via `/proc`+`df`), notify (jsonl/notify-send/TTS/ntfy/telegram), audio (ffmpeg), GPIO/PWM/servo (sysfs + libgpiod), display_face/sketch_draw, camera_capture/screenshot_mirror, eject_media, and the `ui_*` adaptive-UI staging verbs (ui_open/close/focus/query/arrange/theme/reflex — validate+echo handlers, applied by ui-slint). **FS and git tools self-confine in-process** — `tools.rs::confine` (policy) over the std-only `apexos-confine` root crate (mechanism): writes are workspace-rooted, reads get the workspace + a small allowlist minus a secret denylist; the agentd `PolicyEngine` plus the systemd sandbox layer on top (see Security). |
 | `apex-sensor-bridge` | **bin** | Standalone write-only WS client. Reads CPU temp from sysfs and optionally polls a SensorHead HTTP service (BME688 env + MLX90640 thermal), pushing `sensor_reading` frames to `/sensor-bridge` on an interval with a fixed-backoff reconnect loop. |
 
 ### `ui-slint/` — the native UI (the unique contribution)
@@ -143,6 +145,10 @@ matching `ToolResult`, loops, then `TurnComplete`.
 (`SENSOR_BRIDGE_TOKEN` auth — its own gate, separate from the API token) →
 `Event::SensorReading` on the bus →
 broadcast to UI sensor view / dashboard **and** persisted by the store log writer.
+A threshold-crossing that survives agentd's persistence filter additionally emits the
+**global** `Event::SensorAlert` (node_id/kind/value/threshold/sensor_id) — the
+machine-readable twin of the root-session alert prompt, fired at the same moment; it is
+the trigger for `ui_reflex` rules.
 
 **Cerebro memory.** `agentd` spawns `cerebro-mcp` as an MCP plugin (`plugins.toml`); agent
 memory tool calls route Supervisor → `McpClient` stdio → `cerebro-mcp` `dispatch.rs` →
@@ -191,6 +197,7 @@ voice live without re-initing the session.
 | `tool_result` | `call: <id>, output: {ok, content}` | update card by id |
 | `approval_pending` | `call: {id, tool, args}` | show approve/reject |
 | `sensor_reading` | `reading: {kind, …}` | update IAQ / thermal |
+| `sensor_alert` | `node_id, kind, value, threshold, sensor_id` | global persistence-filtered alert (fires `ui_reflex` rules) |
 | `wake_triggered` | — | flash wake indicator |
 
 > **`turn_started` is Python-agentd-only.** The Rust daemon never emits it (see

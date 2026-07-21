@@ -28,9 +28,10 @@ level, where the agents self-organize it. agentd does **not** hard-code node rol
 (transport, delegation, advertisement), not policy; the colony decides how to use it. Revisit only if
 soft self-governance proves insufficient.
 
-*Status note (2026-07): the colony is now **3 live nodes** — apex3 (andre-laptop, x86 desktop-mode,
-pro tier) joined alongside apex1/apex2. The table above records the original 2-node constitution;
-apex3 has not yet self-declared a constitutional role — that's the colony's to deliberate.*
+*Status note (2026-07): the colony is now **4 live nodes** — apex3 (andre-laptop, x86 desktop-mode,
+pro tier) and tvpi (the TV Pi, joined 2026-07-20) alongside apex1/apex2. The table above records the
+original 2-node constitution; neither apex3 nor tvpi has yet self-declared a constitutional role —
+that's the colony's to deliberate.*
 
 ---
 
@@ -39,7 +40,7 @@ apex3 has not yet self-declared a constitutional role — that's the colony's to
 Grounding for the plan — several roadmap items are closer than the agents assumed:
 
 - **Discovery** — mDNS browse (`avahi-browse _apexos._tcp`) + advertise (static avahi service file).
-  Every node both advertises and browses (symmetric). See the mesh-discovery gotcha in CLAUDE.md.
+  Every node both advertises and browses (symmetric). See the mesh-discovery gotcha in docs/gotchas.md.
 - **Trust** — cross-node calls are **per-peer bearer-token-gated** (the pairing exchange stores each
   peer's `AGENTD_TOKEN`). Not mTLS, but a peer needs the token. The LAN bind (`AGENTD_BIND=0.0.0.0`)
   is safe *because* of the token (F036).
@@ -56,7 +57,7 @@ Grounding for the plan — several roadmap items are closer than the agents assu
   replies with workspace file-drops ("filed not messaged — send_to_agent session routing is
   buggy per André", apex2, 2026-07-13). The wedge that *looked* like this bug — apex1's
   session-35 inbound turns 400ing — was the separate session-persist interleave, fixed in its
-  own PR (see the CLAUDE.md persist-ordering gotcha).
+  own PR (see the persist-ordering gotcha in docs/gotchas.md).
 - **Embodiment** — `build_embodiment` (agentd) already computes this node's **live senses + the full
   tool registry** every 30s. Capability advertisement is mostly a matter of *exposing* this.
 - **Sub-agents** — `SpawnAgent` machinery exists with non-session-gated child ids — the basis for a
@@ -147,7 +148,7 @@ dark mid-thermal-alert, I need to know. Silence and 'everything fine' look ident
   **✅ Shipped** as the sensor-alert **profiles** selector: `profile_thresholds`
   (`standard`/`smoker`/`kitchen`/`workshop`, pure + unit-tested in agentd `main.rs`) feeding the alert
   loop live, `GET`/`POST /api/sensors/config` (gateway, canonical `SENSOR_PROFILES` list, persisted),
-  and the Settings **SENSOR ALERTS** chip row. See the sensor-profiles gotcha in CLAUDE.md.
+  and the Settings **SENSOR ALERTS** chip row. See the sensor-profiles gotcha in docs/gotchas.md.
 
 ---
 
@@ -155,7 +156,7 @@ dark mid-thermal-alert, I need to know. Silence and 'everything fine' look ident
 
 | # | Item | Why deferred | Revisit when |
 |---|------|--------------|--------------|
-| #5  | NATS / async pub-sub | New transport daemon + dep; at 2 nodes HTTP req/resp + the existing event broadcast + polling cover it. Pub/sub's win is fan-out at scale. | 3+ nodes, or capability-polling proves too chatty. **Trigger FIRED** — the colony is 3 nodes (2026-07). Human steer (André, 2026-07-03): NATS is still overkill at this scale; HTTP req/resp + broadcast held through the federation arc. **Queued for the colony's next deliberation** with federation field data — not building now |
+| #5  | NATS / async pub-sub | New transport daemon + dep; at 2 nodes HTTP req/resp + the existing event broadcast + polling cover it. Pub/sub's win is fan-out at scale. | 3+ nodes, or capability-polling proves too chatty. **Trigger FIRED** — the colony is 4 nodes (2026-07). Human steer (André, 2026-07-03): NATS is still overkill at this scale; HTTP req/resp + broadcast held through the federation arc. **Queued for the colony's next deliberation** with federation field data — not building now |
 | #8/#9 | ~~Cross-cerebro federation / write~~ | **PROMOTED** → the [colony-federation charter](colony-federation.md) (colony deliberation 2026-07-01: unanimous #1) — **shipped** as charter Slices 1–2 (memory relay + federated recall, 2026-07-02, live-verified colony-wide) | — |
 | #15 | mTLS / zero-trust | Per-peer bearer tokens already gate cross-node calls; mTLS is the upgrade for *untrusted networks*. | Before adding an untrusted-network node |
 | #11 | ~~Distributed `dream_run`~~ | **PROMOTED** → federation charter Slice 3 (dream digest exchange; colony's #2, "one arc with A") — **shipped** 2026-07-02 (nightly dream now waits out the run, `AGENTD_DREAM_TIMEOUT_SECS`; digest pushes after it) | — |

@@ -81,7 +81,9 @@ suggest-mode node gates every web read behind the `unknown → ask` fallthrough 
 policy gotcha). **Already-deployed nodes gain them on the next `apexos-update`**: install.sh
 additively syncs any `[rules]` key present in the shipped config but missing live into
 `/etc/agentd/policy.toml` (`sync_policy_rules`, 2026-07-04 — existing/self-evolved values are
-never overwritten).
+never overwritten; hardened 2026-07-20: the presence check is quote-insensitive, quoted
+duplicates are healed first with the self-evolved line winning, and every transform is
+TOML-validated before it lands).
 
 ## 1b. The knowledge hub — LLM curation (`web_distill`)
 
@@ -148,8 +150,10 @@ freshness; a breadcrumb **trail** tracks the agent's path this session. The body
 `ScrollView` (the linuxkms no-wheel-scroll gotcha — a bare Flickable is unscrollable on the kiosk).
 
 The window **auto-reveals the first time APEX browses** (so the human notices it start reading)
-but won't re-pop if the user closes it — closing sets a suppress flag that relaunching from the
-menu clears.
+but won't re-pop if the user closes it — closing latches the reader via the shared adaptive-UI
+latch (A3: the old standalone suppress flag folded into it; the latch also blocks agent `ui_open`
+for the reader), and relaunching from the menu re-invites (clears the latch). See
+`docs/adaptive-ui.md`.
 
 ### The steer (9c)
 

@@ -1,7 +1,7 @@
 /* ApexOS web/PWA client — login (3e session-token auth) + streaming chat + tool
    cards + inline approvals over the agentd WS/REST contract. Vanilla JS, no build.
 
-   Wire contract (see CLAUDE.md "agentd WebSocket protocol"):
+   Wire contract (see docs/agentd-protocol.md):
    - Auth: GET /api/auth/profiles (ungated) → POST /api/auth/login {user_id,pin}
      → {token}. The token is the Bearer for gated REST + `?token=` on the WS.
    - WS: on connect the gateway pushes {type:session_init, session_id, history}.

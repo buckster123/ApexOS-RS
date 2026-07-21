@@ -5,7 +5,7 @@
 > vector search + an association graph. agentd spawns `cerebro-mcp` as an MCP-over-stdio
 > plugin (agent **FORGE**), so every memory verb arrives as a tool call. **Extend this
 > surface when** an agent needs to persist or retrieve something across turns, sessions, or
-> reboots — or when you want to add a *new* memory tool to the ~66-verb registry.
+> reboots — or when you want to add a *new* memory tool to the ~67-verb registry.
 >
 > Two audiences: humans adding a Cerebro tool (a `route` arm in `dispatch.rs` + a `tool_schema`
 > arm in `tools.rs`), and
@@ -37,9 +37,10 @@ Only three methods are "first-class" on the cortex; everything else is reached t
 `route(name, args, brain)`, a big `match name { … }`. The result is
 wrapped as MCP `content[0].text` = a **JSON string**; the agent reads
 that text and re-parses it. Schemas live separately in `tool_schema()` (in `tools.rs`);
-the authoritative name list is `TOOL_NAMES` (`tools.rs`) — **66 entries** (63 functional + 3
-stubs). Note the `tools.rs` header comment still reads "63 tools" — it predates the three
-deferred vision/ingest verbs; the live array is 66. `tools/list` returns `all_tool_schemas()`,
+the authoritative name list is `TOOL_NAMES` (`tools.rs`) — **67 entries** (66 functional +
+the deferred `ingest_file` stub; the `tools.rs` header states this, and the count is
+asserted by a `tools.len()` test in `dispatch.rs` so it can't silently go stale).
+`tools/list` returns `all_tool_schemas()`,
 which maps `tool_schema` over every `TOOL_NAMES` entry.
 
 **Scoping — the single primitive.** `agent_scope(args)` (fn in `dispatch.rs`) reads one field,
@@ -58,9 +59,17 @@ which maps `tool_schema` over every `TOOL_NAMES` entry.
 appears in the `remember` schema (in `tools.rs`) is **not read by dispatch** — visibility is
 *derived from scope* inside `CerebroCortex::remember`: a scoped write is `Private`, an
 unscoped write is `Shared`. To make a memory shared, omit `agent_id` on the write or call
-`share_memory` afterward. **In ApexOS-RS, FORGE passes `agent_id="FORGE"` and APEX passes
-`agent_id="CLAUDE-APEX"`** (FORGE is the external tool-caller's agent id per CLAUDE.md; APEX is
-the running on-device agent) — keep these consistent or recall silently misses prior memories.
+`share_memory` afterward. **On the deployed path, `agent_id` is system-stamped, not
+agent-supplied**: agentd's `Supervisor::dispatch_tool` **overwrites** `agent_id` on every
+`cerebro`-plugin call with the session's resolved identity (`stamp_agent_id` — the node
+agent, env `AGENTD_AGENT_ID`, default `APEX`; or the session's bound agent via
+`SessionBindings`), so a model-passed value is ignored and the model can't forget/typo/spoof
+its memory space. A caller-supplied `agent_id` matters only for direct-MCP use (dev tools,
+tests) — FORGE, the dev-session tool-caller, passes `agent_id="FORGE"` per CLAUDE.md.
+Destructive ops are store-layer scope-enforced too (CB-018): `delete_memory`/`purge_memory`/
+`restore_memory`/`bulk_delete`/`prune_thread`/`purge_all_deleted` and the tag rewrites carry
+the caller's `VisibilityScope` in their WHERE clauses, and `share_memory` refuses to
+re-scope a memory the caller doesn't own.
 
 **Memory types** (`MemoryType` enum in `types.rs`, snake_case on the wire): `episodic`, `semantic`,
 `procedural`, `affective`, `prospective`, `schematic`. Most verbs that "feel" like a distinct
@@ -78,8 +87,13 @@ SLEEP    session_save · store_intention(per deferred item) · dream_run   (depo
 ```
 
 A turn that ends without depositing is amnesia — the continuity contract is honoured only if
-the Sleep loop runs. `session_save` is **mandatory at session end**; `dream_run` is periodic
-(schedule nightly). See "Known stubs & inert paths" before relying on any verb.
+the Sleep loop runs. `session_save` is **mandatory at session end**. In ApexOS-RS the daemon
+now owns the two book-ends: Wake priming is CCBS-driven (`root_turn` calls
+`cognitive_bootstrap` on a session's first turn and appends the result to the system prompt)
+and consolidation is a daemon cron (`spawn_nightly_dream` calls `dream_run` directly —
+`AGENTD_DREAM_CRON`, default 03:00 UTC; no LLM turn, can't be skipped), both scoped to the
+node identity — the agent-side verbs remain for manual/extra runs. See "Known stubs & inert
+paths" before relying on any verb.
 
 ---
 
@@ -161,11 +175,12 @@ makes the agent *see* the tool; the route in `dispatch.rs` makes it *do* somethi
 
 A realistic agent (APEX) closing out a session. Every call is a real, routed verb. This is
 the pattern an always-on agent should run at idle/shutdown so tomorrow's APEX is the same
-agent as today's.
+agent as today's. (`agent_id` is shown explicitly — the direct-MCP form; on the deployed
+path the supervisor stamps it, so APEX need not pass it at all.)
 
 ```jsonc
 // 1. Wrap the work that happened this session as an episode (remember the *doing*)
-episode_start { "title": "diagnose VRM thermal spike", "agent_id": "CLAUDE-APEX" }
+episode_start { "title": "diagnose VRM thermal spike", "agent_id": "APEX" }
 // → { "episode_id": "ep_3f2c…", "status": "started" }
 
 episode_add_step {
@@ -181,7 +196,7 @@ episode_end { "episode_id": "ep_3f2c…", "summary": "throttling resolves VRM sp
 // 2. Deposit the salient observation with AFFECT so activation resurfaces it under load
 memory_store {
   "content": "VRM hits 78°C under sustained 70B inference; throttle to recover",
-  "agent_id": "CLAUDE-APEX"
+  "agent_id": "APEX"
 }
 // memory_store is the `remember` alias (the "memory_store" | "memory_search" arm in route) — type auto-classified, scoped private.
 
@@ -189,36 +204,36 @@ memory_store {
 store_procedure {
   "content": "Thermal recovery: if cpu_temp > 75°C for >3m, POST /api/backend to a lighter model, re-check in 90s.",
   "tags": ["thermal", "runbook"],
-  "agent_id": "CLAUDE-APEX"
+  "agent_id": "APEX"
 }
 // → { "id": "<uuid>", "status": "ok" }   (MemoryType::Procedural, tag "procedure", salience 0.8)
 
 // 4. Record any deferred work as an intention (prospective memory), one per item
 store_intention {
   "content": "Add a fan-curve PWM rule so throttling is automatic, not manual.",
-  "salience": 0.85, "agent_id": "CLAUDE-APEX"
+  "salience": 0.85, "agent_id": "APEX"
 }
 // → { "id": "<uuid>", "status": "ok", "salience": 0.85 }
 
 // 5. The mandatory session note — searchable on next Wake
 session_save {
   "content": "Diagnosed + fixed a VRM thermal spike by throttling the backend; runbook stored. Open: automate the fan curve.",
-  "priority": "HIGH", "session_type": "ops", "agent_id": "CLAUDE-APEX"
+  "priority": "HIGH", "session_type": "ops", "agent_id": "APEX"
 }
-// stored as MemoryType::Episodic with tags ["session_note","priority:HIGH","session_type:ops","agent:CLAUDE-APEX"]
+// stored as MemoryType::Episodic with tags ["session_note","priority:HIGH","session_type:ops","agent:APEX"]
 
 // 6. (Periodic, nightly) consolidate — strengthen, abstract, prune
-dream_run { "agent_id": "CLAUDE-APEX", "max_llm_calls": 20 }
+dream_run { "agent_id": "APEX", "max_llm_calls": 20 }
 ```
 
 Next session, the Wake loop rehydrates from exactly these deposits:
 
 ```jsonc
-session_recall { "query": "thermal VRM throttle runbook", "agent_id": "CLAUDE-APEX" }
+session_recall { "query": "thermal VRM throttle runbook", "agent_id": "APEX" }
 // → returns the session_note above (filtered to tag "session_note")
-check_inbox    { "agent_id": "CLAUDE-APEX" }      // cross-agent messages
-list_intentions{ "agent_id": "CLAUDE-APEX" }      // surfaces the fan-curve TODO (salience ≥ 0.3)
-find_relevant_procedures { "tags": ["thermal"], "agent_id": "CLAUDE-APEX" }  // the runbook
+check_inbox    { "agent_id": "APEX" }      // cross-agent messages
+list_intentions{ "agent_id": "APEX" }      // surfaces the fan-curve TODO (salience ≥ 0.3)
+find_relevant_procedures { "tags": ["thermal"], "agent_id": "APEX" }  // the runbook
 ```
 
 Why each verb and not a flat dump: `session_save` is tag-convention episodic so it's
@@ -270,10 +285,12 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 
 **Known stubs & inert paths (do NOT rely on these).** Grounded in `dispatch.rs` + symbiosis.md:
 
-- `ingest_file`, `describe_image`, `search_vision` are advertised in `TOOL_NAMES` but
-  unimplemented — they fall through the `route` match to the `_` arm and return an honest
-  `-32601` not-implemented **error** (C-RS-007). These three are the **only** Cerebro stubs;
-  the other 63 `TOOL_NAMES` verbs are functional.
+- `ingest_file` is advertised in `TOOL_NAMES` but unimplemented — it falls through the
+  `route` match to the `_` arm and returns an honest `-32601` not-implemented **error**
+  (C-RS-007). It is the **only** Cerebro stub; the other 66 `TOOL_NAMES` verbs are
+  functional. `describe_image` (a real VLM caption tool — tiered `CEREBRO_VISION_BACKEND`,
+  Ollama VLM → Anthropic fallback) and `search_vision` (CLIP visual recall, tier-gated off
+  on Nano) are **implemented** — see their `route` arms in `dispatch.rs`.
 - **`cognitive_bootstrap` is implemented** (CB-001 closed): one call assembles a
   token-budgeted priming block from live memory state — open intentions + query-relevant
   session summaries, procedures, and memories. It is the one-call replacement for the manual
@@ -301,6 +318,7 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 |------|---------------|---------------|---------|---------|
 | `remember` / `memory_store` | `content` | `memory_type`, `tags`, `salience`, `agent_id` (`memory_store` only takes content/tags/agent_id) | `cortex.remember` | the stored `MemoryNode` |
 | `recall` / `memory_search` | `query` | `top_k` (10), `agent_id` | `cortex.recall` | `[{memory, score}]` |
+| `find_by_tags` | `tags` | `limit` (20, max 200), `agent_id` | sqlite exact-tag AND lookup (precise where recall is fuzzy — provenance queries) | compact rows (content ≤200 chars) |
 | `associate` | `source_id`, `target_id` | `link_type` (semantic), `weight` (0.5), `agent_id` | `cortex.associate` | `{status:"ok"}` |
 | `get_memory` | `memory_id` | `agent_id` | sqlite | `MemoryNode` or error |
 | `update_memory` | `memory_id` | `content`, `tags`, `salience`, `agent_id` | sqlite (re-embeds if content changed) | updated `MemoryNode` |
@@ -347,7 +365,9 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 | set, non-empty | `for_agent(id)` | `visibility='shared' OR (visibility='private' AND agent_id=?)` | own private + all shared |
 | absent / empty | `global()` | `1=1` (read sees all rows) | everything (no isolation on read); global *writes* are `Shared` |
 
-ApexOS-RS conventions: FORGE → `agent_id="FORGE"`; APEX → `agent_id="CLAUDE-APEX"`.
+ApexOS-RS conventions: FORGE (direct-MCP dev sessions) → `agent_id="FORGE"`; on the deployed
+path the supervisor stamps the session's resolved identity (`stamp_agent_id`, default `APEX`)
+over whatever the model passed.
 
 ### Tag conventions (verbs that are `remember` + tags)
 
@@ -370,8 +390,8 @@ mode default (incl. `session_save`, `store_intention`, `store_procedure`, `dream
 
 ### Known stubs (advertised but unimplemented)
 
-`ingest_file` · `describe_image` · `search_vision` — return an honest `-32601` error.
-(`cognitive_bootstrap` is now **implemented** — a live-state priming assembler, CB-001 closed.)
+`ingest_file` — returns an honest `-32601` error. (`describe_image`, `search_vision`, and
+`cognitive_bootstrap` are all **implemented** now — the stub list is down to one.)
 
 ### Files
 

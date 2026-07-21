@@ -95,6 +95,9 @@ server (`APEXOS_UI_SNAPSHOT_ADDR`, :8788) serves **`/state`** beside `/snapshot`
                "maximized": false, "focused": true}],
   "agent_opened": ["sensor"],      // windows the agent created (still open)
   "latched": ["settings"],         // user closed after agent opened — ui_open suppressed
+  "turn_mutations": 0,             // A3 rate rail: mutations applied this turn…
+  "mutation_cap": 4,               // …vs the cap — the agent SEES the throttle
+  "reflexes": [{"on": "sensor_alert", "do": "open", "app": "sensor", "fires": 0}],
   "apps": ["chat", "..."]          // the valid catalog, self-describing
 }
 ```
@@ -238,7 +241,7 @@ real value. Details + honest cost note: the plan archive
 | A2 | `ui_arrange` presets + layout fn; `ui_theme` via `apply_persona` | **shipped** (#256, field-confirmed) |
 | A3 | Etiquette pass: rate rail (4/turn, `/state`-visible), drag guard (`WmState.dragging-id`), occipital latch fold, seed-soul etiquette (live nodes via `propose_evolution`) | **shipped** |
 | B | Loop-6 memory: deposit discipline + procedure promotion (seeded in the soul's "Your stage", A3), geometry persistence (per-kind shape file, clamp-on-restore, boot-seed area wait — §5) | **shipped** (E2E-verified: restore, clamp, arrange→write, restart continuity) |
-| C | `ui_reflex` family: 7 global triggers × open/focus/close, (on,app)-keyed table of 8, 30s cooldown, fires ledger on `/state`, soul "Reflexes for the recurring" (§6) | **shipped** (E2E-verified: install→persist→fire→ledger, cooldown swallows bursts, restart-proof) |
+| C | `ui_reflex` family: 8 global triggers × open/focus/close, (on,app)-keyed table of 8, 30s cooldown, fires ledger on `/state`, soul "Reflexes for the recurring" (§6) | **shipped** (E2E-verified: install→persist→fire→ledger, cooldown swallows bursts, restart-proof) |
 | D | Colony field cycle (apex1 kiosk / apex-3 desktop), dream-consolidation check | next |
 | E | Decision gate: Bevy Tier B — go/no-go on Tier-A evidence | — |
 | F | Fast-model field test (APEX-on-Cerebras via the OAI-compat backend) | independent |

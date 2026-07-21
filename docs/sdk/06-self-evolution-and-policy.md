@@ -90,6 +90,32 @@ uses `write_atomic`. `write_atomic` tries temp+rename but **falls back to a non-
 in-place write** when the parent dir is root-owned (the deployed `/etc/agentd` case) — see
 [Policy / safety](#policy--safety).
 
+**Shipped since (June–July 2026)** — the pipeline above gained several layers (CLAUDE.md
+gotchas are the detail source):
+
+- **Deferred ack over a dedicated mpsc** (`set_propose_tx`): `propose_evolution` acks
+  *after* the apply lands, so the tool result carries the real apply outcome (a failed
+  apply no longer reads as success). `EvolutionProposed` stays on the bus for UI/event-log
+  only.
+- **The H4 snapshot gate**: a *full soul rewrite* (`update_system_prompt`) refuses to apply
+  unless the undo snapshot exists AND its episode step is durably persisted first (verified
+  by stored-memory id). Refusal is the honest failure mode for an unrecoverable identity
+  rewrite; small edits stay untaxed.
+- **PAC-2 structural lint** (`agentd/src/pac_lint.rs`, pure + unit-tested): a
+  dense-claiming `UpdateSystemPrompt` payload is linted before the snapshot gate — lint
+  errors → refusal with a line-numbered report; prose/lean souls pass untouched.
+- **Fossil healing at boot**: `restore_rollback_store` heals off-spec undo snapshots in
+  place (privatize + tag + de-salience + attribute-if-orphaned via the pure
+  `evolution::fossil_heal_args`; never deletes — the snapshots ARE the rollback
+  capability).
+- **`soul_rehearse`**: run a candidate soul on an ephemeral, tool-less mind (an identity
+  probe battery, optional A/B vs the current soul) *before* proposing — opt-in by design,
+  policy `allow`.
+- **Per-agent soul targeting** (`soul_target_for`): for a session bound to a non-default
+  agent, `read_soul_md` reads and `propose_evolution{UpdateSystemPrompt}`/rollback write
+  the **bound agent's own `soul_file`** — only APEX/unbound touches the global `soul.md` +
+  live `soul_arc`.
+
 ---
 
 ## Add a new evolution (the common case — config, no Rust)
@@ -103,9 +129,11 @@ You are an agent. You want to change your own config. You do **not** edit Rust; 
    *live* content, not your in-context snapshot; another evolution may have changed it
    since you last saw it. (The spec literally says "ALWAYS call this before
    propose_evolution with kind=update_system_prompt" — see `read_soul_md_spec`.)
-2. **`query_audit(agent_id="CLAUDE-APEX")`** — confirm the evolution episode/rollback trail
-   is being recorded in *this* daemon session. Rollback only works for the current session
-   (in-memory store); if you can't see the trail, assume you cannot roll back.
+2. **`query_audit(agent_id="APEX")`** — the node agent id (`AGENTD_AGENT_ID`, default
+   `APEX`; the supervisor stamps it on every Cerebro call anyway) — confirm the evolution
+   episode/rollback trail is being recorded. The rollback store is in-memory but
+   **best-effort restored from Cerebro episodes at boot** (`restore_rollback_store`); if
+   the trail isn't recording, assume you cannot roll back.
 3. **Summarise the change** in your message text before submitting — what changes, why,
    and the expected effect. This is the human-readable half of the audit trail.
 
@@ -150,7 +178,7 @@ what it is:
 { "tool": "memory_store",
   "content": "Set http_fetch=allow because research turns called it 5–10x and each gate stalled the turn. Expected effect: faster research, slightly larger outbound surface — revert if it ever fetches something unexpected.",
   "type": "semantic", "tags": ["evolution","rationale"], "salience": 0.9,
-  "agent_id": "CLAUDE-APEX" }
+  "agent_id": "APEX" }
 ```
 
 ### Verify and (if needed) roll back
@@ -181,7 +209,7 @@ defer follow-ups. It does this safely, with a full trail.
 **Turn 1 — orient & snapshot.**
 
 ```
-query_audit(agent_id="CLAUDE-APEX", limit=20)
+query_audit(agent_id="APEX", limit=20)
   → confirms evolution episodes are recording this session
 read_soul_md()
   → returns the live soul.md (APEX edits from THIS, not memory)
@@ -230,7 +258,7 @@ propose_evolution({
 memory_store({
   "content": "Evolved 2026-06-13: allowed store_intention (id 318) + soul reminder to defer anomaly follow-ups (id 319). Why: autonomous anomaly turns were stalling on the intention gate. Expected: hands-off anomaly handling. Watch: if intentions pile up unactioned, the deferral habit is wrong, not the gate.",
   "type": "semantic", "tags": ["evolution","rationale"], "salience": 0.9,
-  "agent_id": "CLAUDE-APEX"
+  "agent_id": "APEX"
 })
 ```
 
@@ -256,12 +284,15 @@ prior soul text. The policy rule (318) can't auto-revert — APEX must propose a
 by `PolicyEngine::check` (in `policy.rs`, called from `run` in `supervisor.rs`) *before*
 `dispatch_tool` ever runs. There is **no `evolution.*` rule namespace** — the comment in
 `types.rs` describing one is aspirational; the actual key is the literal tool name
-`propose_evolution`. In the shipped `config/policy.toml`,
-`propose_evolution`/`rollback_evolution`/`read_soul_md` are **not listed**, so under the
-default `mode = "suggest"` they hit the unknown-tool default → `Decision::Ask` (the `None`
-arm of `PolicyEngine::check`). That means: **every self-evolution requires human approval out
-of the box.** `read_soul_md` is read-only but also gates by default (you may want to
-allow-list it so pre-flight never stalls).
+`propose_evolution`. The shipped `config/policy.toml` now seeds all three explicitly:
+`read_soul_md = "allow"` (a read — gating it stalled the pre-flight on an approval that
+never resolved), `propose_evolution = "ask"`, `rollback_evolution = "ask"`. So under the
+default `mode = "suggest"`, **every self-*modification* still requires human approval out
+of the box**, but the read-only pre-flight never stalls. `install.sh`'s `sync_policy_rules`
+additively propagates these rules to already-deployed nodes on `apexos-update` (existing
+keys are never overwritten, so a self-evolved value always wins). A tool *absent* from the
+live `policy.toml` still hits the unknown-tool default → `Decision::Ask` (the `None` arm of
+`PolicyEngine::check`).
 
 **Policy modes** (the `PolicyMode` enum in `types.rs`; serialized kebab-case):
 
@@ -329,16 +360,22 @@ self-history; wiping it severs the rationale thread. Use the test-rig Pi for cle
 ## Add a *new evolution kind* (Rust change — for FORGE, not APEX)
 
 Adding a brand-new `EvolutionProposal` variant is a workspace code change, gated by normal
-git/CLAUDE.md discipline. The variant must touch exactly five sites:
+git/CLAUDE.md discipline. The rule since the June 2026 extraction: **pure evolution logic
+lives in `agentd/crates/agentd/src/evolution.rs` (with a unit test), not the applier loop**
+— `evolution.rs` holds the state machine (`kind`/`invert`, the undo-snapshot codec, the
+TOML edits like `policy_toml_set_rule`); `apply_evolution`/`compute_undo` in `main.rs` are
+IO-thin glue (read → pure transform → write/effect). The variant touches:
 
 1. **`EvolutionProposal` in `agentd/crates/core/src/types.rs`** — add the variant (and a
    `Subsystem` value if it's a reload target). Pick a `snake_case` tag; that becomes the
    `kind` string on the wire.
-2. **`apply_evolution` (in `main.rs`)** — add the match arm: write the config artifact
-   (use `write_atomic` for anything under `/etc/agentd`), update the live `Arc`, and/or send
-   a `SupervisorCmd`. Return a one-line `patch_summary`.
-3. **`compute_undo` (in `main.rs`)** — produce the inverse proposal (or `None` if there
-   isn't one). Without this, the change cannot be rolled back.
+2. **`evolution.rs`** — the pure pieces, each with a test: a `kind` label, the `invert`
+   arm (the inverse proposal, or none), and any config-text transform (mirror
+   `policy_toml_set_rule` — validate-before-persist).
+3. **`apply_evolution` + `compute_undo` (in `main.rs`)** — the thin glue arms: read the
+   artifact, call your `evolution.rs` transform, write (use `write_atomic` for anything
+   under `/etc/agentd`), update the live `Arc`, and/or send a `SupervisorCmd`. Return a
+   one-line `patch_summary`.
 4. **`propose_evolution_spec` (in `main.rs`)** — add the `kind` to the `enum` and document
    any new args, so the LLM tool schema advertises it.
 5. **`config/soul.md` Self-evolution table** — add the row so APEX knows the kind exists
@@ -415,7 +452,9 @@ Apply arm = the matching `EvolutionProposal::*` arm of `apply_evolution` (in `ma
 | Policy engine (rule eval, wildcard, workspace) | `agentd/crates/plugins/src/policy.rs` (`PolicyEngine::check`, `find_rule`, `matches_wildcard`, `workspace_decision`) |
 | Tool gate (`check` before dispatch) | `run` in `agentd/crates/plugins/src/supervisor.rs` (calls `PolicyEngine::check`) |
 | Virtual-tool interception | `dispatch_tool` in `agentd/crates/plugins/src/supervisor.rs` |
-| Applier loop, `apply_evolution`, `compute_undo`, `write_atomic` | `agentd/crates/agentd/src/main.rs` (`spawn_evolution_applier`, `apply_evolution`, `compute_undo`, `write_atomic`) |
+| Applier loop, `apply_evolution`, `compute_undo`, `write_atomic` (IO-thin glue) | `agentd/crates/agentd/src/main.rs` (`spawn_evolution_applier`, `apply_evolution`, `compute_undo`, `write_atomic`) |
+| Pure evolution state machine (`kind`/`invert`, undo codec, TOML edits) — new evolution *logic* goes here, with a test | `agentd/crates/agentd/src/evolution.rs` (`kind`, `invert`, `undo_step_line`/`parse_undo_snapshot_from_text`, `policy_toml_set_rule`, `plugins_toml_add`/`_remove`, `wishlist_append`, `fossil_heal_args`) |
+| PAC-2 dense-soul lint gate | `agentd/crates/agentd/src/pac_lint.rs` (format-gated: only dense-claiming `UpdateSystemPrompt` payloads) |
 | Tool specs (`gather_tools`) | `gather_tools` in `agentd/crates/agentd/src/main.rs` (+ the `*_spec` builders) |
 | Cold-start rollback restore | `restore_rollback_store` + `parse_undo_snapshot_from_text` in `agentd/crates/agentd/src/main.rs` |
 | Default policy | `config/policy.toml` |

@@ -36,10 +36,13 @@ mesh. It is three loosely-coupled mechanisms layered on top of independent `agen
      `AGENTD_TOKEN` as `PeerRecord.token` (0600 file; redacted to `has_token` in the
      `/api/mesh/peers` JSON). No token → `send_to_agent` returns `detail: "no token stored…"`;
      wrong token → `401`.
-   - **LAN bind.** agentd defaults to `127.0.0.1:8787` (loopback). Discovery (mDNS/UDP) still works,
-     so a peer ADDs fine, but the delivery POST gets a connection error until the target sets
-     `AGENTD_BIND=0.0.0.0:8787` in `/etc/agentd/env`. The token is what makes that non-loopback bind
-     safe (F036) — the two features are meant to ship together.
+   - **LAN bind.** agentd's *code* default is `127.0.0.1:8787` (loopback), but **`install.sh` now
+     seeds `AGENTD_BIND=0.0.0.0:8787`** in `/etc/agentd/env` (seed-if-absent), so a freshly
+     provisioned node is LAN-reachable out of the box. The manual edit only applies to nodes
+     deployed before the seed (an `apexos-update` re-run adds it) and to raw token-less
+     `cargo run`s, which stay loopback. The token is what makes the non-loopback bind safe (F036)
+     — install.sh always generates one, which is why the LAN default lives in the installer, not
+     the code.
 
 Orthogonal to the mesh are two *single-node* axes that `install.sh` decides at provision time:
 
@@ -75,6 +78,31 @@ nodes then reach that model by being routed at the renting node (`send_to_agent 
 > empty mesh). Two gaps remain: `install.sh` does **not** install `sshpass` (`bootstrap_node`
 > needs it), and does **not** create `recipes.toml` (vast needs it at
 > `/etc/agentd/recipes.toml`). Ground any "it just works" claim against these.
+
+### Shipped since this chapter was written (June → July 2026)
+
+This chapter covers the mesh *foundations*; the colony arcs that landed after it are
+documented in **`docs/colony-mesh.md`** + **`docs/colony-federation.md`** (and the CLAUDE.md
+gotchas). Headlines, so you don't design against a stale surface:
+
+- **Downtime beacon** (`gateway/src/beacon.rs`, `spawn_beacon_loop`/`beacon_step`): active
+  HTTP liveness-probing of every peer; an up↔down edge emits a global
+  `Event::MeshNodeStatus` and (by default) a root-session notice — silence no longer reads
+  as "all fine".
+- **Per-peer a2a sessions + durable inbox**: inbound mesh a2a lands in the sending peer's
+  *own* session (not root 0), with `[from <node> — to reply: …]` provenance and reply
+  continuity (`origin_session`); unread counts persist (`/api/mesh/inbox`).
+- **Capability advertisement**: `GET /api/capabilities` + the `mesh_capabilities` tool —
+  peers discover each other's senses/tools/tier.
+- **Blocking cross-node `agent_spawn`** (`POST /api/spawn`): run a sub-agent on a peer and
+  wait for the result — bounded by a per-call timeout, a per-peer circuit breaker, and the
+  `x-mesh-hops` guard.
+- **Federation slices**: `mesh_file_send`, `mesh_memory_send`, `mesh_recall`,
+  `mesh_procedure_send`, the nightly dream-digest exchange, and per-peer federation
+  counters (`docs/colony-federation.md`).
+- **Deploy hardening**: `apexos-update` is idempotent (the resolved mode/tier persists in
+  `/etc/agentd/install.conf` — no re-auto-detect flips), and low-RAM nodes get a capped
+  build + temporary swap so the ui-slint compile survives 4 GB boards.
 
 ---
 
@@ -126,17 +154,24 @@ off); faster tiers get the same behaviour, just quicker.
 Modes gate which binaries install. The logic is in `install.sh` (the `MODE` auto-detect + the
 `NO_UI` gating line).
 
-1. **Add the auto-detect branch** (`$IS_PI && MODE="kiosk" || MODE="headless"`), and a picker entry
-   in the manual menu.
-2. **Decide component gating.** The one rule today is:
+1. **Add the auto-detect branch** (the `MODE == "auto"` resolution: a Pi picks `desktop` when the
+   OS boots `graphical.target` or a session env — `WAYLAND_DISPLAY`/`DISPLAY` — is live, else
+   `kiosk`; non-Pi → `headless`), and a picker entry in the manual menu.
+2. **Decide component gating.** The rules today are:
    ```bash
-   [[ "$MODE" == "headless" || "$MODE" == "desktop" ]] && NO_UI=true
+   [[ "$MODE" == "headless" ]] && NO_UI=true
+   [[ "$MODE" == "desktop"  ]] && IS_DESKTOP=true
    ```
-   `NO_UI=true` skips installing/enabling `apexos-rs-ui` (guarded at the UI build, `install_svc`,
-   and `systemctl enable` sites). Add your mode's gating here. Other gates: `NO_SENSOR` (sensor
-   bridge), `NO_CEREBRO_API` (REST dashboard).
-3. A mode is just a label that flips `NO_*` booleans. agentd itself is mode-agnostic — it is a
-   pure daemon; headless = "don't install the local display."
+   **Only `headless` sets `NO_UI=true`** (skips installing/enabling `apexos-rs-ui` — guarded at
+   the UI build, `install_svc`, and `systemctl enable` sites). `desktop` installs a **real UI**:
+   `IS_DESKTOP=true` keeps `NO_UI=false`, builds + installs `/usr/local/bin/apexos-rs-ui` plus a
+   `.desktop` launcher (app menu + the install user's `~/.config/autostart`, launching with
+   `SLINT_BACKEND=winit`), and skips **only** the root KMS kiosk systemd service (the
+   `! $NO_UI && ! $IS_DESKTOP` gate at `install_svc`/enable/start). Add your mode's gating here.
+   Other gates: `NO_SENSOR` (sensor bridge), `NO_CEREBRO_API` (REST dashboard).
+3. A mode is just a label that flips these booleans. agentd itself is mode-agnostic — it is a
+   pure daemon; headless = "don't install the local display." The resolved mode persists in
+   `/etc/agentd/install.conf`, so `apexos-update` keeps it (no flip back to auto-detect).
 
 ## Add a mesh node (and route to it)
 
@@ -152,10 +187,13 @@ Two ways: **manual** (you provision the box yourself) or **agent-driven** (`boot
    node both advertises `_apexos._tcp` and can `avahi-browse`. To wire an *already-deployed* node
    that predates this, just `apexos-update` it (re-runs `install.sh`), or drop the file by hand:
    `sudo install -D -m 644 deploy/avahi/apexos-rs.service /etc/avahi/services/apexos-rs.service && sudo systemctl reload avahi-daemon`.
-3. **Open the LAN bind on every node you'll route to.** agentd defaults to `127.0.0.1:8787`
-   (loopback) — discovery (mDNS/UDP) still works, which *masks* the gap, but cross-node delivery
-   POSTs get a connection error. Set `AGENTD_BIND=0.0.0.0:8787` in `/etc/agentd/env` + restart.
-   The per-peer token (next) is exactly what makes that non-loopback bind safe (F036).
+3. **Confirm the LAN bind on every node you'll route to.** `install.sh` seeds
+   `AGENTD_BIND=0.0.0.0:8787` into `/etc/agentd/env` (seed-if-absent), so a freshly provisioned
+   node is already mesh-reachable. Only a node deployed *before* the seed stays on the code
+   default `127.0.0.1:8787` (loopback) — discovery (mDNS/UDP) still works there, which *masks*
+   the gap, but cross-node delivery POSTs get a connection error. Fix by `apexos-update` (re-runs
+   install.sh, which seeds it) or set the line by hand + restart. The per-peer token (next) is
+   exactly what makes that non-loopback bind safe (F036).
 4. **Register the peer — pick one:**
    - **Pairing code (recommended; kiosk-friendly, no external device).** On the *peer's* Mesh app
      tap **PAIR** (`POST /api/mesh/pair/start`) → it shows a single-use **6-digit code** (5-min
@@ -359,23 +397,27 @@ swapped `oai_base_url` (Topology B); `vast_status` reports `ready` with the inst
 
 ## Policy / safety
 
-**Approval gating.** None of `bootstrap_node`, `send_to_agent`, `vast_launch`, `vast_destroy`,
-`list_mesh_peers`, or `vast_status` appear in `config/policy.toml`. Unlisted tools default to
-`Decision::Ask` (`policy.rs` :111). So in the default `suggest` mode (and `auto-edit`), **every
-one of these gates on human approval** — only `yolo` mode bypasses (`policy.rs` :89). This is the
-intended posture: provisioning a node, spending money on a GPU, and messaging another machine are
-all "ask first" by default. If you add a mesh/vast tool and want it auto-allowed, you must add an
-explicit `"tool_name" = "allow"` rule — and that itself should go through `propose_evolution`, not
-a hand-edit.
+**Approval gating.** `config/policy.toml` now seeds the mesh family **`allow`**:
+`send_to_agent`, `list_mesh_peers`, and the federation tools (`mesh_file_send`,
+`mesh_memory_send`, `mesh_procedure_send`, `mesh_recall`, `mesh_capabilities`, plus
+`agent_spawn`). The trust basis is the peer registry — a send only reaches a *paired* node,
+rides the per-peer bearer token, and is non-destructive; the suggest-mode `unknown → ask`
+fallthrough used to stall every autonomous reply on an approval no one watches in the peer's
+thread. `bootstrap_node` and the `vast_*` tools remain **unlisted** → the unknown-tool default
+`Decision::Ask` — provisioning a node and spending money on a GPU stay "ask first" by default;
+only `yolo` mode bypasses. If you add a mesh/vast tool and want it auto-allowed, add an explicit
+`"tool_name" = "allow"` rule to `config/policy.toml` (`sync_policy_rules` propagates new keys to
+deployed nodes on `apexos-update`) — a live-node value change should go through
+`propose_evolution`, not a hand-edit.
 
-**Cross-node trust is transitive and unauthenticated by default.** `send_to_agent --node` POSTs to
-the peer's `/api/sessions/{id}/message`. That route is under the token gate, but the cross-node
-caller uses bare `curl` with **no `Authorization` header** (supervisor :585-589). It therefore only
-works if the peer's gateway is on loopback-reachable / token-less terms with the caller — i.e. it
-works against a peer bound loopback-only via its own loopback, or one whose token gate you've
-satisfied out-of-band. Treat the mesh as a **trusted LAN** primitive. The `MESH_SUBNET_GUARD`
-(`/24`, on by default) is a containment measure, not authentication — it stops discovery from
-reaching off-segment, nothing more.
+**Cross-node trust = the per-peer token + the peer registry.** `send_to_agent --node` POSTs to
+the peer's token-gated `/api/sessions/{id}/message` via **reqwest with the stored per-peer token
+as `Authorization: Bearer`** (never curl argv — the credential must not be visible in `ps`). No
+token stored → an honest `no token stored…` error; wrong token → `401`. The pairing-code flow is
+what exchanges tokens without typing. Still treat the mesh as a **trusted LAN** primitive: any
+holder of a peer's token can inject prompts into it. The `MESH_SUBNET_GUARD` (`/24`, on by
+default) is a containment measure, not authentication — it stops discovery from reaching
+off-segment, nothing more.
 
 **`bootstrap_node` handles secrets in process args.** It passes `ssh_password` and `api_key`
 through shell command lines (`echo '<pw>' | sudo -S`, `export ANTHROPIC_API_KEY=<key>`,
@@ -395,7 +437,8 @@ practice, but don't assume atomicity.
 
 **Network exposure.** A mesh only forms if `agentd` binds beyond loopback. `agentd` **hard-bails on
 a non-loopback bind when `AGENTD_TOKEN` is unset** (`main.rs` bind/auth gate). So to mesh, set
-`AGENTD_BIND=0.0.0.0:8787` *and* keep the generated token. Discovery/registry routes
+`AGENTD_BIND=0.0.0.0:8787` *and* keep the generated token — `install.sh` does both by default
+(token always generated, bind seeded-if-absent). Discovery/registry routes
 (`/api/mesh/*`) are under the token gate.
 
 **Audit discipline (for agents).** When you provision a node, rent a GPU, or register a peer, you
@@ -429,9 +472,9 @@ see "Add a new hardware tier").
 
 | Mode | Auto-detect | Installs `apexos-rs-ui`? | Interface | `SLINT_BACKEND` |
 |------|-------------|--------------------------|-----------|-----------------|
-| `kiosk` | Pi | yes | local HDMI display | `linuxkms` (or `linuxkms-femtovg` on Pi Zero) |
-| `headless` | non-Pi | no (`NO_UI=true`) | browser / PWA | — |
-| `desktop` | manual | no (`NO_UI=true`) | native window | `winit` |
+| `kiosk` | Lite-OS Pi (`multi-user.target`, no session) | yes, as the root KMS systemd service | local HDMI display | `linuxkms` (or `linuxkms-femtovg` on Pi Zero) |
+| `headless` | non-Pi | no (`NO_UI=true`) — the only mode that skips the UI | browser / PWA | — |
+| `desktop` | desktop-OS Pi (`graphical.target` or live session env), or manual | yes, as a winit window (`.desktop` launcher + autostart; **no** kiosk service) | native window | `winit` |
 
 ### Mesh REST API (`gateway/src/lib.rs` — the `/api/mesh/*` + `/api/backend` + `/api/sessions/*` routes)
 
@@ -442,29 +485,27 @@ see "Add a new hardware tier").
 | `POST /api/mesh/peers` | `{node_id, ws_url, role?}` | add/update a peer (`role`: `full`\|`sensor`\|`thin`), emit `PeerRegistered` |
 | `DELETE /api/mesh/peers/{id}` | — | remove peer by `node_id` |
 | `GET /api/sessions/active` | — | in-memory sessions (id + msg count) — pick a target for `send_to_agent` |
-| `POST /api/sessions/{id}/message` | `{message}` *(`message` only — `text` is NOT accepted, see live bug below)* | inject a `UserPrompt` into session `id` — this is the A2A landing point |
+| `POST /api/sessions/{id}/message` | `{message, from?, origin_session?}` (`message` only — `text` is NOT accepted) | inject a `UserPrompt` — the A2A landing point; a registered peer's `from` routes to that peer's own mesh session (not root 0) |
 | `GET/POST /api/backend` | `{backend, oai_base_url?, model?}` | read / hot-swap inference backend (no restart) |
 
-> **Live bug — cross-node `send_to_agent` does not actually deliver.** The caller POSTs
-> `{"text": <message>}` (supervisor :584), but `session_message_handler` reads **only**
-> `body["message"]` with no `text` fallback (gateway :717) and returns
-> `{"ok":false,"error":"missing message"}` with HTTP 200. The caller only inspects `curl -f`'s exit
-> status, so a 200-with-error-body reports `status:"sent"` — a **false success**. Until the field
-> names are reconciled (send `message`, or have the handler accept both), prefer a direct
-> `POST /api/sessions/{id}/message` with `{"message": …}` for cross-node injection. Local
-> `send_to_agent` (no `node`) is unaffected — it emits `AgentMessage` on the bus directly.
+> **Historical bug — fixed.** An early cross-node `send_to_agent` POSTed `{"text": …}` against a
+> handler reading only `body["message"]` and trusted the HTTP status alone, so every remote send
+> was a **false success**. The current sender posts `{"message": …, "from": <node_id>}` (plus
+> `origin_session` for reply continuity), checks the response *body's* `ok` — not just the status
+> — and reports `landed_session` (where the peer actually delivered it). Local `send_to_agent`
+> (no `node`) emits `AgentMessage` on the bus directly, as before.
 
 ### Mesh / deploy virtual tools (specs: the `*_spec` fns in `agentd/src/main.rs`; impl: `Supervisor::dispatch_tool` in `supervisor.rs`)
 
 | Tool | Required args | Optional args | Returns | Default policy |
 |------|---------------|---------------|---------|----------------|
-| `list_mesh_peers` | — | — | `peers.toml` text | Ask |
-| `send_to_agent` | `session_id`, `message` | `node` (peer node_id) | `{status, msg_id}` (local) / `{status, node, target_session}` (remote) | Ask |
-| `bootstrap_node` | `target_ip`, `ssh_password` | `ssh_user`(=`apexos`), `api_key`, `repo_url` | status string (returns before install finishes) | Ask |
-| `vast_list_recipes` | — | — | JSON array of recipes | Ask |
-| `vast_launch` | `recipe` | `geo`(=`EU_NORDIC`) | `{status:"ready", instance_id, model, cost_per_hr, local_port, …}` | Ask |
-| `vast_destroy` | — | — | `{status:"destroyed", instance_id}` | Ask |
-| `vast_status` | — | — | `{status, phase?, instance?}` | Ask |
+| `list_mesh_peers` | — | — | `peers.toml` text | Allow (seeded — a read) |
+| `send_to_agent` | `session_id`, `message` | `node` (peer node_id) | `{status, msg_id}` (local) / `{status, node, landed_session}` (remote) | Allow (seeded — peer-registry-bounded) |
+| `bootstrap_node` | `target_ip`, `ssh_password` | `ssh_user`(=`apexos`), `api_key`, `repo_url` | status string (returns before install finishes) | Ask (unlisted) |
+| `vast_list_recipes` | — | — | JSON array of recipes | Ask (unlisted) |
+| `vast_launch` | `recipe` | `geo`(=`EU_NORDIC`) | `{status:"ready", instance_id, model, cost_per_hr, local_port, …}` | Ask (unlisted) |
+| `vast_destroy` | — | — | `{status:"destroyed", instance_id}` | Ask (unlisted) |
+| `vast_status` | — | — | `{status, phase?, instance?}` | Ask (unlisted) |
 
 ### `peers.toml` schema (`PeerRecord` in `mesh.rs`; `/etc/agentd/peers.toml`)
 
@@ -515,7 +556,6 @@ Phases (`VastPhase`): `idle` → `launching{phase}` → `ready` → `destroying`
 
 | Need | For | Install |
 |------|-----|---------|
-| `avahi-daemon` + published `_apexos._tcp` | mDNS discovery | `apt install avahi-daemon avahi-utils` + publish service |
 | `sshpass` | `bootstrap_node` | `apt install sshpass` |
 | `/etc/agentd/recipes.toml` | vast recipes | author by hand (schema above) |
 | `vastai` CLI + `VAST_API_KEY` | vast lifecycle | `pip install vastai`; key in `/etc/agentd/env` |

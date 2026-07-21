@@ -6,10 +6,10 @@
 > **which agent is this, and is that identity enforced — or merely remembered?**
 
 Every other layer assumes an answer to one question and never checks it: *whose* memory is
-this, *whose* soul is evolving, *whose* body is this node? Today that answer is supplied by
-the agent itself — APEX passes its own `agent_id` on every Cerebro call. That works while
-there is exactly one agent and it never makes a mistake. It is not a foundation for a
-multi-user, multi-agent OS, and it is a quiet security gap even for a single agent.
+this, *whose* soul is evolving, *whose* body is this node? Before this arc that answer was
+supplied by the agent itself — APEX passed its own `agent_id` on every Cerebro call. That
+worked while there was exactly one agent and it never made a mistake. It was not a foundation
+for a multi-user, multi-agent OS, and it was a quiet security gap even for a single agent.
 
 This charter makes identity **ambient and system-enforced** instead of **agent-supplied**,
 and then builds the human-facing flow that lets a person pick which identity boots.
@@ -18,22 +18,23 @@ and then builds the human-facing flow that lets a person pick which identity boo
 
 ## The problem, precisely
 
-Three symptoms of one root cause — *identity lives in the agent's output, not in the system*:
+Three symptoms of one root cause — *identity lived in the agent's output, not in the system*.
+(All three are fixed by the shipped arc below; kept here as the record of why.)
 
 1. **Soft Cerebro routing.** Every memory call (`recall`, `remember`, `session_save`, …)
    takes an `agent_id` argument that the **model fills in**. Cerebro's isolation is real —
    `Visibility::Private ⇒ agent_id == node_agent_id`, enforced in SQL
    (`visibility='shared' OR (visibility='private' AND agent_id=?)`, `cerebro/.../types.rs`).
-   But the boundary is only as good as the argument the model remembered to pass. Forget it,
-   typo it, or (in a multi-agent world) pass *someone else's*, and memories land in — or leak
-   from — the wrong space. The lock is sound; the key is handed to the prisoner.
+   But the boundary was only as good as the argument the model remembered to pass. Forget it,
+   typo it, or (in a multi-agent world) pass *someone else's*, and memories landed in — or
+   leaked from — the wrong space. The lock was sound; the key was handed to the prisoner.
 
-2. **Identity-string drift.** Even the single agent isn't named consistently in code:
+2. **Identity-string drift.** Even the single agent wasn't named consistently in code:
    `"APEX"` in the council handler, `"CLAUDE-APEX"` in the rollback store
    (`agentd/.../main.rs`). No single source of truth for "who am I."
 
-3. **No human-facing identity at all.** The device boots straight into one agent (APEX) with
-   one presentation. There is no notion of *users* of the box, and no way to run a second
+3. **No human-facing identity at all.** The device booted straight into one agent (APEX) with
+   one presentation. There was no notion of *users* of the box, and no way to run a second
    agent — a custom main, or a sub-agent — alongside APEX with its own memory and soul.
 
 ---
@@ -46,7 +47,7 @@ the Cerebro space key and the thing the system stamps everywhere.
 | Facet | Lives in | Scope | Notes |
 |-------|----------|-------|-------|
 | **Memory space** | Cerebro `agent_id` (private/shared visibility) | **per-agent** | The isolation boundary. Private memories are visible only to their `agent_id`; `shared` crosses agents deliberately. |
-| **Soul** (who I am) | `soul.md` | **per-agent** | Portable identity; evolves at runtime (see [symbiosis.md](symbiosis.md)). Today one file; multi-agent needs one soul per agent. |
+| **Soul** (who I am) | `soul.md` | **per-agent** | Portable identity; evolves at runtime (see [symbiosis.md](symbiosis.md)). Global `soul.md` for APEX/unbound + a per-agent `soul_file` (`souls/<id>.md`) for bound agents — shipped in 3b-2. |
 | **Permissions** | `policy.toml` | per-agent *(open: or a shared default + per-agent overrides)* | What this agent may do without asking. |
 | **Presentation** | persona / skin (theme + chrome + wallpaper + shell-mode) | **per-agent default, user-overridable** | A skin is *worn*, not *who you are* — see [ui-glowup.md](ui-glowup.md) §5. An agent has a default skin; a user may override and pin it. |
 
@@ -58,7 +59,7 @@ the Cerebro space key and the thing the system stamps everywhere.
 - **Agent ≠ node.** The body ([edk.md](edk.md)) is per-node and physical; identity is portable
   and rides the mesh. The same APEX can inhabit the Pi 5 today and a GPU node tomorrow — the
   soul and memory travel, the embodiment block is swapped underneath (see the soul-vs-embodiment
-  rule in CLAUDE.md).
+  rule in docs/gotchas.md).
 - **Agent ≠ session.** A `SessionId` is one conversation/turn-stream; an agent identity spans
   many sessions (and reboots). One agent, many sessions; the binding is session → identity.
   Ephemeral **spawn sessions** (`SessionId ≥ apexos_core::SPAWN_SESSION_BASE`, the `1<<63`
@@ -99,6 +100,11 @@ from the model:
   from an ephemeral spawn session gets a `spawn-derived` tag appended, so the continuous
   self can tell at retrieval which memories a sub-agent wrote. Keyed by session range
   (`apexos_core::is_spawn_session`), never model-supplied, never strippable by the child.
+
+Identity also **gates** virtual tools, not just stamps arguments: `schedule_wakeup`/
+`cancel_wakeup` refuse any session whose resolved agent isn't the node agent (wakeups fire
+into APEX's root thread — a bound guest agent may not plant or cancel notes in it; same
+trust basis as the Cerebro `agent_id` stamp).
 
 Why this is both **security** and **correctness**:
 - *Security / isolation* — a session bound to agent B physically cannot read or write agent A's

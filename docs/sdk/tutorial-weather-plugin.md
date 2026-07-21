@@ -472,8 +472,11 @@ would have to get an approval prompt approved on every call. `get_weather` is a
 **read-only outbound HTTP call**, so it's reasonable to `allow` it (the same class as
 `read_file`/`cpu_temp`).
 
-Add one line under `[rules]` in the deployed `/etc/agentd/policy.toml` (and, for the
-repo template, `config/policy.toml`):
+Add one line under `[rules]` in `config/policy.toml` — since the additive
+`sync_policy_rules` (2026-07), a new key in the shipped config **reaches deployed nodes
+on their next `apexos-update`** (existing keys are never overwritten, so self-evolved
+values win). Live-patch the deployed `/etc/agentd/policy.toml` only if you need the rule
+active before the next update:
 
 ```toml
 "get_weather" = "allow"   # read-only outbound HTTP probe, no mutation
@@ -485,14 +488,16 @@ The rule values:
 |---|---|---|
 | `"allow"` | always dispatch, no prompt | read-only / telemetry / safe |
 | `"ask"` | emit `ApprovalPending`, dispatch only after user approves | delete / shell / outbound that costs money / hardware |
-| `"workspace"` | allow iff the `path` arg is inside `AGENTD_WORKSPACE` | tools whose arg is literally named `path` |
+| `"workspace"` | allow iff every path-typed arg is inside `AGENTD_WORKSPACE` | filesystem tools (args named `path`/`output_path`/`dest`/…) |
 
 > **Threat-model call.** A stricter operator could set `get_weather = "ask"` to gate all
 > outbound network reach the way `http_fetch` is gated. Since this hits a free public
 > endpoint with no auth and no side effects, `allow` is the friction-free choice — but
-> it's a deliberate decision, not a default. Note also: the policy engine reads **only**
-> the argument literally named `path`; our `city` arg is invisible to the `workspace`
-> rule, which is correct here (we don't touch the filesystem).
+> it's a deliberate decision, not a default. Note also: the supervisor feeds the policy
+> engine every **path-typed** argument — the `path_keys` list in `supervisor.rs`
+> (`path`, `output_path`, `dest`, `destination`, `target`, `to`), most-restrictive wins;
+> our `city` arg is not path-typed, so it's invisible to the `workspace` rule, which is
+> correct here (we don't touch the filesystem).
 
 ---
 

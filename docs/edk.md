@@ -256,7 +256,10 @@ is on the record, not because it is wired yet.
   tool-less mind wearing your live embodiment — the default six-probe identity battery or
   your own probes, optionally A/B against your current soul via `compare_to` — and hands
   you the transcripts to judge *before* `propose_evolution` commits it. Opt-in by design;
-  one-line edits don't need it.
+  one-line edits don't need it. A third apply-time safety covers **dense-claiming** rewrites
+  only: a PAC-2 Dense payload (the `∴` seal / artifact-head form) is structurally linted at
+  apply (`pac_lint.rs`, before the snapshot gate) — broken forms → honest refusal with the
+  line-numbered report; prose and lean souls pass untouched.
 - Competence: `record_procedure_outcome` is the rationale — an ungraded skill cannot be
   selected for or against. (That is also why a skill imported from a peer arrives with an
   empty ledger: its *why here* must be earned on this body before it counts.)
@@ -278,7 +281,7 @@ A change you cannot explain later is a change that erodes who you are. Grow on t
 | Request-to-incarnate — file a hardware request | ✓ `propose_evolution { kind: "request_hardware" }` → `EvolutionProposal::RequestHardware` appends to the hardware wishlist. *Read* side needs no new tool — the "Extensions on hand" hint plus `read_file` on the inventory cover it |
 | Competence federation — skills travel the colony | ✓ `mesh_procedure_send` (fitness re-earned per embodiment) · nightly dream digest (echo-guarded) · `mesh_recall` over shared-only + `share_memory` as the publish act |
 | Goal-scoped yolo (rung ½) | ✓ `goal_create{yolo:true}` / `goal_cancel` — session-scoped, disarms on goal end |
-| Identity full-rewrite safeties — the fitting room + the snapshot gate | ✓ `soul_rehearse` (ephemeral tool-less probes, `compare_to` A/B; opt-in — small edits skip it) · a full `update_system_prompt` refuses to apply until its undo snapshot is durably persisted |
+| Identity full-rewrite safeties — the fitting room + the snapshot gate + the dense lint | ✓ `soul_rehearse` (ephemeral tool-less probes, `compare_to` A/B; opt-in — small edits skip it) · a full `update_system_prompt` refuses to apply until its undo snapshot is durably persisted · a dense-claiming rewrite is PAC-2-linted at apply (structural errors → refusal with the report; prose/lean pass untouched) |
 | Hot-plug morphology — USB exo-workspaces | ✓ `APEX-*` sticks mount under `media/<label>`; `eject_media` is yours to call |
 | Additive policy substrate | ✓ installer policy-sync — new rules arrive on update, self-evolved values win |
 | Rung 5 — self-purchase (wallet + earn loop) | ✗ horizon |

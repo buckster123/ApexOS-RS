@@ -25,8 +25,8 @@ ground-truthed; where this disagrees with `CLAUDE.md`, this is correct.
 
 | To add… | Edit (in order) | Schema / signature | Gate / notes |
 |---|---|---|---|
-| **An outbound Event variant** | `core/src/types.rs` (declare in `Event`) → `core/src/state.rs` (exhaustive `apply` arm, no-op unless canonical state) → producer calls `bus.emit(...)` → client `dispatch_event` arm | `enum Event {#[serde(tag="type", rename_all="snake_case")] NewVariant { field: T }}` | Store + every gateway WS task relay automatically — usually zero consumer edits. Compile-time; not self-evolution. |
-| **An inbound frontend intent** | `core/src/types.rs` → `core/src/state.rs` → `agentd/src/main.rs` (router match in `spawn_agent_router`, ~:969) | Variant MUST include `session: SessionId`; gateway injects it (`gateway/src/lib.rs:245`). Client sends frame **without** `session`. | Router has catch-all `Ok(_)=>{}` → unmatched variant is inert. A frame that fails deserialization is **silently dropped** (`lib.rs:246`) — test a real round-trip. |
+| **An outbound Event variant** | `apexos-protocol/src/lib.rs` (declare in `Event`, :235) → `core/src/state.rs` (exhaustive `apply` arm, no-op unless canonical state) → producer calls `bus.emit(...)` → client `dispatch_event` arm | `enum Event {#[serde(tag="type", rename_all="snake_case")] NewVariant { field: T }}` | Store + every gateway WS task relay automatically — usually zero consumer edits. Compile-time; not self-evolution. **The crate is `no_std`-capable with an external bare-metal consumer (ApexOS-RV):** map-bearing fields use the crate's `Map<K,V>` alias (never `HashMap` directly), no bare `std::` paths, ID newtypes derive `Ord`; run BOTH `cargo test -p apexos-protocol` and `--no-default-features --features alloc`. |
+| **An inbound frontend intent** | `apexos-protocol/src/lib.rs` → `core/src/state.rs` → `agentd/src/main.rs` (router match in `spawn_agent_router`, :1477) | Variant MUST include `session: SessionId`; gateway injects it (`gateway/src/lib.rs:245`). Client sends frame **without** `session`. | Router has catch-all `Ok(_)=>{}` → unmatched variant is inert. A frame that fails deserialization is **silently dropped** (`lib.rs:246`) — test a real round-trip. |
 | **A new client/frontend** | client-side only (no daemon files) | Connect `ws://HOST:8787/ws?token=<AGENTD_TOKEN>`; server pushes `session_init` first; send `user_prompt`/`user_approval`/`user_cancel` without `session`; resume via `{type:hello,resume_session:id}` | Client MUST filter inbound on `session` (gateway broadcasts every session to every socket). Busy ← `agent_text` (not `turn_started`). `user_cancel` emits no `turn_complete`. Approval = `{action:<numeric call.id>, granted:bool}`. |
 
 ### MCP plugin — new process (guide 02)
@@ -66,14 +66,15 @@ ground-truthed; where this disagrees with `CLAUDE.md`, this is correct.
 | **Add/remove an MCP plugin** | `propose_evolution` | `{kind:"register_mcp_server", name, command, env:{}, reason}` \| `{kind:"unregister_mcp_server", name, reason}` | Highest-trust kind: arbitrary process spawn, confined only by sandbox. `register` undo = unregister; `unregister` undo loses env. Binary must already exist on disk. |
 | **Hot-reload a subsystem** | `propose_evolution` | `{kind:"hot_reload_subsystem", subsystem:"plugins"\|"policy"\|"agent"\|"gateway"}` | **NO undo.** `plugins`=no-op, `gateway`=unsupported without restart. |
 | **Roll back an evolution** | `rollback_evolution` | `{evolution_id:int, reason}` — `evolution_id` = the original `propose_evolution` call's `ToolCall.id` | In-memory `rollback_store`, **current daemon session only**; cold-start rebuild from Cerebro is best-effort. Returns "no rollback snapshot" if undo absent. |
-| **Journal the rationale (mandatory)** | `memory_store` | `{content:WHY, type:"semantic", salience:0.9, tags:["evolution","rationale"], agent_id:"CLAUDE-APEX"}` | The daemon journals the undo snapshot automatically but NEVER the rationale. Omitting it = identity drift (symbiosis.md §5). |
-| **Add a new EvolutionProposal kind (Rust)** | — | (1) variant in `EvolutionProposal` (`types.rs:88`, snake_case tag) (2) `apply_evolution` arm (`main.rs:808`) (3) `compute_undo` arm (`main.rs:712`) (4) `propose_evolution_spec` enum+args (`main.rs:1257`) (5) `soul.md` self-evolution table row | Validate-before-persist (parse candidate before writing, like `update_policy_rule` `main.rs:843`); use `write_atomic` for `/etc/agentd`. Normal git discipline. |
+| **Journal the rationale (mandatory)** | `memory_store` | `{content:WHY, type:"semantic", salience:0.9, tags:["evolution","rationale"]}` (`agent_id` is system-stamped by agentd — default `APEX`) | The daemon journals the undo snapshot automatically but NEVER the rationale. Omitting it = identity drift (symbiosis.md §5). |
+| **Add a new EvolutionProposal kind (Rust)** | — | (1) variant in `EvolutionProposal` (`apexos-protocol/src/lib.rs:141`, snake_case tag) (2) `apply_evolution` arm (`main.rs:808`) (3) `compute_undo` arm (`main.rs:712`) (4) `propose_evolution_spec` enum+args (`main.rs:1257`) (5) `soul.md` self-evolution table row | Validate-before-persist (parse candidate before writing, like `update_policy_rule` `main.rs:843`); use `write_atomic` for `/etc/agentd`. Normal git discipline. |
 
 > **There is NO `evolution.*` policy namespace.** The gate is the literal tool
-> name (`propose_evolution` / `rollback_evolution` / `read_soul_md`), unlisted in
-> `policy.toml` → defaults to **Ask** under `suggest` mode. Every self-evolution
-> needs approval by default. Do NOT bypass this by inventing an Event that writes
-> config directly — that loses audit + undo.
+> name — `config/policy.toml` now seeds `read_soul_md = "allow"` and
+> `propose_evolution` / `rollback_evolution` = `"ask"` (an *unlisted* tool still
+> defaults to **Ask** under `suggest` mode). Every self-evolution needs approval
+> by default. Do NOT bypass this by inventing an Event that writes config
+> directly — that loses audit + undo.
 
 ### Mesh & deployment (guide 07)
 
@@ -89,18 +90,20 @@ ground-truthed; where this disagrees with `CLAUDE.md`, this is correct.
 
 ## Catalog — tool names, arg schemas, Event variants
 
-### Event enum (`core/src/types.rs:162`, `#[serde(tag="type", rename_all="snake_case")]`)
+### Event enum (`apexos-protocol/src/lib.rs:235`, `#[serde(tag="type", rename_all="snake_case")]`)
 
-ID newtypes `SessionId`/`ActionId`/`EvolutionId` (u64) and `PluginId` (String)
-serialize as **bare scalars**, not strings. The gateway injects `session` into
+ID newtypes `SessionId`/`ActionId`/`EvolutionId`/`GoalId` (u64) and `PluginId`
+(String) serialize as **bare scalars**, not strings (all derive `Ord` — the
+`no_std` consumer keys BTreeMaps with them). The gateway injects `session` into
 inbound frames; clients omit it.
 
 **Inbound (client → daemon, omit `session`):**
 
 | Event | Fields |
 |---|---|
-| `hello` | `resume_session: u64?` |
-| `user_prompt` | `text` |
+| `hello` | `resume_session: u64?`, `new: bool?`, `agent_id?`, `persona?` — gateway frame, not an `Event` variant (`gateway/src/lib.rs:577`) |
+| `set_persona` | `persona` — gateway frame (`gateway/src/lib.rs:647`) |
+| `user_prompt` | `text`, `images: ImageSource[]?` |
 | `user_approval` | `action: u64`, `granted: bool` |
 | `user_cancel` | — |
 
@@ -118,13 +121,18 @@ inbound frames; clients omit it.
 | `plugin_up` / `plugin_down` | `plugin, tools: ToolSpec[]` / `plugin, reason` |
 | `spawn_agent` / `sub_agent_started` | `parent, call_id, prompt, system?` / `parent, child, prompt` |
 | `sensor_reading` | `node_id`, `reading: SensorReading`, `timestamp: u64` |
+| `sensor_alert` | `node_id`, `kind` (`cpu_temp`\|`motion`\|`air_quality`\|`thermal_hotspot`), `value`, `threshold`, `sensor_id` — fired only after the persistence filter + cooldown; GLOBAL (:285) |
 | `wake_triggered` | — |
 | `agent_message` / `agent_message_ack` | `from, to, body, msg_id` / `msg_id, from` |
-| `council_*` | `council_started/round_start/agent_delta/agent_done/round_done/complete/butt_in` (:217-224) |
+| `council_*` | `council_started/round_start/agent_delta/agent_done/round_done/complete/butt_in` (:305-312) |
 | `error` | `session: u64?`, `message` |
-| `vast_*` | `vast_instance_launched/ready/destroyed`, `vast_tunnel_lost` (:230-237) |
-| `peer_*` | `peer_seen/peer_registered/peer_lost` (:241-245) |
-| `evolution_*` | `evolution_proposed{id,proposal,proposed_by}` / `evolution_applied` / `evolution_rolled_back` (:250-267) |
+| `vast_*` | `vast_instance_launched/ready/destroyed`, `vast_tunnel_lost` (:318-329) |
+| `mesh_message` | `from_node, session, preview` — inbound mesh a2a landed; GLOBAL notification (:339) |
+| `mesh_memory_shared` | `from_node, memory_id, preview` — federation import; GLOBAL (:345) |
+| `peer_*` | `peer_seen/peer_registered/peer_lost` (:347-351) |
+| `mesh_node_status` | `node_id, status ("dark"\|"alive"), last_seen_secs` — downtime-beacon edge; GLOBAL (:358) |
+| `evolution_*` | `evolution_proposed{id,proposal,proposed_by}` / `evolution_applied` / `evolution_rolled_back` (:363-380) |
+| `goal_state_changed` | `goal: GoalId, objective, state: GoalState, step, max_steps, detail, yolo: bool?` — GLOBAL Work-Board event (:386) |
 
 > **`turn_started` is NOT emitted by the Rust daemon.** Busy is driven by
 > `agent_text`. `needs_approval` is hardcoded `false` by the agent
@@ -132,16 +140,18 @@ inbound frames; clients omit it.
 
 **Nested structs / enums:**
 
-- `ToolCall{ id:ActionId, tool:String, args:Value, needs_approval:bool }` (:272)
-- `ToolOutput{ ok:bool, content:Value }` (:281)
-- `ToolSpec{ name, description, input_schema }` (:287)
-- `ContentBlock` (tag `type`): `text` / `thinking`(+`signature`) / `tool_use` / `tool_result` (:329)
-- `Message` (tag `role`): `user` / `assistant` (:322)
-- `SensorReading` (tag `kind`): `temperature/humidity/pressure/motion/distance/gpio_level/air_quality/thermal_frame` (:121)
-- `EvolutionProposal` (tag `kind`): `register_mcp_server/unregister_mcp_server/update_policy_rule/update_system_prompt/hot_reload_subsystem` (:88)
-- `PolicyMode` (global, kebab): `suggest`(default) `auto-edit` `yolo` (:29)
-- `PolicyRule` (per-tool `[rules]` value, kebab): `allow` `ask` `workspace` (:45)
-- `Subsystem` (snake): `plugins/policy/agent/gateway` (:77)
+- `ToolCall{ id:ActionId, tool:String, args:Value, needs_approval:bool }` (:406)
+- `ToolOutput{ ok:bool, content:Value }` (:415)
+- `ToolSpec{ name, description, input_schema }` (:421)
+- `ContentBlock` (tag `type`): `text` / `thinking`(+`signature`) / `tool_use` / `tool_result` / `image`(`media_type`,`data` b64) (:464)
+- `Message` (tag `role`): `user` / `assistant` (:457)
+- `ImageSource{ media_type, data }` — prepared b64 riding `user_prompt.images` (:480)
+- `SensorReading` (tag `kind`): `temperature/humidity/pressure/motion/distance/gpio_level/air_quality/thermal_frame` (:192)
+- `EvolutionProposal` (tag `kind`): `register_mcp_server/unregister_mcp_server/update_policy_rule/update_system_prompt/hot_reload_subsystem/request_hardware` (:141)
+- `GoalState` (snake): `planning/acting/blocked/reflecting/done/failed/cancelled` (:56)
+- `PolicyMode` (global, kebab): `suggest`(default) `auto-edit` `yolo` (:82)
+- `PolicyRule` (per-tool `[rules]` value, kebab): `allow` `ask` `workspace` (:98)
+- `Subsystem` (snake): `plugins/policy/agent/gateway` (:130)
 
 ### Bus & policy
 
@@ -168,14 +178,24 @@ error, aborts the call.
 
 ### apexos-tools — existing tool names (global; don't collide)
 
-31 tools, advertised by `list()` and dispatched by `call()` (both in
+50 tools, advertised by `list()` and dispatched by `call()` (both in
 `tools/crates/apexos-tools/src/tools.rs`):
 
 `run_command read_file write_file list_dir create_dir delete_path notes_list
-notes_read notes_append sketch_snapshot screenshot_mirror camera_capture
+notes_read notes_append sketch_snapshot sketch_draw screenshot_mirror ui_open
+ui_close ui_focus ui_query ui_arrange ui_theme ui_reflex camera_capture
 http_fetch cpu_temp disk_usage memory_info uptime notify audio_analyze
 audio_trim_silence audio_normalize audio_peak_limit audio_trim audio_clean
-gpio_info gpio_read gpio_write gpio_pulse gpio_pwm gpio_servo display_face`
+gpio_info gpio_read gpio_write gpio_pulse gpio_pwm gpio_servo display_face
+git_status git_diff git_log git_branch git_init git_commit git_push
+git_checkout git_reset git_merge eject_media`
+
+`sketch_draw`, the `ui_*` family (adaptive UI, docs/adaptive-ui.md) and
+`display_face` are validate+echo handlers: ui-slint intercepts the
+`tool_requested` event and applies them client-side (no tool card). `git_*`
+shell out to system `git` via argv (never `/bin/sh`), repo-confined to
+`confine_git_repo` roots (workspace + `AGENTD_GIT_ROOTS`). `eject_media` drops
+a request file for the root systemd eject drain (never sudo).
 
 `sketch_snapshot`/`screenshot_mirror`/`camera_capture` are the **vision** tools:
 each returns a `{"vision":{"path"|"b64"},"text"}` sentinel that the agent turn
@@ -183,12 +203,16 @@ loop (`vision_rewrite` in `agentd/crates/agent/src/turn.rs`) converts to a
 `ContentBlock::Image` via `prepare_image`/`prepare_b64`
 (`agentd/crates/core/src/vision.rs`) — zero agentd schema changes.
 
-Confinement is honest: only `write_file`/`create_dir` use the `workspace` rule,
-only `delete_path` self-roots to `AGENTD_WORKSPACE`; every other tool is
-unconfined and the real boundary is the systemd sandbox. The `run_command`
-denylist is a bypassable heuristic, not security. `SupervisorCmd::CallTool`
-(`dispatch_tool` in `agentd/crates/agentd/src/supervisor.rs`) dispatches
-**without** a policy check.
+FS confinement lives in the tool process: `tools.rs::confine(path, write)`
+(:906, delegating to the std-only `apexos-confine` crate) gates every FS verb —
+writes/creates/deletes are workspace-only (per-agent root, system-stamped as
+`__workspace`), reads/lists get the workspace + a small read allowlist
+(`AGENTD_READ_ROOTS`-extensible) minus a secret denylist; `confine_git_repo`
+(:955) and `confine_audio_io` (:2291) confine the git and audio families. The
+`run_command` denylist is a bypassable heuristic, not security — the systemd
+sandbox is the outer boundary. `SupervisorCmd::CallTool` (`dispatch_tool` in
+`agentd/crates/plugins/src/supervisor.rs`) dispatches **without** a policy
+check.
 
 ### Cerebro — core memory verbs (`name | required args | key optional | backing`)
 
@@ -211,29 +235,44 @@ Plus CRUD/graph/analytics/tags/audit/versions/threads/episodes families (see
 guide 04 catalog). **Scoping:** `agent_id` set → `VisibilityScope::for_agent`
 (own private + shared); absent → global (shared only). Write visibility derived
 from scope (scoped→Private, unscoped→Shared); the schema `visibility` arg is
-unread. Conventions: FORGE→`"FORGE"`, APEX→`"CLAUDE-APEX"`.
+unread. Conventions: FORGE→`"FORGE"`, APEX→`"APEX"` — but agentd **system-stamps**
+`agent_id` on every cerebro call (`AGENTD_AGENT_ID`, default `APEX`), so the
+model-supplied value never lands.
 
-**Stubs (advertised in `TOOL_NAMES` for surface parity, NOT routed —
-`route()` in `cerebro/crates/cerebro-mcp/src/dispatch.rs` returns
-"tool not implemented"):** `ingest_file`, `search_vision`.
-`TOOL_NAMES` (`cerebro/crates/cerebro-mcp/src/tools.rs`) has 66 entries: 64
-functional + these 2 stubs. **`describe_image` and `cognitive_bootstrap` are SHIPPED, not stubs** —
-it routes to the live-state priming assembler (`assemble_bootstrap` in
-`dispatch.rs`). Caveat: reinforcement is inert (recall doesn't bump activation)
-and spreading activation ignores scope — treat scope as a best-effort read
-filter, not hard isolation.
+**Stub (advertised in `TOOL_NAMES` for surface parity, NOT routed — the
+dispatch fallthrough in `cerebro/crates/cerebro-mcp/src/dispatch.rs` returns
+"tool not implemented"):** `ingest_file` only.
+`TOOL_NAMES` (`cerebro/crates/cerebro-mcp/src/tools.rs:932`) has 67 entries: 66
+functional + that 1 stub. **`describe_image`, `search_vision` (CLIP visual
+recall) and `cognitive_bootstrap` are SHIPPED, not stubs** — the latter routes
+to the live-state priming assembler (`assemble_bootstrap` in `dispatch.rs`).
+Reinforcement is live (a recall's returned top-k record an access —
+`cortex.rs:270`), and visibility scope is enforced at all three recall touch
+points (SQL filter, `can_access`, and the spreading-activation `visible_nodes`
+map — `activation/spreading.rs:98`).
 
 ### Virtual tools (agentd-built-in, intercepted in `supervisor.rs` `dispatch_tool`)
 
-| Tool | Signature | Spec / intercept |
-|---|---|---|
-| `read_soul_md` | `()` → live soul.md string | spec `main.rs:1243`, intercept `supervisor.rs:399` |
-| `propose_evolution` | `(kind, reason, +per-kind args)` → `{status:"proposed", evolution_id}` | spec `main.rs:1257`, intercept `supervisor.rs:302` |
-| `rollback_evolution` | `(evolution_id:int, reason)` → `{status:"rolled_back", summary}` | spec `main.rs:1321`, intercept `supervisor.rs:349` |
-| `list_mesh_peers` | `()` → peers.toml text | `main.rs:1473-1599`, `supervisor.rs` |
-| `send_to_agent` | `(session_id:int, message:str, node?:str)` | `supervisor:557` (cross-node bug: sends `{"text"}`, handler reads `{"message"}`) |
-| `bootstrap_node` | `(target_ip, ssh_password, ssh_user?=apexos, api_key?, repo_url?)` | needs `sshpass` (not auto-installed) |
-| `vast_list_recipes` / `vast_launch` / `vast_destroy` / `vast_status` | recipe array / `(recipe, geo?=EU_NORDIC)`→`{status:ready,...}` / teardown / phase | all default to Ask |
+Specs live in `agentd/src/main.rs` unless noted; intercepts in
+`agentd/crates/plugins/src/supervisor.rs`. Policy = the shipped
+`config/policy.toml` value (unlisted → Ask under `suggest`).
+
+| Tool | Signature | Spec / intercept | Policy |
+|---|---|---|---|
+| `read_soul_md` | `()` → the bound agent's live soul string | spec `main.rs:2774`, intercept `supervisor.rs:666` | allow |
+| `soul_rehearse` | `(soul, probes?≤6, compare_to?)` → transcripts from an ephemeral, tool-less mind (nothing persists) | spec `main.rs:2788`, intercept `supervisor.rs:841` | allow |
+| `propose_evolution` | `(kind, reason, +per-kind args)` — deferred ack carries the real apply outcome | spec `main.rs:2832`, intercept `supervisor.rs:554` | ask |
+| `rollback_evolution` | `(evolution_id:int, reason)` → `{status:"rolled_back", summary}` | spec `main.rs:2923`, intercept `supervisor.rs:616` | ask |
+| `agent_spawn` | `(prompt, system?, inherit_soul?, node?, timeout_s?)` — with `node` = blocking cross-node spawn | spec `main.rs:2723`, intercept `supervisor.rs:1941` | allow |
+| `schedule_task` / `list_schedules` / `cancel_schedule` / `schedule_wakeup` / `list_wakeups` / `cancel_wakeup` | scheduler family; wakeups are identity-gated to the node agent | specs `main.rs:2946-3054`, intercept `supervisor.rs:715` | `schedule_task` ask, rest allow |
+| `goal_create` / `goal_step` / `list_goals` / `goal_resume` / `goal_cancel` | autonomous goal driver (`goal_create{yolo:true}` arms goal-scoped auto-approval) | specs `goal.rs:115`, intercept `supervisor.rs:773` | allow |
+| `apply_daemon_update` | self-update apply | spec `self_update.rs:103`, intercept `supervisor.rs:869` | ask |
+| `convene_council` / `query_event_log` | multi-agent council / event-log query | specs `main.rs:3072`/`:3111`, intercepts `supervisor.rs:803`/`:899` | unlisted → Ask |
+| `send_to_agent` | `(session_id:int, message:str, node?:str)` — cross-node posts `{message}` + auto-stamped `origin_session`; result reports `landed_session` | spec `main.rs:3143`, intercept `supervisor.rs:971` | allow |
+| `mesh_file_send` / `mesh_memory_send` / `mesh_procedure_send` / `mesh_recall` / `mesh_capabilities` | mesh relay + federation family (workspace-confined / provenance-stamped / `shared_only()` on the wire) | specs `main.rs:3188-3307`, intercepts `supervisor.rs:1111-1193` | allow |
+| `list_mesh_peers` | `()` → peers.toml text | spec `main.rs:3327`, intercept `supervisor.rs:1205` | allow |
+| `bootstrap_node` | `(target_ip, ssh_password, ssh_user?=apexos, api_key?, repo_url?)` — needs `sshpass` (not auto-installed) | spec `main.rs:3340`, intercept `supervisor.rs:1223` | unlisted → Ask |
+| `vast_list_recipes` / `vast_launch` / `vast_destroy` / `vast_status` | recipe array / `(recipe, geo?=EU_NORDIC)`→`{status:ready,...}` / teardown / phase | specs `main.rs:3376-3419`, intercepts `supervisor.rs:1400/:1438/:1480/:1877` | unlisted → Ask |
 
 ### Mesh REST routes (`gateway/src/lib.rs`)
 

@@ -235,16 +235,19 @@ itself with no weight update and no human in the loop. The selection core
    (`is_skill`) — placed after "Where you left off" and *before* "Relevant procedures", so the
    abstract skill arrives ahead of the concrete procedures it generalises. Skills are excluded
    from the generic "Relevant memories" bucket so they are never double-listed.
-3. **Make selection real + promotion deliberate.** ◑ **Code DONE; conventions pending.**
+3. **Make selection real + promotion deliberate.** ◑ **Code DONE; one convention pending.**
    `record_procedure_outcome` now sharpens the fitness signal: failure decays salience
    (−0.15, floored) and bumps FSRS difficulty; once a procedure decays to the
    `PRUNE_CANDIDATE_SALIENCE` floor it is tagged `prune_candidate` and dream's pruning phase
    retires it. Success promotes (+0.1) and eases difficulty so a procedure can recover. The
-   two remaining parts are **conventions, not cerebro code**, and (per house rule) land via a
-   *deliberate* `propose_evolution` to APEX's `soul.md`, not a direct edit:
-   (a) make outcome-recording mandatory Sleep-loop discipline (same tier as `session_save`);
+   remaining parts are **conventions, not cerebro code**:
+   (a) outcome-recording as mandatory Sleep-loop discipline — ✓ **seeded** via the #264
+   full-coverage seed soul (`config/soul.md`: "after using one, `record_procedure_outcome`
+   — outcomes feed the nightly darwin competition"); live nodes still adopt it via their
+   own `propose_evolution`, per house rule;
    (b) conventionalize the schema → `soul.md` promotion path as an audited `propose_evolution`
-   step with a rationale memory. These are proposals to surface to APEX, tracked separately.
+   step with a rationale memory — still pending, the sole remaining convention (a proposal
+   to surface to APEX, tracked separately).
 
 #### Beyond the foundation — the frontier
 

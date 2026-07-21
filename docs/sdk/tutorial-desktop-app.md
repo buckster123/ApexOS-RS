@@ -6,7 +6,8 @@
 > the existing 1-second Slint timer) plus the host's `uptime`, fetched on
 > demand from agentd's `/api/run` REST endpoint.
 >
-> By the end you will have touched the exact six files every new app touches,
+> By the end you will have touched the exact seven files every new app touches
+> (six in `ui-slint`, plus the agent-facing slug catalog in `apexos-tools`),
 > understood the thread-model rules that keep the UI from deadlocking, and
 > hot-swapped the binary onto the Pi.
 >
@@ -20,8 +21,8 @@ All paths below are relative to the repo root unless absolute. The binary is
 
 ## What we're building
 
-A new window of `AppKind` `clock` — appended at the **next free ordinal, 18**
-(the enum already runs `chat=0 … explorer=17`; we never reorder, only append):
+A new window of `AppKind` `clock` — appended at the **next free ordinal, 20**
+(the enum already runs `chat=0 … board=19`; we never reorder, only append):
 
 - **Top half** — big live time + date, read from the `Clock` Slint global (a
   Rust `chrono::Local` timer already ticks it every second; we reuse it for
@@ -69,13 +70,19 @@ Five facts make everything below make sense.
    end shows it.)
 
 5. **`AppKind` is the spine.** The enum in `types.slint` is simultaneously: the
-   window's `kind`, the launcher ordinal, and the discriminant of the
-   `if root.kind == AppKind.x` content switch in `AppWindowFrame`. Its ordinal
-   is **mirrored by hand** in Rust (`kind_ordinal` / `kind_from_ordinal` /
-   `kind_title` / `default_geom`). These must agree with the enum order, which
-   is positional. **Append, never reorder.** The enum currently ends at
-   `explorer` (ordinal 17), so our new variant lands at the **next free
-   ordinal, 18** — that number is what every step below uses.
+   window's `kind`, the launcher ordinal, the agent-facing slug, and the
+   discriminant of the `if root.kind == AppKind.x` content switch in
+   `AppWindowFrame`. Its ordinal is **mirrored by hand** in Rust: the
+   `APP_TABLE` const in `main.rs` (a `(AppKind, slug)` table whose **index IS
+   the ordinal** — `kind_ordinal`/`kind_slug`/`kind_from_slug` derive from it)
+   plus the `kind_from_ordinal` / `kind_title` / `default_geom` matches. These
+   must agree with the enum order, which is positional — a unit test
+   (`app_table_is_the_ordinal_order`) locks the agreement. Since Adaptive UI
+   (Loop 6, `docs/adaptive-ui.md`), the slug must **also** land in
+   apexos-tools' `UI_APPS` catalog, or the agent's `ui_open`/`ui_arrange`
+   can't reach the app. **Append, never reorder.** The enum currently ends at
+   `board` (ordinal 19), so our new variant lands at the **next free
+   ordinal, 20** — that number is what every step below uses.
 
 The window manager itself (drag/resize/focus/minimise) is already built and
 generic over `kind` — you get all of it for free just by adding your `kind`.
@@ -88,11 +95,12 @@ generic over `kind` — you get all of it for free just by adding your `kind`.
 |---|------|--------------|
 | 1 | `ui-slint/src/ui/components/clock_view.slint` | the view component (new file) |
 | 2 | `ui-slint/src/ui/types.slint` | the `clock` variant on `AppKind` |
-| 3 | `ui-slint/src/main.rs` | `kind_ordinal` / `kind_from_ordinal` / `kind_title` / `default_geom` arms |
+| 3 | `ui-slint/src/main.rs` | the `APP_TABLE` `(kind, slug)` entry + `kind_from_ordinal` / `kind_title` / `default_geom` arms (+ bump the lock-test count) |
 | 4 | `ui-slint/src/ui/components/app_window_frame.slint` | import + props/callback + content arm |
 | 5 | `ui-slint/src/ui/appwindow.slint` | matching prop/callback on `AppWindow` + pass-through into the window loop |
 | 6 | `ui-slint/src/main.rs` | launcher refresh hook + the `on_refresh_clock` callback |
 | + | `ui-slint/src/ui/components/start_menu.slint` | a `MenuRow` launching the new ordinal |
+| + | `tools/crates/apexos-tools/src/tools.rs` | the `"clock"` slug in `UI_APPS` — makes the app reachable by the agent's `ui_open`/`ui_arrange` |
 
 We'll do them in dependency order so each step compiles conceptually before the
 next.
@@ -215,20 +223,20 @@ Notes that match the existing components:
 ## Step 2 — Add the `AppKind` variant
 
 Edit `ui-slint/src/ui/types.slint`. Find the enum (it's grown a lot — these are
-the live 18 variants, ending at `explorer`):
+the live 20 variants, ending at `board`):
 
 ```slint
-export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer, occipital, board }
 ```
 
 Append `clock` to the **end** (do **not** reorder the existing variants —
 ordinals are positional and Rust hard-codes them):
 
 ```slint
-export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer, clock }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer, occipital, board, clock }
 ```
 
-`clock` is now ordinal **18** (chat=0 … explorer=17).
+`clock` is now ordinal **20** (chat=0 … board=19).
 
 > If your app needed a list of structured rows, you'd also add an
 > `export struct ClockRow { … }` here; it becomes a Rust struct via
@@ -238,24 +246,29 @@ export enum AppKind { chat, system, sensor, sessions, settings, terminal, counci
 
 ## Step 3 — Mirror the ordinal in Rust
 
-Edit `ui-slint/src/main.rs`. Four `match`es over `AppKind` must each gain a
-`Clock` arm. They're all near the top of the file in the window-manager section.
+Edit `ui-slint/src/main.rs`. The `APP_TABLE` const and three `match`es over
+`AppKind` must each gain a `Clock` entry. They're all near the top of the file
+in the window-manager / adaptive-UI section.
 
-Each match already lists all 18 existing variants; only the new tail arm is
-shown here (`…` = the existing arms, left untouched).
+Each already lists all 20 existing variants; only the new tail entry is
+shown here (`…` = the existing entries, left untouched).
 
-**`kind_ordinal`** (the enum-order mirror — must equal the Slint ordinal, 18):
+**`APP_TABLE`** (the `(AppKind, slug)` table — its **index IS the ordinal**, so
+appending at the end lands `clock` at 20; `kind_ordinal`/`kind_slug`/
+`kind_from_slug` all derive from it, no separate arms needed. The slug is the
+agent-facing `ui_*` vocabulary):
 
 ```rust
-fn kind_ordinal(k: AppKind) -> i32 {
-    match k {
-        AppKind::Chat => 0,
-        // … System=1 … Calculator=16 …
-        AppKind::Explorer => 17,
-        AppKind::Clock => 18,         // ← add
-    }
-}
+const APP_TABLE: &[(AppKind, &str)] = &[
+    (AppKind::Chat, "chat"),
+    // … (AppKind::Explorer, "explorer") … (AppKind::Board, "board") …
+    (AppKind::Clock, "clock"),        // ← add (index 20 = the ordinal)
+];
 ```
+
+Also bump the count assertion in the `app_table_is_the_ordinal_order` unit test
+(`assert_eq!(APP_TABLE.len(), 20)` → `21`) — that test locks the table against
+`kind_from_ordinal` and the Slint enum order.
 
 **`kind_from_ordinal`** (reverse map; `_ => Chat` stays the catch-all):
 
@@ -263,9 +276,8 @@ fn kind_ordinal(k: AppKind) -> i32 {
 fn kind_from_ordinal(o: i32) -> AppKind {
     match o {
         1 => AppKind::System,
-        // … 16 => AppKind::Calculator …
-        17 => AppKind::Explorer,
-        18 => AppKind::Clock,         // ← add
+        // … 17 => AppKind::Explorer … 19 => AppKind::Board …
+        20 => AppKind::Clock,         // ← add
         _ => AppKind::Chat,
     }
 }
@@ -277,8 +289,8 @@ fn kind_from_ordinal(o: i32) -> AppKind {
 fn kind_title(k: AppKind) -> &'static str {
     match k {
         AppKind::Chat => "Chat",
-        // … AppKind::Calculator => "Calculator" …
-        AppKind::Explorer => "Files",
+        // … AppKind::Calculator => "Calculator" … AppKind::Occipital => "Occipital" …
+        AppKind::Board => "Work Board",
         AppKind::Clock => "Clock",            // ← add
     }
 }
@@ -291,8 +303,8 @@ function, so just give width/height):
 fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
     let (w, h) = match kind {
         AppKind::Chat => (760.0, 540.0),
-        // … AppKind::Calculator => (300.0, 440.0) …
-        AppKind::Explorer => (680.0, 520.0),
+        // … AppKind::Explorer => (680.0, 520.0) … AppKind::Occipital => (720.0, 620.0) …
+        AppKind::Board => (880.0, 600.0),
         AppKind::Clock => (360.0, 380.0),     // ← add
     };
     let step = (n % 6) as f32 * 30.0;
@@ -300,12 +312,13 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
 }
 ```
 
-> **Why these are non-exhaustive `match`es matter:** the Rust compiler will
-> *error* if you forget any of the four (the `AppKind::Clock` variant is now
-> unhandled). That's your safety net — a missed arm is a build failure, not a
-> runtime surprise. The only silent trap is getting the **ordinal number**
-> wrong in `kind_ordinal`/`kind_from_ordinal`: keep it equal to the Slint enum
-> position (18).
+> **Where the safety nets are:** `kind_title` and `default_geom` are exhaustive
+> `match`es — the Rust compiler *errors* if you forget either (the
+> `AppKind::Clock` variant is unhandled). A missed `APP_TABLE` entry or a wrong
+> number in `kind_from_ordinal` won't fail the compile (the table is just data
+> and the match has a `_ => Chat` catch-all) — that drift is what the
+> `app_table_is_the_ordinal_order` unit test catches, which is why you bump its
+> count assert. Keep the ordinal equal to the Slint enum position (20).
 
 ---
 
@@ -471,11 +484,11 @@ Also note the Slint↔Rust string conversion: `uptime.into()` turns the Rust
 `ui-slint/src/ui/components/start_menu.slint`. The Clock is a "core" app
 (useful for everyone), so add it to the always-shown group (the unconditional
 `MenuRow`s, not the ones behind `if Personas.show-tech-apps:`). Launch
-ordinal **18**:
+ordinal **20**:
 
 ```slint
 // in the StartMenu component, with the core MenuRows (alongside Calculator/Files):
-MenuRow { glyph: "🕐"; label: "Clock"; clicked => { root.launch(18); } }
+MenuRow { glyph: "🕐"; label: "Clock"; clicked => { root.launch(20); } }
 ```
 
 The same file also has a Win-98 persona menu (`WinMenuRow`s in the `Win98...`
@@ -483,7 +496,7 @@ start-menu component). If you want Clock there too, add the matching row in the
 core group:
 
 ```slint
-WinMenuRow { glyph: "🕐"; label: "Clock"; clicked => { root.launch(18); } }
+WinMenuRow { glyph: "🕐"; label: "Clock"; clicked => { root.launch(20); } }
 ```
 
 > The tech-only apps live behind `if Personas.show-tech-apps:` and the Win-98
@@ -491,9 +504,26 @@ WinMenuRow { glyph: "🕐"; label: "Clock"; clicked => { root.launch(18); } }
 > put Clock in a *conditional* group, bump that arithmetic to match. A core,
 > always-shown row needs no height change.
 
-`launch(18)` already routes to `ui.on_launch_app` → `wm_launch` (creates or
+`launch(20)` already routes to `ui.on_launch_app` → `wm_launch` (creates or
 reveals the single Clock window) → the per-app refresh you added in 6a. No
 other launcher wiring is needed.
+
+**6d. Register the slug for the agent.** One edit outside `ui-slint`: add
+`"clock"` to the **`UI_APPS`** const in
+`tools/crates/apexos-tools/src/tools.rs` — the closed catalog the
+`ui_open`/`ui_close`/`ui_focus`/`ui_arrange` tools validate their `app` arg
+against (it mirrors `APP_TABLE`'s slugs; `docs/adaptive-ui.md` is the
+contract):
+
+```rust
+const UI_APPS: &[&str] = &[
+    // …existing slugs…, "occipital", "board",
+    "clock",
+];
+```
+
+Skipping this doesn't break the human launcher — only the agent's hands: APEX's
+`ui_open("clock")` would be rejected as an unknown app.
 
 ---
 
@@ -598,8 +628,9 @@ match ev["type"].as_str() {
 | Set a property, no visible change yet | `invoke_from_event_loop` is fire-and-forget | it queues; the closure runs later on the Slint thread — don't assume immediacy |
 | `VecModel` mutated from a tokio task corrupts the list | models are not thread-safe | mutate the `Rc<VecModel<T>>` **only** on the Slint thread (inside the invoke closure) |
 | Window launches empty | no per-app refresh on open | add your `AppKind` arm to the `on_launch_app` match |
-| Compile error: non-exhaustive match on `AppKind` | forgot a `kind_*` arm | add the arm to all four: `kind_ordinal`, `kind_from_ordinal`, `kind_title`, `default_geom` |
-| App opens the wrong kind / launcher does nothing | ordinal mismatch | the number in `kind_ordinal`/`kind_from_ordinal`/`launch(N)` must equal the Slint enum position |
+| Compile error: non-exhaustive match on `AppKind` | forgot a `kind_*` arm | add the arm to `kind_title` + `default_geom` (and the `APP_TABLE` entry + `kind_from_ordinal` arm, which don't error — the `app_table_is_the_ordinal_order` test catches those) |
+| App opens the wrong kind / launcher does nothing | ordinal mismatch | the `APP_TABLE` index / `kind_from_ordinal` number / `launch(N)` must equal the Slint enum position |
+| `ui_open("myapp")` rejected as unknown app | slug missing from `UI_APPS` | add it to `UI_APPS` in `tools/crates/apexos-tools/src/tools.rs` (mirrors `APP_TABLE`) |
 | `include_modules!()` can't find your component | component isn't exported | it must be `export component X` |
 | `.slint` edit not picked up | `build.rs` didn't re-run | `touch ui-slint/build.rs` |
 | `SharedString` type error | passing `&str`/`String` where Slint wants `SharedString` | convert with `.into()`; read back with `.to_string()` |
@@ -630,10 +661,12 @@ governed by agentd's policy:
 
 ## Recap — the loop
 
-`clock_view.slint` (view) → `AppKind.clock` (`types.slint`) → four Rust `kind_*`
-arms → frame import + content arm (`app_window_frame.slint`) → `AppWindow`
-pass-through (`appwindow.slint`) → launcher row (`start_menu.slint`) → refresh
-hook + `on_clock_refresh` (`main.rs`). Build, hot-swap, open Start → Clock.
+`clock_view.slint` (view) → `AppKind.clock` (`types.slint`) → `APP_TABLE` entry
++ three Rust `kind_*` arms (`main.rs`, lock-test count bumped) → frame import +
+content arm (`app_window_frame.slint`) → `AppWindow` pass-through
+(`appwindow.slint`) → launcher row (`start_menu.slint`) → refresh hook +
+`on_clock_refresh` (`main.rs`) → the `"clock"` slug in apexos-tools `UI_APPS`.
+Build, hot-swap, open Start → Clock.
 
 For the condensed reference and the full file/endpoint/event tables, see
 `docs/sdk/05-desktop-apps.md`.

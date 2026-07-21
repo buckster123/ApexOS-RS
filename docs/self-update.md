@@ -326,10 +326,11 @@ apex1 is APEX's permanent brain. The self-update machinery is validated on the
 **test rig (apex2, .146)** before apex1.
 
 **Logic proven locally first.** `deploy/apexos-self-update-drill.sh` runs the
-watchdog against a fake `systemctl` through all six state-machine paths (24
+watchdog against a fake `systemctl` through all six state-machine paths (34
 assertions, all green): confirm, health-timeout rollback, crash-fast rollback,
 sha-mismatch reject (daemon untouched), power-loss reconcile, power-loss
-resume-rollback — plus both the jq and sed-fallback JSON parsers. Run it anywhere:
+resume-rollback — plus both the jq and sed-fallback JSON parsers and the slice-5
+probation scenarios (P1/P1b/P2/P3). Run it anywhere:
 `bash deploy/apexos-self-update-drill.sh`.
 
 On-hardware drills (apex2), driven by hand-writing a `request.json` — no agent yet:
@@ -381,9 +382,9 @@ Each slice is independently shippable + testable; build in order, and **prove sl
 1. **Health marker + commit embed** (agentd). Additive, deploys normally. Foundation. **← ✅ LANDED.**
 2. **Watchdog + units + rollback** (`deploy/` + `install.sh`). **← ✅ LANDED.** No
    agent involvement yet — drive it by hand-writing a `request.json`. The full state
-   machine is proven locally by `deploy/apexos-self-update-drill.sh` (24 assertions:
+   machine is proven locally by `deploy/apexos-self-update-drill.sh` (34 assertions:
    confirm · timeout-rollback · crash-rollback · sha-reject · both power-loss paths ·
-   jq + sed parsing). **Forced-rollback drill PASSED on apex2 hardware** (2026-06-19):
+   jq + sed parsing · probation P1/P1b/P2/P3). **Forced-rollback drill PASSED on apex2 hardware** (2026-06-19):
    broken binary swapped in → health timeout → `agentd.prev` restored, node kept
    serving. *Power-loss drill (cut power mid-swap) still TODO — needs physical access.*
 3. **`apply_daemon_update` tool + gates + Cerebro wiring** (agentd). **← ✅ LANDED.**
@@ -397,8 +398,8 @@ Each slice is independently shippable + testable; build in order, and **prove sl
    the new healthy binary's full `health.commit` didn't equal the request's *short*
    `target_commit`. **The recoverability invariant worked end-to-end on a live
    self-update: bad confirm → automatic rollback → agentd healthy + serving.** Bug
-   fixed (the tool now stores the resolved full sha). *Next: re-test → expect
-   CONFIRM, then slices 4–5.*
+   fixed (the tool now stores the resolved full sha). *The re-test CONFIRMED
+   end-to-end (see the status header), and slices 4–5 landed below.*
 4. **Adversarial LLM review gate.** **← ✅ LANDED.** Stage 3 in `self_update.rs`: a
    fresh-context `RoutingProvider` reviews the swap-in diff → `VERDICT: SAFE|BLOCK`,
    fail-closed, empty-diff-safe, `AGENTD_SELF_UPDATE_REVIEW=0` opt-out. Single
