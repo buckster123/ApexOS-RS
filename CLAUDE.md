@@ -236,6 +236,8 @@ Load only the relevant doc when entering a subsystem.
 | `docs/post-mk1.md` | Post-mk1 vision — hardening tracks, v0.1.0 release path |
 | `docs/model-welfare.md` | Welfare charter — doctrine, red lines, audit ledger |
 | `docs/porting-guide.md` | Porting -RS patterns to other projects |
+| `docs/sdk/` | Extension SDK — outsider-facing guides + tool/event catalog for building on -RS |
+| `docs/ideas/` | Design sketches & evals (state machine, goal driver) — inputs, some superseded |
 
 ---
 
@@ -246,6 +248,7 @@ Load only the relevant doc when entering a subsystem.
 - A new env var → `docs/env-vars.md`; protocol change → `docs/agentd-protocol.md`
 - A deferred item resolves → the ledger at the end of `docs/build-roadmap.md`
 - A doc file is created → add a row to `## Docs`
+- **Periodic hygiene**: every few weeks / after a big arc, run the saved `docs-hygiene-audit` workflow (`.claude/workflows/`) — review findings, apply on a branch, ship via PR
 - **Keep this file under ~250 lines / ~20 KB** — Claude Code warns on oversized CLAUDE.md and it loads into every session's context. Fat goes to docs/, this file points.
 
 ### What never goes in CLAUDE.md or docs/*.md
