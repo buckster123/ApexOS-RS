@@ -67,7 +67,11 @@ export component StartMenu inherits Rectangle {
     callback launch(int);     // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings 5=terminal 6=council
     in property <int> mesh-unread: 0;   // mesh inbox unread → badge on the Mesh row
 
-    width: 240px;
+    // Two columns (APPS | DEEP TECH) when the tech surface is on — a single
+    // 20-row column outgrew shorter laptop displays (content-height with no
+    // clamp shot past the top of the frame). Column width 224px keeps rows the
+    // exact size the old 240px single-column menu gave them.
+    width: Personas.show-tech-apps ? 472px : 240px;
     height: layout.preferred-height;
     background: Palette.surface;
     border-radius: Palette.radius-lg;
@@ -77,46 +81,70 @@ export component StartMenu inherits Rectangle {
     drop-shadow-color: #000000aa;
     drop-shadow-offset-y: 8px;
 
-    layout := VerticalLayout {
+    layout := HorizontalLayout {
         padding: 8px;
-        spacing: 2px;
-
-        Text {
-            text: "APPS";
-            font-size: 10px;
-            font-weight: 700;
-            letter-spacing: 1.6px;
-            color: Palette.text-dim;
-            height: 28px;
-            horizontal-alignment: left;
-            vertical-alignment: center;
-            // align label with the rows below it
-            x: 12px;
-        }
+        spacing: 8px;
 
         // Core apps — always shown.
-        MenuRow { glyph: "💬"; label: "Chat";     clicked => { root.launch(0); } }
-        MenuRow { glyph: "🖥"; label: "System";   clicked => { root.launch(1); } }
-        MenuRow { glyph: "🎵"; label: "Sonus";    clicked => { root.launch(11); } }
-        MenuRow { glyph: "📝"; label: "Notes";    clicked => { root.launch(12); } }
-        MenuRow { glyph: "😊"; label: "APEX";     clicked => { root.launch(13); } }
-        MenuRow { glyph: "🎨"; label: "Sketchpad"; clicked => { root.launch(14); } }
-        MenuRow { glyph: "🕘"; label: "Sessions"; clicked => { root.launch(3); } }
-        MenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
-        MenuRow { glyph: "🧮"; label: "Calculator"; clicked => { root.launch(16); } }
-        MenuRow { glyph: "📁"; label: "Files";     clicked => { root.launch(17); } }
+        VerticalLayout {
+            width: 224px;
+            spacing: 2px;
+            alignment: start;
+
+            Text {
+                text: "APPS";
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 1.6px;
+                color: Palette.text-dim;
+                height: 28px;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+                // align label with the rows below it
+                x: 12px;
+            }
+
+            MenuRow { glyph: "💬"; label: "Chat";     clicked => { root.launch(0); } }
+            MenuRow { glyph: "🖥"; label: "System";   clicked => { root.launch(1); } }
+            MenuRow { glyph: "🎵"; label: "Sonus";    clicked => { root.launch(11); } }
+            MenuRow { glyph: "📝"; label: "Notes";    clicked => { root.launch(12); } }
+            MenuRow { glyph: "😊"; label: "APEX";     clicked => { root.launch(13); } }
+            MenuRow { glyph: "🎨"; label: "Sketchpad"; clicked => { root.launch(14); } }
+            MenuRow { glyph: "🕘"; label: "Sessions"; clicked => { root.launch(3); } }
+            MenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
+            MenuRow { glyph: "🧮"; label: "Calculator"; clicked => { root.launch(16); } }
+            MenuRow { glyph: "📁"; label: "Files";     clicked => { root.launch(17); } }
+        }
 
         // Deep-tech apps — hidden by the simple/warm persona (G5 surface gating).
-        if Personas.show-tech-apps: MenuRow { glyph: "🌡"; label: "Sensors";  clicked => { root.launch(2); } }
-        if Personas.show-tech-apps: MenuRow { glyph: "⌨"; label: "Terminal"; clicked => { root.launch(5); } }
-        if Personas.show-tech-apps: MenuRow { glyph: "⚖"; label: "Council";  clicked => { root.launch(6); } }
-        if Personas.show-tech-apps: MenuRow { glyph: "📜"; label: "Event Log"; clicked => { root.launch(7); } }
-        if Personas.show-tech-apps: MenuRow { glyph: "🕸"; label: "Mesh";      badge: root.mesh-unread; clicked => { root.launch(8); } }
-        if Personas.show-tech-apps: MenuRow { glyph: "⚡"; label: "Inference"; clicked => { root.launch(9); } }
-        if Personas.show-tech-apps: MenuRow { glyph: "🎛"; label: "Audio Editor"; clicked => { root.launch(10); } }
-        if Personas.show-tech-apps: MenuRow { glyph: "🌐"; label: "Web";          clicked => { root.launch(15); } }
-        if Personas.show-tech-apps: MenuRow { glyph: "📖"; label: "Occipital";    clicked => { root.launch(18); } }
-        if Personas.show-tech-apps: MenuRow { glyph: "🗂"; label: "Work Board";   clicked => { root.launch(19); } }
+        if Personas.show-tech-apps: VerticalLayout {
+            width: 224px;
+            spacing: 2px;
+            alignment: start;
+
+            Text {
+                text: "DEEP TECH";
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 1.6px;
+                color: Palette.text-dim;
+                height: 28px;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+                x: 12px;
+            }
+
+            MenuRow { glyph: "🌡"; label: "Sensors";  clicked => { root.launch(2); } }
+            MenuRow { glyph: "⌨"; label: "Terminal"; clicked => { root.launch(5); } }
+            MenuRow { glyph: "⚖"; label: "Council";  clicked => { root.launch(6); } }
+            MenuRow { glyph: "📜"; label: "Event Log"; clicked => { root.launch(7); } }
+            MenuRow { glyph: "🕸"; label: "Mesh";      badge: root.mesh-unread; clicked => { root.launch(8); } }
+            MenuRow { glyph: "⚡"; label: "Inference"; clicked => { root.launch(9); } }
+            MenuRow { glyph: "🎛"; label: "Audio Editor"; clicked => { root.launch(10); } }
+            MenuRow { glyph: "🌐"; label: "Web";          clicked => { root.launch(15); } }
+            MenuRow { glyph: "📖"; label: "Occipital";    clicked => { root.launch(18); } }
+            MenuRow { glyph: "🗂"; label: "Work Board";   clicked => { root.launch(19); } }
+        }
     }
 }
 
@@ -162,8 +190,10 @@ export component Win98StartMenu inherits Rectangle {
     callback launch(int);     // AppKind ordinal — same contract as StartMenu
 
     width: 200px;
-    // 9 core rows + (optional separator + 8 tech rows), all 26px; + 4px pads.
-    height: (Personas.show-tech-apps ? 9 * 26px + 9px + 8 * 26px : 9 * 26px) + 8px;
+    // 10 core rows + (optional separator + 10 tech rows), all 26px; + pads.
+    // NB: keep these counts in sync with the row list below — the old 9/8
+    // formula silently cut the last two rows off the menu.
+    height: (Personas.show-tech-apps ? 10 * 26px + 9px + 10 * 26px : 10 * 26px) + 8px;
     background: Win98.face;
     drop-shadow-blur: 6px;
     drop-shadow-color: #00000088;

@@ -102,8 +102,13 @@ export component InferenceView {
                         font-size: 8px;
                         letter-spacing: 1.5px;
                     }
+                    // The stored OAI base URL rides along in the persisted config even
+                    // while the anthropic backend is active — showing it there reads as
+                    // "anthropic via localhost:11434". Anthropic always talks to its own
+                    // API host, so say that instead.
                     Text {
-                        text: root.base-url == "" ? "(default)" : root.base-url;
+                        text: root.backend == "anthropic" ? "api.anthropic.com"
+                            : root.base-url == "" ? "(default)" : root.base-url;
                         color: Palette.text;
                         font-size: 12px;
                         overflow: elide;

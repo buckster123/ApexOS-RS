@@ -5176,6 +5176,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_current_view(0);
             ui.set_current_session_id(session_id);
             ui.set_status("Restoring…".into());
+            // Restoring must also SURFACE the chat: in desktop mode the replay
+            // otherwise lands in a closed/hidden window (set_current_view only
+            // drives the focus shell). Route through the menu-launch path — a
+            // restore is the user's own act, so the latch-clear it performs is
+            // correct — which reveals/creates + focuses the Chat window. Covers
+            // all restore entry points (session row, toast, mesh inbox).
+            ui.invoke_launch_app(0); // AppKind::Chat ordinal
         }
         // Ask agentd to replay the session (Rust agentd: hello + resume_session field)
         let payload = serde_json::json!({
