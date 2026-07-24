@@ -1,8 +1,7 @@
 use serde_json::{json, Value};
 
 /// Tool schema registry — the advertised tool set (count asserted by the
-/// `tools.len()` test in dispatch.rs so this header can't silently go stale;
-/// currently 67 = 66 functional + the deferred `ingest_file` stub).
+/// `tools.len()` test in dispatch.rs so this header can't silently go stale).
 /// Descriptions are verbatim from the Python mcp_server.py (agent-facing strings).
 pub fn all_tool_schemas() -> Vec<Value> {
     TOOL_NAMES.iter().map(|&name| tool_schema(name)).collect()
@@ -916,9 +915,23 @@ fn tool_schema(name: &str) -> Value {
             }
         }),
 
-        // Deferred Tier-7 tools (ingest_file). Advertised for surface parity with
-        // Python, but calling them returns an honest "not implemented" error (see
-        // dispatch, C-RS-007).
+        "ingest_file" => json!({
+            "name": "ingest_file",
+            "description": "Read a file and store its contents as searchable memories. Routed by extension: text/code and HTML are paragraph-chunked (≤500 words, sentence-split); Markdown splits on ## sections (section titles become tags; simple `key: value` frontmatter sets type/tags); JSON accepts a list of strings or {content, type, tags, salience} records (or a {memories:[…]}/{records:[…]} wrapper); CSV stores one memory per row, or a schema summary past 200 rows; PDF text is extracted (no OCR — image-only scans are rejected honestly); images are captioned via the vision backend and CLIP-indexed for search_vision. Every memory gets a `source:<filename>` tag — find_by_tags with it lists (or cleans up) the whole import.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "Absolute path to the file" },
+                    "tags":      { "anyOf": [{"type":"array","items":{"type":"string"}},{"type":"string"}], "description": "Tags to apply to all imported memories" },
+                    "agent_id":  { "type": "string", "description": "Agent performing the import" }
+                },
+                "required": ["file_path"]
+            }
+        }),
+
+        // Unknown names (nothing is deferred anymore — ingest_file was the
+        // last stub). The fallthrough stays as a safety net; dispatch answers
+        // anything unadvertised with an honest error (C-RS-007).
         _ => json!({
             "name": name,
             "description": format!("(not yet implemented) {name}"),
@@ -927,8 +940,8 @@ fn tool_schema(name: &str) -> Value {
     }
 }
 
-/// All 66 tool names (63 functional + 3 deferred Tier-7 stubs) — derived from
-/// Python mcp_server.py tool registry.
+/// All tool names (count asserted by the `tools.len()` test in dispatch.rs) —
+/// derived from Python mcp_server.py tool registry.
 pub const TOOL_NAMES: &[&str] = &[
     "remember",
     "recall",

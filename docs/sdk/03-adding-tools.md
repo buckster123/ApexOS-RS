@@ -463,7 +463,7 @@ The 50 tools `apexos-tools` exposes today (verify against `list()` / `call()` in
 `git_status`, `git_diff`, `git_log`, `git_branch`, `git_init`, `git_commit`, `git_push`,
 `git_checkout`, `git_reset`, `git_merge`, `eject_media`. Names are global across all
 plugins — don't collide with these or with `cerebro-mcp`'s tools (`TOOL_NAMES`, 67
-entries — 66 functional + 1 stub: `ingest_file`).
+entries, all functional).
 
 ### Workspace confinement coverage
 

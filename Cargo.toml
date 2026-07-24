@@ -61,6 +61,8 @@ clap          = { version = "4", features = ["derive", "env"] }
 # Vision (decode/downscale/re-encode — the image-into-context shim)
 image         = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64        = "0.22"
+# PDF text extraction (ingest_file)
+lopdf         = "0.44"
 # Utils
 subtle           = "2"
 sha2             = "0.10"

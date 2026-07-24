@@ -76,7 +76,7 @@ ApexOS-RV) and `apexos-confine` (std-only path-confinement primitives —
 | Crate | Kind | Role |
 |-------|------|------|
 | `cerebro` | lib | The engine. `cortex.rs` `CerebroCortex` is the public facade owning storage + the cognitive engines (`engines/` — hippocampus, neocortex, amygdala, prefrontal, dream, …). `storage/` = `sqlite.rs` (source of truth), `vector.rs` (sqlite-vec vec0 with FTS5 fallback), `graph.rs` (in-memory petgraph rebuilt at startup). `activation/` (`actr.rs`, `fsrs.rs`, `spreading.rs`) is pure math. `engines/dream.rs` runs the 6-phase consolidation (plus the exo-evolution variation/competition phases) against claude-haiku. `config.rs` `Config::from_env`. |
-| `cerebro-mcp` | **bin** | MCP-over-stdio server — the plugin `agentd` spawns for agent memory (agent `FORGE`). `dispatch.rs` routes 67 tools (66 functional + the deferred `ingest_file` stub) over `Arc<CerebroCortex>`; `tools.rs` is the static schema registry; `transport.rs` is the stdio JSON-RPC loop. `agent_scope(args)` maps an optional `agent_id` to a `VisibilityScope` — the single scoping primitive. |
+| `cerebro-mcp` | **bin** | MCP-over-stdio server — the plugin `agentd` spawns for agent memory (agent `FORGE`). `dispatch.rs` routes all 67 tools (no stubs — the last, `ingest_file`, landed with the ingestion port) over `Arc<CerebroCortex>`; `tools.rs` is the static schema registry; `transport.rs` is the stdio JSON-RPC loop. `agent_scope(args)` maps an optional `agent_id` to a `VisibilityScope` — the single scoping primitive. |
 | `cerebro-api` | **bin** | axum REST + dashboard over the same engine (memory/episode/graph/tag endpoints, ~40 routes). Enforces the shared `AGENTD_TOKEN` bearer secret and refuses a non-loopback bind when it is unset. Binds **:8765**. |
 | `cerebro-cli` | **bin** (`cerebro`) | clap CLI over the engine for human/script use. |
 
@@ -255,8 +255,10 @@ counterpart to CLAUDE.md (static blueprint) and git (code truth).
 - **Recall reinforcement is wired.** `recall()` records an access on the returned memories so
   ACT-R base-level activation rises ("recall sharpens memory"). FSRS *grading* still happens
   only via `record_procedure_outcome`, not on ordinary reads.
-- **`ingest_file` is unimplemented** — it returns an honest `-32601` not-implemented error
-  (C-RS-007). (`describe_image` and `search_vision` **are** implemented now —
+- **`ingest_file` is implemented** — extension-routed import (`cerebro::ingest`): text/code/HTML
+  paragraph chunks, Markdown `##` sections, JSON records, CSV rows, PDF text via `lopdf`,
+  images through the vision loop; every memory tagged `source:<filename>` so an import is
+  find_by_tags-addressable. (`describe_image` and `search_vision` **are** implemented now —
   `cerebro::vision`: a tiered Ollama→Anthropic VLM caption tool, and CLIP visual recall
   over a `vision_embeddings` table.) (Spreading activation **does** enforce scope as of
   C-RS-003 — the earlier "ignores scope" claim is no longer true.)

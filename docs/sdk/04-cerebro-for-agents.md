@@ -37,9 +37,9 @@ Only three methods are "first-class" on the cortex; everything else is reached t
 `route(name, args, brain)`, a big `match name { … }`. The result is
 wrapped as MCP `content[0].text` = a **JSON string**; the agent reads
 that text and re-parses it. Schemas live separately in `tool_schema()` (in `tools.rs`);
-the authoritative name list is `TOOL_NAMES` (`tools.rs`) — **67 entries** (66 functional +
-the deferred `ingest_file` stub; the `tools.rs` header states this, and the count is
-asserted by a `tools.len()` test in `dispatch.rs` so it can't silently go stale).
+the authoritative name list is `TOOL_NAMES` (`tools.rs`) — **67 entries**, all functional
+(the count is asserted by a `tools.len()` test in `dispatch.rs` so it can't silently go
+stale).
 `tools/list` returns `all_tool_schemas()`,
 which maps `tool_schema` over every `TOOL_NAMES` entry.
 
@@ -283,12 +283,13 @@ for identity-level / safety-critical facts; the activation model resurfaces high
 affect-tagged memories under pressure. Audit reads are available via `query_audit` /
 `audit_summary` and version snapshots via `get_memory_versions` / `restore_version`.
 
-**Known stubs & inert paths (do NOT rely on these).** Grounded in `dispatch.rs` + symbiosis.md:
+**Behavior notes & formerly-inert paths.** Grounded in `dispatch.rs` + symbiosis.md:
 
-- `ingest_file` is advertised in `TOOL_NAMES` but unimplemented — it falls through the
-  `route` match to the `_` arm and returns an honest `-32601` not-implemented **error**
-  (C-RS-007). It is the **only** Cerebro stub; the other 66 `TOOL_NAMES` verbs are
-  functional. `describe_image` (a real VLM caption tool — tiered `CEREBRO_VISION_BACKEND`,
+- **There are no Cerebro stubs anymore** — all 67 `TOOL_NAMES` verbs are functional.
+  `ingest_file` (the last deferred stub) is implemented (`cerebro::ingest`, extension-routed
+  file import, every memory tagged `source:<filename>`); only an *unadvertised* name falls
+  through the `route` match to the `_` arm's honest `-32601` error (C-RS-007).
+  `describe_image` (a real VLM caption tool — tiered `CEREBRO_VISION_BACKEND`,
   Ollama VLM → Anthropic fallback) and `search_vision` (CLIP visual recall, tier-gated off
   on Nano) are **implemented** — see their `route` arms in `dispatch.rs`.
 - **`cognitive_bootstrap` is implemented** (CB-001 closed): one call assembles a
