@@ -1573,7 +1573,9 @@ mod db_compat {
         position INTEGER NOT NULL,
         role TEXT NOT NULL DEFAULT 'event',
         timestamp TEXT NOT NULL,
-        PRIMARY KEY (episode_id, position)
+        PRIMARY KEY (episode_id, position),
+        FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE,
+        FOREIGN KEY (memory_id) REFERENCES memory_nodes(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS audit_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1706,6 +1708,42 @@ mod db_compat {
         // Verify migration is idempotent — re-opening should not error
         drop(store);
         SqliteStore::open(&db_path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn second_open_reaps_all_python_orphan_tables() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("cerebro.db");
+        seed_python_db(&db_path);
+
+        // First open migrates; the Python originals + _py_* renames survive it
+        // (deliberate: the fallback holds through the migration boot itself).
+        let store = SqliteStore::open(&db_path).await.unwrap();
+        drop(store);
+
+        // Second open runs the reap. Regression (FK edge): `episode_steps`
+        // declares an FK to `memory_nodes`, and with foreign_keys=ON the drop
+        // of `_py_episodes` errored "no such table: memory_nodes" mid-batch —
+        // stranding the remaining _py_* tables forever (the has_py probe skips
+        // once memory_nodes is gone). The reap must run with FKs off.
+        let store = SqliteStore::open(&db_path).await.unwrap();
+        drop(store);
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let leftovers: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND \
+             (name LIKE '\\_py\\_%' ESCAPE '\\' OR name IN ('memory_nodes','associative_links'))",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(leftovers, 0, "all Python orphan tables must be reaped on the second open");
+
+        // And the migrated data is still intact afterwards.
+        let store = SqliteStore::open(&db_path).await.unwrap();
+        let mem = store.get_memory(
+            &MemoryId("mem_test_migrate_001".into()), &VisibilityScope::global(),
+        ).await.unwrap();
+        assert!(mem.is_some(), "migrated memory must survive the reap");
     }
 
     #[tokio::test]

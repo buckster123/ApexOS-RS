@@ -245,14 +245,26 @@ fn migrate_from_python(conn: &mut Connection) -> Result<()> {
             // as a fallback through the migration boot itself; once a migrated
             // DB is back in service they're dead weight. Dropping memory_nodes
             // also makes every future open skip this probe (has_py = false).
-            if let Err(e) = conn.execute_batch(
-                "DROP TABLE IF EXISTS memory_nodes;
+            //
+            // FK enforcement must be OFF for the drops (same as the migration
+            // itself): the Python `episode_steps` declares an FK to
+            // `memory_nodes`, so with foreign_keys=ON the implicit DELETE that
+            // DROP TABLE `_py_episodes` performs tries to resolve that FK
+            // against the by-then-dropped `memory_nodes` and errors with
+            // "no such table" — leaving the reap half done (and the leftover
+            // `_py_*` tables stranded forever, since the probe skips next open).
+            let reap = conn.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 DROP TABLE IF EXISTS memory_nodes;
                  DROP TABLE IF EXISTS associative_links;
                  DROP TABLE IF EXISTS _py_agents;
                  DROP TABLE IF EXISTS _py_episodes;
                  DROP TABLE IF EXISTS _py_episode_steps;
                  DROP TABLE IF EXISTS _py_audit_log;",
-            ) {
+            );
+            // Restore FK enforcement even when a drop failed mid-batch.
+            let _ = conn.execute_batch("PRAGMA foreign_keys=ON;");
+            if let Err(e) = reap {
                 tracing::warn!("orphan Python-table reap failed (non-fatal): {e}");
             } else {
                 tracing::info!("reaped Python-migration orphan tables (memory_nodes, associative_links, _py_*)");
