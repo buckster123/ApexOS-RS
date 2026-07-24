@@ -2,6 +2,7 @@ pub mod activation;
 pub mod config;
 pub mod cortex;
 pub mod engines;
+pub mod ingest;
 pub mod models;
 pub mod storage;
 pub mod types;

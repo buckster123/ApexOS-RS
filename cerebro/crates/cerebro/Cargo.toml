@@ -15,6 +15,7 @@ petgraph.workspace  = true
 fastembed.workspace = true
 reqwest.workspace   = true
 base64.workspace    = true
+lopdf.workspace     = true
 uuid.workspace      = true
 chrono.workspace    = true
 anyhow.workspace    = true

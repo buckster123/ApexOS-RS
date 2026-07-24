@@ -1265,6 +1265,21 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             assemble_bootstrap(&brain, query, mode, max_tokens, scope).await
         }
 
+        // Tier-7 ingestion: read a file and store its contents as searchable
+        // memories (`cerebro::ingest` — the Rust port of the Python adapter
+        // pipeline). Routed by extension; every stored memory carries a
+        // `source:<name>` tag so the whole import is find_by_tags-addressable.
+        "ingest_file" => {
+            let file_path = args["file_path"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("file_path is required"))?;
+            let tags  = coerce_str_list(&args["tags"]);
+            let scope = agent_scope(args);
+            let report = cerebro::ingest::ingest_file(
+                &brain, std::path::Path::new(file_path), tags, scope,
+            ).await?;
+            Ok(serde_json::to_value(&report)?)
+        }
+
         // Tier-7 vision: caption an image via the tiered VLM backend
         // (Ollama local/LAN → Anthropic fallback; `cerebro::vision`). Accepts a
         // workspace `path` or inline `b64` (+ optional `media_type`); with
@@ -1358,10 +1373,10 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             Ok(json!({ "results": results, "count": count }))
         }
 
-        // Deferred Tier-7 tools (ingest_file) and any unknown name. C-RS-007:
-        // these are still advertised in tools/list (surface parity with Python's
-        // 67) but must NOT return a success payload — that reads as "it worked."
-        // Return an honest not-implemented error so callers can branch on it.
+        // Unknown tool name. All 67 advertised tools are implemented now
+        // (ingest_file was the last Tier-7 stub); this fallthrough remains as
+        // the honest answer for anything not advertised (C-RS-007: never a
+        // success payload that reads as "it worked").
         _ => Err(anyhow::anyhow!("tool not implemented: {name}")),
     }
 }
@@ -2191,17 +2206,147 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_deferred_tool_errors_not_success() {
+    async fn dispatch_unknown_tool_errors_not_success() {
         let (brain, _dir) = make_brain().await;
-        // A deferred Tier-7 tool must return an honest error, never a success stub.
+        // An unadvertised name must return an honest error, never a success stub
+        // (C-RS-007 — nothing is deferred anymore, so the probe is a fake name).
         let msg = json!({
             "jsonrpc":"2.0","id":12,"method":"tools/call",
-            "params":{"name":"ingest_file","arguments":{"path":"/tmp/x"}}
+            "params":{"name":"definitely_not_a_tool","arguments":{}}
         });
         let resp = dispatch_tool(msg, brain).await;
-        assert!(resp["result"].is_null(), "deferred tool must not return a success result");
+        assert!(resp["result"].is_null(), "unknown tool must not return a success result");
         assert_eq!(resp["error"]["code"], -32601,
-            "deferred tool should map to method-not-found, got {}", resp["error"]);
+            "unknown tool should map to method-not-found, got {}", resp["error"]);
+    }
+
+    // ---- ingest_file: the last Tier-7 stub, now real ------------------------
+
+    #[tokio::test]
+    async fn dispatch_ingest_file_markdown_sections_end_to_end() {
+        let (brain, _dir) = make_brain().await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let md_path = tmp.path().join("deploy-notes.md");
+        std::fs::write(&md_path,
+            "---\ntype: procedural\ntags: [ops]\n---\n\
+             ## Hot Swap\nStop the service, copy the binary over, start it again.\n\n\
+             ## Verify\nTail the journal for the first twenty lines after restart.\n",
+        ).unwrap();
+
+        let msg = json!({
+            "jsonrpc":"2.0","id":30,"method":"tools/call",
+            "params":{"name":"ingest_file","arguments":{
+                "file_path": md_path.to_str().unwrap(),
+                "tags": "imported",
+                "agent_id": "FORGE"
+            }}
+        });
+        let resp = dispatch_tool(msg, Arc::clone(&brain)).await;
+        assert!(resp["error"].is_null(), "ingest error: {}", resp["error"]);
+        let report: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(report["kind"], "markdown");
+        assert_eq!(report["memories_imported"], 2, "two ## sections: {report}");
+        assert_eq!(report["memory_ids"].as_array().unwrap().len(), 2);
+
+        // The whole import is addressable via its source tag…
+        let find = json!({
+            "jsonrpc":"2.0","id":31,"method":"tools/call",
+            "params":{"name":"find_by_tags","arguments":{
+                "tags":["source:deploy-notes.md","imported"], "agent_id":"FORGE"
+            }}
+        });
+        let resp = dispatch_tool(find, Arc::clone(&brain)).await;
+        let hits: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(hits.as_array().unwrap().len(), 2, "source tag finds the import");
+        // …frontmatter type + section-slug tags landed…
+        assert_eq!(hits[0]["memory_type"], "procedural", "frontmatter type applies");
+        let all_tags: Vec<String> = hits.as_array().unwrap().iter()
+            .flat_map(|h| h["tags"].as_array().unwrap().iter()
+                .map(|t| t.as_str().unwrap().to_string()))
+            .collect();
+        assert!(all_tags.iter().any(|t| t == "hot_swap"), "section slug tag: {all_tags:?}");
+        assert!(all_tags.iter().any(|t| t == "ops"), "frontmatter tag: {all_tags:?}");
+
+        // …and the mutation left an audit row (C3 whitelist).
+        let audit = json!({
+            "jsonrpc":"2.0","id":32,"method":"tools/call",
+            "params":{"name":"query_audit","arguments":{"action":"ingest_file"}}
+        });
+        let resp = dispatch_tool(audit, Arc::clone(&brain)).await;
+        let rows: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 1, "ingest_file must be audited");
+    }
+
+    #[tokio::test]
+    async fn dispatch_ingest_file_json_records() {
+        let (brain, _dir) = make_brain().await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let json_path = tmp.path().join("memories.json");
+        std::fs::write(&json_path, r#"[
+            "a bare string memory imported from json",
+            {"content": "how to rotate the relay token safely", "type": "procedural",
+             "tags": ["relay"], "salience": 0.9}
+        ]"#).unwrap();
+
+        let msg = json!({
+            "jsonrpc":"2.0","id":33,"method":"tools/call",
+            "params":{"name":"ingest_file","arguments":{
+                "file_path": json_path.to_str().unwrap()
+            }}
+        });
+        let resp = dispatch_tool(msg, Arc::clone(&brain)).await;
+        assert!(resp["error"].is_null(), "ingest error: {}", resp["error"]);
+        let report: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(report["kind"], "json");
+        assert_eq!(report["memories_imported"], 2, "{report}");
+
+        // The record's own type/tags/salience land on its memory.
+        let find = json!({
+            "jsonrpc":"2.0","id":34,"method":"tools/call",
+            "params":{"name":"find_by_tags","arguments":{ "tags":["relay"] }}
+        });
+        let resp = dispatch_tool(find, Arc::clone(&brain)).await;
+        let hits: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(hits.as_array().unwrap().len(), 1);
+        assert_eq!(hits[0]["memory_type"], "procedural");
+        assert!((hits[0]["salience"].as_f64().unwrap() - 0.9).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn dispatch_ingest_file_honest_errors() {
+        let (brain, _dir) = make_brain().await;
+        // Missing file_path → Invalid params.
+        let msg = json!({
+            "jsonrpc":"2.0","id":35,"method":"tools/call",
+            "params":{"name":"ingest_file","arguments":{}}
+        });
+        let resp = dispatch_tool(msg, Arc::clone(&brain)).await;
+        assert_eq!(resp["error"]["code"], -32602, "{}", resp["error"]);
+
+        // Nonexistent file → an error, not a success.
+        let msg = json!({
+            "jsonrpc":"2.0","id":36,"method":"tools/call",
+            "params":{"name":"ingest_file","arguments":{"file_path":"/nope/missing.txt"}}
+        });
+        let resp = dispatch_tool(msg, Arc::clone(&brain)).await;
+        assert!(!resp["error"].is_null(), "missing file must error");
+
+        // Unsupported extension → an honest no-handler error.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("blob.bin");
+        std::fs::write(&bin, [0u8; 32]).unwrap();
+        let msg = json!({
+            "jsonrpc":"2.0","id":37,"method":"tools/call",
+            "params":{"name":"ingest_file","arguments":{"file_path": bin.to_str().unwrap()}}
+        });
+        let resp = dispatch_tool(msg, Arc::clone(&brain)).await;
+        let err = resp["error"]["message"].as_str().unwrap_or_default();
+        assert!(err.contains("no handler"), "got: {err}");
     }
 
     #[tokio::test]

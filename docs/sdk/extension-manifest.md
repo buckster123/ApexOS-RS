@@ -239,12 +239,11 @@ unread. Conventions: FORGE→`"FORGE"`, APEX→`"APEX"` — but agentd **system-
 `agent_id` on every cerebro call (`AGENTD_AGENT_ID`, default `APEX`), so the
 model-supplied value never lands.
 
-**Stub (advertised in `TOOL_NAMES` for surface parity, NOT routed — the
-dispatch fallthrough in `cerebro/crates/cerebro-mcp/src/dispatch.rs` returns
-"tool not implemented"):** `ingest_file` only.
-`TOOL_NAMES` (`cerebro/crates/cerebro-mcp/src/tools.rs:932`) has 67 entries: 66
-functional + that 1 stub. **`describe_image`, `search_vision` (CLIP visual
-recall) and `cognitive_bootstrap` are SHIPPED, not stubs** — the latter routes
+**Stubs: none.** `TOOL_NAMES` (`cerebro/crates/cerebro-mcp/src/tools.rs`) has
+67 entries, all functional — `ingest_file` (the last deferred stub) landed with
+the ingestion port; the dispatch fallthrough now answers only unadvertised
+names with "tool not implemented". **`describe_image`, `search_vision` (CLIP
+visual recall) and `cognitive_bootstrap` are SHIPPED too** — the latter routes
 to the live-state priming assembler (`assemble_bootstrap` in `dispatch.rs`).
 Reinforcement is live (a recall's returned top-k record an access —
 `cortex.rs:270`), and visibility scope is enforced at all three recall touch
