@@ -78,6 +78,7 @@ the prefix cache. Conversation caching, TTL tuning, and tokenomics accounting ar
 | Gate it (first turn + idle gap) | `turn.rs` — `TurnEngine::should_inject_ambient_at()` |
 | Live config (enabled / cache_conversation / ttl), shared `Arc<RwLock>` | `agentd/crates/agent/src/cache.rs` — `CacheConfig`; env `AGENTD_CACHE*`; live via `GET`/`POST /api/cache` |
 | Tokenomics (hit-rate, banked tokens, cost estimate) | `agentd/crates/agent/src/usage.rs`; `GET /api/usage`; surfaced as the **CACHE BANK** card in the ⚡ Inference UI |
+| History trim with hysteresis (fires at 1.2× budget, cuts to 0.75× — a trim rewrites the window front, so steady-state sessions must not trim per message) | `agentd/crates/core/src/history.rs` — `trim_history()` |
 | OpenAI variant (auto-prefix, no markers) | `agentd/crates/agent/src/oai.rs` — `build_body()` |
 
 **The contract is unit-tested, and the test names read as the spec** — lift these with the code

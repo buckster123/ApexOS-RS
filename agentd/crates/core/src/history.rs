@@ -4,11 +4,13 @@
 //! scheduled task into one ever-growing `Vec<Message>` that is re-sent in full
 //! each turn — with no bound it eventually exceeds the model context window and
 //! the daemon wedges in a restart-surviving crash-loop. [`trim_history`] caps the
-//! in-memory window to a rough token budget, dropping whole oldest turns but
-//! cutting only at clean user-turn boundaries so a kept `tool_result` is never
-//! orphaned from its `tool_use` (which the Anthropic API rejects). The on-disk
-//! JSONL stays append-only (the full history is preserved for replay) — only the
-//! working window the model sees each turn is bounded.
+//! in-memory window around a rough token budget (with hysteresis — see its doc —
+//! so steady-state sessions don't bust the prompt cache on every message),
+//! dropping whole oldest turns but cutting only at clean user-turn boundaries so
+//! a kept `tool_result` is never orphaned from its `tool_use` (which the
+//! Anthropic API rejects). The on-disk JSONL stays append-only (the full history
+//! is preserved for replay) — only the working window the model sees each turn
+//! is bounded.
 //!
 //! [`repair_history`] is the load-time twin: a session JSONL written by racing
 //! append tasks (or truncated by a crash/abort mid-batch) can reload in an order
@@ -50,12 +52,22 @@ fn is_turn_start(m: &Message) -> bool {
         if !content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })))
 }
 
-/// Trim `history` in place so its rough token estimate fits `budget_tokens`,
-/// dropping whole oldest turns at clean user-turn boundaries. Keeps the most
-/// recent turns that fit; always keeps at least the last turn even if it alone
-/// exceeds the budget (intra-message trimming is out of scope). No-op when
-/// already under budget, when `budget_tokens == 0` (disabled), or when no safe
-/// cut point exists — it never orphans a `tool_result` from its `tool_use`.
+/// Trim `history` in place around a rough token budget, dropping whole oldest
+/// turns at clean user-turn boundaries. Always keeps at least the last turn
+/// even if it alone exceeds the budget (intra-message trimming is out of
+/// scope). No-op when `budget_tokens == 0` (disabled) or when no safe cut
+/// point exists — it never orphans a `tool_result` from its `tool_use`.
+///
+/// **Hysteresis (prompt-cache discipline):** a trim rewrites the front of the
+/// window — dropped turns plus the folded seam marker at position 0 — which
+/// invalidates the conversation prompt-cache for everything after it. A
+/// trim-to-fit-on-every-message policy therefore re-bills the whole window at
+/// the cache-write premium on *every* exchange once a session sits at the
+/// budget (the steady state of any long-lived session). Instead: fire only
+/// once the estimate overshoots the budget by 20%, then cut down to 75% of it,
+/// so the front stays byte-stable for many turns between trims and the cache
+/// busts once per band-crossing, not once per message. The budget is thus a
+/// soft ceiling — the resident window peaks at ~1.2× `budget_tokens`.
 pub fn trim_history(history: &mut Vec<Message>, budget_tokens: usize) {
     if budget_tokens == 0 {
         return;
@@ -70,19 +82,22 @@ pub fn trim_history(history: &mut Vec<Message>, budget_tokens: usize) {
     for i in (0..n).rev() {
         suffix[i] = suffix[i + 1] + msg_tokens(&history[i]);
     }
-    if suffix[0] <= budget_tokens {
+    let trigger = budget_tokens.saturating_add(budget_tokens / 5);
+    if suffix[0] <= trigger {
         return;
     }
 
-    // The earliest turn-start whose suffix fits keeps the most history. If even
-    // the last turn alone exceeds the budget, fall back to the last turn-start
-    // (best effort — we never split below one turn).
+    // Cut down to the hysteresis floor: the earliest turn-start whose suffix
+    // fits the target keeps the most history. If even the last turn alone
+    // exceeds it, fall back to the last turn-start (best effort — we never
+    // split below one turn).
+    let target = budget_tokens - budget_tokens / 4;
     let mut last_start = None;
     let mut cut = None;
     for i in 0..n {
         if is_turn_start(&history[i]) {
             last_start = Some(i);
-            if suffix[i] <= budget_tokens {
+            if suffix[i] <= target {
                 cut = Some(i);
                 break;
             }
@@ -399,6 +414,40 @@ mod tests {
             1,
             "exactly one marker at any time"
         );
+        assert!(!has_orphan_tool_result(&h));
+    }
+
+    #[test]
+    fn hysteresis_keeps_front_stable_between_trims() {
+        // Cache discipline: a trim rewrites the window front (dropped turns + the
+        // folded marker), busting the conversation prompt-cache for everything
+        // after it — so once a session sits near the budget, trims must fire once
+        // per band-crossing, not once per message. Budget 1000 → trigger 1200,
+        // floor 750; turns estimate ~208 tokens each.
+        let mut h: Vec<Message> = Vec::new();
+        for _ in 0..8 {
+            h.push(user(&"u".repeat(400)));
+            h.push(asst(&"a".repeat(400)));
+        }
+        trim_history(&mut h, 1000); // ~1664 > 1200 → trims down to ≤750
+        let dropped_first = marker_dropped(&h[0]).expect("first trim leaves a marker");
+
+        // One more turn keeps the estimate inside the band (~908 < 1200): the
+        // trim must be a no-op, leaving the window front byte-identical.
+        h.push(user(&"u".repeat(400)));
+        h.push(asst(&"a".repeat(400)));
+        let len_before = h.len();
+        trim_history(&mut h, 1000);
+        assert_eq!(h.len(), len_before, "no re-trim inside the hysteresis band");
+        assert_eq!(marker_dropped(&h[0]), Some(dropped_first), "marker untouched inside the band");
+
+        // Growing past the trigger trims again (the marker count advances).
+        for _ in 0..3 {
+            h.push(user(&"u".repeat(400)));
+            h.push(asst(&"a".repeat(400)));
+        }
+        trim_history(&mut h, 1000); // ~1532 > 1200 → band crossed
+        assert!(marker_dropped(&h[0]).unwrap() > dropped_first, "band crossing trims again");
         assert!(!has_orphan_tool_result(&h));
     }
 
