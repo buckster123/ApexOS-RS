@@ -97,9 +97,14 @@ And in `turn.rs`: `inject_ambient_appends_clock_to_last_user_turn`,
 
 ## Provider notes
 
-- **Anthropic** — explicit `cache_control` blocks. TTL is 5 min by default (write premium 1.25×) or
-  1 hour (`AGENTD_CACHE_TTL=1h`, write premium 2×, survives >5-min human pauses without re-writing
-  the whole prefix). ≤ 4 breakpoints per request.
+- **Anthropic** — explicit `cache_control` blocks. Two TTLs: 5 min (write premium 1.25×) and 1 hour
+  (write premium 2×). **ApexOS defaults to 1h** (`AGENTD_CACHE_TTL`): the 5-minute entry expires in
+  every human pause, sensor-alert gap, and wakeup interval, re-writing the whole prefix at premium
+  each time — field-measured (2026-07-25) as near-zero cache reads on human-paced sessions. Pick 5m
+  only for pure burst loops. Two field caveats: a just-written large entry (100k+ tokens) can take
+  tens of seconds to become readable, so the first request after a cold write may re-write once more;
+  and the TTL clock refreshes on every read, so an active session never expires mid-conversation.
+  ≤ 4 breakpoints per request.
 - **OpenAI / Ollama** — automatic prefix caching, no markers to set. The *same* stable-prefix
   discipline is exactly what triggers it, so everything above still applies; you just don't place
   breakpoints by hand.
