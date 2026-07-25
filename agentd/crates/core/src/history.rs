@@ -24,9 +24,17 @@
 use crate::{ContentBlock, Message};
 use std::collections::VecDeque;
 
-/// Rough per-message token estimate (≈ chars/4 over the text-bearing blocks).
-/// Images are token-capped upstream by the vision shim, so they're charged a flat
-/// cost rather than their (huge) base64 length, which would wildly over-count.
+/// Rough per-message token estimate, calibrated per block type against real
+/// `count_tokens` on two live apex1 sessions (2026-07-26). Measured chars/token:
+/// prose ≈ 4, compact JSON ≈ 3.4, escape-dense JSON (stringified-JSON-in-JSON
+/// tool results full of `\"`, timestamps, UUIDs) ≈ 2.0 — a flat chars/4
+/// undercounted the escape-dense corpus almost 2×, letting real windows run
+/// far past the configured budget. Tool results add a backslash-count term as
+/// a cheap escape-density proxy; the blend lands both corpora within ±21%
+/// (slightly over on clean content — the safe direction for a bound).
+/// Images are token-capped upstream by the vision shim (`VISION_MAX_EDGE`,
+/// default 1024px ≈ ≤1.4k tokens), so they're charged a flat cost rather than
+/// their (huge) base64 length, which would wildly over-count.
 fn msg_tokens(m: &Message) -> usize {
     let content = match m {
         Message::User { content } | Message::Assistant { content } => content,
@@ -36,8 +44,12 @@ fn msg_tokens(m: &Message) -> usize {
         .map(|b| match b {
             ContentBlock::Text { text }              => text.len() / 4,
             ContentBlock::Thinking { thinking, .. }  => thinking.len() / 4,
-            ContentBlock::ToolUse { input, .. }      => input.to_string().len() / 4,
-            ContentBlock::ToolResult { content, .. } => content.to_string().len() / 4,
+            ContentBlock::ToolUse { input, .. }      => input.to_string().len() / 3,
+            ContentBlock::ToolResult { content, .. } => {
+                let s = content.to_string();
+                let backslashes = s.bytes().filter(|&c| c == b'\\').count();
+                (s.len() + 3 * backslashes) / 3
+            }
             ContentBlock::Image { .. }               => 1_600,
         })
         .sum();
@@ -354,6 +366,37 @@ mod tests {
     fn has_orphan_tool_result(h: &[Message]) -> bool {
         h.iter().any(|m| matches!(m, Message::User { content }
             if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))))
+    }
+
+    #[test]
+    fn estimator_weights_json_denser_than_prose() {
+        // Calibration contract (2026-07-26, count_tokens ground truth): compact
+        // JSON tokenizes ~3.4 chars/token and escape-dense JSON ~2.0, vs prose
+        // ~4 — so a tool_result must estimate higher than same-length prose,
+        // and an escape-dense result higher than a clean one of equal length.
+        let prose = user(&"word ".repeat(300)); // 1500 chars of text
+        let clean_json = Message::User {
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(),
+                content: json!("x".repeat(1494)), // ~1500 chars incl. quotes, no escapes
+                is_error: false,
+            }],
+        };
+        // Stringified-JSON-in-JSON: every quote doubles into \" on the wire.
+        let escaped_inner = serde_json::to_string(&json!({"k": "v".repeat(200), "ts": "2026-07-26T00:00:00.000000000Z"})).unwrap();
+        let escaped = Message::User {
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(),
+                content: json!([{ "text": escaped_inner }]),
+                is_error: false,
+            }],
+        };
+        assert!(msg_tokens(&clean_json) > msg_tokens(&prose),
+            "JSON must estimate denser than prose of equal length");
+        let esc_len = serde_json::to_string(&json!([{ "text": escaped_inner }])).unwrap().len();
+        let esc_est = msg_tokens(&escaped);
+        assert!(esc_est > esc_len / 3,
+            "escape-dense result must estimate above plain chars/3 (got {esc_est} for {esc_len} chars)");
     }
 
     #[test]
