@@ -211,6 +211,67 @@ pub fn parse_error() -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// Wire view — the agent-facing render of a MemoryNode
+// ---------------------------------------------------------------------------
+
+/// Serde-dumping the full `MemoryNode` puts the STORAGE model into the model's
+/// context window: `access_times` (up to 50 ns-precision timestamps), FSRS
+/// `strength` internals, 16-decimal floats. None of it is agent-actionable
+/// (activation_curve / activation_at_risk / cortex_stats are the introspection
+/// tools), and it's the worst-tokenizing content there is — escaped-JSON
+/// timestamp digits measure ~2 chars/token, and bookkeeping was 26% of a live
+/// 209k-char list_procedures result (apex1, 2026-07-26). This view keeps what
+/// the agent reads and drops scheduler state; timestamps at second precision,
+/// floats at 2 decimals. Every memory-returning tool routes through here
+/// EXCEPT `export_memories` (a backup tool — raw fidelity is the point; a
+/// re-import must not lose fields).
+fn wire_node(n: &MemoryNode) -> Value {
+    let mut v = json!({
+        "id":           n.id,
+        "content":      n.content,
+        "memory_type":  n.memory_type,
+        "layer":        n.layer,
+        "salience":     round2(n.salience),
+        "tags":         n.tags,
+        "agent_id":     n.agent_id,
+        "visibility":   n.visibility,
+        "created_at":   wire_time(&n.created_at),
+        "updated_at":   wire_time(&n.updated_at),
+        "access_count": n.access_count,
+    });
+    if let Some(t) = &n.thread_id {
+        v["thread_id"] = json!(t);
+    }
+    if let Some(ev) = &n.emotional_valence {
+        v["emotional_valence"] = json!(ev);
+        v["emotional_intensity"] = json!(round2(n.emotional_intensity));
+    }
+    // Metadata carries provenance (concepts, spawn/federation stamps,
+    // rediscovered_count) — agent-meaningful, keep it.
+    if !n.metadata.is_null() {
+        v["metadata"] = n.metadata.clone();
+    }
+    v
+}
+
+fn wire_nodes(nodes: &[MemoryNode]) -> Value {
+    Value::Array(nodes.iter().map(wire_node).collect())
+}
+
+fn round2(x: f32) -> f64 {
+    (f64::from(x) * 100.0).round() / 100.0
+}
+
+/// Recall scores at 3 decimals — a similarity printed to 16 digits is noise.
+fn round3(x: f32) -> f64 {
+    (f64::from(x) * 1000.0).round() / 1000.0
+}
+
+fn wire_time(t: &chrono::DateTime<chrono::Utc>) -> String {
+    t.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Tool routing
 // ---------------------------------------------------------------------------
 
@@ -226,7 +287,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let salience = args["salience"].as_f64().map(|f| f as f32);
             let scope    = agent_scope(args);
             let node = brain.remember(content, memory_type, tags, salience, scope).await?;
-            Ok(serde_json::to_value(&node)?)
+            Ok(wire_node(&node))
         }
 
         "recall" => {
@@ -245,7 +306,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             };
             let results = brain.recall(query, k, scope).await?;
             let out: Vec<Value> = results.into_iter()
-                .map(|(node, score)| json!({ "memory": node, "score": score }))
+                .map(|(node, score)| json!({ "memory": wire_node(&node), "score": round3(score) }))
                 .collect();
             Ok(json!(out))
         }
@@ -272,7 +333,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let node  = brain.storage.read().await
                 .sqlite.get_memory(&MemoryId(id.to_string()), &scope).await?;
             match node {
-                Some(n) => Ok(serde_json::to_value(&n)?),
+                Some(n) => Ok(wire_node(&n)),
                 None    => Err(anyhow::anyhow!("memory not found: {id}")),
             }
         }
@@ -334,7 +395,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             if content_changed {
                 storage.vector.embed_and_store(&node.id, &node.content).await?;
             }
-            Ok(serde_json::to_value(&node)?)
+            Ok(wire_node(&node))
         }
 
         // Aliases — same underlying logic, different param names
@@ -355,7 +416,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 let salience = args["salience"].as_f64().map(|f| f as f32);
                 let scope = agent_scope(args);
                 let node = brain.remember(content, memory_type, tags, salience, scope).await?;
-                Ok(serde_json::to_value(&node)?)
+                Ok(wire_node(&node))
             } else {
                 let query = args["query"].as_str()
                     .ok_or_else(|| anyhow::anyhow!("query is required"))?;
@@ -363,7 +424,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 let scope = agent_scope(args);
                 let results = brain.recall(query, k, scope).await?;
                 let out: Vec<Value> = results.into_iter()
-                    .map(|(node, score)| json!({ "memory": node, "score": score }))
+                    .map(|(node, score)| json!({ "memory": wire_node(&node), "score": round3(score) }))
                     .collect();
                 Ok(json!(out))
             }
@@ -379,7 +440,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 .neighbors(&MemoryId(id.to_string()))
                 .into_iter().cloned().collect();
             let nodes = storage.sqlite.get_memories_by_ids(&neighbor_ids, &scope).await?;
-            Ok(serde_json::to_value(&nodes)?)
+            Ok(wire_nodes(&nodes))
         }
 
         "find_path" => {
@@ -411,7 +472,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             );
             let ids: Vec<MemoryId> = common;
             let nodes = storage.sqlite.get_memories_by_ids(&ids, &scope).await?;
-            Ok(serde_json::to_value(&nodes)?)
+            Ok(wire_nodes(&nodes))
         }
 
         "cortex_stats" => {
@@ -453,7 +514,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 args["salience"].as_f64().map(|f| f as f32),
                 scope,
             ).await?;
-            Ok(serde_json::to_value(&node)?)
+            Ok(wire_node(&node))
         }
 
         "session_recall" => {
@@ -474,7 +535,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 .filter(|(n, _)| type_filter.is_none_or(|st|
                     n.tags.iter().any(|t| t == &format!("session_type:{st}"))))
                 .take(k)
-                .map(|(node, score)| json!({ "memory": node, "score": score }))
+                .map(|(node, score)| json!({ "memory": wire_node(&node), "score": round3(score) }))
                 .collect();
             Ok(json!(out))
         }
@@ -488,7 +549,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let limit = args["limit"].as_u64().unwrap_or(50) as usize;
             let nodes = brain.storage.read().await
                 .sqlite.list_deleted_memories(&scope, limit).await?;
-            Ok(serde_json::to_value(&nodes)?)
+            Ok(wire_nodes(&nodes))
         }
 
         "restore_memory" => {
@@ -538,6 +599,8 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                     limit,
                     ..Default::default()
                 }).await?;
+            // Deliberately RAW (not wire_node): export is a backup — a re-import
+            // must not lose access_times/strength/precision.
             Ok(serde_json::to_value(&nodes)?)
         }
 
@@ -599,7 +662,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 node.thread_id = Some(tid);
                 brain.storage.read().await.sqlite.update_memory(&node).await?;
             }
-            Ok(serde_json::to_value(&node)?)
+            Ok(wire_node(&node))
         }
 
         "check_inbox" => {
@@ -608,7 +671,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let limit = args["limit"].as_u64().unwrap_or(20) as usize;
             let nodes = brain.storage.read().await
                 .sqlite.check_inbox(agent_id, &VisibilityScope::global(), limit).await?;
-            Ok(serde_json::to_value(&nodes)?)
+            Ok(wire_nodes(&nodes))
         }
 
         // ------------------------------------------------------------------ //
@@ -627,7 +690,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let scope = agent_scope(args);
             let nodes = brain.storage.read().await
                 .sqlite.get_thread_memories(thread_id, &scope).await?;
-            Ok(serde_json::to_value(&nodes)?)
+            Ok(wire_nodes(&nodes))
         }
 
         "prune_thread" => {
@@ -847,7 +910,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let storage = brain.storage.read().await;
             let ids     = storage.sqlite.get_episode_memory_ids(episode_id).await?;
             let nodes   = storage.sqlite.get_memories_by_ids(&ids, &scope).await?;
-            Ok(serde_json::to_value(&nodes)?)
+            Ok(wire_nodes(&nodes))
         }
 
         // ------------------------------------------------------------------ //
@@ -900,7 +963,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let filtered: Vec<_> = nodes.into_iter()
                 .filter(|n| n.salience >= min_salience)
                 .collect();
-            Ok(json!(filtered))
+            Ok(wire_nodes(&filtered))
         }
 
         "resolve_intention" => {
@@ -968,7 +1031,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 // they're rollback records, not skills. (APEX caught this via a goal.)
                 .filter(|n| !n.tags.iter().any(|t| t == "undo_snapshot"))
                 .collect();
-            Ok(json!(filtered))
+            Ok(wire_nodes(&filtered))
         }
 
         "find_relevant_procedures" => {
@@ -1052,7 +1115,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             // An empty result must be readable (C6): "nothing exists" and "the
             // matcher missed" are different situations — say which is plausible.
             let mut out = json!({
-                "procedures": matched,
+                "procedures": wire_nodes(&matched),
                 "matched": { "exact": exact_hits, "semantic": semantic_hits },
                 "procedures_in_scope": in_scope,
             });
@@ -1154,7 +1217,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             };
             let nodes = brain.storage.read().await.sqlite
                 .list_memories_scoped(&scope, &filter).await?;
-            Ok(json!(nodes))
+            Ok(wire_nodes(&nodes))
         }
 
         "find_matching_schemas" => {
@@ -1181,7 +1244,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 })
                 .take(max_results)
                 .collect();
-            Ok(json!(filtered))
+            Ok(wire_nodes(&filtered))
         }
 
         "get_schema_sources" => {
@@ -2190,6 +2253,55 @@ mod tests {
         });
         let resp2 = dispatch_tool(next, brain).await;
         assert!(resp2["error"].is_null(), "post-panic call should succeed: {}", resp2["error"]);
+    }
+
+    #[tokio::test]
+    async fn wire_view_drops_bookkeeping_and_rounds() {
+        // The wire-view contract: memory-returning tools must NOT serde-dump
+        // the storage model into the context window. access_times (ns
+        // timestamps) and FSRS strength internals stay out; salience is 2dp;
+        // timestamps are second-precision. export_memories stays raw.
+        let (brain, _dir) = make_brain().await;
+        let store = json!({
+            "jsonrpc":"2.0","id":50,"method":"tools/call",
+            "params":{"name":"remember","arguments":{
+                "content":"wire view calibration memory — long enough to pass the thalamus gate",
+                "salience": 0.8500000238418579, "tags":["wire-test"]
+            }}
+        });
+        let resp = dispatch_tool(store, Arc::clone(&brain)).await;
+        assert!(resp["error"].is_null(), "remember failed: {}", resp["error"]);
+        let node: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+
+        assert!(node.get("access_times").is_none(), "access_times must not reach the wire");
+        assert!(node.get("strength").is_none(), "FSRS strength internals must not reach the wire");
+        assert_eq!(node["salience"], 0.85, "salience rounds to 2dp: {}", node["salience"]);
+        let ts = node["created_at"].as_str().unwrap();
+        assert!(!ts.contains('.'), "timestamps are second-precision: {ts}");
+        assert!(node["content"].as_str().unwrap().starts_with("wire view"), "content intact");
+
+        // recall hits carry the same view, with a rounded score.
+        let recall = json!({
+            "jsonrpc":"2.0","id":51,"method":"tools/call",
+            "params":{"name":"recall","arguments":{"query":"wire view calibration"}}
+        });
+        let resp = dispatch_tool(recall, Arc::clone(&brain)).await;
+        let hits: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(!hits.as_array().unwrap().is_empty(), "recall finds the memory");
+        assert!(hits[0]["memory"].get("access_times").is_none(), "hit memories use the wire view");
+
+        // export_memories is the deliberate exception — full fidelity.
+        let export = json!({
+            "jsonrpc":"2.0","id":52,"method":"tools/call",
+            "params":{"name":"export_memories","arguments":{}}
+        });
+        let resp = dispatch_tool(export, Arc::clone(&brain)).await;
+        let dump: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(dump[0].get("access_times").is_some(), "export keeps the raw storage model");
+        assert!(dump[0].get("strength").is_some(), "export keeps FSRS state");
     }
 
     #[tokio::test]
