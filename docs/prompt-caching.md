@@ -78,6 +78,7 @@ the prefix cache. Conversation caching, TTL tuning, and tokenomics accounting ar
 | Gate it (first turn + idle gap) | `turn.rs` — `TurnEngine::should_inject_ambient_at()` |
 | Live config (enabled / cache_conversation / ttl), shared `Arc<RwLock>` | `agentd/crates/agent/src/cache.rs` — `CacheConfig`; env `AGENTD_CACHE*`; live via `GET`/`POST /api/cache` |
 | Tokenomics (hit-rate, banked tokens, cost estimate) | `agentd/crates/agent/src/usage.rs`; `GET /api/usage`; surfaced as the **CACHE BANK** card in the ⚡ Inference UI |
+| History trim with hysteresis (fires at 1.2× budget, cuts to 0.75× — a trim rewrites the window front, so steady-state sessions must not trim per message) | `agentd/crates/core/src/history.rs` — `trim_history()` |
 | OpenAI variant (auto-prefix, no markers) | `agentd/crates/agent/src/oai.rs` — `build_body()` |
 
 **The contract is unit-tested, and the test names read as the spec** — lift these with the code
@@ -97,9 +98,14 @@ And in `turn.rs`: `inject_ambient_appends_clock_to_last_user_turn`,
 
 ## Provider notes
 
-- **Anthropic** — explicit `cache_control` blocks. TTL is 5 min by default (write premium 1.25×) or
-  1 hour (`AGENTD_CACHE_TTL=1h`, write premium 2×, survives >5-min human pauses without re-writing
-  the whole prefix). ≤ 4 breakpoints per request.
+- **Anthropic** — explicit `cache_control` blocks. Two TTLs: 5 min (write premium 1.25×) and 1 hour
+  (write premium 2×). **ApexOS defaults to 1h** (`AGENTD_CACHE_TTL`): the 5-minute entry expires in
+  every human pause, sensor-alert gap, and wakeup interval, re-writing the whole prefix at premium
+  each time — field-measured (2026-07-25) as near-zero cache reads on human-paced sessions. Pick 5m
+  only for pure burst loops. Two field caveats: a just-written large entry (100k+ tokens) can take
+  tens of seconds to become readable, so the first request after a cold write may re-write once more;
+  and the TTL clock refreshes on every read, so an active session never expires mid-conversation.
+  ≤ 4 breakpoints per request.
 - **OpenAI / Ollama** — automatic prefix caching, no markers to set. The *same* stable-prefix
   discipline is exactly what triggers it, so everything above still applies; you just don't place
   breakpoints by hand.

@@ -13,10 +13,14 @@
 //! API key) so it can be retuned without a restart. OpenAI/Ollama auto-cache by prefix,
 //! so this config is a no-op there (they still benefit from the stable-prefix discipline).
 
-/// Cache-entry lifetime. 5-minute is the default (write premium 1.25×); 1-hour (write
-/// premium 2×) survives human pauses mid-session — on a giant transcript that avoids
-/// re-writing the whole prefix on resume, so it's the more economical choice for gappy
-/// interactive sessions even though each write costs more.
+/// Cache-entry lifetime. 1-hour (write premium 2×) is the default: every ApexOS mode
+/// is gappy — kiosk chat pauses, sensor alerts and scheduled wakeups minutes apart —
+/// and a 5-minute entry (write premium 1.25×) expires in every such gap, re-writing
+/// the whole prefix at full price + premium per pause. Field-measured on apex1/apex-3
+/// (2026-07-25): with 5m, a human-paced session read 0 from cache on nearly every
+/// exchange and re-wrote ~300k tokens each time. One 2× write per cold start beats
+/// 1.25× × N per session whenever anything resumes inside the hour, which is always.
+/// 5m remains available (`AGENTD_CACHE_TTL=5m`) for pure burst workloads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheTtl {
     FiveMin,
@@ -57,7 +61,7 @@ pub struct CacheConfig {
 
 impl Default for CacheConfig {
     fn default() -> Self {
-        Self { enabled: true, cache_conversation: true, ttl: CacheTtl::FiveMin }
+        Self { enabled: true, cache_conversation: true, ttl: CacheTtl::OneHour }
     }
 }
 
@@ -69,7 +73,8 @@ impl CacheConfig {
     /// Read defaults from the environment:
     /// - `AGENTD_CACHE=0|false|off|no` → disable caching entirely
     /// - `AGENTD_CACHE_CONVERSATION=0|false|off|no` → cache only the system+tools prefix
-    /// - `AGENTD_CACHE_TTL=1h` (or `1hr`/`hour`/`3600`) → 1-hour TTL; anything else → 5m
+    /// - `AGENTD_CACHE_TTL=1h` (or `1hr`/`hour`/`3600`) → 1-hour TTL (the default when
+    ///   unset); any other set value (e.g. `5m`) → 5-minute TTL
     pub fn from_env() -> Self {
         let mut c = Self::default();
         if let Ok(v) = std::env::var("AGENTD_CACHE") {
@@ -113,10 +118,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_on_conversation_5m() {
+    fn default_is_on_conversation_1h() {
         let c = CacheConfig::default();
         assert!(c.enabled && c.cache_conversation);
-        assert_eq!(c.ttl, CacheTtl::FiveMin);
+        assert_eq!(c.ttl, CacheTtl::OneHour, "gappy-workload default — see CacheTtl docs");
     }
 
     #[test]
@@ -129,7 +134,7 @@ mod tests {
 
     #[test]
     fn summary_reads_clearly() {
-        assert_eq!(CacheConfig::default().summary(), "on · conversation=yes · ttl=5m");
+        assert_eq!(CacheConfig::default().summary(), "on · conversation=yes · ttl=1h");
         assert_eq!(
             CacheConfig { enabled: false, ..Default::default() }.summary(),
             "off"
