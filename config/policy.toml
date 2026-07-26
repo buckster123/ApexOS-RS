@@ -157,6 +157,16 @@ mode = "suggest"
 "web_save"    = "allow"
 "web_forget"  = "allow"
 "web_distill" = "allow"
+# Browsing verbs (Occipital phases 12-16). web_dom is a pure read (the element
+# registry of a page). web_click follows a link (a polite GET) — but `form:N`
+# also submits that form, so it is not purely read-only. web_submit is the only
+# verb that can POST to a third party: deliberate-only, never auto-retried,
+# robots-gated, same per-domain budget as any read — still, writing to someone
+# else's site is the operator's call, so it defaults to "ask". Set it to
+# "allow" for unattended multi-step browsing (search -> results -> refine).
+"web_dom"     = "allow"
+"web_click"   = "allow"
+"web_submit"  = "ask"
 
 # Cerebro plugin tools --------------------------------------------------------
 "remember"     = "allow"

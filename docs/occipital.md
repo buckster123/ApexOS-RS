@@ -6,8 +6,9 @@ reader-mode · read-through cache · semantic recall · decay) behind MCP/CLI/RE
 member of this workspace — it ships and versions independently, exactly like Cerebro did before the
 distro absorbed it. ApexOS-RS consumes it two ways, both **additive** (no agentd changes):
 
-1. **As an MCP plugin** — register `occipital-mcp` so APEX gains six tools:
-   `web_search` · `web_fetch` · `web_recall` · `web_save` · `web_forget` · `web_distill`.
+1. **As an MCP plugin** — register `occipital-mcp` so APEX gains nine tools:
+   `web_search` · `web_fetch` · `web_recall` · `web_save` · `web_forget` · `web_distill`
+   · `web_dom` · `web_click` · `web_submit` (the phase 12–16 browsing verbs).
 2. **As a follow-along reader window** — ui-slint renders each `web_fetch`/`web_search` result live,
    so a human watches the agent read (see *Follow-along window* below).
 
@@ -71,12 +72,20 @@ Env (in the plugin's `[plugin.env]`):
 | `OCCIPITAL_KEYS_FILE` | `0600` provider-key store — optional Brave/Tavily/Bing keys |
 | `OCCIPITAL_EMBED_MODEL` | Micro+ only — semantic recall model (needs `--features embeddings`) |
 | `OCCIPITAL_SEARXNG_URL` | self-hosted SearXNG endpoint (otherwise DuckDuckGo HTML) |
+| `OCCIPITAL_COOKIES` | opt-in persistent cookie jar (phase 15) — one jar, one identity, honest UA |
+| `OCCIPITAL_HEADERS_FILE` | per-domain extra-header map (phase 15); UA stays honest |
+| `OCCIPITAL_PROXY` | explicit egress proxy — topology, not evasion (phase 15) |
+| `OCCIPITAL_ROBOTS_TTL_SECS` | robots.txt cache TTL (phase 16) |
+| `OCCIPITAL_LOG_MAX` | request-trail ring size — `occipital log` / `GET /log` (phase 16) |
 
 Full env list: Occipital's `docs/build-roadmap.md`. Without any key, search uses DuckDuckGo HTML.
 
 ### Policy rules
 
-`config/policy.toml` seeds explicit `allow` rules for all six `web_*` tools — without them a
+`config/policy.toml` seeds explicit rules for all nine `web_*` tools (`allow`, except
+`web_submit` = `ask` — the one verb that can POST to a third party; note `web_click` on a
+`form:N` element also submits, so tighten both to `ask` for a hard no-writes stance) —
+without them a
 suggest-mode node gates every web read behind the `unknown → ask` fallthrough (the standing
 policy gotcha). **Already-deployed nodes gain them on the next `apexos-update`**: install.sh
 additively syncs any `[rules]` key present in the shipped config but missing live into
@@ -115,9 +124,9 @@ What it changes for the agent:
   instead of a raw-body snippet — recall serves knowledge, not HTML dregs. Distilled
   tags/entities/key-points are FTS-indexed, so **Nano keyword recall finds pages by curated
   terms too** (no embeddings needed).
-- The `kind:"distill"` tool payload is *not* rendered by the reader window yet (its
-  `occipital_payload()` matches `page|results|recall` only, so it passes through harmlessly);
-  a distill card is a follow-on UI slice.
+- The `kind:"distill"` tool payload is the one kind *not* rendered by the reader window yet
+  (its `occipital_payload()` whitelist skips it, so it passes through harmlessly); a distill
+  card is a follow-on UI slice (`BACKLOG.md`).
 
 **Distillation is explicit-only** — nothing spends tokens behind the operator's back;
 auto-distill-on-ingest (budget-guarded), semantic dedup/relate, digests, and the sqlite-vec
@@ -141,9 +150,12 @@ mirroring how `turn.rs` recovers the vision sentinel). It then switches on `kind
 
 | `kind` | Rendered as |
 |--------|-------------|
-| `page` | reader-mode **markdown parsed natively** (Slint has no webview) into headings / paragraphs / bullets / blockquote / code / rule, plus the page's link list as clickable rows |
+| `page` | reader-mode **markdown parsed natively** (Slint has no webview) into headings / paragraphs / bullets / blockquote / code / rule — plus inline `[form#N → …]` annotations styled as ⌨ affordance blocks — and the page's link list as clickable rows. `salvaged` pages say so in the meta line; a `js_required` page renders an honest "needs JavaScript" state instead of a blank fetch |
 | `results` | ranked result rows (`#1…`), each with title · URL · snippet |
 | `recall` | memory-hit rows with a cosine-score chip (`0.82`) or `kw` for FTS5 keyword hits |
+| `dom` | the element registry (`web_dom`): links with their click ordinals (`#N`) + forms as non-clickable rows (method+action, visible fields, submit label) — what APEX can act on |
+| `click` | the landed page (same layout as `page`); the meta line shows the hand: `clicked link:3 → url · HTTP 200` |
+| `submit` | the response page; meta shows the submission: `form#1 GET action — q=… · HTTP 200`. Freshness badge reads `cached` (a POST result is never cached) |
 
 Each row is clickable (the steer). A `● LIVE` / `● CACHED` badge (from `from_cache`) shows
 freshness; a breadcrumb **trail** tracks the agent's path this session. The body is a std-widgets
