@@ -257,6 +257,24 @@ sense ✗→✓. The one evolution that *can't* auto-apply.
 · agentd + [`config/parts/`](config/parts/) · explained in [`docs/edk.md`](docs/edk.md)
 · **Lift:** the embodiment-gradient idea + the inventory schema.
 
+**The colony field loop — dev agent ships, edge agent breaks, repeat until it shines** ✅
+A three-party development cycle: a dev-side agent ships a capability via PR; a *live node's* agent
+field-tests it against the real world the same day and files a written report into its own workspace
+(repro → cause verified against source → proposed fix with the design decision named); the dev agent
+verifies the report against the code — confirming or *re-diagnosing* — ships the fix pass with the
+reporter's riding tests, and answers with a letter; the node re-verifies, adversarially (stale-cache
+paths, manufactured pathological states — "you cannot verify a self-heal without a wound": when an
+earlier fix cured the natural population, wound the store precisely, adversarial details included,
+and watch the heal). The human stays in the loop as reviewer/merger of every slice. Field-proven
+2026-07-26: eight rounds in one day took the Occipital browsing verbs from first-shipped to
+field-hardened (11 PRs, none bounced). Two habits make it work: **neither half grades its own
+homework**, and **severities are never inflated** — the reporter twice argued against its own prior
+(a rediagnosis, and a feature request withdrawn on its own tally) when evidence said so.
+· the worked example: Occipital-RS `docs/agent-browsing.md` (field-pass sections) + the
+  letter exchange in apex1's workspace (`apex1-to-forge-*` / `forge-to-apex1-*`, 2026-07-26)
+· **Lift:** pure process, zero code — needs an agent with tools against the live capability, a
+  writable shared drop-box for reports, and a merge gate a human holds.
+
 ---
 
 ## D. Interface

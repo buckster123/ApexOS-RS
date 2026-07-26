@@ -157,6 +157,18 @@ mirroring how `turn.rs` recovers the vision sentinel). It then switches on `kind
 | `click` | the landed page (same layout as `page`); the meta line shows the hand: `clicked link:3 → url · HTTP 200` |
 | `submit` | the response page; meta shows the submission: `form#1 GET action — q=… · HTTP 200`. Freshness badge reads `cached` (a POST result is never cached) |
 
+**Field-pass additions (2026-07-26, Occipital-RS PRs #11–#17):** the payloads carry more than
+the table shows — all additive, and the reader ignores what it doesn't render. `links` is
+capped at 120 on the wire with `links_total` the true count (`web_dom` windows via
+`links_from`/`limit`, ordinals stay full-list); a POST result carries a `handle`
+(`result:<id>`, ~15 min working memory) usable as the next verb's `url`, and handle-sourced
+interactions echo `from_handle`; forms carry `submittable` (a dead GET form — no named
+fields — is refused by `web_submit`); pages may carry `markdown_alternate` (an authored-`.md`
+offer, reported never auto-followed) and `source_format` (`"markdown"`/`"text"` = the body
+passed through verbatim — `.md`/`llms.txt` responses skip the HTML extractor entirely, so
+their link registries survive and `web_click` traverses them). Full contract + the field-loop
+story: Occipital-RS `docs/agent-browsing.md`.
+
 Each row is clickable (the steer). A `● LIVE` / `● CACHED` badge (from `from_cache`) shows
 freshness; a breadcrumb **trail** tracks the agent's path this session. The body is a std-widgets
 `ScrollView` (the linuxkms no-wheel-scroll gotcha — a bare Flickable is unscrollable on the kiosk).
