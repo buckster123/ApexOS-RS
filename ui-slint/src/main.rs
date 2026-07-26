@@ -1081,8 +1081,8 @@ fn seed_windows_when_area_live(
     }
     // Dev: APEX_OCCIPITAL_DEMO=1 opens the Occipital reader at launch with a
     // sample page so the follow-along window can be verified without agentd
-    // (snapshot server). =results|recall previews those modes. (Its
-    // auto-reveal places a window too — same wait applies.)
+    // (snapshot server). =results|recall|dom|click|submit previews those
+    // modes. (Its auto-reveal places a window too — same wait applies.)
     if let Some(demo) = std::env::var_os("APEX_OCCIPITAL_DEMO") {
         apply_occipital_render(&ui, occipital_demo_render(&demo.to_string_lossy()));
     }
@@ -1199,7 +1199,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
 /// Plain (Send) render plan built off the Slint thread; the invoke closure turns
 /// the tuples into ReaderBlock/ReaderLink on the Slint thread.
 struct OccipitalRender {
-    mode:        String,   // page|results|recall
+    mode:        String,   // page|results|recall|dom|click|submit
     title:       String,
     url:         String,
     meta:        String,
@@ -1210,14 +1210,19 @@ struct OccipitalRender {
     crumb_url:   String,
 }
 
-/// Recover an Occipital payload (an object with `kind` ∈ {page,results,recall})
-/// from a tool result's content, whatever the transport shape: a bare object, a
-/// JSON string, or an MCP text-content array.
+/// Recover an Occipital payload (an object with a known reader `kind`) from a
+/// tool result's content, whatever the transport shape: a bare object, a JSON
+/// string, or an MCP text-content array.
+///
+/// ⚠ Two-places trap: this whitelist and the `build_occipital_render` match
+/// arms must move TOGETHER — a kind admitted here without a real arm falls to
+/// the honest `_` fallback (visible), but a kind with an arm that isn't listed
+/// here is silently dropped before rendering ever runs.
 fn occipital_payload(content: &Value) -> Option<Value> {
     fn is_occipital(v: &Value) -> bool {
         matches!(
             v.get("kind").and_then(|k| k.as_str()),
-            Some("page" | "results" | "recall")
+            Some("page" | "results" | "recall" | "dom" | "click" | "submit")
         )
     }
     if is_occipital(content) {
@@ -1391,12 +1396,71 @@ fn cap_crumb(s: &str) -> String {
     out
 }
 
+fn json_flag(p: &Value, key: &str) -> bool {
+    p.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
+}
+
+/// (kind, text, depth) — a parsed reader block before Slint conversion.
+type BlockPlan = (String, String, i32);
+/// (label, url, detail, badge) — a link row before Slint conversion.
+type LinkPlan = (String, String, String, String);
+
+/// Markdown blocks + link rows of a page-ish payload — `page`, `click` and
+/// `submit` all carry a full page body, so they share this. Occipital inlines
+/// each form as a prose annotation (`[form#1 → GET /search — search "q" ·
+/// submit "Go"]`); re-kind those to "form" blocks so the view can style the
+/// interactive surface as an affordance instead of plain text. A JS-only page
+/// that yielded nothing gets an honest empty state rather than a blank fetch.
+fn page_blocks_links(p: &Value) -> (Vec<BlockPlan>, Vec<LinkPlan>) {
+    let markdown = json_str(p, "markdown");
+    let mut blocks = if markdown.is_empty() {
+        Vec::new()
+    } else {
+        parse_reader_markdown(&markdown)
+    };
+    for b in &mut blocks {
+        if b.0 == "p" && b.1.starts_with("[form#") && b.1.ends_with(']') {
+            b.0 = "form".into();
+            b.1 = b.1[1..b.1.len() - 1].to_string();
+        }
+    }
+    if blocks.is_empty() && json_flag(p, "js_required") {
+        blocks.push((
+            "quote".into(),
+            "This page needs JavaScript — nothing was recoverable from static HTML.".into(),
+            0,
+        ));
+    }
+    let links: Vec<(String, String, String, String)> = p
+        .get("links")
+        .and_then(|l| l.as_array())
+        .map(|arr| {
+            arr.iter()
+                .take(60)
+                .map(|l| {
+                    let u = json_str(l, "url");
+                    let t = json_str(l, "text");
+                    let label = if t.trim().is_empty() { u.clone() } else { t };
+                    (label, u, String::new(), String::new())
+                })
+                .filter(|(_, u, _, _)| !u.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    (blocks, links)
+}
+
 /// Build the (Send) render plan from a recovered Occipital payload.
 fn build_occipital_render(p: &Value) -> OccipitalRender {
     let kind = json_str(p, "kind");
-    let from_cache = p.get("from_cache").and_then(|b| b.as_bool());
+    // `submit` reports freshness as `cached` (a POST result is never cached, so
+    // `from_cache` would be a lie there); everything else uses `from_cache`.
+    let from_cache = match kind.as_str() {
+        "submit" => p.get("cached").and_then(|b| b.as_bool()),
+        _ => p.get("from_cache").and_then(|b| b.as_bool()),
+    };
     let badge = match (kind.as_str(), from_cache) {
-        ("recall", _) => String::new(),
+        ("recall" | "dom", _) => String::new(),
         (_, Some(true)) => "cache".into(),
         (_, Some(false)) => "live".into(),
         _ => String::new(),
@@ -1409,14 +1473,98 @@ fn build_occipital_render(p: &Value) -> OccipitalRender {
                 let t = json_str(p, "title");
                 if t.is_empty() { url.clone() } else { t }
             };
-            let markdown = json_str(p, "markdown");
             let saved = json_str(p, "status") == "saved";
-            let blocks = if markdown.is_empty() {
-                Vec::new()
+            let (blocks, links) = page_blocks_links(p);
+            let mut meta = if saved {
+                "📌 saved to memory".into()
             } else {
-                parse_reader_markdown(&markdown)
+                format!("{} link{} on page", links.len(), if links.len() == 1 { "" } else { "s" })
             };
-            let links: Vec<(String, String, String, String)> = p
+            if json_flag(p, "salvaged") {
+                meta.push_str(" · salvaged from embedded data");
+            }
+            let crumb = cap_crumb(&title);
+            OccipitalRender {
+                mode: "page".into(), title, url, meta, badge, blocks, links,
+                crumb_label: crumb, crumb_url: json_str(p, "url"),
+            }
+        }
+
+        // An interaction result is a page payload plus what the agent DID —
+        // same reader layout, the meta line shows the hands.
+        "click" => {
+            let url = json_str(p, "url");
+            let title = {
+                let t = json_str(p, "title");
+                if t.is_empty() { url.clone() } else { t }
+            };
+            let (blocks, links) = page_blocks_links(p);
+            let mut meta = format!(
+                "clicked {} → {}",
+                json_str(p, "element"),
+                json_str(p, "target_url")
+            );
+            if let Some(s) = p.get("status").and_then(|x| x.as_u64()) {
+                meta.push_str(&format!(" · HTTP {s}"));
+            }
+            if json_flag(p, "salvaged") {
+                meta.push_str(" · salvaged");
+            }
+            let crumb = cap_crumb(&format!("click: {title}"));
+            OccipitalRender {
+                mode: "click".into(), title, url, meta, badge, blocks, links,
+                crumb_label: crumb, crumb_url: json_str(p, "url"),
+            }
+        }
+
+        "submit" => {
+            let url = json_str(p, "url");
+            let title = {
+                let t = json_str(p, "title");
+                if t.is_empty() { url.clone() } else { t }
+            };
+            let (blocks, links) = page_blocks_links(p);
+            let form = p.get("form").and_then(|x| x.as_u64()).unwrap_or(0);
+            let sent: Vec<String> = p
+                .get("sent")
+                .and_then(|s| s.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .take(3)
+                        .map(|f| format!("{}={}", json_str(f, "name"), json_str(f, "value")))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut meta = format!(
+                "form#{form} {} {}",
+                json_str(p, "method").to_uppercase(),
+                json_str(p, "action")
+            );
+            if !sent.is_empty() {
+                meta.push_str(&format!(" — {}", sent.join(" · ")));
+            }
+            if let Some(s) = p.get("status").and_then(|x| x.as_u64()) {
+                meta.push_str(&format!(" · HTTP {s}"));
+            }
+            if json_flag(p, "salvaged") {
+                meta.push_str(" · salvaged");
+            }
+            let crumb = cap_crumb(&format!("form: {title}"));
+            OccipitalRender {
+                mode: "submit".into(), title, url, meta, badge, blocks, links,
+                crumb_label: crumb, crumb_url: json_str(p, "url"),
+            }
+        }
+
+        // The element registry: links (with their click ordinals) + forms as
+        // rows. Agent-facing data, human-legible list — no page body.
+        "dom" => {
+            let url = json_str(p, "url");
+            let title = {
+                let t = json_str(p, "title");
+                if t.is_empty() { url.clone() } else { t }
+            };
+            let mut links: Vec<(String, String, String, String)> = p
                 .get("links")
                 .and_then(|l| l.as_array())
                 .map(|arr| {
@@ -1426,20 +1574,65 @@ fn build_occipital_render(p: &Value) -> OccipitalRender {
                             let u = json_str(l, "url");
                             let t = json_str(l, "text");
                             let label = if t.trim().is_empty() { u.clone() } else { t };
-                            (label, u, String::new(), String::new())
+                            let idx = l.get("idx").and_then(|x| x.as_u64()).unwrap_or(0);
+                            (label, u, String::new(), format!("#{idx}"))
                         })
                         .filter(|(_, u, _, _)| !u.is_empty())
                         .collect()
                 })
                 .unwrap_or_default();
-            let meta = if saved {
-                "📌 saved to memory".into()
-            } else {
-                format!("{} link{} on page", links.len(), if links.len() == 1 { "" } else { "s" })
-            };
-            let crumb = cap_crumb(&title);
+            let n_links = links.len();
+            let forms = p
+                .get("forms")
+                .and_then(|f| f.as_array())
+                .cloned()
+                .unwrap_or_default();
+            for f in forms.iter().take(20) {
+                let idx = f.get("idx").and_then(|x| x.as_u64()).unwrap_or(0);
+                let fields: Vec<String> = f
+                    .get("fields")
+                    .and_then(|x| x.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter(|fd| json_str(fd, "kind") != "hidden")
+                            .take(4)
+                            .map(|fd| format!("{} \"{}\"", json_str(fd, "kind"), json_str(fd, "name")))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut detail = fields.join(" · ");
+                if let Some(s) = f.get("submit").and_then(|x| x.as_str()) {
+                    if !detail.is_empty() {
+                        detail.push_str(" · ");
+                    }
+                    detail.push_str(&format!("submit \"{s}\""));
+                }
+                // url stays empty — a form row is an affordance to read, not a
+                // link to steer to (LinkRow ignores clicks on an empty url).
+                links.push((
+                    format!("form#{idx} → {} {}", json_str(f, "method").to_uppercase(), json_str(f, "action")),
+                    String::new(),
+                    detail,
+                    "form".into(),
+                ));
+            }
+            let n_forms = forms.len();
+            let mut meta = format!(
+                "{n_links} link{} · {n_forms} form{}",
+                if n_links == 1 { "" } else { "s" },
+                if n_forms == 1 { "" } else { "s" },
+            );
+            if json_flag(p, "snapshot") {
+                meta.push_str(" · snapshot held");
+            }
+            if json_flag(p, "js_required") {
+                meta.push_str(" · needs JS");
+            } else if json_flag(p, "salvaged") {
+                meta.push_str(" · salvaged");
+            }
+            let crumb = cap_crumb(&format!("dom: {title}"));
             OccipitalRender {
-                mode: "page".into(), title, url, meta, badge, blocks, links,
+                mode: "dom".into(), title, url, meta, badge, blocks: Vec::new(), links,
                 crumb_label: crumb, crumb_url: json_str(p, "url"),
             }
         }
@@ -1479,8 +1672,7 @@ fn build_occipital_render(p: &Value) -> OccipitalRender {
                 crumb_url: String::new(),
             }
         }
-        _ => {
-            // recall
+        "recall" => {
             let query = json_str(p, "query");
             let links: Vec<(String, String, String, String)> = p
                 .get("hits")
@@ -1515,6 +1707,22 @@ fn build_occipital_render(p: &Value) -> OccipitalRender {
                 crumb_url: String::new(),
             }
         }
+
+        // Unreachable while the `occipital_payload` whitelist and these arms
+        // stay in sync. If they drift, say so — the old `_ => recall` wildcard
+        // silently rendered every new kind as "0 memory hits" (the two-places
+        // trap), which is exactly the failure this arm exists to make visible.
+        other => OccipitalRender {
+            mode: "page".into(),
+            title: format!("unrenderable payload: kind \"{other}\""),
+            url: String::new(),
+            meta: "the reader has no renderer for this kind — the gate and the render arms have drifted".into(),
+            badge: String::new(),
+            blocks: Vec::new(),
+            links: Vec::new(),
+            crumb_label: cap_crumb(other),
+            crumb_url: String::new(),
+        },
     }
 }
 
@@ -1585,10 +1793,51 @@ fn apply_occipital_render(ui: &AppWindow, r: OccipitalRender) {
     });
 }
 
-/// Sample render for `APEX_OCCIPITAL_DEMO` (page|results|recall) — lets the reader
-/// window be verified via the snapshot server with no agentd / no network.
+/// Sample render for `APEX_OCCIPITAL_DEMO` (page|results|recall|dom|click|submit)
+/// — lets the reader window be verified via the snapshot server with no agentd /
+/// no network. The samples mirror the real Occipital payload shapes.
 fn occipital_demo_render(mode: &str) -> OccipitalRender {
     let payload = match mode.trim() {
+        "dom" => serde_json::json!({
+            "kind": "dom", "url": "https://www.raspberrypi.com/products/raspberry-pi-5/",
+            "title": "Raspberry Pi 5", "from_cache": true, "snapshot": true,
+            "salvaged": false, "js_required": false, "content_hash": "abc123",
+            "links": [
+                {"idx": 1, "text": "official 27W PD supply", "url": "https://www.raspberrypi.com/products/27w-power-supply/"},
+                {"idx": 2, "text": "product page", "url": "https://www.raspberrypi.com/products/raspberry-pi-5/"}
+            ],
+            "forms": [
+                {"idx": 1, "action": "https://www.raspberrypi.com/search", "method": "get",
+                 "fields": [{"name": "q", "kind": "search", "label": "Search"}], "submit": "Go"}
+            ]
+        }),
+        "click" => serde_json::json!({
+            "kind": "click", "element": "link:1",
+            "source_url": "https://www.raspberrypi.com/products/raspberry-pi-5/",
+            "target_url": "https://www.raspberrypi.com/products/27w-power-supply/",
+            "url": "https://www.raspberrypi.com/products/27w-power-supply/",
+            "title": "27W USB-C Power Supply", "from_cache": false, "status": null,
+            "markdown": "# 27W USB-C Power Supply\n\nThe official Raspberry Pi 27W USB-C PD supply delivers **5V/5A** for full Pi 5 performance and peripheral power.\n\n[form#1 → GET https://www.raspberrypi.com/search — search \"q\" · submit \"Go\"]",
+            "links": [{"text": "Raspberry Pi 5", "url": "https://www.raspberrypi.com/products/raspberry-pi-5/"}],
+            "forms": [
+                {"idx": 1, "action": "https://www.raspberrypi.com/search", "method": "get",
+                 "fields": [{"name": "q", "kind": "search"}], "submit": "Go"}
+            ],
+            "salvaged": false, "js_required": false, "content_hash": "def456"
+        }),
+        "submit" => serde_json::json!({
+            "kind": "submit", "source_url": "https://www.raspberrypi.com/",
+            "form": 1, "action": "https://www.raspberrypi.com/search", "method": "get",
+            "sent": [{"name": "q", "value": "pi 5 power delivery"}], "status": null, "cached": false,
+            "url": "https://www.raspberrypi.com/search?q=pi+5+power+delivery",
+            "title": "Search — pi 5 power delivery",
+            "markdown": "## Results\n\n- [Raspberry Pi 5](https://www.raspberrypi.com/products/raspberry-pi-5/) — the board itself\n- [27W Power Supply](https://www.raspberrypi.com/products/27w-power-supply/) — the official 5V/5A PD supply",
+            "links": [
+                {"text": "Raspberry Pi 5", "url": "https://www.raspberrypi.com/products/raspberry-pi-5/"},
+                {"text": "27W Power Supply", "url": "https://www.raspberrypi.com/products/27w-power-supply/"}
+            ],
+            "forms": [], "salvaged": false, "js_required": false, "content_hash": "ghi789"
+        }),
         "results" => serde_json::json!({
             "kind": "results", "query": "raspberry pi 5 power delivery",
             "provider": "duckduckgo", "count": 3, "from_cache": false,
@@ -3265,6 +3514,81 @@ mod tests {
         assert_eq!(r.title, "X");
         assert!(r.blocks.iter().any(|(k, t, _)| k == "h1" && t == "X"));
         assert_eq!(r.links[0].0, "next");
+
+        // page: an inline form annotation re-kinds to a "form" affordance
+        // block (brackets stripped), and salvaged is honest in the meta.
+        let r = build_occipital_render(&json!({
+            "kind": "page", "url": "https://x", "title": "X", "from_cache": false,
+            "salvaged": true,
+            "markdown": "intro\n\n[form#1 → GET /search — search \"q\" · submit \"Go\"]"
+        }));
+        assert!(
+            r.blocks.iter().any(|(k, t, _)| k == "form" && t.starts_with("form#1")),
+            "form annotation should re-kind: {:?}", r.blocks
+        );
+        assert!(r.meta.contains("salvaged"), "meta: {}", r.meta);
+
+        // page: JS-only wall → honest empty state, not a blank fetch
+        let r = build_occipital_render(&json!({
+            "kind": "page", "url": "https://spa", "title": "SPA",
+            "from_cache": false, "js_required": true, "markdown": ""
+        }));
+        assert!(
+            r.blocks.iter().any(|(k, t, _)| k == "quote" && t.contains("JavaScript")),
+            "js_required should render an honest block: {:?}", r.blocks
+        );
+
+        // click → page layout + the interaction in the meta line
+        let r = build_occipital_render(&json!({
+            "kind": "click", "element": "link:3",
+            "source_url": "https://a", "target_url": "https://b",
+            "url": "https://b", "title": "B", "from_cache": false, "status": null,
+            "markdown": "# B\n\nlanded"
+        }));
+        assert_eq!(r.mode, "click");
+        assert_eq!(r.badge, "live");
+        assert!(r.meta.contains("clicked link:3 → https://b"), "meta: {}", r.meta);
+        assert!(r.blocks.iter().any(|(k, _, _)| k == "h1"));
+
+        // submit → form + sent fields in the meta; freshness comes from
+        // `cached` (NOT `from_cache` — a POST result is never cached)
+        let r = build_occipital_render(&json!({
+            "kind": "submit", "source_url": "https://a",
+            "form": 1, "action": "https://a/search", "method": "get",
+            "sent": [{"name": "q", "value": "rust"}], "status": 200, "cached": true,
+            "url": "https://a/search?q=rust", "title": "results", "markdown": "## r"
+        }));
+        assert_eq!(r.mode, "submit");
+        assert_eq!(r.badge, "cache");
+        assert!(r.meta.contains("form#1 GET https://a/search"), "meta: {}", r.meta);
+        assert!(r.meta.contains("q=rust"), "meta: {}", r.meta);
+        assert!(r.meta.contains("HTTP 200"), "meta: {}", r.meta);
+
+        // dom → ordinal-badged link rows + non-clickable form rows, no badge
+        let r = build_occipital_render(&json!({
+            "kind": "dom", "url": "https://x", "title": "X", "from_cache": true,
+            "snapshot": true, "links": [{"idx": 1, "text": "a", "url": "https://a"}],
+            "forms": [{"idx": 1, "action": "https://x/s", "method": "post",
+                       "fields": [{"name": "q", "kind": "text"},
+                                  {"name": "csrf", "kind": "hidden"}],
+                       "submit": "Send"}]
+        }));
+        assert_eq!(r.mode, "dom");
+        assert_eq!(r.badge, "", "dom is a registry — no freshness badge");
+        assert_eq!(r.links[0].3, "#1");
+        let form_row = &r.links[1];
+        assert_eq!(form_row.0, "form#1 → POST https://x/s");
+        assert_eq!(form_row.1, "", "form rows must not be steerable");
+        assert!(form_row.2.contains("text \"q\""), "detail: {}", form_row.2);
+        assert!(!form_row.2.contains("csrf"), "hidden fields stay out: {}", form_row.2);
+        assert!(form_row.2.contains("submit \"Send\""), "detail: {}", form_row.2);
+        assert!(r.meta.contains("1 link · 1 form"), "meta: {}", r.meta);
+        assert!(r.meta.contains("snapshot held"), "meta: {}", r.meta);
+
+        // an unknown kind that slips the gate renders honestly, never as recall
+        let r = build_occipital_render(&json!({"kind": "distill", "url": "https://x"}));
+        assert!(r.title.contains("distill"), "title: {}", r.title);
+        assert_ne!(r.mode, "recall", "the two-places trap: never silent-recall");
     }
 }
 

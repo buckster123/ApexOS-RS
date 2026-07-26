@@ -321,7 +321,7 @@ export struct SketchStroke {
 // One rendered block of a reader-mode page. Rust parses the page markdown into
 // a flat list; the view styles by `kind`.
 export struct ReaderBlock {
-    kind:  string,   // "h1"|"h2"|"h3"|"p"|"code"|"bullet"|"quote"|"rule"
+    kind:  string,   // "h1"|"h2"|"h3"|"p"|"code"|"bullet"|"quote"|"rule"|"form"
     text:  string,
     depth: int,      // bullet nesting (0-based)
 }

@@ -88,7 +88,7 @@ export component OccipitalView {
     preferred-height: 0px;
     min-height: 0px;
 
-    in property <string>        mode: "idle";   // idle|page|results|recall
+    in property <string>        mode: "idle";   // idle|page|results|recall|dom|click|submit
     in property <string>        title: "";
     in property <string>        url: "";
     in property <string>        meta: "";
@@ -242,8 +242,9 @@ export component OccipitalView {
                     }
                 }
 
-                // ── Page mode: rendered markdown ────────────────────────
-                if root.mode == "page": VerticalLayout {
+                // ── Page mode: rendered markdown (interaction results are
+                // page payloads too — the meta line carries what was done) ──
+                if root.mode == "page" || root.mode == "click" || root.mode == "submit": VerticalLayout {
                     spacing: 6px;
                     for b in root.blocks: VerticalLayout {
                         if b.kind == "h1": Text {
@@ -320,6 +321,30 @@ export component OccipitalView {
                             height: 1px;
                             background: Palette.border;
                         }
+                        // A form on the page — the surface APEX can type into.
+                        if b.kind == "form": Rectangle {
+                            background: Palette.surface;
+                            border-radius: Palette.radius;
+                            border-width: 1px;
+                            border-color: Palette.primary-dim;
+                            HorizontalLayout {
+                                padding: 10px;
+                                spacing: 10px;
+                                Text {
+                                    text: "⌨";
+                                    color: Palette.primary;
+                                    font-size: 12px * Personas.font-scale;
+                                }
+                                Text {
+                                    text: b.text;
+                                    color: Palette.secondary;
+                                    font-size: 11px * Personas.font-scale;
+                                    font-family: "monospace";
+                                    wrap: word-wrap;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                        }
                     }
 
                     // Links on the page = the interactive surface.
@@ -335,11 +360,13 @@ export component OccipitalView {
                     }
                 }
 
-                // ── Results / recall mode: clickable rows ───────────────
-                if root.mode == "results" || root.mode == "recall": VerticalLayout {
+                // ── Results / recall / dom mode: row lists ──────────────
+                if root.mode == "results" || root.mode == "recall" || root.mode == "dom": VerticalLayout {
                     spacing: 8px;
                     if root.links.length == 0: Text {
-                        text: root.mode == "recall" ? "No remembered pages match." : "No results.";
+                        text: root.mode == "recall" ? "No remembered pages match."
+                            : root.mode == "dom" ? "No interactive elements on this page."
+                            : "No results.";
                         color: Palette.text-dim;
                         font-size: 12px * Personas.font-scale;
                         horizontal-alignment: center;
