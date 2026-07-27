@@ -29,7 +29,7 @@ Only three methods are "first-class" on the cortex; everything else is reached t
 
 | Cortex method | Symbol | Pipeline |
 |---------------|--------|----------|
-| `remember(content, type?, tags?, salience?, scope)` | `CerebroCortex::remember` | thalamus gate → amygdala emotion → temporal concepts → SQLite insert → vector embed → graph node |
+| `remember(content, type?, tags?, salience?, scope)` | `CerebroCortex::remember` | thalamus gate → amygdala emotion → temporal concepts → SQLite insert → vector embed → graph node → auto-link |
 | `recall(query, k, scope)` | `CerebroCortex::recall` | vector/FTS5 candidates → spreading activation → bulk SQLite load → prefrontal rank → top-k |
 | `associate(src, tgt, link)` | `CerebroCortex::associate` | SQLite insert_link → mirror into graph |
 
@@ -285,6 +285,14 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 
 **Behavior notes & formerly-inert paths.** Grounded in `dispatch.rs` + symbiosis.md:
 
+- **`remember` auto-links at encoding** (Python step 5, restored — new memories are no
+  longer born isolated): shared *topical* tags → semantic links (bookkeeping tags like
+  `session_note`/`priority:*` never link), shared extracted concepts → semantic, same
+  emotional valence → affective; all scope-aware. `memory_health` now reports a `graph`
+  section (component count, disconnected-island roster with scope-honest previews,
+  isolated count, never-traversed-link share) — the fragmentation watchdog. One-time
+  per-node retrofit for pre-existing stores: `cerebro backfill` (embed vector-less rows)
+  then `cerebro autolink` (link link-less rows), both with `--dry-run`.
 - **There are no Cerebro stubs anymore** — all 67 `TOOL_NAMES` verbs are functional.
   `ingest_file` (the last deferred stub) is implemented (`cerebro::ingest`, extension-routed
   file import, every memory tagged `source:<filename>`); only an *unadvertised* name falls

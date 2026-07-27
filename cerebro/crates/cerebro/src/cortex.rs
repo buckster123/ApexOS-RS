@@ -79,7 +79,7 @@ impl CerebroCortex {
     /// Store a new memory through the full cognitive pipeline.
     ///
     /// Pipeline: thalamus gate → amygdala emotion → temporal concepts
-    ///           → SQLite insert → vector embed → graph node
+    ///           → SQLite insert → vector embed → graph node → auto-link
     ///
     /// Returns Err if thalamus rejects the content (too short / filtered).
     pub async fn remember(
@@ -132,8 +132,191 @@ impl CerebroCortex {
             }
         }
 
-        tracing::info!(id = %node.id.0, memory_type = ?node.memory_type, salience = node.salience, "memory stored");
+        // Python remember() step 5, restored: without it every new memory is
+        // born isolated and spreading activation can never reach it (the topo
+        // exploration found 23% of the store stranded this way). Non-fatal by
+        // the same rule as the vector persist.
+        let auto_links = match Self::auto_link_locked(&mut storage, &node).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("auto-link failed (non-fatal): {e}");
+                0
+            }
+        };
+
+        tracing::info!(id = %node.id.0, memory_type = ?node.memory_type,
+            salience = node.salience, auto_links, "memory stored");
         Ok(node)
+    }
+
+    /// Encoding-time auto-link (own write guard) — the retrofit entry point
+    /// for memories stored before the pass existed (`cerebro autolink`).
+    pub async fn auto_link(&self, node: &MemoryNode) -> Result<usize> {
+        let mut storage = self.storage.write().await;
+        Self::auto_link_locked(&mut storage, node).await
+    }
+
+    /// Port of Python's encoding-time link passes (`auto_link_on_store` tag
+    /// links + `create_semantic_links` concept links + `create_affective_links`),
+    /// folded into one call under the caller's write guard. Scope is derived
+    /// from the node's owner exactly like Python (`_scope_sql(agent_id)`), so
+    /// another agent's private memories never become link partners.
+    ///
+    /// Deliberate deviations, both documented in CerebroCortex-RS FINDINGS-1:
+    /// bookkeeping tags (`session_note`, `priority:*`, …) never link — Python
+    /// linked on ALL tags, which is how its 269 session notes inter-linked
+    /// into a hairball; and concept candidates come from one combined query
+    /// taking the strongest overlaps instead of Python's per-concept LIMIT
+    /// loop (same weight formula, deterministic). Weights are Python's exactly:
+    /// tags min(0.3 + 0.1·overlap, 0.8); concepts min(0.3 + 0.15·overlap, 0.9);
+    /// affect max(0.3, 0.7 − |Δintensity|·0.5), top-salience partners, ≤3.
+    async fn auto_link_locked(
+        storage: &mut StorageCoordinator,
+        node: &MemoryNode,
+    ) -> Result<usize> {
+        use crate::engines::dream::is_structural_tag;
+
+        let scope = match &node.agent_id {
+            Some(a) => VisibilityScope::for_agent(a.clone()),
+            None => VisibilityScope::global(),
+        };
+        let now = Utc::now();
+        let mut created = 0usize;
+        let mut semantic_partners: std::collections::HashSet<MemoryId> =
+            std::collections::HashSet::new();
+
+        let push_link = |storage_links: &mut Vec<AssociativeLink>,
+                         target: MemoryId,
+                         link_type: crate::types::LinkType,
+                         weight: f32| {
+            storage_links.push(AssociativeLink {
+                source_id:       node.id.clone(),
+                target_id:       target,
+                link_type,
+                weight,
+                created_at:      now,
+                last_traversed:  None,
+                traversal_count: 0,
+            });
+        };
+        let mut links: Vec<AssociativeLink> = Vec::new();
+
+        // Pass 1 — shared topical tags → semantic (Python weight formula).
+        let topical: Vec<String> = node
+            .tags
+            .iter()
+            .filter(|t| !is_structural_tag(t))
+            .cloned()
+            .collect();
+        if !topical.is_empty() {
+            let tag_set: std::collections::HashSet<&str> =
+                topical.iter().map(String::as_str).collect();
+            for (id, other_tags) in storage
+                .sqlite
+                .find_by_any_tag(&node.id, &topical, &scope, 5)
+                .await?
+            {
+                let overlap = other_tags
+                    .iter()
+                    .filter(|t| tag_set.contains(t.as_str()))
+                    .count();
+                if overlap > 0 && semantic_partners.insert(id.clone()) {
+                    let weight = (0.3 + 0.1 * overlap as f32).min(0.8);
+                    push_link(&mut links, id, crate::types::LinkType::Semantic, weight);
+                }
+            }
+        }
+
+        // Pass 2 — shared concepts → semantic; strongest overlaps win the
+        // (bounded) slots, pairs already tag-linked are skipped (Python's
+        // ensure_link first-wins).
+        let concepts: Vec<String> = node
+            .metadata
+            .get("concepts")
+            .and_then(|c| serde_json::from_value(c.clone()).ok())
+            .unwrap_or_default();
+        if !concepts.is_empty() {
+            let concept_set: std::collections::HashSet<&str> =
+                concepts.iter().map(String::as_str).collect();
+            let mut scored: Vec<(MemoryId, usize)> = storage
+                .sqlite
+                .find_by_any_concept(&node.id, &concepts, &scope, 15)
+                .await?
+                .into_iter()
+                .filter(|(id, _)| !semantic_partners.contains(id))
+                .map(|(id, other)| {
+                    let overlap = other
+                        .iter()
+                        .filter(|c| concept_set.contains(c.as_str()))
+                        .count();
+                    (id, overlap)
+                })
+                .filter(|(_, overlap)| *overlap > 0)
+                .collect();
+            scored.sort_by_key(|(_, overlap)| std::cmp::Reverse(*overlap));
+            for (id, overlap) in scored.into_iter().take(5) {
+                if semantic_partners.insert(id.clone()) {
+                    let weight = (0.3 + 0.15 * overlap as f32).min(0.9);
+                    push_link(&mut links, id, crate::types::LinkType::Semantic, weight);
+                }
+            }
+        }
+
+        // Pass 3 — same emotional valence → affective, top-salience partners.
+        if let Some(valence) = &node.emotional_valence {
+            let valence_str = serde_json::to_value(valence)?
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_default();
+            for (id, intensity) in storage
+                .sqlite
+                .find_same_valence(&node.id, &valence_str, &scope, 3)
+                .await?
+            {
+                let weight = (0.7 - (node.emotional_intensity - intensity).abs() * 0.5).max(0.3);
+                push_link(&mut links, id, crate::types::LinkType::Affective, weight);
+            }
+        }
+
+        for link in links {
+            storage.sqlite.insert_link(&link).await?;
+            if let Err(e) = storage.graph.add_edge(link.clone()) {
+                tracing::warn!("auto-link graph mirror failed (rebuild heals): {e}");
+            }
+            created += 1;
+        }
+        Ok(created)
+    }
+
+    /// Backfill vector embeddings for memories that have none (rows migrated
+    /// from the Python store predate the Rust embedder and are FTS5-only at
+    /// recall until embedded). Runs the same embed-and-persist path
+    /// `remember()` uses, oldest first, up to `limit` rows. Returns
+    /// `(embedded, missing_found)`.
+    pub async fn backfill_embeddings(&self, limit: usize) -> Result<(usize, usize)> {
+        let storage = self.storage.read().await;
+        if !storage.vector.is_embedder_loaded() {
+            anyhow::bail!(
+                "no embedder loaded — backfill requires embeddings enabled \
+                 (CEREBRO_EMBED_MODEL must not be empty)"
+            );
+        }
+        let missing = storage.sqlite.list_missing_embeddings(limit).await?;
+        let found = missing.len();
+        let mut embedded = 0usize;
+        for (id, content) in missing {
+            match storage.vector.embed_and_store(&id, &content).await {
+                Ok(v) if !v.is_empty() => {
+                    embedded += 1;
+                    if embedded.is_multiple_of(50) {
+                        tracing::info!("backfill: {embedded}/{found} embedded");
+                    }
+                }
+                Ok(_)  => tracing::warn!("backfill: no vector produced for {}", id.0),
+                Err(e) => tracing::warn!("backfill: embed failed for {}: {e}", id.0),
+            }
+        }
+        Ok((embedded, found))
     }
 
     /// Compute an embedding with NO storage lock held (CB-007/CB-019): clone

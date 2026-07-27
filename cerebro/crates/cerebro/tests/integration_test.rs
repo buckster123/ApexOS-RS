@@ -553,6 +553,220 @@ mod storage_basic {
         assert!(store.sqlite.share_memory(&id, Some("alice"), &VisibilityScope::global()).await.unwrap());
     }
 
+    // Phase-5 isolation check: incoming links count too (spreading is
+    // bidirectional), but a link whose other endpoint is soft-deleted does not.
+    #[tokio::test]
+    async fn has_any_live_link_sees_both_directions_and_dead_endpoints() {
+        use cerebro::models::{AssociativeLink, MemoryNode};
+        use cerebro::types::LinkType;
+        use chrono::Utc;
+
+        let dir = TempDir::new().unwrap();
+        let store = StorageCoordinator::new(&Config {
+            db_path:       dir.path().join("t.db"),
+            anthropic_key: None,
+            embed_model:   "".into(),
+        }).await.unwrap();
+
+        let a = MemoryNode::new("source node", MemoryType::Semantic);
+        let b = MemoryNode::new("target node", MemoryType::Semantic);
+        store.sqlite.insert_memory(&a).await.unwrap();
+        store.sqlite.insert_memory(&b).await.unwrap();
+        store.sqlite.insert_link(&AssociativeLink {
+            source_id:       a.id.clone(),
+            target_id:       b.id.clone(),
+            link_type:       LinkType::Semantic,
+            weight:          0.5,
+            created_at:      Utc::now(),
+            last_traversed:  None,
+            traversal_count: 0,
+        }).await.unwrap();
+
+        // b has only an INCOMING link — still connected.
+        assert!(store.sqlite.has_any_live_link(&a.id).await.unwrap());
+        assert!(store.sqlite.has_any_live_link(&b.id).await.unwrap());
+
+        // Soft-delete a: b's only link now points at a dead endpoint.
+        store.sqlite.delete_memory(&a.id, &VisibilityScope::global()).await.unwrap();
+        assert!(!store.sqlite.has_any_live_link(&b.id).await.unwrap());
+    }
+
+    // E2 fragmentation watchdog: components over live-endpoint links (both
+    // directions), islands with scope-honest member previews, isolated count,
+    // frozen-link share.
+    #[tokio::test]
+    async fn memory_health_reports_graph_fragmentation() {
+        use cerebro::models::{AssociativeLink, MemoryNode};
+        use cerebro::types::{AgentId, LinkType, Visibility};
+        use chrono::Utc;
+
+        let dir = TempDir::new().unwrap();
+        let store = StorageCoordinator::new(&Config {
+            db_path:       dir.path().join("t.db"),
+            anthropic_key: None,
+            embed_model:   "".into(),
+        }).await.unwrap();
+
+        let mk = |content: &str| MemoryNode::new(content, MemoryType::Semantic);
+        let link = |a: &MemoryNode, b: &MemoryNode, traversed: bool| AssociativeLink {
+            source_id:       a.id.clone(),
+            target_id:       b.id.clone(),
+            link_type:       LinkType::Semantic,
+            weight:          0.5,
+            created_at:      Utc::now(),
+            last_traversed:  traversed.then(Utc::now),
+            traversal_count: u32::from(traversed),
+        };
+
+        let a0 = mk("main component anchor");
+        let a1 = mk("main component middle");
+        let a2 = mk("main component tail");
+        let mut b0 = mk("island member private to bob");
+        b0.agent_id = Some(AgentId("bob".into()));
+        b0.visibility = Visibility::Private;
+        let b1 = mk("island member shared");
+        let iso = mk("all alone, no links at all");
+        let dead = mk("soft-deleted endpoint");
+        for m in [&a0, &a1, &a2, &b0, &b1, &iso, &dead] {
+            store.sqlite.insert_memory(m).await.unwrap();
+        }
+        store.sqlite.insert_link(&link(&a0, &a1, true)).await.unwrap();
+        store.sqlite.insert_link(&link(&a1, &a2, false)).await.unwrap();
+        store.sqlite.insert_link(&link(&b0, &b1, false)).await.unwrap();
+        store.sqlite.insert_link(&link(&dead, &a0, false)).await.unwrap();
+        store.sqlite.delete_memory(&dead.id, &VisibilityScope::global()).await.unwrap();
+
+        let health = store.sqlite.memory_health(&VisibilityScope::global()).await.unwrap();
+        let g = &health["graph"];
+        assert_eq!(g["live_memories"], 6);
+        assert_eq!(g["linked_memories"], 5);
+        assert_eq!(g["isolated_memories"], 1);
+        assert_eq!(g["live_links"], 3, "dead-endpoint link must not count");
+        assert_eq!(g["never_traversed_links_pct"], 66.7);
+        assert_eq!(g["components"], 2);
+        assert_eq!(g["largest_component"], 3);
+        let islands = g["islands"].as_array().unwrap();
+        assert_eq!(islands.len(), 1);
+        assert_eq!(islands[0]["size"], 2);
+        let members = islands[0]["members"].as_array().unwrap();
+        // Global scope is the unscoped view — every member carries a preview.
+        assert!(members.iter().all(|m| m.get("preview").is_some()));
+
+        // Alice's scope: bob's private island member is a bare id, the shared
+        // one keeps its preview.
+        let alice = VisibilityScope::for_agent(AgentId("alice".into()));
+        let scoped = store.sqlite.memory_health(&alice).await.unwrap();
+        let members = scoped["graph"]["islands"][0]["members"].as_array().unwrap();
+        let by_id = |id: &str| members.iter().find(|m| m["id"] == id).unwrap();
+        assert!(by_id(b0.id.0.as_str()).get("preview").is_none(),
+            "private member of another agent must not leak content");
+        assert!(by_id(b1.id.0.as_str()).get("preview").is_some());
+    }
+
+    #[tokio::test]
+    async fn remember_auto_links_by_shared_topical_tags_not_bookkeeping() {
+        // Python remember() step 5, restored: a new memory sharing a TOPICAL
+        // tag with an existing one gets a semantic encoding link (weight
+        // 0.3 + 0.1·overlap) and becomes spreading-reachable immediately.
+        // Bookkeeping tags (session_note, …) never count toward overlap.
+        use cerebro::CerebroCortex;
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            db_path:       dir.path().join("test.db"),
+            anthropic_key: None,
+            embed_model:   "".into(), // the pass is symbolic — no vectors needed
+        };
+        let brain = CerebroCortex::new(config).await.unwrap();
+        let a = brain.remember(
+            "slint scissor pass clips the face view to its window rect",
+            None, Some(vec!["slint".into(), "session_note".into()]), None,
+            VisibilityScope::global(),
+        ).await.unwrap();
+        let b = brain.remember(
+            "quaternion gimbal rig calibration for the studio camera crane",
+            None, Some(vec!["slint".into(), "session_note".into()]), None,
+            VisibilityScope::global(),
+        ).await.unwrap();
+
+        let links = brain.storage.read().await.sqlite
+            .list_links_from(&b.id).await.unwrap();
+        let to_a: Vec<_> = links.iter().filter(|l| l.target_id == a.id).collect();
+        assert!(
+            to_a.iter().any(|l| {
+                l.link_type == cerebro::types::LinkType::Semantic
+                    && (l.weight - 0.4).abs() < 1e-6
+            }),
+            "one shared topical tag must create a semantic link at 0.3 + 0.1·1 = 0.4: {to_a:?}"
+        );
+        // Reachability is the point: both ends now sit in the live graph
+        // with an edge between them.
+        assert!(brain.storage.read().await.graph.neighbors(&b.id)
+            .iter().any(|n| **n == a.id),
+            "auto-link must mirror into the spreading graph immediately");
+        assert!(brain.storage.read().await.sqlite
+            .has_any_live_link(&a.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn auto_link_retrofit_links_a_linkless_memory() {
+        // The `cerebro autolink` path: a pre-existing link-less memory gets
+        // its encoding links after the fact.
+        use cerebro::CerebroCortex;
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            db_path:       dir.path().join("test.db"),
+            anthropic_key: None,
+            embed_model:   "".into(),
+        };
+        let brain = CerebroCortex::new(config).await.unwrap();
+        let a = brain.remember(
+            "occipital politeness bucket honors the crawl delay",
+            None, Some(vec!["occipital".into()]), None,
+            VisibilityScope::global(),
+        ).await.unwrap();
+
+        // Strand a second memory the pre-fix way: direct insert, no links.
+        let mut b = cerebro::models::MemoryNode::new(
+            "occipital robots cache keyed by origin with a ttl",
+            MemoryType::Semantic,
+        );
+        b.tags = vec!["occipital".into()];
+        brain.storage.read().await.sqlite.insert_memory(&b).await.unwrap();
+        let linkless = brain.storage.read().await.sqlite
+            .list_linkless_memory_ids(100).await.unwrap();
+        assert!(linkless.contains(&b.id), "b starts link-less");
+
+        let created = brain.auto_link(&b).await.unwrap();
+        assert!(created >= 1, "retrofit must create at least the tag link");
+        assert!(brain.storage.read().await.sqlite
+            .has_any_live_link(&b.id).await.unwrap());
+        let after = brain.storage.read().await.sqlite
+            .list_linkless_memory_ids(100).await.unwrap();
+        assert!(!after.contains(&b.id), "b leaves the worklist");
+        assert!(brain.storage.read().await.sqlite
+            .list_links_from(&b.id).await.unwrap()
+            .iter().any(|l| l.target_id == a.id));
+    }
+
+    #[tokio::test]
+    async fn backfill_without_embedder_errors_honestly() {
+        // The backfill exists to CREATE vectors; silently scanning rows with
+        // no embedder loaded would report success while doing nothing.
+        use cerebro::CerebroCortex;
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            db_path:       dir.path().join("test.db"),
+            anthropic_key: None,
+            embed_model:   "".into(),
+        };
+        let brain = CerebroCortex::new(config).await.unwrap();
+        brain.remember("vectorless row", None, None, None, VisibilityScope::global())
+            .await.unwrap();
+        let err = brain.backfill_embeddings(100).await.unwrap_err();
+        assert!(err.to_string().contains("embedder"),
+            "error names the missing embedder: {err}");
+    }
+
     #[tokio::test]
     async fn remember_lands_in_graph_even_without_a_vector() {
         // CB-007/CB-009: the embed runs lock-free before the write guard and a

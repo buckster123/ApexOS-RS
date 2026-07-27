@@ -222,11 +222,12 @@ fn procedure_fitness(node: &MemoryNode) -> f32 {
     (salience * (1.0 - failure_penalty)).clamp(0.0, 1.0)
 }
 
-/// True for tags that mark a memory's *role* rather than its *topic*. Excluded
-/// when clustering procedures (into skills, and into competition niches) so
-/// clusters form on subject matter (e.g. "slint", "async") not on bookkeeping
-/// markers.
-fn is_structural_tag(tag: &str) -> bool {
+/// True for tags that mark a memory's *role* or bookkeeping rather than its
+/// *topic*. Excluded wherever tags define clusters (pattern extraction, skill
+/// distillation, competition niches) and from encoding-time auto-links, so
+/// clusters and links form on subject matter (e.g. "slint", "async") not on
+/// markers like `session_note` or `agent:*`.
+pub(crate) fn is_structural_tag(tag: &str) -> bool {
     matches!(
         tag,
         "procedure"
@@ -239,7 +240,29 @@ fn is_structural_tag(tag: &str) -> bool {
             | "dream_merged"
             | "skill_champion"
             | "prune_candidate"
-    ) || tag.starts_with("support_count:")
+            | "session_note"
+    ) || ["support_count:", "priority:", "session_type:", "agent:", "source:"]
+        .iter()
+        .any(|prefix| tag.starts_with(prefix))
+}
+
+/// Tag → indices (in iteration order) over the given nodes, skipping
+/// structural/bookkeeping tags — clusters must form on subject matter, and the
+/// bookkeeping tags are the most common ones in a real store, so an unfiltered
+/// map spends the phase's LLM budget on grab-bag groups.
+fn topical_tag_map<'a>(
+    nodes: impl IntoIterator<Item = &'a MemoryNode>,
+) -> HashMap<String, Vec<usize>> {
+    let mut map: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, node) in nodes.into_iter().enumerate() {
+        for tag in &node.tags {
+            if is_structural_tag(tag) {
+                continue;
+            }
+            map.entry(tag.clone()).or_default().push(i);
+        }
+    }
+    map
 }
 
 /// Read a procedure's win/loss ledger (`metadata.outcomes`, written by
@@ -781,13 +804,8 @@ impl DreamEngine {
             .list_memories_scoped(scope, &ListFilter { limit: 500, ..Default::default() })
             .await?;
 
-        // tag → indices into `memories`
-        let mut tag_map: HashMap<String, Vec<usize>> = HashMap::new();
-        for (i, node) in memories.iter().enumerate() {
-            for tag in &node.tags {
-                tag_map.entry(tag.clone()).or_default().push(i);
-            }
-        }
+        // tag → indices into `memories` (topical tags only)
+        let tag_map = topical_tag_map(&memories);
 
         let clusters_total = tag_map.values().filter(|v| v.len() >= CLUSTER_MIN_SIZE).count();
         let mut budget_remaining = budget;
@@ -1021,13 +1039,7 @@ impl DreamEngine {
             .collect();
 
         // Cluster the survivors by topical tag (structural markers excluded).
-        let mut tag_map: HashMap<String, Vec<usize>> = HashMap::new();
-        for (i, node) in successful.iter().enumerate() {
-            for tag in &node.tags {
-                if is_structural_tag(tag) { continue; }
-                tag_map.entry(tag.clone()).or_default().push(i);
-            }
-        }
+        let tag_map = topical_tag_map(successful.iter().copied());
 
         // Existing schemas — prefix-dedup so re-running dream doesn't duplicate
         // a skill it already distilled.
@@ -1526,8 +1538,11 @@ impl DreamEngine {
                 && node.salience <= PRUNING_MAX_SALIENCE
             {
                 // Class A: isolated, low-salience, stale sensory memory.
-                cortex.storage.read().await.sqlite
-                    .list_links_from(&node.id).await?.is_empty()
+                // Isolation is direction-blind — spreading traverses links both
+                // ways, so any live-endpoint link (in or out) keeps a node
+                // reachable and off the prune list.
+                !cortex.storage.read().await.sqlite
+                    .has_any_live_link(&node.id).await?
             } else {
                 false
             };
@@ -1850,7 +1865,8 @@ mod tests {
     use super::{
         compute_competition_verdicts, competitive_fitness, has_pending_merge, has_pending_variant,
         is_skill_champion, is_structural_tag, merge_candidates, outcome_stats, procedure_fitness,
-        refine_candidates, retrieval_rank, wilson_lower_bound, CompetitionAction, SKILL_MIN_FITNESS,
+        refine_candidates, retrieval_rank, topical_tag_map, wilson_lower_bound, CompetitionAction,
+        SKILL_MIN_FITNESS,
     };
     use super::RetentionCaps;
     use crate::config::FSRS_INITIAL_DIFFICULTY;
@@ -1958,12 +1974,27 @@ mod tests {
         for t in [
             "procedure", "skill", "schema", "dream_distilled", "support_count:3",
             "skill_champion", "prune_candidate", "dream_mutated", "dream_merged",
+            "session_note", "priority:HIGH", "session_type:technical",
+            "agent:APEX", "source:report.pdf",
         ] {
             assert!(is_structural_tag(t), "{t} should be structural");
         }
-        for t in ["slint", "async", "debugging", "rust"] {
+        for t in ["slint", "async", "debugging", "rust", "next-session"] {
             assert!(!is_structural_tag(t), "{t} should be topical");
         }
+    }
+
+    #[test]
+    fn topical_tag_map_skips_bookkeeping_tags() {
+        let mut a = MemoryNode::new("wire view slimming", MemoryType::Episodic);
+        a.tags = vec!["session_note".into(), "priority:HIGH".into(), "cerebro".into()];
+        let mut b = MemoryNode::new("recall wire shape", MemoryType::Episodic);
+        b.tags = vec!["session_note".into(), "cerebro".into(), "agent:APEX".into()];
+        let nodes = vec![a, b];
+
+        let map = topical_tag_map(&nodes);
+        assert_eq!(map.len(), 1, "only the topical tag clusters: {:?}", map.keys());
+        assert_eq!(map["cerebro"], vec![0, 1]);
     }
 
     // ---- exo-evolution: fitness ledger + niche competition ------------------
