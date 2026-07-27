@@ -497,7 +497,7 @@ fn tool_schema(name: &str) -> Value {
 
         "memory_health" => json!({
             "name": "memory_health",
-            "description": "Return overall memory health metrics: total, deleted, avg salience, avg stability, by-type breakdown.",
+            "description": "Return overall memory health metrics: total, deleted, avg salience, avg stability, by-type breakdown, and graph fragmentation (component count, disconnected islands with member previews, isolated memories, never-traversed link share).",
             "inputSchema": {
                 "type": "object",
                 "properties": {

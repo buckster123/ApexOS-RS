@@ -557,6 +557,179 @@ impl SqliteStore {
         }
     }
 
+    /// Live memories with no stored embedding vector, oldest first — the
+    /// backfill worklist (id + content only; the caller embeds).
+    pub async fn list_missing_embeddings(&self, limit: usize) -> Result<Vec<(MemoryId, String)>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, content FROM memories \
+             WHERE embedding IS NULL AND deleted_at IS NULL \
+             ORDER BY created_at LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok((MemoryId(r.get::<_, String>(0)?), r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Candidates sharing at least one of `tags` (JSON-quoted match — Python's
+    /// unquoted LIKE also matched substrings, "rust" hitting "trust"; quoted is
+    /// strictly tighter). Scope-filtered so private memories of other agents
+    /// never become link partners. Returns (id, tags).
+    pub async fn find_by_any_tag(
+        &self,
+        exclude: &MemoryId,
+        tags: &[String],
+        scope: &VisibilityScope,
+        limit: usize,
+    ) -> Result<Vec<(MemoryId, Vec<String>)>> {
+        if tags.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().await;
+        let (scope_sql, scope_params) = scope.sql_filter();
+        let likes = vec!["tags LIKE ?"; tags.len()].join(" OR ");
+        let sql = format!(
+            "SELECT id, tags FROM memories \
+             WHERE id != ? AND deleted_at IS NULL AND {scope_sql} AND ({likes}) \
+             LIMIT ?"
+        );
+        let patterns: Vec<String> = tags
+            .iter()
+            .map(|t| format!("%\"{}\"%", t.replace(['"', '%', '_'], "")))
+            .collect();
+        let limit_s = limit.to_string();
+        let params_all: Vec<&dyn rusqlite::ToSql> = std::iter::once(&exclude.0 as &dyn rusqlite::ToSql)
+            .chain(scope_params.iter().map(|s| s as &dyn rusqlite::ToSql))
+            .chain(patterns.iter().map(|s| s as &dyn rusqlite::ToSql))
+            .chain(std::iter::once(&limit_s as &dyn rusqlite::ToSql))
+            .collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_all.as_slice(), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, tags_json) = row?;
+            let parsed: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+            out.push((MemoryId(id), parsed));
+        }
+        Ok(out)
+    }
+
+    /// Candidates whose `metadata.concepts` share at least one of `concepts`
+    /// (matched as JSON-quoted strings inside the metadata TEXT, like Python's
+    /// `concepts_json LIKE '%"c"%'`). Scope-filtered. Returns (id, concepts).
+    pub async fn find_by_any_concept(
+        &self,
+        exclude: &MemoryId,
+        concepts: &[String],
+        scope: &VisibilityScope,
+        limit: usize,
+    ) -> Result<Vec<(MemoryId, Vec<String>)>> {
+        if concepts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().await;
+        let (scope_sql, scope_params) = scope.sql_filter();
+        let likes = vec!["metadata LIKE ?"; concepts.len()].join(" OR ");
+        let sql = format!(
+            "SELECT id, metadata FROM memories \
+             WHERE id != ? AND deleted_at IS NULL AND {scope_sql} AND ({likes}) \
+             LIMIT ?"
+        );
+        let patterns: Vec<String> = concepts
+            .iter()
+            .map(|c| format!("%\"{}\"%", c.replace(['"', '%', '_'], "")))
+            .collect();
+        let limit_s = limit.to_string();
+        let params_all: Vec<&dyn rusqlite::ToSql> = std::iter::once(&exclude.0 as &dyn rusqlite::ToSql)
+            .chain(scope_params.iter().map(|s| s as &dyn rusqlite::ToSql))
+            .chain(patterns.iter().map(|s| s as &dyn rusqlite::ToSql))
+            .chain(std::iter::once(&limit_s as &dyn rusqlite::ToSql))
+            .collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_all.as_slice(), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, meta_json) = row?;
+            let parsed: Vec<String> = serde_json::from_str::<serde_json::Value>(&meta_json)
+                .ok()
+                .and_then(|m| {
+                    m.get("concepts")
+                        .and_then(|c| serde_json::from_value(c.clone()).ok())
+                })
+                .unwrap_or_default();
+            out.push((MemoryId(id), parsed));
+        }
+        Ok(out)
+    }
+
+    /// Highest-salience live memories sharing an emotional valence, scope-
+    /// filtered. Returns (id, emotional_intensity) — the affective-link pass.
+    pub async fn find_same_valence(
+        &self,
+        exclude: &MemoryId,
+        valence: &str,
+        scope: &VisibilityScope,
+        limit: usize,
+    ) -> Result<Vec<(MemoryId, f32)>> {
+        let conn = self.conn.lock().await;
+        let (scope_sql, scope_params) = scope.sql_filter();
+        let sql = format!(
+            "SELECT id, emotional_intensity FROM memories \
+             WHERE id != ? AND deleted_at IS NULL AND emotional_valence = ? AND {scope_sql} \
+             ORDER BY salience DESC LIMIT ?"
+        );
+        let limit_s = limit.to_string();
+        let params_all: Vec<&dyn rusqlite::ToSql> = [
+            &exclude.0 as &dyn rusqlite::ToSql,
+            &valence as &dyn rusqlite::ToSql,
+        ]
+        .into_iter()
+        .chain(scope_params.iter().map(|s| s as &dyn rusqlite::ToSql))
+        .chain(std::iter::once(&limit_s as &dyn rusqlite::ToSql))
+        .collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_all.as_slice(), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)? as f32))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, intensity) = row?;
+            out.push((MemoryId(id), intensity));
+        }
+        Ok(out)
+    }
+
+    /// Live memories with no live-endpoint link at all (the auto-link retrofit
+    /// worklist), oldest first — the set-based complement of `has_any_live_link`.
+    pub async fn list_linkless_memory_ids(&self, limit: usize) -> Result<Vec<MemoryId>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT m.id FROM memories m WHERE m.deleted_at IS NULL AND NOT EXISTS (
+                SELECT 1 FROM links l
+                JOIN memories other
+                  ON other.id = CASE WHEN l.source_id = m.id
+                                     THEN l.target_id ELSE l.source_id END
+                WHERE (l.source_id = m.id OR l.target_id = m.id)
+                  AND other.deleted_at IS NULL
+             ) ORDER BY m.created_at LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(MemoryId(row?));
+        }
+        Ok(out)
+    }
+
     /// Soft-delete a memory. Returns true if the memory existed and was deleted.
     /// Soft-delete, scope-enforced (CB-018): the WHERE carries the caller's
     /// `scope_sql`, so a scoped caller can only delete what it can see — the
@@ -772,6 +945,27 @@ impl SqliteStore {
             results.push(row?.into_link()?);
         }
         Ok(results)
+    }
+
+    /// True if the memory participates in any link whose other endpoint is
+    /// live, in either direction — spreading activation traverses links both
+    /// ways, and the graph rebuild drops links to deleted endpoints, so this
+    /// is the isolation test that matches what recall can actually reach.
+    pub async fn has_any_live_link(&self, id: &MemoryId) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let exists: i64 = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM links l
+                JOIN memories other
+                  ON other.id = CASE WHEN l.source_id = ?1
+                                     THEN l.target_id ELSE l.source_id END
+                WHERE (l.source_id = ?1 OR l.target_id = ?1)
+                  AND other.deleted_at IS NULL
+             )",
+            params![id.0],
+            |r| r.get(0),
+        )?;
+        Ok(exists != 0)
     }
 
     /// Hard-delete a single memory (use after backup/purge confirmation).
@@ -1445,6 +1639,139 @@ impl SqliteStore {
             for r in rows { let (t, cnt) = r?; by_type.insert(t, cnt.into()); }
         }
 
+        // E2 fragmentation watchdog (topo plan §4, FINDINGS-0): connectivity of
+        // the live link graph — components, island roster, isolated nodes,
+        // frozen-link share. Whole-store by design: links carry no scope and
+        // spreading crosses agents, so a scoped component count would report
+        // fake fragmentation. Island member PREVIEWS do honor the caller's
+        // scope — out-of-scope members stay bare ids.
+        let graph = {
+            const ISLAND_CAP: usize = 8;
+            const MEMBER_CAP: usize = 3;
+
+            let mut ids: Vec<String> = Vec::new();
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM memories WHERE deleted_at IS NULL ORDER BY rowid",
+                )?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                for r in rows {
+                    ids.push(r?);
+                }
+            }
+            let index: std::collections::HashMap<&str, usize> =
+                ids.iter().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
+            let n = ids.len();
+            let mut uf = petgraph::unionfind::UnionFind::<usize>::new(n);
+            let mut is_linked = vec![false; n];
+            let mut live_links = 0i64;
+            let mut frozen = 0i64;
+            {
+                let mut stmt =
+                    conn.prepare("SELECT source_id, target_id, last_traversed FROM links")?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (s, t, traversed) = row?;
+                    let (Some(&si), Some(&ti)) =
+                        (index.get(s.as_str()), index.get(t.as_str()))
+                    else {
+                        continue; // an endpoint is deleted — dead link, no connectivity
+                    };
+                    live_links += 1;
+                    if traversed.is_none() {
+                        frozen += 1;
+                    }
+                    is_linked[si] = true;
+                    is_linked[ti] = true;
+                    uf.union(si, ti);
+                }
+            }
+
+            // Components over LINKED nodes only; isolated nodes reported apart.
+            let mut comp: std::collections::HashMap<usize, Vec<usize>> = Default::default();
+            for (i, &l) in is_linked.iter().enumerate() {
+                if l {
+                    comp.entry(uf.find_mut(i)).or_default().push(i);
+                }
+            }
+            let mut components: Vec<Vec<usize>> = comp.into_values().collect();
+            components.sort_by_key(|c| std::cmp::Reverse(c.len()));
+            let linked_count = components.iter().map(Vec::len).sum::<usize>();
+            let isolated = n - linked_count;
+
+            // Scope-filtered content previews for island members (never the
+            // largest component — islands are the actionable part).
+            let member_ids: Vec<&str> = components
+                .iter()
+                .skip(1)
+                .take(ISLAND_CAP)
+                .flat_map(|c| c.iter().take(MEMBER_CAP).map(|&i| ids[i].as_str()))
+                .collect();
+            let mut previews: std::collections::HashMap<String, String> = Default::default();
+            if !member_ids.is_empty() {
+                let placeholders = vec!["?"; member_ids.len()].join(",");
+                let sql = format!(
+                    "SELECT id, substr(content, 1, 80) FROM memories \
+                     WHERE {scope_sql} AND deleted_at IS NULL AND id IN ({placeholders})"
+                );
+                let params_all: Vec<&dyn rusqlite::ToSql> = scope_params
+                    .iter()
+                    .map(|s| s as &dyn rusqlite::ToSql)
+                    .chain(member_ids.iter().map(|s| s as &dyn rusqlite::ToSql))
+                    .collect();
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(params_all.as_slice(), |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                for r in rows {
+                    let (id, preview) = r?;
+                    previews.insert(id, preview);
+                }
+            }
+
+            let islands: Vec<serde_json::Value> = components
+                .iter()
+                .skip(1)
+                .take(ISLAND_CAP)
+                .map(|c| {
+                    let members: Vec<serde_json::Value> = c
+                        .iter()
+                        .take(MEMBER_CAP)
+                        .map(|&i| {
+                            let id = &ids[i];
+                            match previews.get(id) {
+                                Some(p) => serde_json::json!({ "id": id, "preview": p }),
+                                None => serde_json::json!({ "id": id }),
+                            }
+                        })
+                        .collect();
+                    serde_json::json!({ "size": c.len(), "members": members })
+                })
+                .collect();
+
+            let pct = |num: i64, den: i64| {
+                if den == 0 { 0.0 } else { (num as f64 / den as f64 * 1000.0).round() / 10.0 }
+            };
+            serde_json::json!({
+                "live_memories": n,
+                "linked_memories": linked_count,
+                "isolated_memories": isolated,
+                "isolated_pct": pct(isolated as i64, n as i64),
+                "live_links": live_links,
+                "never_traversed_links_pct": pct(frozen, live_links),
+                "components": components.len(),
+                "largest_component": components.first().map_or(0, Vec::len),
+                "islands": islands,
+                "islands_truncated": components.len().saturating_sub(1) > ISLAND_CAP,
+            })
+        };
+
         Ok(serde_json::json!({
             "total_memories": total,
             "deleted_memories": deleted,
@@ -1452,6 +1779,7 @@ impl SqliteStore {
             "avg_salience": avg_sal,
             "avg_stability": avg_stab,
             "by_type": by_type,
+            "graph": graph,
         }))
     }
 
