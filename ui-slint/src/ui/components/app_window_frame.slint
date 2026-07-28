@@ -204,6 +204,9 @@ export component AppWindowFrame inherits Rectangle {
     in property <[ImagineJobItem]> imagine-jobs;
     in property <string>           imagine-selected-job;
     in-out property <string>       imagine-prompt-input;
+    in property <string>           imagine-video-state;
+    in property <float>            imagine-video-progress;
+    in property <string>           imagine-video-time;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -283,6 +286,8 @@ export component AppWindowFrame inherits Rectangle {
     callback imagine-generate(string, string, string, int);  // prompt, model|"auto", aspect, n
     callback imagine-pick-job(string);                       // job id → preview
     callback refresh-imagine();
+    callback imagine-video-play(int, int);                   // stage px w, h
+    callback imagine-video-stop();
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -766,9 +771,14 @@ export component AppWindowFrame inherits Rectangle {
             jobs: root.imagine-jobs;
             selected-job: root.imagine-selected-job;
             prompt-input <=> root.imagine-prompt-input;
+            video-state: root.imagine-video-state;
+            video-progress: root.imagine-video-progress;
+            video-time: root.imagine-video-time;
             generate(p, m, a, n) => { root.imagine-generate(p, m, a, n); }
             pick-job(id) => { root.imagine-pick-job(id); }
             refresh => { root.refresh-imagine(); }
+            video-play(w, h) => { root.imagine-video-play(w, h); }
+            video-stop => { root.imagine-video-stop(); }
         }
     }
 

@@ -112,6 +112,13 @@ export component ImagineView {
     in property <image>            preview;
     in property <[ImagineJobItem]> jobs;
     in property <string>           selected-job: "";
+    // Video player (A1): idle|ready|playing|ended — ready/playing/ended render
+    // the preview image (poster / live frames) + the transport bar.
+    in property <string>           video-state: "idle";
+    in property <float>            video-progress: 0.0;
+    in property <string>           video-time: "";
+    property <bool> video-live: root.preview-kind == "video"
+        && (root.video-state == "ready" || root.video-state == "playing" || root.video-state == "ended");
 
     in-out property <string>       prompt-input: "";
     // Local chip state — resets with the window, which is fine.
@@ -123,6 +130,8 @@ export component ImagineView {
     callback generate(string, string, string, int);  // prompt, model slug|"auto", aspect, n
     callback pick-job(string);                       // job id → preview it
     callback refresh();
+    callback video-play(int, int);                   // stage px w, h → decode at this size
+    callback video-stop();
 
     function fire-generate() {
         if (root.prompt-input != "" && !root.busy && root.status == "ok") {
@@ -343,20 +352,20 @@ export component ImagineView {
 
             Rectangle { width: 1px; background: Palette.border; }
 
-            // ── Preview pane ────────────────────────────────────────────
-            Rectangle {
+            // ── Preview pane / the stage ────────────────────────────────
+            stage := Rectangle {
                 horizontal-stretch: 1;
                 background: Palette.bg;
 
-                if root.preview-kind == "image": Image {
+                if root.preview-kind == "image" || root.video-live: Image {
                     x: 14px;
                     y: 14px;
                     width: parent.width - 28px;
-                    height: parent.height - 46px;
+                    height: parent.height - (root.video-live ? 76px : 46px);
                     source: root.preview;
                     image-fit: contain;
                 }
-                if root.preview-kind != "image": VerticalLayout {
+                if root.preview-kind != "image" && !root.video-live: VerticalLayout {
                     alignment: center;
                     spacing: 8px;
                     Text {
@@ -368,7 +377,7 @@ export component ImagineView {
                     }
                     Text {
                         text: root.preview-kind == "video"
-                                ? "video job — open the browser studio to play it"
+                                ? "video job — no local preview (needs ffmpeg/ffprobe on this node)"
                             : root.preview-kind == "error" ? ""
                             : (root.status == "offline"
                                 ? "imaginarium node unreachable — is imaginarium.service running?"
@@ -381,6 +390,73 @@ export component ImagineView {
                         font-size: 12px * Personas.font-scale;
                         horizontal-alignment: center;
                         wrap: word-wrap;
+                    }
+                }
+
+                // Transport bar (video only): ▶/⏹/↻ · progress · clock.
+                if root.video-live: Rectangle {
+                    x: 14px;
+                    height: 26px;
+                    width: parent.width - 28px;
+                    y: parent.height - self.height - (root.note != "" ? 38px : 8px);
+                    border-radius: Palette.radius-sm;
+                    background: Palette.surface;
+
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 10px;
+                        spacing: 10px;
+
+                        Rectangle {
+                            width: 30px;
+                            height: 22px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: Palette.radius-sm;
+                            background: transport-ta.has-hover ? Palette.surface-hi : transparent;
+                            transport-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    if (root.video-state == "playing") {
+                                        root.video-stop();
+                                    } else {
+                                        root.video-play(
+                                            Math.round(stage.width / 1px),
+                                            Math.round((stage.height - 62px) / 1px));
+                                    }
+                                }
+                            }
+                            Text {
+                                text: root.video-state == "playing" ? "⏹"
+                                    : root.video-state == "ended" ? "↻" : "▶";
+                                color: Palette.primary;
+                                font-size: 14px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Progress track + fill.
+                        Rectangle {
+                            height: 4px;
+                            y: (parent.height - self.height) / 2;
+                            horizontal-stretch: 1;
+                            border-radius: 2px;
+                            background: Palette.surface-hi;
+                            Rectangle {
+                                x: 0;
+                                width: parent.width * min(1.0, max(0.0, root.video-progress));
+                                height: parent.height;
+                                border-radius: 2px;
+                                background: Palette.primary;
+                            }
+                        }
+
+                        Text {
+                            text: root.video-time;
+                            color: Palette.text-dim;
+                            font-size: 10px * Personas.font-scale;
+                            vertical-alignment: center;
+                        }
                     }
                 }
 
