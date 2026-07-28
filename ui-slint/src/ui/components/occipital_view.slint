@@ -88,7 +88,7 @@ export component OccipitalView {
     preferred-height: 0px;
     min-height: 0px;
 
-    in property <string>        mode: "idle";   // idle|page|results|recall|dom|click|submit
+    in property <string>        mode: "idle";   // idle|page|results|recall|dom|click|submit|distill
     in property <string>        title: "";
     in property <string>        url: "";
     in property <string>        meta: "";
@@ -243,8 +243,9 @@ export component OccipitalView {
                 }
 
                 // ── Page mode: rendered markdown (interaction results are
-                // page payloads too — the meta line carries what was done) ──
-                if root.mode == "page" || root.mode == "click" || root.mode == "submit": VerticalLayout {
+                // page payloads too — the meta line carries what was done;
+                // distill renders its knowledge cards through the same blocks) ──
+                if root.mode == "page" || root.mode == "click" || root.mode == "submit" || root.mode == "distill": VerticalLayout {
                     spacing: 6px;
                     for b in root.blocks: VerticalLayout {
                         if b.kind == "h1": Text {
@@ -349,7 +350,7 @@ export component OccipitalView {
 
                     // Links on the page = the interactive surface.
                     if root.links.length > 0: Text {
-                        text: "LINKS ON THIS PAGE";
+                        text: root.mode == "distill" ? "DISTILLED PAGES" : "LINKS ON THIS PAGE";
                         color: Palette.text-dim;
                         font-size: 9px * Personas.font-scale;
                         letter-spacing: 2px;
