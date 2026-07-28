@@ -708,6 +708,130 @@ mod storage_basic {
     }
 
     #[tokio::test]
+    async fn recall_stamps_walked_links() {
+        // The colony's 4/4 field finding (2026-07-28): never_traversed_links_pct
+        // read exactly 100.0 on every node because the write half was never
+        // wired — spreading consumed last_traversed but nothing ever set it.
+        // A recall whose spread walks a link must stamp it.
+        use cerebro::CerebroCortex;
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            db_path:       dir.path().join("test.db"),
+            anthropic_key: None,
+            embed_model:   "".into(),
+        };
+        let brain = CerebroCortex::new(config).await.unwrap();
+        brain.remember(
+            "thermal sensor calibration drift on the mlx lens assembly",
+            None, Some(vec!["sensors".into()]), None, VisibilityScope::global(),
+        ).await.unwrap();
+        brain.remember(
+            "bme688 air quality baseline needs a burn-in period",
+            None, Some(vec!["sensors".into()]), None, VisibilityScope::global(),
+        ).await.unwrap();
+
+        let before = brain.storage.read().await.sqlite
+            .memory_health(&VisibilityScope::global()).await.unwrap();
+        assert_eq!(before["graph"]["never_traversed_links_pct"], 100.0,
+            "auto-link creates links untraversed: {}", before["graph"]);
+
+        // FTS5 recall seeds on one memory; spreading walks the shared-tag link.
+        let hits = brain.recall("thermal calibration mlx", 5, VisibilityScope::global())
+            .await.unwrap();
+        assert!(!hits.is_empty(), "recall must find the seed");
+
+        let after = brain.storage.read().await.sqlite
+            .memory_health(&VisibilityScope::global()).await.unwrap();
+        let pct = after["graph"]["never_traversed_links_pct"].as_f64().unwrap();
+        assert!(pct < 100.0,
+            "a walked link must be stamped — the metric has to move: {}", after["graph"]);
+    }
+
+    #[tokio::test]
+    async fn link_reassertion_ratchets_instead_of_wiping() {
+        // Python parity (add_link's IntegrityError arm): re-asserting an
+        // existing (source, target, type) is an ACTIVATION — weight ratchets
+        // to the max, stamp + count advance. The old INSERT OR REPLACE wiped
+        // that history and could lower the weight.
+        use cerebro::models::{AssociativeLink, MemoryNode};
+        use cerebro::types::LinkType;
+        use chrono::Utc;
+
+        let dir = TempDir::new().unwrap();
+        let store = StorageCoordinator::new(&Config {
+            db_path:       dir.path().join("t.db"),
+            anthropic_key: None,
+            embed_model:   "".into(),
+        }).await.unwrap();
+        let a = MemoryNode::new("re-assert source", MemoryType::Semantic);
+        let b = MemoryNode::new("re-assert target", MemoryType::Semantic);
+        store.sqlite.insert_memory(&a).await.unwrap();
+        store.sqlite.insert_memory(&b).await.unwrap();
+
+        let mk = |w: f32| AssociativeLink {
+            source_id:       a.id.clone(),
+            target_id:       b.id.clone(),
+            link_type:       LinkType::Semantic,
+            weight:          w,
+            created_at:      Utc::now(),
+            last_traversed:  None,
+            traversal_count: 0,
+        };
+        store.sqlite.insert_link(&mk(0.9)).await.unwrap();
+        store.sqlite.insert_link(&mk(0.2)).await.unwrap(); // weaker re-assert
+
+        let links = store.sqlite.list_links_from(&a.id).await.unwrap();
+        let l = links.iter().find(|l| l.target_id == b.id).unwrap();
+        assert!((l.weight - 0.9).abs() < 1e-6, "weight ratchets, never lowers: {}", l.weight);
+        assert_eq!(l.traversal_count, 1, "a re-assert counts as one activation");
+        assert!(l.last_traversed.is_some(), "a re-assert stamps the link");
+    }
+
+    #[tokio::test]
+    async fn remember_exact_duplicate_reinforces_not_duplicates() {
+        // Thalamus gate 2 (the Python dedup step the port dropped — the
+        // "install prewarm" fossil): identical content in the SAME owner
+        // space returns the existing node reinforced; a different space keeps
+        // its own copy; messages are always stored.
+        use cerebro::CerebroCortex;
+        use cerebro::types::AgentId;
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            db_path:       dir.path().join("test.db"),
+            anthropic_key: None,
+            embed_model:   "".into(),
+        };
+        let brain = CerebroCortex::new(config).await.unwrap();
+
+        let body = "ApexOS-RS install prewarm sentinel body for the dedup gate";
+        let first = brain.remember(body, None, None, None, VisibilityScope::global())
+            .await.unwrap();
+        let again = brain.remember(body, None, None, None, VisibilityScope::global())
+            .await.unwrap();
+        assert_eq!(again.id, first.id, "same space + same body = the same memory");
+        assert!(again.access_count > first.access_count,
+            "the re-encounter reinforces: {} vs {}", again.access_count, first.access_count);
+
+        // A different owner space is a different memory (provenance stays).
+        let alice = VisibilityScope::for_agent(AgentId("alice".into()));
+        let scoped = brain.remember(body, None, None, None, alice).await.unwrap();
+        assert_ne!(scoped.id, first.id, "another agent's identical note is its own");
+
+        // Messages are exempt — a repeated "ping, still there?" is two events.
+        let m1 = brain.remember(
+            "ping — you still there, BOB?", None,
+            Some(vec!["message".into(), "to:BOB".into()]), None,
+            VisibilityScope::global(),
+        ).await.unwrap();
+        let m2 = brain.remember(
+            "ping — you still there, BOB?", None,
+            Some(vec!["message".into(), "to:BOB".into()]), None,
+            VisibilityScope::global(),
+        ).await.unwrap();
+        assert_ne!(m1.id, m2.id, "messages are always stored");
+    }
+
+    #[tokio::test]
     async fn auto_link_retrofit_links_a_linkless_memory() {
         // The `cerebro autolink` path: a pre-existing link-less memory gets
         // its encoding links after the fact.
