@@ -1645,7 +1645,7 @@ if [[ "$TIER" != "nano" ]]; then
 
   printf '%s\n%s\n' \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"prewarm","version":"0.1"}}}' \
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"remember","arguments":{"content":"ApexOS-RS install prewarm","memory_type":"semantic"}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"recall","arguments":{"query":"install prewarm embedding model warmup"}}}' \
   | sudo -u agentd env "${CEREBRO_ENV[@]}" /usr/local/bin/cerebro-mcp 2>/dev/null \
   | grep -q '"result"' \
     && ok "Embedding model cached" \

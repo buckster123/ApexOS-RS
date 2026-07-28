@@ -913,12 +913,45 @@ impl SqliteStore {
     // Link CRUD
     // -----------------------------------------------------------------------
 
+    /// Exact-content probe within one owner space — thalamus gate 2 (dedup).
+    /// Content *equality* only; near-duplicate detection stays an explicit
+    /// tool (`check_near_duplicates`). A full-column scan is fine at store
+    /// scale (thousands of rows); revisit with a hash column if stores grow
+    /// orders beyond that.
+    pub async fn find_exact_content(
+        &self,
+        content: &str,
+        agent_id: Option<&str>,
+    ) -> Result<Option<MemoryId>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().await;
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM memories \
+                 WHERE content = ?1 AND agent_id IS ?2 AND deleted_at IS NULL LIMIT 1",
+                params![content, agent_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(id.map(MemoryId))
+    }
+
+    /// Insert a link, or — Python parity (`add_link`'s IntegrityError arm) —
+    /// treat a duplicate (source, target, type) as a **re-assertion**: the
+    /// weight ratchets to the max and the activation stamp/count advance.
+    /// The old `INSERT OR REPLACE` *wiped* that history on every re-assert
+    /// (reset count/stamp, could even lower the weight) — the colony's 4/4
+    /// `never_traversed_links_pct: 100.0` finding, 2026-07-28.
     pub async fn insert_link(&self, link: &AssociativeLink) -> Result<()> {
         let conn = self.conn.lock().await;
         conn.execute(
-            "INSERT OR REPLACE INTO links \
+            "INSERT INTO links \
              (source_id, target_id, link_type, weight, created_at, last_traversed, traversal_count) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(source_id, target_id, link_type) DO UPDATE SET \
+               weight          = MAX(weight, excluded.weight), \
+               last_traversed  = excluded.created_at, \
+               traversal_count = traversal_count + 1",
             params![
                 link.source_id.0,
                 link.target_id.0,
@@ -929,6 +962,34 @@ impl SqliteStore {
                 link.traversal_count as i64,
             ],
         )?;
+        Ok(())
+    }
+
+    /// Batch-stamp links spreading activation actually walked in a recall:
+    /// `last_traversed` = now, `traversal_count` += 1, one transaction.
+    /// This is the write half the port never had — the read half
+    /// (`decayed_link_weight`, link fatigue, `never_traversed_links_pct`)
+    /// consumed these fields from day one.
+    pub async fn record_traversals(
+        &self,
+        keys: &[(MemoryId, MemoryId, crate::types::LinkType)],
+    ) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().await;
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE links SET last_traversed = ?1, traversal_count = traversal_count + 1 \
+                 WHERE source_id = ?2 AND target_id = ?3 AND link_type = ?4",
+            )?;
+            for (src, tgt, lt) in keys {
+                stmt.execute(params![now, src.0, tgt.0, enum_to_str(lt)?])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 

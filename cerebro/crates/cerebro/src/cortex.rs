@@ -6,7 +6,7 @@ use petgraph::graph::NodeIndex;
 use tokio::sync::RwLock;
 
 use crate::{
-    activation::spread,
+    activation::spread_traced,
     config::Config,
     engines::{
         AffectEngine, DreamEngine, EpisodicEngine, ExecutiveEngine, GatingEngine,
@@ -104,6 +104,36 @@ impl CerebroCortex {
                  single-memory cap — one memory is a note, not a document dump; \
                  split it or ingest_file it)"
             ))?;
+
+        // Thalamus gate 2 — exact-content dedup (the Python step the port
+        // dropped; found via the colony's "install prewarm" fossil islands,
+        // 2026-07-28). An identical body in the SAME owner space is a
+        // re-encounter, not a new memory: reinforce the existing node's
+        // access history and hand it back. Messages are exempt (Python:
+        // "messages are always stored") — a repeated "ping" is two events.
+        let is_message = node.tags.iter().any(|t| t == "message");
+        if !is_message {
+            let storage = self.storage.read().await;
+            if let Some(id) = storage.sqlite
+                .find_exact_content(&content, node.agent_id.as_ref().map(|a| a.0.as_str())).await?
+            {
+                if let Some(mut existing) = storage.sqlite.get_memory(&id, &scope).await? {
+                    let now = Utc::now();
+                    existing.record_access(now);
+                    let times = serde_json::to_string(&existing.access_times)
+                        .unwrap_or_else(|_| "[]".to_string());
+                    storage.sqlite.record_accesses(&[(
+                        existing.id.clone(),
+                        existing.access_count,
+                        times,
+                        existing.strength.stability,
+                        existing.strength.difficulty,
+                        existing.strength.last_review.map(|dt| dt.to_rfc3339()),
+                    )]).await?;
+                    return Ok(existing);
+                }
+            }
+        }
 
         // Amygdala: emotional classification and salience modulation
         node = self.amygdala.apply_emotion(node);
@@ -421,7 +451,21 @@ impl CerebroCortex {
                 })
                 .collect()
         };
-        let activated = spread(&storage.graph.graph, &seeds, &visible_nodes);
+        let (activated, walked) = spread_traced(&storage.graph.graph, &seeds, &visible_nodes);
+
+        // The walk is part of the memory act: stamp the links spreading
+        // actually used, so link decay and the fragmentation watchdog's
+        // never_traversed_links_pct measure real usage (the colony's 4/4
+        // "exactly 100.0%" finding — the write half was never wired). SQLite
+        // is the source of truth; the in-memory copy picks the stamps up on
+        // its next rebuild (cross-process refresh / restart), so recall stays
+        // on the read guard with no new lock contention.
+        let walked_keys: Vec<(MemoryId, MemoryId, crate::types::LinkType)> = walked
+            .iter()
+            .filter_map(|&eidx| storage.graph.graph.edge_weight(eidx))
+            .map(|l| (l.source_id.clone(), l.target_id.clone(), l.link_type))
+            .collect();
+        storage.sqlite.record_traversals(&walked_keys).await?;
 
         // 3. Build score maps and union ID set
         let sims_map: HashMap<MemoryId, f32> = candidates.into_iter().collect();

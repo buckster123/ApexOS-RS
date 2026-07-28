@@ -103,8 +103,26 @@ pub fn spread(
     seeds: &[(NodeIndex, f32)],
     visible_nodes: &HashMap<NodeIndex, bool>,
 ) -> HashMap<NodeIndex, f32> {
+    spread_traced(graph, seeds, visible_nodes).0
+}
+
+/// `spread` plus the trace: which edges actually carried activation (passed
+/// the threshold + visibility gates and contributed to a neighbour). The
+/// caller stamps them (`last_traversed`/`traversal_count`) so link decay and
+/// the fragmentation watchdog's `never_traversed_links_pct` measure reality.
+///
+/// Deliberate deviation from Python: there, `last_activated` only advanced on
+/// duplicate link re-assertion (Hebbian re-asserts), never on a spread walk —
+/// so the "never traversed" metric could not move with use. Walk-stamping is
+/// what the field name promises and what the colony's field test expected
+/// (4/4 nodes reporting exactly 100.0%, 2026-07-28).
+pub fn spread_traced(
+    graph: &Graph<MemoryId, AssociativeLink>,
+    seeds: &[(NodeIndex, f32)],
+    visible_nodes: &HashMap<NodeIndex, bool>,
+) -> (HashMap<NodeIndex, f32>, Vec<petgraph::graph::EdgeIndex>) {
     if seeds.is_empty() {
-        return HashMap::new();
+        return (HashMap::new(), Vec::new());
     }
 
     let max_nodes     = SPREADING_MAX_ACTIVATED;
@@ -122,6 +140,7 @@ pub fn spread(
     }
 
     let mut frontier: HashSet<NodeIndex> = activated.keys().copied().collect();
+    let mut traversed: HashSet<petgraph::graph::EdgeIndex> = HashSet::new();
 
     for hop in 0..max_hops {
         if frontier.is_empty() || activated.len() >= max_nodes {
@@ -156,6 +175,7 @@ pub fn spread(
                     if spread_amt < threshold {
                         continue;
                     }
+                    traversed.insert(edge.id());
 
                     match activated.get(&neighbor).copied() {
                         Some(existing) => {
@@ -189,7 +209,7 @@ pub fn spread(
         }
     }
 
-    activated
+    (activated, traversed.into_iter().collect())
 }
 
 #[cfg(test)]

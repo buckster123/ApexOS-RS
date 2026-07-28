@@ -62,6 +62,23 @@ impl GraphStore {
             .ok_or_else(|| anyhow::anyhow!("source {} not in graph", link.source_id.0))?;
         let tgt = self.index.get(&link.target_id).copied()
             .ok_or_else(|| anyhow::anyhow!("target {} not in graph", link.target_id.0))?;
+        // Re-assertion updates the existing edge in place — mirroring
+        // `insert_link`'s upsert (weight ratchets, activation stamp/count
+        // advance). petgraph happily stores parallel edges, and a duplicate
+        // edge would double-count in spreading conductance.
+        use petgraph::visit::EdgeRef;
+        let existing = self
+            .graph
+            .edges_connecting(src, tgt)
+            .find(|e| e.weight().link_type == link.link_type)
+            .map(|e| e.id());
+        if let Some(eidx) = existing {
+            let e = self.graph.edge_weight_mut(eidx).expect("edge index from edges_connecting");
+            e.weight = e.weight.max(link.weight);
+            e.last_traversed = Some(link.created_at);
+            e.traversal_count += 1;
+            return Ok(());
+        }
         self.graph.add_edge(src, tgt, link);
         Ok(())
     }
