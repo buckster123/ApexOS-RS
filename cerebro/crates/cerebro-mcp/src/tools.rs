@@ -419,7 +419,7 @@ fn tool_schema(name: &str) -> Value {
 
         "find_by_tags" => json!({
             "name": "find_by_tags",
-            "description": "Find memories carrying EVERY given tag (exact match, AND). Precise where recall is fuzzy — use it for provenance queries (e.g. tags [\"from:apex1\"] lists everything a peer sent; add \"origin:<id>\" to find one specific federated import).",
+            "description": "Find memories carrying EVERY given tag (exact match, AND). Precise where recall is fuzzy — use it for provenance queries (e.g. tags [\"from:apex1\"] lists everything a peer sent; add \"origin:<id>\" to find one specific federated import). Returns summary rows — content_head (first 200 chars) + content_chars (full length); fetch a full body with get_memory(id).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -668,7 +668,7 @@ fn tool_schema(name: &str) -> Value {
 
         "list_intentions" => json!({
             "name": "list_intentions",
-            "description": "List pending TODOs and reminders that have not been resolved.",
+            "description": "List pending TODOs and reminders that have not been resolved. Returns summary rows — content_head (first 200 chars) + content_chars (full length); fetch a full body with get_memory(id).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -710,7 +710,7 @@ fn tool_schema(name: &str) -> Value {
 
         "list_procedures" => json!({
             "name": "list_procedures",
-            "description": "List all stored workflows, strategies, and how-to guides.",
+            "description": "List all stored workflows, strategies, and how-to guides. Returns summary rows — content_head (first 200 chars) + content_chars (full length): a browse index, not the texts. For full bodies use find_relevant_procedures (task-matched) or get_memory(id).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -776,7 +776,7 @@ fn tool_schema(name: &str) -> Value {
 
         "list_schemas" => json!({
             "name": "list_schemas",
-            "description": "List all stored patterns and principles.",
+            "description": "List all stored patterns and principles. Returns summary rows — content_head (first 200 chars) + content_chars (full length); for full bodies use find_matching_schemas or get_memory(id).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
