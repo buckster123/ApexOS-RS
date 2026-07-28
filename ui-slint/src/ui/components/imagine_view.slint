@@ -150,13 +150,14 @@ export component ImagineView {
                     height: 9px;
                     border-radius: 5px;
                     background: root.status == "ok" ? #22c55e
-                              : root.status == "auth" ? Palette.warning
+                              : (root.status == "auth" || root.status == "unconfigured") ? Palette.warning
                               : root.status == "offline" ? Palette.error
                               : Palette.text-dim;
                 }
                 Text {
                     text: "IMAGINE · " + (root.status == "ok" ? "CONNECTED"
                         : root.status == "auth" ? "TOKEN REJECTED"
+                        : root.status == "unconfigured" ? "NO TOKEN"
                         : root.status == "offline" ? "NODE OFFLINE" : "…");
                     color: Palette.text-dim;
                     font-size: 9px * Personas.font-scale;
@@ -372,7 +373,9 @@ export component ImagineView {
                             : (root.status == "offline"
                                 ? "imaginarium node unreachable — is imaginarium.service running?"
                             : root.status == "auth"
-                                ? "token rejected — check IMAGINARIUM_TOKEN on this node"
+                                ? "the node rejected the token — /etc/imaginarium/env and /etc/agentd/env must carry the SAME IMAGINARIUM_TOKEN (restart both services after fixing)"
+                            : root.status == "unconfigured"
+                                ? "no token — agentd has no IMAGINARIUM_TOKEN yet. Provision with install.sh --imaginarium (docs/imaginarium.md), then hit ⟳"
                                 : "generate an image, or pick a job from the list");
                         color: Palette.text-dim;
                         font-size: 12px * Personas.font-scale;

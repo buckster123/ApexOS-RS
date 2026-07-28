@@ -348,6 +348,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/capabilities",       get(capabilities_handler))
         .route("/api/sensors/config",     get(sensor_config_get_handler).post(sensor_config_post_handler))
         .route("/api/voice",              get(get_voice_handler).post(set_voice_handler))
+        .route("/api/imaginarium",        get(imaginarium_reach_handler))
         .route("/api/spawn",              post(spawn_handler))
         .route("/api/mesh/file",          post(mesh_file_handler).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/api/mesh/memory",        post(mesh_memory_handler).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
@@ -2908,6 +2909,65 @@ fn voice_config_snapshot() -> VoiceConfig {
 
 fn voice_backend_valid(s: &str) -> bool {
     matches!(s, "auto" | "local" | "api" | "off")
+}
+
+// ── Imaginarium reach (docs/imaginarium.md) ───────────────────────────────────
+// Hands an authenticated client the node's Imaginarium base URL + LAN token from
+// agentd's OWN environment (the systemd-parsed /etc/agentd/env values install.sh
+// provisioned — the same ones the MCP proxy plugin inherits). Exists for the
+// DESKTOP ui-slint Imagine app: a winit window in the user's session cannot read
+// the 0600 root env file, so it asks agentd after login instead. Never the xAI
+// key — that lives only in /etc/imaginarium/env. Gated like every /api route
+// (admin token OR a minted login session token): node-local trust — whoever may
+// use this node's UI may use its generator.
+
+/// Pure resolver so the trim/default rules are testable without process env.
+fn imaginarium_reach_from(url_env: Option<String>, token_env: Option<String>) -> (String, String) {
+    let url = url_env
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8791".to_string());
+    let token = token_env.map(|s| s.trim().to_string()).unwrap_or_default();
+    (url, token)
+}
+
+async fn imaginarium_reach_handler() -> impl IntoResponse {
+    let (url, token) = imaginarium_reach_from(
+        std::env::var("IMAGINARIUM_URL").ok(),
+        std::env::var("IMAGINARIUM_TOKEN").ok(),
+    );
+    Json(serde_json::json!({
+        "url": url,
+        "token": token,
+        "configured": !token.is_empty(),
+    }))
+}
+
+#[cfg(test)]
+mod imaginarium_reach_tests {
+    use super::imaginarium_reach_from;
+
+    #[test]
+    fn reach_defaults_trims_and_reports() {
+        // Unset env → loopback default, no token.
+        assert_eq!(
+            imaginarium_reach_from(None, None),
+            ("http://127.0.0.1:8791".into(), String::new())
+        );
+        // Trailing slash + whitespace healed; token trimmed.
+        assert_eq!(
+            imaginarium_reach_from(
+                Some("  http://10.0.0.5:8791/  ".into()),
+                Some(" abc123 \n".into())
+            ),
+            ("http://10.0.0.5:8791".into(), "abc123".into())
+        );
+        // Empty strings behave like unset.
+        assert_eq!(
+            imaginarium_reach_from(Some("   ".into()), Some(String::new())),
+            ("http://127.0.0.1:8791".into(), String::new())
+        );
+    }
 }
 
 async fn get_voice_handler() -> impl IntoResponse {
