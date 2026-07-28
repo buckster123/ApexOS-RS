@@ -46,9 +46,9 @@ Design rules (violating any of these is a regression):
 | `ui_query` | — | GET the shell's `/state` → structure JSON (below). Graceful "no display" note on headless |
 | `ui_reflex` | `on`, `do`, `app`, `remove?` | Install (or `remove: true` uninstall) an event→action rule the shell runs below inference (C, below) |
 
-The app catalog = the 20 `AppKind` slugs: `chat system sensor sessions settings terminal
+The app catalog = the 21 `AppKind` slugs: `chat system sensor sessions settings terminal
 council event-log mesh inference audio-editor sonus notes face sketchpad web calculator
-explorer occipital board`.
+explorer occipital board imagine`.
 
 ### `ui_arrange` — preset topologies (A2)
 

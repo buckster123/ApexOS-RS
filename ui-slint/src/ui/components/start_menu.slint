@@ -114,6 +114,7 @@ export component StartMenu inherits Rectangle {
             MenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
             MenuRow { glyph: "🧮"; label: "Calculator"; clicked => { root.launch(16); } }
             MenuRow { glyph: "📁"; label: "Files";     clicked => { root.launch(17); } }
+            MenuRow { glyph: "🖼"; label: "Imagine";   clicked => { root.launch(20); } }
         }
 
         // Deep-tech apps — hidden by the simple/warm persona (G5 surface gating).
@@ -190,10 +191,10 @@ export component Win98StartMenu inherits Rectangle {
     callback launch(int);     // AppKind ordinal — same contract as StartMenu
 
     width: 200px;
-    // 10 core rows + (optional separator + 10 tech rows), all 26px; + pads.
+    // 11 core rows + (optional separator + 10 tech rows), all 26px; + pads.
     // NB: keep these counts in sync with the row list below — the old 9/8
     // formula silently cut the last two rows off the menu.
-    height: (Personas.show-tech-apps ? 10 * 26px + 9px + 10 * 26px : 10 * 26px) + 8px;
+    height: (Personas.show-tech-apps ? 11 * 26px + 9px + 10 * 26px : 11 * 26px) + 8px;
     background: Win98.face;
     drop-shadow-blur: 6px;
     drop-shadow-color: #00000088;
@@ -238,6 +239,7 @@ export component Win98StartMenu inherits Rectangle {
             WinMenuRow { glyph: "⚙"; label: "Settings"; clicked => { root.launch(4); } }
             WinMenuRow { glyph: "🧮"; label: "Calculator"; clicked => { root.launch(16); } }
             WinMenuRow { glyph: "📁"; label: "Files";     clicked => { root.launch(17); } }
+            WinMenuRow { glyph: "🖼"; label: "Imagine";   clicked => { root.launch(20); } }
 
             // Etched separator before the deep-tech group.
             if Personas.show-tech-apps: Rectangle {

@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, WmState, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, UsbCandidate, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, BoardCard } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, WmState, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, UsbCandidate, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, ImagineJobItem, BoardCard } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { IdentityWizard } from "components/identity_wizard.slint";
 import { ImagePicker } from "components/image_picker.slint";
@@ -148,6 +148,17 @@ export component AppWindow inherits Window {
     in-out property <bool>           explorer-drive-busy: false;
     in-out property <string>         explorer-drive-result: "";
 
+    // ── Imagine (🖼) Imaginarium studio ─────────────────────────────────
+    in-out property <string>           imagine-status: "idle";       // idle|ok|auth|offline
+    in-out property <string>           imagine-node-url: "";
+    in-out property <bool>             imagine-busy: false;
+    in-out property <string>           imagine-note: "";
+    in-out property <string>           imagine-preview-kind: "none"; // none|image|video|error
+    in-out property <image>            imagine-preview;
+    in-out property <[ImagineJobItem]> imagine-jobs;
+    in-out property <string>           imagine-selected-job: "";
+    in-out property <string>           imagine-prompt-input: "";
+
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id is
     // Rust-maintained for chrome highlight + dock state.
@@ -265,6 +276,9 @@ export component AppWindow inherits Window {
     callback open-url(string);
     callback calc-key(string);
     callback occipital-steer(string);   // a clicked link / URL-bar "go here" nudge (9c)
+    callback imagine-generate(string, string, string, int);  // prompt, model|"auto", aspect, n
+    callback imagine-pick-job(string);                       // job id → preview
+    callback refresh-imagine();
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -842,6 +856,15 @@ export component AppWindow inherits Window {
                         explorer-drive-candidates: root.explorer-drive-candidates;
                         explorer-drive-busy: root.explorer-drive-busy;
                         explorer-drive-result: root.explorer-drive-result;
+                        imagine-status: root.imagine-status;
+                        imagine-node-url: root.imagine-node-url;
+                        imagine-busy: root.imagine-busy;
+                        imagine-note: root.imagine-note;
+                        imagine-preview-kind: root.imagine-preview-kind;
+                        imagine-preview: root.imagine-preview;
+                        imagine-jobs: root.imagine-jobs;
+                        imagine-selected-job: root.imagine-selected-job;
+                        imagine-prompt-input <=> root.imagine-prompt-input;
 
                         send-message(t) => { root.send-message(t); }
                         attach-image => { root.refresh-workspace-images(); root.image-picker-open = true; }
@@ -914,6 +937,9 @@ export component AppWindow inherits Window {
                         open-url(u) => { root.open-url(u); }
                         calc-key(k) => { root.calc-key(k); }
                         occipital-steer(u) => { root.occipital-steer(u); }
+                        imagine-generate(p, m, a, n) => { root.imagine-generate(p, m, a, n); }
+                        imagine-pick-job(id) => { root.imagine-pick-job(id); }
+                        refresh-imagine => { root.refresh-imagine(); }
 
                         req-focus => { root.focus-window(w.id); }
                         req-close => { root.close-window(w.id); }

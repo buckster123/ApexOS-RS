@@ -1,0 +1,405 @@
+import { ScrollView } from "std-widgets.slint";
+import { Palette } from "../palette.slint";
+import { Personas } from "../personas.slint";
+import { ImagineJobItem } from "../types.slint";
+
+// ── ImagineView (🖼) — the Imaginarium studio window ─────────────────────────
+//
+// A thin native client for the node-local Imaginarium daemon (docs/imaginarium.md):
+// prompt → POST /v1/images/generations → still preview, plus the node's shared
+// jobs list (agent MCP jobs and these land in the same library). Rust owns all
+// HTTP (IMAGINARIUM_URL/IMAGINARIUM_TOKEN); this view is controls + honest
+// connection states. v1 is image-first — video jobs list and report their
+// status, generation of them stays with the agent tools / browser studio.
+// Lists live in ScrollViews (linuxkms drops the scroll wheel — the kiosk needs
+// the scrollbar).
+
+// A small selectable option chip (model / aspect / count rows).
+component OptionChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked;
+
+    height: 24px;
+    width: txt.preferred-width + 18px;
+    border-radius: Palette.radius-sm;
+    background: root.active ? Palette.primary-dim : (ta.has-hover ? Palette.surface-hi : Palette.surface);
+    border-width: 1px;
+    border-color: root.active ? Palette.primary : Palette.border;
+    animate background, border-color { duration: 120ms; }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    txt := Text {
+        text: root.label;
+        color: root.active ? Palette.primary : Palette.text-dim;
+        font-size: 10px * Personas.font-scale;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// One job row: status dot · mode glyph + model · timestamp; click = preview it.
+component JobRow inherits Rectangle {
+    in property <ImagineJobItem> job;
+    in property <bool> selected;
+    callback pick(string);
+
+    height: row.preferred-height + 12px;
+    border-radius: Palette.radius-sm;
+    background: root.selected ? Palette.primary-dim
+              : (ta.has-hover ? Palette.surface-hi : Palette.surface);
+    border-width: 1px;
+    border-color: root.selected ? Palette.primary : Palette.border;
+    animate background, border-color { duration: 120ms; }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.pick(root.job.id); }
+    }
+
+    row := HorizontalLayout {
+        padding: 8px;
+        spacing: 8px;
+
+        // Status dot — green done, amber in-flight, red failed/expired.
+        Rectangle {
+            y: 5px;
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: root.job.status == "done" ? #22c55e
+                      : (root.job.status == "failed" || root.job.status == "expired"
+                         || root.job.status == "cancelled") ? Palette.error
+                      : Palette.warning;
+        }
+
+        VerticalLayout {
+            spacing: 1px;
+            horizontal-stretch: 1;
+            Text {
+                text: (root.job.mode == "image_generate" || root.job.mode == "image_edit"
+                       ? "🖼 " : "🎬 ") + root.job.model;
+                color: Palette.text-bright;
+                font-size: 11px * Personas.font-scale;
+                font-weight: 700;
+                overflow: elide;
+            }
+            Text {
+                text: root.job.status + " · " + root.job.when
+                    + (root.job.err != "" ? " · " + root.job.err : "");
+                color: root.job.err != "" ? Palette.error : Palette.text-dim;
+                font-size: 10px * Personas.font-scale;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+export component ImagineView {
+    preferred-height: 0px;
+    min-height: 0px;
+
+    // Connection: idle (never probed) | ok | auth (401) | offline.
+    in property <string>           status: "idle";
+    in property <string>           node-url: "";
+    in property <bool>             busy: false;
+    in property <string>           note: "";           // status line under the preview
+    in property <string>           preview-kind: "none";  // none|image|video|error
+    in property <image>            preview;
+    in property <[ImagineJobItem]> jobs;
+    in property <string>           selected-job: "";
+
+    in-out property <string>       prompt-input: "";
+    // Local chip state — resets with the window, which is fine.
+    property <int> model-ix: 0;    // 0 auto · 1 image (fast) · 2 quality
+    property <int> aspect-ix: 0;   // index into aspect-labels
+    property <int> n-ix: 0;        // 0 → 1 image · 1 → 2 · 2 → 4
+    property <[string]> aspect-labels: ["1:1", "16:9", "9:16", "4:3", "3:4"];
+
+    callback generate(string, string, string, int);  // prompt, model slug|"auto", aspect, n
+    callback pick-job(string);                       // job id → preview it
+    callback refresh();
+
+    function fire-generate() {
+        if (root.prompt-input != "" && !root.busy && root.status == "ok") {
+            root.generate(
+                root.prompt-input,
+                root.model-ix == 1 ? "image" : (root.model-ix == 2 ? "quality" : "auto"),
+                root.aspect-labels[root.aspect-ix],
+                root.n-ix == 1 ? 2 : (root.n-ix == 2 ? 4 : 1));
+        }
+    }
+
+    VerticalLayout {
+        // ── Header: connection dot · node URL · refresh ─────────────────
+        Rectangle {
+            height: 40px;
+            background: Palette.surface;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 10px;
+                spacing: 8px;
+
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 9px;
+                    height: 9px;
+                    border-radius: 5px;
+                    background: root.status == "ok" ? #22c55e
+                              : root.status == "auth" ? Palette.warning
+                              : root.status == "offline" ? Palette.error
+                              : Palette.text-dim;
+                }
+                Text {
+                    text: "IMAGINE · " + (root.status == "ok" ? "CONNECTED"
+                        : root.status == "auth" ? "TOKEN REJECTED"
+                        : root.status == "offline" ? "NODE OFFLINE" : "…");
+                    color: Palette.text-dim;
+                    font-size: 9px * Personas.font-scale;
+                    letter-spacing: 2px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.node-url;
+                    color: Palette.secondary;
+                    font-size: 10px * Personas.font-scale;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                Rectangle {
+                    width: 28px;
+                    height: 24px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Palette.radius-sm;
+                    background: refresh-ta.has-hover ? Palette.surface-hi : transparent;
+                    refresh-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.refresh(); }
+                    }
+                    Text {
+                        text: "⟳";
+                        color: Palette.text-dim;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Palette.border; }
+
+        // ── Body: controls + jobs rail (left) · preview (right) ────────
+        HorizontalLayout {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                width: 280px;
+                padding: 12px;
+                spacing: 8px;
+
+                // Prompt — multi-line, Enter generates, Shift+Enter newline
+                // (the composer idiom from input_bar.slint).
+                Rectangle {
+                    height: max(64px, min(field.preferred-height + 16px, 140px));
+                    border-radius: Palette.radius;
+                    background: Palette.surface;
+                    border-width: 1px;
+                    border-color: field.has-focus ? Palette.primary-dim : Palette.border;
+                    clip: true;
+
+                    field := TextInput {
+                        x: 10px;
+                        y: 8px;
+                        width: parent.width - 20px;
+                        font-size: 12px * Personas.font-scale;
+                        color: Palette.text;
+                        single-line: false;
+                        wrap: word-wrap;
+                        enabled: !root.busy;
+                        text <=> root.prompt-input;
+                        key-pressed(e) => {
+                            if (e.text == "\n" && !e.modifiers.shift) {
+                                root.fire-generate();
+                                return EventResult.accept;
+                            }
+                            return EventResult.reject;
+                        }
+                    }
+                    if field.text == "": Text {
+                        x: 10px;
+                        y: 8px;
+                        text: "describe the image…";
+                        color: Palette.text-dim;
+                        font-size: 12px * Personas.font-scale;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "MODEL";
+                        width: 52px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        letter-spacing: 1.5px;
+                        vertical-alignment: center;
+                    }
+                    OptionChip { label: "AUTO";    active: root.model-ix == 0; clicked => { root.model-ix = 0; } }
+                    OptionChip { label: "FAST";    active: root.model-ix == 1; clicked => { root.model-ix = 1; } }
+                    OptionChip { label: "QUALITY"; active: root.model-ix == 2; clicked => { root.model-ix = 2; } }
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "RATIO";
+                        width: 52px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        letter-spacing: 1.5px;
+                        vertical-alignment: center;
+                    }
+                    for label[ix] in root.aspect-labels: OptionChip {
+                        label: label;
+                        active: root.aspect-ix == ix;
+                        clicked => { root.aspect-ix = ix; }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "COUNT";
+                        width: 52px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        letter-spacing: 1.5px;
+                        vertical-alignment: center;
+                    }
+                    OptionChip { label: "1"; active: root.n-ix == 0; clicked => { root.n-ix = 0; } }
+                    OptionChip { label: "2"; active: root.n-ix == 1; clicked => { root.n-ix = 1; } }
+                    OptionChip { label: "4"; active: root.n-ix == 2; clicked => { root.n-ix = 2; } }
+                }
+
+                // Generate — disabled while busy/offline; shows the rough spend.
+                Rectangle {
+                    height: 36px;
+                    border-radius: Palette.radius;
+                    background: (root.busy || root.status != "ok" || root.prompt-input == "")
+                        ? Palette.surface
+                        : (gen-ta.has-hover ? Palette.primary : Palette.primary-dim);
+                    border-width: 1px;
+                    border-color: (root.busy || root.status != "ok") ? Palette.border : Palette.primary;
+                    animate background { duration: 120ms; }
+                    gen-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.fire-generate(); }
+                    }
+                    Text {
+                        text: root.busy ? "GENERATING…"
+                            : "✦ GENERATE  (~$" + (root.model-ix == 2 ? "0.05" : "0.02") + "/img)";
+                        color: (root.busy || root.status != "ok" || root.prompt-input == "")
+                            ? Palette.text-dim : Palette.text-bright;
+                        font-size: 11px * Personas.font-scale;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Text {
+                    text: "JOBS ON THIS NODE";
+                    color: Palette.text-dim;
+                    font-size: 9px * Personas.font-scale;
+                    letter-spacing: 1.5px;
+                    height: 20px;
+                    vertical-alignment: center;
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        for job in root.jobs: JobRow {
+                            job: job;
+                            selected: root.selected-job == job.id;
+                            pick(id) => { root.pick-job(id); }
+                        }
+                        if root.jobs.length == 0: Text {
+                            text: root.status == "ok" ? "no jobs yet — generate something ✦" : "";
+                            color: Palette.text-dim;
+                            font-size: 11px * Personas.font-scale;
+                        }
+                    }
+                }
+            }
+
+            Rectangle { width: 1px; background: Palette.border; }
+
+            // ── Preview pane ────────────────────────────────────────────
+            Rectangle {
+                horizontal-stretch: 1;
+                background: Palette.bg;
+
+                if root.preview-kind == "image": Image {
+                    x: 14px;
+                    y: 14px;
+                    width: parent.width - 28px;
+                    height: parent.height - 46px;
+                    source: root.preview;
+                    image-fit: contain;
+                }
+                if root.preview-kind != "image": VerticalLayout {
+                    alignment: center;
+                    spacing: 8px;
+                    Text {
+                        text: root.preview-kind == "video" ? "🎬"
+                            : root.preview-kind == "error" ? "⚠" : "🖼";
+                        font-size: 40px;
+                        horizontal-alignment: center;
+                        color: Palette.text-dim;
+                    }
+                    Text {
+                        text: root.preview-kind == "video"
+                                ? "video job — open the browser studio to play it"
+                            : root.preview-kind == "error" ? ""
+                            : (root.status == "offline"
+                                ? "imaginarium node unreachable — is imaginarium.service running?"
+                            : root.status == "auth"
+                                ? "token rejected — check IMAGINARIUM_TOKEN on this node"
+                                : "generate an image, or pick a job from the list");
+                        color: Palette.text-dim;
+                        font-size: 12px * Personas.font-scale;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // Status line — cost / errors / "generating…" feedback.
+                if root.note != "": Rectangle {
+                    x: 14px;
+                    height: 24px;
+                    width: parent.width - 28px;
+                    y: parent.height - self.height - 8px;
+                    border-radius: Palette.radius-sm;
+                    background: Palette.surface;
+                    Text {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        text: root.note;
+                        color: root.preview-kind == "error" ? Palette.error : Palette.text-dim;
+                        font-size: 10px * Personas.font-scale;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+}
