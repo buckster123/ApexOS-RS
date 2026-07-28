@@ -126,7 +126,7 @@ they come up.
 
 ## How to add an app (recipe)
 
-Reverse-engineered from the shipped set (20 `AppKind`s and counting). To add app `Foo`:
+Reverse-engineered from the shipped set (21 `AppKind`s and counting). To add app `Foo`:
 
 1. **`ui-slint/src/ui/types.slint`** — add `foo` to the `AppKind` enum. Add a
    `struct FooItem { … }` if the app has list data.

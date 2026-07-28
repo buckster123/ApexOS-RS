@@ -117,6 +117,8 @@ thread_local! {
     // lives in the generalized UI_LATCHED map below (A3) — the reader
     // force-latches on any user close; a menu launch re-invites.
     static OCCIPITAL_TRAIL: RefCell<Option<Rc<slint::VecModel<ReaderLink>>>> = const { RefCell::new(None) };
+    // Imagine (🖼) — the Imaginarium studio's shared node jobs list.
+    static IMAGINE_JOBS: RefCell<Option<Rc<slint::VecModel<ImagineJobItem>>>> = const { RefCell::new(None) };
     // Adaptive UI (Loop 6, docs/adaptive-ui.md): per-AppKind bitmasks, bit index =
     // the AppKind ordinal (APP_TABLE order). AGENT_OPENED marks windows the agent
     // created via `ui_open`; a USER close of one moves the bit to UI_LATCHED —
@@ -510,6 +512,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         17 => AppKind::Explorer,
         18 => AppKind::Occipital,
         19 => AppKind::Board,
+        20 => AppKind::Imagine,
         _ => AppKind::Chat,
     }
 }
@@ -541,6 +544,7 @@ const APP_TABLE: &[(AppKind, &str)] = &[
     (AppKind::Explorer, "explorer"),
     (AppKind::Occipital, "occipital"),
     (AppKind::Board, "board"),
+    (AppKind::Imagine, "imagine"),
 ];
 
 fn kind_ordinal(k: AppKind) -> i32 {
@@ -1155,6 +1159,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Explorer => "Files",
         AppKind::Occipital => "Occipital",
         AppKind::Board => "Work Board",
+        AppKind::Imagine => "Imagine",
     }
 }
 
@@ -1182,6 +1187,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Explorer => (680.0, 520.0),
         AppKind::Occipital => (720.0, 620.0),
         AppKind::Board => (880.0, 600.0),
+        AppKind::Imagine => (900.0, 640.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -3516,7 +3522,7 @@ mod tests {
             assert_eq!(kind_from_slug(slug), Some(*kind));
             assert_eq!(kind_slug(*kind), *slug);
         }
-        assert_eq!(APP_TABLE.len(), 20);
+        assert_eq!(APP_TABLE.len(), 21);
         // Slugs fit the u32 latch bitmasks and stay unique.
         assert!(APP_TABLE.len() <= 32);
         let mut slugs: Vec<_> = APP_TABLE.iter().map(|(_, s)| *s).collect();
@@ -3526,6 +3532,49 @@ mod tests {
         // Unknown slugs are inexpressible.
         assert_eq!(kind_from_slug("xterm"), None);
         assert_eq!(kind_from_slug(""), None);
+    }
+
+    #[test]
+    fn imagine_job_rows_parses_the_jobs_list() {
+        use super::imagine_job_rows;
+        // Well-formed JobListItem rows: model stem trimmed, created_at cut to
+        // date+minute (both RFC3339 and SQLite forms), error carried through.
+        let v = serde_json::json!([
+            { "job_id": "01ABC", "status": "done", "mode": "image_generate",
+              "model": "grok-imagine-image-quality",
+              "created_at": "2026-07-28T18:03:11.123Z", "error": null },
+            { "job_id": "01DEF", "status": "failed", "mode": "video_generate",
+              "model": "grok-imagine-video",
+              "created_at": "2026-07-28 18:05:02", "error": "upstream 500" },
+        ]);
+        let rows = imagine_job_rows(&v);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], ("01ABC".into(), "image_generate".into(), "done".into(),
+                             "image-quality".into(), "2026-07-28 18:03".into(), "".into()));
+        assert_eq!(rows[1].3, "video");
+        assert_eq!(rows[1].4, "2026-07-28 18:05");
+        assert_eq!(rows[1].5, "upstream 500");
+        // A row without a job_id is skipped, not a panic; non-arrays yield nothing.
+        let partial = serde_json::json!([{ "status": "done" }, { "job_id": "01X" }]);
+        let rows = imagine_job_rows(&partial);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "01X");
+        assert_eq!(rows[0].2, "?");
+        assert!(imagine_job_rows(&serde_json::json!({"not":"an array"})).is_empty());
+        assert!(imagine_job_rows(&serde_json::Value::Null).is_empty());
+    }
+
+    #[test]
+    fn imagine_done_note_reports_cost_and_batch() {
+        use super::imagine_done_note;
+        let job = serde_json::json!({ "usage": { "estimated_usd": 0.04 } });
+        assert_eq!(imagine_done_note(&job, 1), "done · ~$0.04");
+        assert_eq!(
+            imagine_done_note(&job, 4),
+            "done · ~$0.04 · 4 images in the node library (first shown)"
+        );
+        // No usage block → still an honest "done".
+        assert_eq!(imagine_done_note(&serde_json::json!({}), 1), "done");
     }
 
     #[test]
@@ -4239,6 +4288,173 @@ async fn json_get(client: &reqwest::Client, url: String) -> Value {
     {
         Ok(resp) => resp.json::<Value>().await.unwrap_or(Value::Null),
         Err(_)   => Value::Null,
+    }
+}
+
+// ── Imagine (🖼) — the Imaginarium studio window (docs/imaginarium.md) ────────
+// ui-slint is a thin HTTP client of the node-local Imaginarium daemon. Base URL
+// and LAN token ride the SAME env vars the agentd MCP proxy uses
+// (IMAGINARIUM_URL / IMAGINARIUM_TOKEN — /etc/agentd/env reaches both the
+// daemon-side plugin and this UI's service unit), so one config wires both
+// surfaces. The xAI key never appears here — that's the whole seam.
+
+fn imagine_base_url() -> String {
+    std::env::var("IMAGINARIUM_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8791".to_string())
+}
+
+/// A jobs-rail row in Send form: (id, mode, status, model, when, err).
+type ImagineRow = (String, String, String, String, String, String);
+
+/// Rows for the jobs rail from a `GET /v1/jobs` body (array of JobListItem).
+/// Pure — malformed entries are skipped, a non-array yields no rows. Model is
+/// shown without the shared "grok-imagine-" stem; created_at keeps its
+/// date+minute prefix (RFC3339 "T" and SQLite " " both read fine).
+fn imagine_job_rows(v: &Value) -> Vec<ImagineRow> {
+    let Some(arr) = v.as_array() else { return Vec::new() };
+    arr.iter()
+        .filter_map(|j| {
+            let id = j.get("job_id")?.as_str()?.to_string();
+            let status = j.get("status").and_then(Value::as_str).unwrap_or("?").to_string();
+            let mode = j.get("mode").and_then(Value::as_str).unwrap_or("").to_string();
+            let model_full = j.get("model").and_then(Value::as_str).unwrap_or("");
+            let model = model_full.strip_prefix("grok-imagine-").unwrap_or(model_full).to_string();
+            let when = j.get("created_at").and_then(Value::as_str).unwrap_or("")
+                .replace('T', " ")
+                .chars()
+                .take(16)
+                .collect::<String>();
+            let err = j.get("error").and_then(Value::as_str).unwrap_or("").to_string();
+            Some((id, mode, status, model, when, err))
+        })
+        .collect()
+}
+
+/// One line summarizing a finished generation for the note strip: cost when the
+/// JobResult carries usage, plus a multi-image reminder (only 00 previews here).
+fn imagine_done_note(job: &Value, n: u32) -> String {
+    let cost = job
+        .get("usage")
+        .and_then(|u| u.get("estimated_usd"))
+        .and_then(Value::as_f64)
+        .map(|c| format!(" · ~${c:.2}"))
+        .unwrap_or_default();
+    let extra = if n > 1 { format!(" · {n} images in the node library (first shown)") } else { String::new() };
+    format!("done{cost}{extra}")
+}
+
+/// GET /v1/jobs?limit=40 → Ok(rows) | Err("auth"|"offline"). 401/403 = the
+/// token is wrong; anything else unreachable/broken = offline (the view says
+/// which). Never panics — an unparsable 200 is just zero rows.
+async fn imagine_fetch_jobs(client: &reqwest::Client, base: &str) -> Result<Vec<ImagineRow>, String> {
+    match client
+        .get(format!("{base}/v1/jobs?limit=40"))
+        .timeout(std::time::Duration::from_secs(6))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 => {
+            Err("auth".into())
+        }
+        Ok(resp) if resp.status().is_success() => {
+            let body = resp.json::<Value>().await.unwrap_or(Value::Null);
+            Ok(imagine_job_rows(&body))
+        }
+        _ => Err("offline".into()),
+    }
+}
+
+/// GET /v1/jobs/{id} → the full JobResult (Null on any failure).
+async fn imagine_fetch_job(client: &reqwest::Client, base: &str, id: &str) -> Value {
+    json_get(client, format!("{base}/v1/jobs/{id}")).await
+}
+
+/// GET /v1/library/{job_id}/content → decoded RGBA (w, h, pixels), ready to
+/// cross to the Slint thread (the slint::Image itself is not Send — the pixel
+/// buffer is built inside the invoke closure, the thermal-heatmap idiom).
+async fn imagine_fetch_preview(
+    client: &reqwest::Client,
+    base: &str,
+    job_id: &str,
+) -> Result<(u32, u32, Vec<u8>), String> {
+    let resp = client
+        .get(format!("{base}/v1/library/{job_id}/content"))
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("fetch failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("content HTTP {}", resp.status().as_u16()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("read failed: {e}"))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("decode failed: {e}"))?;
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    Ok((w, h, rgba.into_raw()))
+}
+
+/// POST /v1/images/generations. `model` is the chip slug — "auto" omits the
+/// field (server default), "image"/"quality" pass through (ModelId aliases).
+async fn imagine_generate_call(
+    client: &reqwest::Client,
+    base: &str,
+    prompt: &str,
+    model: &str,
+    aspect: &str,
+    n: u32,
+) -> Result<Value, String> {
+    let mut body = serde_json::json!({ "prompt": prompt, "n": n, "aspect_ratio": aspect });
+    if model != "auto" {
+        body["model"] = Value::String(model.to_string());
+    }
+    let resp = client
+        .post(format!("{base}/v1/images/generations"))
+        .json(&body)
+        // Image gen is synchronous upstream — a quality 4-image batch takes a
+        // while; be patient rather than strand a paid render.
+        .timeout(std::time::Duration::from_secs(180))
+        .send()
+        .await
+        .map_err(|e| format!("node unreachable: {e}"))?;
+    let code = resp.status().as_u16();
+    let body = resp.json::<Value>().await.unwrap_or(Value::Null);
+    if code == 401 || code == 403 {
+        return Err("token rejected — check IMAGINARIUM_TOKEN".into());
+    }
+    if !(200..300).contains(&code) {
+        let msg = body.get("error").and_then(Value::as_str).unwrap_or("generation failed");
+        return Err(format!("HTTP {code}: {msg}"));
+    }
+    Ok(body)
+}
+
+/// Land a jobs-fetch outcome on the Slint thread: status + the rail rows move
+/// together, so a 401/offline never shows stale jobs under a red dot.
+fn apply_imagine_rows(ui: &AppWindow, outcome: &Result<Vec<ImagineRow>, String>) {
+    match outcome {
+        Ok(rows) => {
+            ui.set_imagine_status("ok".into());
+            IMAGINE_JOBS.with(|m| {
+                if let Some(model) = m.borrow().as_ref() {
+                    model.set_vec(
+                        rows.iter()
+                            .map(|(id, mode, status, model_s, when, err)| ImagineJobItem {
+                                id: id.into(),
+                                mode: mode.into(),
+                                status: status.into(),
+                                model: model_s.into(),
+                                when: when.into(),
+                                err: err.into(),
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            });
+        }
+        Err(e) => ui.set_imagine_status(e.as_str().into()),
     }
 }
 
@@ -5207,6 +5423,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_occipital_trail(slint::ModelRc::from(occipital_trail_vec.clone()));
     OCCIPITAL_TRAIL.with(|t| *t.borrow_mut() = Some(occipital_trail_vec.clone()));
 
+    // Imagine (🖼) — the studio's shared node jobs rail.
+    let imagine_jobs_vec: Rc<slint::VecModel<ImagineJobItem>> = Rc::new(slint::VecModel::default());
+    ui.set_imagine_jobs(slint::ModelRc::from(imagine_jobs_vec.clone()));
+    IMAGINE_JOBS.with(|m| *m.borrow_mut() = Some(imagine_jobs_vec.clone()));
+
     // Feedback subsystem: bind the toast model + global callbacks.
     let toasts_vec: Rc<slint::VecModel<ToastItem>> = Rc::new(slint::VecModel::default());
     ui.global::<Notifications>().set_toasts(slint::ModelRc::from(toasts_vec.clone()));
@@ -5324,6 +5545,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     AppKind::Sonus => ui.invoke_refresh_sonus(),
                     AppKind::Notes => ui.invoke_refresh_notes(),
                     AppKind::Explorer => ui.invoke_refresh_explorer(),
+                    AppKind::Imagine => ui.invoke_refresh_imagine(),
                     // (Occipital: the menu launch's generic latch-clear above IS
                     // the auto-reveal re-invitation since A3 — no separate flag.)
                     _ => {}
@@ -5799,6 +6021,167 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             bump_scroll(&ui);
         }
     });
+
+    // ── Imagine (🖼): the Imaginarium studio (docs/imaginarium.md) ────────────
+    // A second HTTP client for the node-local Imaginarium daemon — its own
+    // bearer token (IMAGINARIUM_TOKEN), never agentd's: two trust domains, one
+    // idiom. Base + token are the SAME env the MCP proxy plugin inherits, so a
+    // provisioned node wires both surfaces with zero extra config.
+    let imagine_base = imagine_base_url();
+    ui.set_imagine_node_url(imagine_base.clone().into());
+    let imagine_client = Arc::new({
+        let mut builder = reqwest::Client::builder();
+        if let Ok(t) = std::env::var("IMAGINARIUM_TOKEN") {
+            if !t.is_empty() {
+                let mut headers = reqwest::header::HeaderMap::new();
+                if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {t}")) {
+                    headers.insert(reqwest::header::AUTHORIZATION, val);
+                }
+                builder = builder.default_headers(headers);
+            }
+        }
+        builder.build().unwrap_or_default()
+    });
+
+    {
+        let rt_h = rt.handle().clone();
+        let client = Arc::clone(&imagine_client);
+        let base = imagine_base.clone();
+        let uw = ui.as_weak();
+        ui.on_refresh_imagine(move || {
+            let client = Arc::clone(&client);
+            let base = base.clone();
+            let uw = uw.clone();
+            rt_h.spawn(async move {
+                let outcome = imagine_fetch_jobs(&client, &base).await;
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = uw.upgrade() {
+                        apply_imagine_rows(&ui, &outcome);
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
+    {
+        let rt_h = rt.handle().clone();
+        let client = Arc::clone(&imagine_client);
+        let base = imagine_base.clone();
+        let uw = ui.as_weak();
+        ui.on_imagine_generate(move |prompt, model, aspect, n| {
+            // Busy state lands immediately — this callback runs on the Slint thread.
+            if let Some(ui) = uw.upgrade() {
+                ui.set_imagine_busy(true);
+                ui.set_imagine_note("generating…".into());
+            }
+            let (prompt, model, aspect) = (prompt.to_string(), model.to_string(), aspect.to_string());
+            let n = n.max(1) as u32;
+            let client = Arc::clone(&client);
+            let base = base.clone();
+            let uw = uw.clone();
+            rt_h.spawn(async move {
+                let result = imagine_generate_call(&client, &base, &prompt, &model, &aspect, n).await;
+                let (note, preview, job_id, failed) = match &result {
+                    Ok(job) => {
+                        let status = job.get("status").and_then(Value::as_str).unwrap_or("");
+                        let id = job.get("job_id").and_then(Value::as_str).unwrap_or("").to_string();
+                        if status == "done" && !id.is_empty() {
+                            match imagine_fetch_preview(&client, &base, &id).await {
+                                Ok(px) => (imagine_done_note(job, n), Some(px), id, false),
+                                Err(e) => (format!("generated, preview failed: {e}"), None, id, false),
+                            }
+                        } else {
+                            let msg = job
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("job did not complete");
+                            (format!("{status}: {msg}"), None, id, true)
+                        }
+                    }
+                    Err(e) => (e.clone(), None, String::new(), true),
+                };
+                // The daemon's jobs list is the shared truth — refresh it either way.
+                let rows = imagine_fetch_jobs(&client, &base).await;
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = uw.upgrade() {
+                        ui.set_imagine_busy(false);
+                        ui.set_imagine_note(note.into());
+                        if let Some((w, h, rgba)) = preview {
+                            let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                                &rgba, w, h,
+                            );
+                            ui.set_imagine_preview(slint::Image::from_rgba8(buf));
+                            ui.set_imagine_preview_kind("image".into());
+                            ui.set_imagine_prompt_input("".into());
+                        } else if failed {
+                            ui.set_imagine_preview_kind("error".into());
+                        }
+                        if !job_id.is_empty() {
+                            ui.set_imagine_selected_job(job_id.into());
+                        }
+                        apply_imagine_rows(&ui, &rows);
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
+    {
+        let rt_h = rt.handle().clone();
+        let client = Arc::clone(&imagine_client);
+        let base = imagine_base.clone();
+        let uw = ui.as_weak();
+        ui.on_imagine_pick_job(move |id| {
+            let id = id.to_string();
+            let client = Arc::clone(&client);
+            let base = base.clone();
+            let uw = uw.clone();
+            rt_h.spawn(async move {
+                let job = imagine_fetch_job(&client, &base, &id).await;
+                let mode = job.get("mode").and_then(Value::as_str).unwrap_or("").to_string();
+                let status = job.get("status").and_then(Value::as_str).unwrap_or("").to_string();
+                let err = job.get("error").and_then(Value::as_str).unwrap_or("").to_string();
+                let prompt = job.get("prompt").and_then(Value::as_str).unwrap_or("").to_string();
+                let is_image = mode.starts_with("image");
+                let preview = if is_image && status == "done" {
+                    imagine_fetch_preview(&client, &base, &id).await.ok()
+                } else {
+                    None
+                };
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = uw.upgrade() {
+                        ui.set_imagine_selected_job(id.into());
+                        if let Some((w, h, rgba)) = preview {
+                            let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                                &rgba, w, h,
+                            );
+                            ui.set_imagine_preview(slint::Image::from_rgba8(buf));
+                            ui.set_imagine_preview_kind("image".into());
+                            let note = if prompt.is_empty() { status } else { format!("{status} · {prompt}") };
+                            ui.set_imagine_note(note.into());
+                        } else if !is_image && !mode.is_empty() {
+                            // Video (and craft renders): no in-app playback in v1 —
+                            // the browser studio on the node plays it.
+                            ui.set_imagine_preview_kind("video".into());
+                            let tail = if err.is_empty() { String::new() } else { format!(" · {err}") };
+                            ui.set_imagine_note(format!("{mode} · {status}{tail}").into());
+                        } else {
+                            ui.set_imagine_preview_kind("error".into());
+                            let note = if err.is_empty() {
+                                format!("{status} — no preview available")
+                            } else {
+                                err
+                            };
+                            ui.set_imagine_note(note.into());
+                        }
+                    }
+                })
+                .ok();
+            });
+        });
+    }
 
     // ── refresh-sessions callback ─────────────────────────────────────────────
     let rt_handle     = rt.handle().clone();

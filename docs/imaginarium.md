@@ -95,9 +95,16 @@ design undone in one line.
 
 - **Browser studio** — already shipped by Imaginarium itself at
   `http://127.0.0.1:8791/` (paste the token once). Works today on any node.
-- **ui-slint "Imagine" app** — the native kiosk/desktop surface, planned as the
-  follow-on slice (PR 2): prompt → generate → still preview + the shared jobs
-  list, speaking the same HTTP contract via `IMAGINARIUM_URL`/`IMAGINARIUM_TOKEN`.
+- **ui-slint "Imagine" app** (🖼, in the Start menu's everyday apps) — the
+  native kiosk/desktop surface: prompt + model/aspect/count chips →
+  `POST /v1/images/generations` → still preview (bytes decoded off-thread →
+  `SharedPixelBuffer`, no temp files) + the node's shared jobs rail (the
+  agent's MCP jobs appear there too; video rows point at the browser studio).
+  Honest states: node-offline banner, token-rejected banner, busy guard.
+  Uses the same `IMAGINARIUM_URL`/`IMAGINARIUM_TOKEN` env (a desktop dev shell
+  needs them exported; kiosk units read `/etc/agentd/env`). v1 is image-first —
+  video submit, edit/I2V, follow-along auto-reveal, and an `imagine_save`
+  workspace-pull tool are parked in `BACKLOG.md`.
 
 ## Env summary
 

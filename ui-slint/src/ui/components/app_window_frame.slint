@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, BoardCard, WmState } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, ImagineJobItem, BoardCard, WmState } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -34,6 +34,7 @@ import { WebView } from "web_view.slint";
 import { CalculatorView } from "calculator_view.slint";
 import { ExplorerView } from "explorer_view.slint";
 import { OccipitalView } from "occipital_view.slint";
+import { ImagineView } from "imagine_view.slint";
 
 component CaptionButton inherits Rectangle {
     in property <string> glyph;
@@ -193,6 +194,16 @@ export component AppWindowFrame inherits Rectangle {
     in property <[UsbCandidate]> explorer-drive-candidates;
     in property <bool>           explorer-drive-busy;
     in property <string>         explorer-drive-result;
+    // Imagine (🖼) Imaginarium studio
+    in property <string>           imagine-status;
+    in property <string>           imagine-node-url;
+    in property <bool>             imagine-busy;
+    in property <string>           imagine-note;
+    in property <string>           imagine-preview-kind;
+    in property <image>            imagine-preview;
+    in property <[ImagineJobItem]> imagine-jobs;
+    in property <string>           imagine-selected-job;
+    in-out property <string>       imagine-prompt-input;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -268,6 +279,10 @@ export component AppWindowFrame inherits Rectangle {
     callback open-url(string);
     callback calc-key(string);
     callback occipital-steer(string);   // a clicked link / URL-bar "go here" nudge
+    // Imagine
+    callback imagine-generate(string, string, string, int);  // prompt, model|"auto", aspect, n
+    callback imagine-pick-job(string);                       // job id → preview
+    callback refresh-imagine();
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -738,6 +753,22 @@ export component AppWindowFrame inherits Rectangle {
             trail: root.occipital-trail;
             url-input <=> root.occipital-url-input;
             steer(u) => { root.occipital-steer(u); }
+        }
+
+        if root.kind == AppKind.imagine: ImagineView {
+            vertical-stretch: 1;
+            status: root.imagine-status;
+            node-url: root.imagine-node-url;
+            busy: root.imagine-busy;
+            note: root.imagine-note;
+            preview-kind: root.imagine-preview-kind;
+            preview: root.imagine-preview;
+            jobs: root.imagine-jobs;
+            selected-job: root.imagine-selected-job;
+            prompt-input <=> root.imagine-prompt-input;
+            generate(p, m, a, n) => { root.imagine-generate(p, m, a, n); }
+            pick-job(id) => { root.imagine-pick-job(id); }
+            refresh => { root.refresh-imagine(); }
         }
     }
 

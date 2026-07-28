@@ -10,7 +10,7 @@ export enum ShellMode { desktop, focus }
 // Every app is a window. Rust owns the set (which windows exist, z-order =
 // model order with the last element on top); Slint owns live-drag geometry
 // for smoothness and commits back to Rust on release.
-export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer, occipital, board }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer, occipital, board, imagine }
 
 // ── Persona system (glowup G4) ───────────────────────────────────────────
 // A persona is a named bundle: theme + chrome + wallpaper + default shell mode
@@ -334,6 +334,18 @@ export struct ReaderLink {
     url:    string,
     detail: string,   // snippet (results/recall) — "" for page links
     badge:  string,   // "#1" (search rank) / "0.82" (recall score) / ""
+}
+
+// ── Imagine (🖼) — the Imaginarium studio window ────────────────────────
+// One row in the shared node jobs list (GET /v1/jobs). Agent-generated and
+// human-generated jobs land in the same list — one daemon, one library.
+export struct ImagineJobItem {
+    id:     string,   // job id (ULID) — also the /v1/library/{id}/content key
+    mode:   string,   // image_generate | image_edit | video_* | craft_export
+    status: string,   // pending | running | done | failed | expired | cancelled
+    model:  string,   // grok-imagine-image | …-quality | …-video | …
+    when:   string,   // created_at, trimmed for display
+    err:    string,   // error text ("" when none)
 }
 
 export struct MessageItem {
