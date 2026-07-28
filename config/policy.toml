@@ -171,6 +171,26 @@ mode = "suggest"
 "web_click"   = "allow"
 "web_submit"  = "ask"
 
+# Imaginarium (image/video generation) plugin tools ----------------------------
+# These proxy to the node-local Imaginarium daemon (xAI Imagine, BYOK) — the
+# daemon holds the key, and generation spends REAL MONEY upstream. The reads
+# (models / estimate / job status / wait / list) are free: allow. Image gen/edit
+# costs cents (~$0.02–0.05/image): allow — the creative-tool trust basis, with
+# imaginarium_estimate available when unsure. Video costs dollars (~$0.05–0.08
+# per SECOND, ≈$0.50 for an 8s clip): the spend-heavy verbs default to "ask",
+# the same footing as web_submit — an external consequence is the operator's
+# call until they trust their agent's budget sense, then flip to "allow".
+"imaginarium_models"         = "allow"
+"imaginarium_estimate"       = "allow"
+"imaginarium_job_status"     = "allow"
+"imaginarium_job_wait"       = "allow"
+"imaginarium_jobs_list"      = "allow"
+"imaginarium_image_generate" = "allow"
+"imaginarium_image_edit"     = "allow"
+"imaginarium_video_generate" = "ask"
+"imaginarium_video_edit"     = "ask"
+"imaginarium_video_extend"   = "ask"
+
 # Cerebro plugin tools --------------------------------------------------------
 "remember"     = "allow"
 "recall"       = "allow"

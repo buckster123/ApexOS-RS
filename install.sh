@@ -31,6 +31,7 @@
 # re-verified on a key-less re-run.
 #   APEXOS_MODE=kiosk|headless|desktop      APEXOS_TIER=nano|micro|standard|pro
 #   APEXOS_NO_UI=1   APEXOS_NO_SENSOR=0   APEXOS_NO_CEREBRO_API=0   APEXOS_VOICE=1
+#   APEXOS_IMAGINARIUM=1
 #
 # Idempotency: the resolved choices are saved to /etc/agentd/install.conf and
 # restored on every re-run, so `apexos-update` (a no-flag, no-USB re-run) keeps the
@@ -45,6 +46,7 @@
 #   --no-cerebro-api        Skip cerebro-api REST dashboard
 #   --no-sensor             Skip apex-sensor-bridge (no sensorhead attached)
 #   --no-occipital          Skip the Occipital web cortex (clone + build of the sibling repo)
+#   --imaginarium           Install the Imaginarium image/video-gen node (xAI Imagine, BYOK — opt-in)
 #   --no-voice              Skip whisper + piper wake-word
 #   --api-key=KEY           Set ANTHROPIC_API_KEY non-interactively
 #   --openrouter-key=KEY    Set OPENROUTER_API_KEY
@@ -106,7 +108,7 @@ KEYFILE_NAMES=(apexos.env apexos.conf apexos-rs.env agentd.env apex.env apexos.t
 # Set by find_key_file on success — keys plus optional install settings:
 FOUND_ANTHROPIC=""; FOUND_OPENROUTER=""; FOUND_KEY_SRC=""
 FOUND_MODE=""; FOUND_TIER=""; FOUND_NO_UI=""; FOUND_NO_SENSOR=""
-FOUND_NO_CEREBRO_API=""; FOUND_VOICE=""; FOUND_NO_OCCIPITAL=""
+FOUND_NO_CEREBRO_API=""; FOUND_VOICE=""; FOUND_NO_OCCIPITAL=""; FOUND_IMAGINARIUM=""
 
 # Resolved-choices record: written at the end of a successful install and restored
 # on every re-run (load_persisted_config) so `apexos-update` keeps the same
@@ -207,7 +209,8 @@ _parse_key_file() {
   FOUND_NO_CEREBRO_API=$(_envval "$f" APEXOS_NO_CEREBRO_API)
   FOUND_VOICE=$(_envval "$f" APEXOS_VOICE)
   FOUND_NO_OCCIPITAL=$(_envval "$f" APEXOS_NO_OCCIPITAL)
-  [[ -n "${FOUND_ANTHROPIC}${FOUND_OPENROUTER}${FOUND_MODE}${FOUND_TIER}${FOUND_NO_UI}${FOUND_NO_SENSOR}${FOUND_NO_CEREBRO_API}${FOUND_VOICE}${FOUND_NO_OCCIPITAL}" ]]
+  FOUND_IMAGINARIUM=$(_envval "$f" APEXOS_IMAGINARIUM)
+  [[ -n "${FOUND_ANTHROPIC}${FOUND_OPENROUTER}${FOUND_MODE}${FOUND_TIER}${FOUND_NO_UI}${FOUND_NO_SENSOR}${FOUND_NO_CEREBRO_API}${FOUND_VOICE}${FOUND_NO_OCCIPITAL}${FOUND_IMAGINARIUM}" ]]
 }
 
 # Scan mounted media + the SD boot partition, then probe UNmounted removable
@@ -276,6 +279,7 @@ load_boot_provisioning() {
   [[ -n "$FOUND_NO_CEREBRO_API" ]] && ! $NO_CEREBRO_API_CLI && { _truthy "$FOUND_NO_CEREBRO_API" && NO_CEREBRO_API=true || NO_CEREBRO_API=false; }
   [[ -n "$FOUND_NO_OCCIPITAL"   ]] && ! $NO_OCCIPITAL_CLI   && { _truthy "$FOUND_NO_OCCIPITAL"   && NO_OCCIPITAL=true   || NO_OCCIPITAL=false; }
   [[ -n "$FOUND_VOICE"          ]] && ! $NO_VOICE_CLI       && { _truthy "$FOUND_VOICE"          && NO_VOICE=false      || NO_VOICE=true; }
+  [[ -n "$FOUND_IMAGINARIUM"    ]] && ! $IMAGINARIUM_CLI    && { _truthy "$FOUND_IMAGINARIUM"    && NO_IMAGINARIUM=false || NO_IMAGINARIUM=true; }
   local what="settings"; [[ -n "$FOUND_ANTHROPIC" ]] && what="key + settings"
   ok "Provisioned from ${FOUND_KEY_SRC} ($what)"
 }
@@ -301,7 +305,7 @@ load_persisted_config() {
     fi
     return 0
   fi
-  local c_mode c_tier c_no_ui c_no_sensor c_no_api c_voice c_no_occipital
+  local c_mode c_tier c_no_ui c_no_sensor c_no_api c_voice c_no_occipital c_imaginarium
   c_mode=$(_envval "$CONF_FILE" APEXOS_MODE)
   c_tier=$(_envval "$CONF_FILE" APEXOS_TIER)
   c_no_ui=$(_envval "$CONF_FILE" APEXOS_NO_UI)
@@ -309,6 +313,7 @@ load_persisted_config() {
   c_no_api=$(_envval "$CONF_FILE" APEXOS_NO_CEREBRO_API)
   c_voice=$(_envval "$CONF_FILE" APEXOS_VOICE)
   c_no_occipital=$(_envval "$CONF_FILE" APEXOS_NO_OCCIPITAL)
+  c_imaginarium=$(_envval "$CONF_FILE" APEXOS_IMAGINARIUM)
   [[ -n "$c_mode" ]] && ! $MODE_CLI && MODE="$c_mode"
   [[ -n "$c_tier" ]] && ! $TIER_CLI && TIER="$c_tier"
   [[ -n "$c_no_ui"     ]] && ! $NO_UI_CLI          && { _truthy "$c_no_ui"     && NO_UI=true          || NO_UI=false; }
@@ -316,6 +321,7 @@ load_persisted_config() {
   [[ -n "$c_no_api"    ]] && ! $NO_CEREBRO_API_CLI && { _truthy "$c_no_api"    && NO_CEREBRO_API=true || NO_CEREBRO_API=false; }
   [[ -n "$c_no_occipital" ]] && ! $NO_OCCIPITAL_CLI && { _truthy "$c_no_occipital" && NO_OCCIPITAL=true || NO_OCCIPITAL=false; }
   [[ -n "$c_voice"     ]] && ! $NO_VOICE_CLI       && { _truthy "$c_voice"     && NO_VOICE=false      || NO_VOICE=true; }
+  [[ -n "$c_imaginarium" ]] && ! $IMAGINARIUM_CLI  && { _truthy "$c_imaginarium" && NO_IMAGINARIUM=false || NO_IMAGINARIUM=true; }
   ok "Restored install choices from $CONF_FILE (mode=$MODE tier=$TIER)"
 }
 
@@ -328,6 +334,13 @@ NO_UI=false; NO_CEREBRO_API=false; NO_SENSOR=true; NO_VOICE=true
 # sibling repo and registers occipital-mcp. Skip with --no-occipital / a boot-file
 # APEXOS_NO_OCCIPITAL=1. (OCC_FEATURES/OCCIPITAL_INSTALLED initialised for `set -u`.)
 NO_OCCIPITAL=false; OCC_FEATURES=""; OCCIPITAL_INSTALLED=false
+# Imaginarium (xAI Imagine image/video-gen node) defaults OFF — it needs a paid
+# xAI key to do anything (BYOK), so it's opt-in like voice: --imaginarium, the TUI
+# add-on, or a boot-file APEXOS_IMAGINARIUM=1. INSTALLED = binary + env provisioned;
+# ACTIVE = an XAI_API_KEY is present too, so the daemon may be enabled + the MCP
+# plugin registered. IMAG_ENV is the ONE file that ever holds the xAI key.
+NO_IMAGINARIUM=true; IMAGINARIUM_INSTALLED=false; IMAGINARIUM_ACTIVE=false
+IMAG_ENV=/etc/imaginarium/env
 API_KEY=""; OPENROUTER_KEY=""; API_KEY_SRC=""
 TIER="auto"; MODE="auto"; REPO_DIR=""
 IS_DESKTOP=false   # MODE==desktop → build the UI but launch a winit window, not the kiosk service
@@ -337,7 +350,7 @@ IS_DESKTOP=false   # MODE==desktop → build the UI but launch a winit window, n
 # user did NOT pass. (Precedence: CLI > USB file > install.conf > auto-detect.)
 MODE_CLI=false; TIER_CLI=false
 NO_UI_CLI=false; NO_CEREBRO_API_CLI=false; NO_SENSOR_CLI=false; NO_VOICE_CLI=false
-NO_OCCIPITAL_CLI=false
+NO_OCCIPITAL_CLI=false; IMAGINARIUM_CLI=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -347,6 +360,8 @@ for arg in "$@"; do
     --no-cerebro-api)      NO_CEREBRO_API=true; NO_CEREBRO_API_CLI=true ;;
     --no-sensor)           NO_SENSOR=true; NO_SENSOR_CLI=true ;;
     --no-occipital)        NO_OCCIPITAL=true; NO_OCCIPITAL_CLI=true ;;
+    --imaginarium)         NO_IMAGINARIUM=false; IMAGINARIUM_CLI=true ;;
+    --no-imaginarium)      NO_IMAGINARIUM=true;  IMAGINARIUM_CLI=true ;;
     --no-voice)            NO_VOICE=true;  NO_VOICE_CLI=true ;;
     --voice)               NO_VOICE=false; NO_VOICE_CLI=true ;;
     --api-key=*)           API_KEY="${arg#*=}"; API_KEY_SRC="--api-key flag" ;;
@@ -607,21 +622,24 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
   API_STATE="ON";    $NO_CEREBRO_API && API_STATE="OFF"
   UI_STATE="ON";     $NO_UI && UI_STATE="OFF"
   OCC_STATE="ON";    $NO_OCCIPITAL && OCC_STATE="OFF"
+  IMAG_STATE="OFF";  $NO_IMAGINARIUM || IMAG_STATE="ON"
 
   ADDONS=$(tui_checklist "Components" \
     "Select the components to install:\n(Space to toggle, Enter to confirm)" \
-    "ui"        "apexos-rs-ui     Native Slint UI — kiosk display / desktop window" "$UI_STATE" \
-    "cerebro"   "Cerebro API      REST dashboard + memory UI on :8765"        "$API_STATE" \
-    "occipital" "Web Cortex       web_search/fetch + semantic recall"         "$OCC_STATE" \
-    "sensor"    "Sensor Head      BME688 air quality + MLX90640 thermal cam"  "$SENSOR_STATE" \
-    "voice"     "Voice            Wake-word + whisper transcription"          "OFF")
+    "ui"          "apexos-rs-ui     Native Slint UI — kiosk display / desktop window" "$UI_STATE" \
+    "cerebro"     "Cerebro API      REST dashboard + memory UI on :8765"        "$API_STATE" \
+    "occipital"   "Web Cortex       web_search/fetch + semantic recall"         "$OCC_STATE" \
+    "imaginarium" "Imaginarium      xAI Imagine image/video gen (paid key)"     "$IMAG_STATE" \
+    "sensor"      "Sensor Head      BME688 air quality + MLX90640 thermal cam"  "$SENSOR_STATE" \
+    "voice"       "Voice            Wake-word + whisper transcription"          "OFF")
 
   # Parse whiptail checklist output (space-separated quoted tags)
-  echo "$ADDONS" | grep -q '"ui"'        || NO_UI=true
-  echo "$ADDONS" | grep -q '"cerebro"'   || NO_CEREBRO_API=true
-  echo "$ADDONS" | grep -q '"occipital"' && NO_OCCIPITAL=false || NO_OCCIPITAL=true
-  echo "$ADDONS" | grep -q '"sensor"'    && NO_SENSOR=false || NO_SENSOR=true
-  echo "$ADDONS" | grep -q '"voice"'     && NO_VOICE=false  || NO_VOICE=true
+  echo "$ADDONS" | grep -q '"ui"'          || NO_UI=true
+  echo "$ADDONS" | grep -q '"cerebro"'     || NO_CEREBRO_API=true
+  echo "$ADDONS" | grep -q '"occipital"'   && NO_OCCIPITAL=false || NO_OCCIPITAL=true
+  echo "$ADDONS" | grep -q '"imaginarium"' && NO_IMAGINARIUM=false || NO_IMAGINARIUM=true
+  echo "$ADDONS" | grep -q '"sensor"'      && NO_SENSOR=false || NO_SENSOR=true
+  echo "$ADDONS" | grep -q '"voice"'       && NO_VOICE=false  || NO_VOICE=true
 fi
 
 # ── API keys ──────────────────────────────────────────────────────────────────
@@ -707,6 +725,7 @@ if ! $YES; then
   OCC_RECALL="FTS5 keyword recall"
   case "$TIER" in micro|standard|pro) OCC_RECALL="semantic recall (bge-small)" ;; esac
   ! $NO_OCCIPITAL   && ADDONS_LIST+="  ✓ occipital     (web cortex — $OCC_RECALL)\n"
+  ! $NO_IMAGINARIUM && ADDONS_LIST+="  ✓ imaginarium   (xAI Imagine image/video gen)\n"
   ! $NO_SENSOR      && ADDONS_LIST+="  ✓ sensor-head   (BME688 + MLX90640)\n"
   ! $NO_VOICE       && ADDONS_LIST+="  ✓ voice         (whisper transcription)\n"
   [[ -n "$API_KEY" ]]        && KEY_STATUS="Anthropic key: set" \
@@ -1254,6 +1273,101 @@ if ! $NO_VOICE; then
   fi
 fi
 
+# ── Imaginarium (image/video generation node) ─────────────────────────────────
+# Imaginarium-RS is a standalone sibling repo (github.com/buckster123/Imaginarium-RS)
+# wrapping xAI's Imagine API: one fat-node daemon (`imaginarium serve`, loopback
+# :8791) holds the XAI_API_KEY + the media library/jobs DB; agentd registers the
+# same binary as an MCP plugin in PROXY mode, and the ui-slint Imagine app speaks
+# the same HTTP contract — everything funnels through the daemon, so agent and
+# human share one library. KEY ISOLATION IS STRUCTURAL: the xAI key lives ONLY in
+# /etc/imaginarium/env (read by imaginarium.service); agentd, the MCP child and
+# the UI hold only the minted IMAGINARIUM_TOKEN. Opt-in (default OFF — it needs a
+# paid key to do anything); best-effort like occipital: a failure warns + continues.
+if ! $NO_IMAGINARIUM; then
+  hdr "Imaginarium (image/video generation)"
+  IMAGINARIUM_DIR="$(dirname "$REPO_DIR")/Imaginarium-RS"   # sibling of the ApexOS-RS clone
+
+  imaginarium_provision() {
+    ensure_bootstrap_deps                              # git/curl/ca-certs (idempotent)
+    if [[ -d "$IMAGINARIUM_DIR/.git" ]]; then
+      [[ "$BUILD_USER" != "root" ]] && chown -R "$BUILD_USER:" "$IMAGINARIUM_DIR"
+      info "Updating Imaginarium-RS clone at $IMAGINARIUM_DIR …"
+      local GIT_IMAG=(git -C "$IMAGINARIUM_DIR")
+      [[ "$BUILD_USER" != "root" ]] && GIT_IMAG=(sudo -u "$BUILD_USER" git -C "$IMAGINARIUM_DIR")
+      "${GIT_IMAG[@]}" checkout -- Cargo.lock 2>/dev/null || true   # self-heal build drift
+      "${GIT_IMAG[@]}" pull --ff-only
+    else
+      info "Cloning Imaginarium-RS …"
+      git clone --depth=1 https://github.com/buckster123/Imaginarium-RS "$IMAGINARIUM_DIR"
+      [[ "$BUILD_USER" != "root" ]] && chown -R "$BUILD_USER:" "$IMAGINARIUM_DIR"
+    fi
+    info "Building imaginarium (headless CLI — the slint app is not built) …"
+    # NOT --locked: a foreign repo whose committed lock we don't gate-keep (same
+    # stance as occipital); the checkout above keeps re-runs from dirtying it.
+    sudo -u "$BUILD_USER" "$CARGO" build --release -p imaginarium-cli \
+      --manifest-path "$IMAGINARIUM_DIR/Cargo.toml" 2>&1 \
+      | grep --line-buffered -E "(^[[:space:]]*Compiling imaginarium|Finished|^error)" || true
+    [[ -x "$IMAGINARIUM_DIR/target/release/imaginarium" ]] \
+      || { warn "imaginarium build produced no binary"; return 1; }
+    install -m 755 "$IMAGINARIUM_DIR/target/release/imaginarium" /usr/local/bin/imaginarium
+
+    # Dedicated system user + data home — the daemon (and the xAI key) never run
+    # as the agentd user. Library + jobs DB live under /var/lib/imaginarium.
+    id -u imaginarium &>/dev/null \
+      || useradd --system --home /var/lib/imaginarium --shell /usr/sbin/nologin imaginarium
+    install -d -o imaginarium -g imaginarium /var/lib/imaginarium
+
+    # ffmpeg powers the video-craft render (drawtext/timeline) — best-effort,
+    # image + plain video generation work without it.
+    apt-get install -y --no-install-recommends ffmpeg >/dev/null 2>&1 \
+      || warn "ffmpeg install failed — video craft renders need it (image gen unaffected)"
+
+    # /etc/imaginarium/env — the ONE file that ever holds the xAI key. 0600
+    # root:root; systemd (pid 1) reads it for the unit, the daemon runs unprivileged.
+    # The node LAN token is minted here once (never overwritten) and mirrored into
+    # /etc/agentd/env below so the MCP proxy + UI can authenticate.
+    install -d /etc/imaginarium
+    if [[ ! -f "$IMAG_ENV" ]]; then
+      local _itok
+      _itok=$(openssl rand -hex 24 2>/dev/null || true)
+      [[ -n "$_itok" ]] || _itok=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+      {
+        echo "# Imaginarium node env — the xAI key lives HERE and only here."
+        echo "# agentd / the MCP proxy / the UI never see it; they use IMAGINARIUM_TOKEN."
+        echo "IMAGINARIUM_TOKEN=${_itok}"
+        echo "# Add your xAI key to activate the node, then re-run apexos-update:"
+        echo "XAI_API_KEY="
+      } > "$IMAG_ENV"
+      chmod 600 "$IMAG_ENV"; chown root:root "$IMAG_ENV"
+      ok "IMAGINARIUM_TOKEN generated → $IMAG_ENV"
+    elif ! grep -q "^IMAGINARIUM_TOKEN=" "$IMAG_ENV" 2>/dev/null; then
+      local _itok
+      _itok=$(openssl rand -hex 24 2>/dev/null || true)
+      [[ -n "$_itok" ]] || _itok=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+      echo "IMAGINARIUM_TOKEN=${_itok}" >> "$IMAG_ENV"
+      ok "IMAGINARIUM_TOKEN generated → $IMAG_ENV"
+    fi
+    ok "imaginarium → /usr/local/bin/imaginarium (data: /var/lib/imaginarium)"
+    return 0
+  }
+
+  if imaginarium_provision; then
+    IMAGINARIUM_INSTALLED=true
+    # ACTIVE only when the operator has dropped an xAI key in — a keyless
+    # `imaginarium serve` refuses to start (upstream credentials required), so
+    # enabling the unit would just crash-loop, and registering the MCP plugin
+    # would hand the agent ten dead tools.
+    if [[ -n "$(_envval "$IMAG_ENV" XAI_API_KEY)" ]]; then
+      IMAGINARIUM_ACTIVE=true
+    else
+      warn "No XAI_API_KEY in $IMAG_ENV yet — imaginarium installed but not started."
+      info "Add the key there, then re-run apexos-update to activate the node + agent tools."
+    fi
+  else
+    warn "Imaginarium not installed — node runs without image/video gen; apexos-update retries"
+  fi
+fi
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 hdr "Configuration"
 
@@ -1306,6 +1420,29 @@ if $OCCIPITAL_INSTALLED && [[ -f /etc/agentd/plugins.toml ]] \
     fi
   } >> /etc/agentd/plugins.toml
   ok "Occipital plugin registered in /etc/agentd/plugins.toml"
+fi
+
+# Enable the Imaginarium MCP plugin only when the node is ACTIVE (binary built AND
+# an xAI key present, so imaginarium.service actually runs). The plugin invokes
+# `imaginarium mcp` with no proxy arg: PROXY mode auto-activates from the
+# IMAGINARIUM_URL + IMAGINARIUM_TOKEN that land in /etc/agentd/env below (plugin
+# env is overlaid onto agentd's, never cleared), so every agent tool call funnels
+# through the daemon — one library, one jobs DB, and the xAI key stays out of
+# every agentd-side process. Same anchored-grep idempotency as occipital: skips
+# the commented template AND a prior run / an APEX register_mcp_server entry.
+if $IMAGINARIUM_ACTIVE && [[ -f /etc/agentd/plugins.toml ]] \
+   && ! grep -qE '^[[:space:]]*id[[:space:]]*=[[:space:]]*"imaginarium"' /etc/agentd/plugins.toml; then
+  {
+    echo ""
+    echo "[[plugin]]"
+    echo 'id      = "imaginarium"'
+    echo 'cmd     = "/usr/local/bin/imaginarium"'
+    echo 'args    = ["mcp"]'
+    echo 'restart = "always"'
+    echo "[plugin.env]"
+    echo 'RUST_LOG = "warn"'
+  } >> /etc/agentd/plugins.toml
+  ok "Imaginarium plugin registered in /etc/agentd/plugins.toml"
 fi
 
 # ── policy-sync ───────────────────────────────────────────────────────────────
@@ -1490,6 +1627,7 @@ write_install_conf() {
     echo "APEXOS_NO_OCCIPITAL=$NO_OCCIPITAL"
     echo "APEXOS_NO_CEREBRO_API=$NO_CEREBRO_API"
     echo "APEXOS_VOICE=$( $NO_VOICE && echo false || echo true )"
+    echo "APEXOS_IMAGINARIUM=$( $NO_IMAGINARIUM && echo false || echo true )"
   } > "$tmp"
   chmod 644 "$tmp"; chown root:root "$tmp"
   mv "$tmp" "$CONF_FILE"
@@ -1537,6 +1675,21 @@ if ! grep -q "^AGENTD_BIND=" "$ENV_FILE" 2>/dev/null; then
   ok "AGENTD_BIND=0.0.0.0:8787 (mesh-reachable; token-gated)"
 fi
 
+# Imaginarium reach for agentd-side consumers: the node URL + LAN token (NEVER the
+# xAI key) mirror into this file so the MCP proxy plugin (env inherited from agentd)
+# and the kiosk UI (EnvironmentFile) both authenticate to the local daemon.
+# Seed-if-absent — a rotated token in /etc/imaginarium/env must be updated here too
+# (or delete both lines and re-run apexos-update).
+if $IMAGINARIUM_INSTALLED; then
+  _imag_tok=$(_envval "$IMAG_ENV" IMAGINARIUM_TOKEN)
+  if [[ -n "$_imag_tok" ]]; then
+    _imag_wrote=false
+    grep -q "^IMAGINARIUM_URL="   "$ENV_FILE" 2>/dev/null || { write_env_key "IMAGINARIUM_URL" "http://127.0.0.1:8791"; _imag_wrote=true; }
+    grep -q "^IMAGINARIUM_TOKEN=" "$ENV_FILE" 2>/dev/null || { write_env_key "IMAGINARIUM_TOKEN" "$_imag_tok"; _imag_wrote=true; }
+    if $_imag_wrote; then ok "Imaginarium URL + token mirrored into $ENV_FILE"; fi
+  fi
+fi
+
 write_env_key "ANTHROPIC_API_KEY"  "$API_KEY"
 write_env_key "OPENROUTER_API_KEY" "$OPENROUTER_KEY"
 
@@ -1578,6 +1731,9 @@ install_svc apex-sensor-bridge
 # would crash-loop on a missing model.
 $VOICE_INSTALLED && install_svc apex-tts || true
 $STT_INSTALLED   && install_svc apex-stt || true
+# imaginarium: unit installed whenever the binary landed (ready for activation),
+# but enabled only when ACTIVE — a keyless `imaginarium serve` refuses to start.
+$IMAGINARIUM_INSTALLED && install_svc imaginarium || true
 
 systemctl daemon-reload
 
@@ -1586,6 +1742,7 @@ systemctl enable agentd apex-sensor-bridge
 ! $NO_UI && ! $IS_DESKTOP && systemctl enable apexos-rs-ui || true
 $VOICE_INSTALLED && systemctl enable --now apex-tts || true
 $STT_INSTALLED   && systemctl enable --now apex-stt || true
+$IMAGINARIUM_ACTIVE && systemctl enable imaginarium || true
 
 ok "Services enabled"
 
@@ -1667,6 +1824,9 @@ svc_start() {
   return 1
 }
 
+# imaginarium before agentd so the MCP proxy's first calls find the daemon up
+# (not load-bearing — the proxy client is per-call — just tidy).
+$IMAGINARIUM_ACTIVE && { svc_start imaginarium "imaginarium" || true; }
 svc_start agentd            "agentd"
 $NO_SENSOR || svc_start apex-sensor-bridge "sensor-bridge"
 $NO_CEREBRO_API || svc_start cerebro-api   "cerebro-api"
@@ -1717,6 +1877,17 @@ $NO_CEREBRO_API || { systemctl is-active cerebro-api &>/dev/null \
     && check "cerebro-api on :8765" "pass" \
     || check "cerebro-api on :8765" "not running"; }
 
+# imaginarium: /health is the one unauthenticated route — a clean liveness probe.
+if $IMAGINARIUM_ACTIVE; then
+  if curl -sf --max-time 4 -o /dev/null http://127.0.0.1:8791/health 2>/dev/null; then
+    check "imaginarium node on :8791" "pass"
+  else
+    check "imaginarium node on :8791" "not responding"
+  fi
+elif $IMAGINARIUM_INSTALLED; then
+  check "imaginarium (no xAI key yet)" "installed, inactive — add XAI_API_KEY to $IMAG_ENV"
+fi
+
 { $NO_UI || $IS_DESKTOP; } || { systemctl is-active apexos-rs-ui &>/dev/null \
     && check "apexos-rs-ui (KMS display)" "pass" \
     || check "apexos-rs-ui (KMS display)" "not running"; }
@@ -1739,6 +1910,9 @@ echo -e "  ${DIM}Agent UI:         http://$(hostname -I | awk '{print $1}'):8787
 ! $NO_UI          && echo -e "  ${DIM}Display:          KMS/DRM on /dev/tty7 (1920×1080)${NC}" || true
 [[ -n "$API_CHECK" ]] && \
   echo -e "  ${YELLOW}  ⚠  Set API key:  echo 'ANTHROPIC_API_KEY=sk-...' >> $ENV_FILE${NC}" || true
+if $IMAGINARIUM_INSTALLED && ! $IMAGINARIUM_ACTIVE; then
+  echo -e "  ${YELLOW}  🖼  Imaginarium: add XAI_API_KEY to $IMAG_ENV, then re-run apexos-update${NC}"
+fi
 echo ""
 echo -e "  ${DIM}Logs:    sudo journalctl -u agentd -f${NC}"
 echo -e "  ${DIM}Install: $LOG${NC}"
