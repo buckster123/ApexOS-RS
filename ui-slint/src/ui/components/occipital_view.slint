@@ -88,7 +88,7 @@ export component OccipitalView {
     preferred-height: 0px;
     min-height: 0px;
 
-    in property <string>        mode: "idle";   // idle|page|results|recall|dom|click|submit|distill
+    in property <string>        mode: "idle";   // idle|page|results|recall|dom|click|submit|distill|related
     in property <string>        title: "";
     in property <string>        url: "";
     in property <string>        meta: "";
@@ -361,12 +361,13 @@ export component OccipitalView {
                     }
                 }
 
-                // ── Results / recall / dom mode: row lists ──────────────
-                if root.mode == "results" || root.mode == "recall" || root.mode == "dom": VerticalLayout {
+                // ── Results / recall / dom / related mode: row lists ────
+                if root.mode == "results" || root.mode == "recall" || root.mode == "dom" || root.mode == "related": VerticalLayout {
                     spacing: 8px;
                     if root.links.length == 0: Text {
                         text: root.mode == "recall" ? "No remembered pages match."
                             : root.mode == "dom" ? "No interactive elements on this page."
+                            : root.mode == "related" ? "No connected pages yet — distill more reading."
                             : "No results.";
                         color: Palette.text-dim;
                         font-size: 12px * Personas.font-scale;

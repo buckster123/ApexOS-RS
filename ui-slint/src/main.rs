@@ -1199,7 +1199,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
 /// Plain (Send) render plan built off the Slint thread; the invoke closure turns
 /// the tuples into ReaderBlock/ReaderLink on the Slint thread.
 struct OccipitalRender {
-    mode:        String,   // page|results|recall|dom|click|submit|distill
+    mode:        String,   // page|results|recall|dom|click|submit|distill|related
     title:       String,
     url:         String,
     meta:        String,
@@ -1222,7 +1222,7 @@ fn occipital_payload(content: &Value) -> Option<Value> {
     fn is_occipital(v: &Value) -> bool {
         matches!(
             v.get("kind").and_then(|k| k.as_str()),
-            Some("page" | "results" | "recall" | "dom" | "click" | "submit" | "distill")
+            Some("page" | "results" | "recall" | "dom" | "click" | "submit" | "distill" | "related")
         )
     }
     if is_occipital(content) {
@@ -1708,6 +1708,66 @@ fn build_occipital_render(p: &Value) -> OccipitalRender {
             }
         }
 
+        // The knowledge web: a curated page's neighbours as rows — the shared
+        // terms (the edge label) lead the detail line, the overlap score is
+        // the chip. An empty neighbourhood explains itself via the meta.
+        "related" => {
+            let title = {
+                let t = json_str(p, "title");
+                if t.is_empty() { json_str(p, "url") } else { t }
+            };
+            let links: Vec<(String, String, String, String)> = p
+                .get("related")
+                .and_then(|r| r.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .take(60)
+                        .map(|r| {
+                            let u = json_str(r, "url");
+                            let t = json_str(r, "title");
+                            let label = if t.trim().is_empty() { u.clone() } else { t };
+                            let shared: Vec<String> = r
+                                .get("shared_entities")
+                                .and_then(|a| a.as_array())
+                                .into_iter()
+                                .flatten()
+                                .chain(r.get("shared_tags").and_then(|a| a.as_array()).into_iter().flatten())
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect();
+                            let mut detail = json_str(r, "summary_head");
+                            if !shared.is_empty() {
+                                detail = format!("🏷 {} — {detail}", shared.join(", "));
+                            }
+                            let score = r
+                                .get("score")
+                                .and_then(|s| s.as_f64())
+                                .map(|s| format!("{s:.1}"))
+                                .unwrap_or_default();
+                            (label, u, detail, score)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let total = p.get("distilled_total").and_then(|t| t.as_u64()).unwrap_or(0);
+            let meta = format!(
+                "{} connected page{} · {total} distilled in store",
+                links.len(),
+                if links.len() == 1 { "" } else { "s" }
+            );
+            let crumb = cap_crumb(&format!("related: {title}"));
+            OccipitalRender {
+                mode: "related".into(),
+                title,
+                url: json_str(p, "url"),
+                meta,
+                badge: String::new(),
+                blocks: Vec::new(),
+                links,
+                crumb_label: crumb,
+                crumb_url: json_str(p, "url"),
+            }
+        }
+
         // A distillation is curated knowledge — render each page as a card
         // (title, summary, key-point bullets, a tags/entities line), with the
         // source pages as steerable link rows. Failures and the undistilled
@@ -1921,7 +1981,7 @@ fn apply_occipital_render(ui: &AppWindow, r: OccipitalRender) {
     });
 }
 
-/// Sample render for `APEX_OCCIPITAL_DEMO` (page|results|recall|dom|click|submit|distill)
+/// Sample render for `APEX_OCCIPITAL_DEMO` (page|results|recall|dom|click|submit|distill|related)
 /// — lets the reader window be verified via the snapshot server with no agentd /
 /// no network. The samples mirror the real Occipital payload shapes.
 fn occipital_demo_render(mode: &str) -> OccipitalRender {
@@ -1980,6 +2040,20 @@ fn occipital_demo_render(mode: &str) -> OccipitalRender {
             "hits": [
                 {"url": "https://www.raspberrypi.com/products/27w-power-supply/", "title": "Pi 5 27W PSU", "snippet": "5V/5A USB-C PD — the official supply.", "score": 0.83},
                 {"url": "https://forums.raspberrypi.com/viewtopic.php?t=357789", "title": "PD requirements thread", "snippet": "Caps peripherals without 5A.", "score": null}
+            ]
+        }),
+        "related" => serde_json::json!({
+            "kind": "related", "url": "https://www.raspberrypi.com/products/raspberry-pi-5/",
+            "title": "Raspberry Pi 5", "count": 2, "distilled_total": 7,
+            "related": [
+                {"url": "https://www.raspberrypi.com/products/27w-power-supply/",
+                 "title": "27W Power Supply",
+                 "summary_head": "The official 27W USB-C PD supply delivers the 5V/5A profile the Pi 5 needs.",
+                 "score": 5.0, "shared_entities": ["Raspberry Pi 5", "USB-C PD"], "shared_tags": ["raspberry-pi"]},
+                {"url": "https://forums.raspberrypi.com/viewtopic.php?t=357789",
+                 "title": "PD requirements thread",
+                 "summary_head": "Without a 5V/5A PD source the firmware caps downstream USB current.",
+                 "score": 1.0, "shared_entities": [], "shared_tags": ["power"]}
             ]
         }),
         "distill" => serde_json::json!({
@@ -3673,6 +3747,39 @@ mod tests {
 
         // The payload gate admits the kind (the two-places trap).
         assert!(occipital_payload(&json!({"kind": "distill", "distilled": []})).is_some());
+    }
+
+    #[test]
+    fn build_occipital_render_related_rows() {
+        let r = build_occipital_render(&json!({
+            "kind": "related", "url": "https://a", "title": "A",
+            "count": 1, "distilled_total": 7,
+            "related": [
+                {"url": "https://b", "title": "B", "summary_head": "What B says.",
+                 "score": 3.0, "shared_entities": ["Alpha"], "shared_tags": ["docs"]}
+            ]
+        }));
+        assert_eq!(r.mode, "related");
+        assert_eq!(r.title, "A");
+        assert_eq!(r.links.len(), 1);
+        assert_eq!(r.links[0].0, "B");
+        assert!(
+            r.links[0].2.starts_with("🏷 Alpha, docs — What B says."),
+            "shared terms lead the detail: {}", r.links[0].2
+        );
+        assert_eq!(r.links[0].3, "3.0", "overlap score is the chip");
+        assert!(r.meta.contains("1 connected page"), "meta: {}", r.meta);
+        assert!(r.meta.contains("7 distilled in store"), "meta: {}", r.meta);
+        assert_eq!(r.crumb_label, "related: A");
+
+        // Empty neighbourhood → the meta explains, the store size disambiguates.
+        let r = build_occipital_render(&json!({
+            "kind": "related", "url": "https://a", "title": "A",
+            "count": 0, "distilled_total": 1, "related": []
+        }));
+        assert!(r.links.is_empty());
+        assert!(r.meta.contains("0 connected pages · 1 distilled in store"), "meta: {}", r.meta);
+        assert!(occipital_payload(&json!({"kind": "related", "related": []})).is_some());
     }
 
     #[test]
