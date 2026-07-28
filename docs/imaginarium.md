@@ -100,11 +100,20 @@ design undone in one line.
   `POST /v1/images/generations` → still preview (bytes decoded off-thread →
   `SharedPixelBuffer`, no temp files) + the node's shared jobs rail (the
   agent's MCP jobs appear there too; video rows point at the browser studio).
-  Honest states: node-offline banner, token-rejected banner, busy guard.
-  Uses the same `IMAGINARIUM_URL`/`IMAGINARIUM_TOKEN` env (a desktop dev shell
-  needs them exported; kiosk units read `/etc/agentd/env`). v1 is image-first —
-  video submit, edit/I2V, follow-along auto-reveal, and an `imagine_save`
-  workspace-pull tool are parked in `BACKLOG.md`.
+  Honest states: node-offline banner, token-rejected banner, a distinct
+  **NO TOKEN** state, busy guard. v1 is image-first — video submit, edit/I2V,
+  follow-along auto-reveal, and an `imagine_save` workspace-pull tool are
+  parked in `BACKLOG.md`.
+
+  **How the app gets its reach** (base URL + LAN token): env
+  (`IMAGINARIUM_URL`/`IMAGINARIUM_TOKEN`) wins when set — the kiosk unit reads
+  `/etc/agentd/env` and dev shells can export. When the env token is absent —
+  the **desktop** case: the winit window runs in the user's session and cannot
+  read the 0600 root env file — the UI asks agentd via the token-gated
+  `GET /api/imaginarium` (works with the admin token or a minted login
+  session), which serves the systemd-parsed values from agentd's own env.
+  Boot fetch + retry on ⟳, so login → open Imagine just works. The route never
+  serves the xAI key.
 
 ## Env summary
 
@@ -114,5 +123,10 @@ design undone in one line.
 | `/etc/agentd/env` | `IMAGINARIUM_URL` (`http://127.0.0.1:8791`) + `IMAGINARIUM_TOKEN` (mirror) | agentd → MCP proxy child; `apexos-rs-ui.service` |
 
 Rotating the token = update **both** files (the agentd side is seed-if-absent),
-then restart `imaginarium` and `agentd`. Imaginarium's own knobs
+then restart `imaginarium` and `agentd`. **The two files must agree** — the
+daemon honors the token `/etc/imaginarium/env` seeds; agentd (and everything it
+serves via `GET /api/imaginarium`) relays the one in `/etc/agentd/env`. A
+"token rejected" that survives restarts is almost always this disagreement (or
+a duplicate/quoted line from hand-editing — keep exactly one clean
+`IMAGINARIUM_TOKEN=<hex>` per file). Imaginarium's own knobs
 (`IMAGINARIUM_HOME`, config.toml, model defaults) are documented in its repo.

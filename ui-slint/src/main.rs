@@ -3565,6 +3565,23 @@ mod tests {
     }
 
     #[test]
+    fn imagine_token_clean_heals_operator_forms() {
+        use super::imagine_token_clean;
+        // The canonical form passes through untouched.
+        assert_eq!(imagine_token_clean("abc123"), "abc123");
+        // Whitespace + one pair of matching quotes healed (shell-export form).
+        assert_eq!(imagine_token_clean("  abc123 \n"), "abc123");
+        assert_eq!(imagine_token_clean("\"abc123\""), "abc123");
+        assert_eq!(imagine_token_clean("'abc123'"), "abc123");
+        assert_eq!(imagine_token_clean(" \"abc123\" "), "abc123");
+        // Mismatched quotes are NOT stripped (they're part of the value, honest).
+        assert_eq!(imagine_token_clean("\"abc123'"), "\"abc123'");
+        // Empty / whitespace-only → empty (treated as unset).
+        assert_eq!(imagine_token_clean("   "), "");
+        assert_eq!(imagine_token_clean("\"\""), "");
+    }
+
+    #[test]
     fn imagine_done_note_reports_cost_and_batch() {
         use super::imagine_done_note;
         let job = serde_json::json!({ "usage": { "estimated_usd": 0.04 } });
@@ -4306,6 +4323,45 @@ fn imagine_base_url() -> String {
         .unwrap_or_else(|| "http://127.0.0.1:8791".to_string())
 }
 
+/// The resolved (base, token) the Imagine callbacks use per call. Seeded from
+/// env at boot; on a DESKTOP node (winit window in the user's session — no
+/// /etc/agentd/env in sight, the file is 0600 root) the token arrives later
+/// from agentd's `GET /api/imaginarium`, so callbacks must re-read every
+/// invocation instead of baking a client at boot. Env wins when set.
+static IMAGINE_REACH: std::sync::OnceLock<std::sync::Mutex<(String, String)>> =
+    std::sync::OnceLock::new();
+
+fn imagine_reach_cell() -> &'static std::sync::Mutex<(String, String)> {
+    IMAGINE_REACH.get_or_init(|| {
+        let token = std::env::var("IMAGINARIUM_TOKEN")
+            .map(|t| imagine_token_clean(&t))
+            .unwrap_or_default();
+        std::sync::Mutex::new((imagine_base_url(), token))
+    })
+}
+
+fn imagine_reach() -> (String, String) {
+    imagine_reach_cell()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+/// Heal the operator-footgun forms a hand-set token can take: surrounding
+/// whitespace and one pair of matching quotes (a shell `export T="…"` keeps
+/// them; systemd strips them — this makes both paths agree). Pure, tested.
+fn imagine_token_clean(raw: &str) -> String {
+    let t = raw.trim();
+    let t = if t.len() >= 2
+        && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')))
+    {
+        &t[1..t.len() - 1]
+    } else {
+        t
+    };
+    t.trim().to_string()
+}
+
 /// A jobs-rail row in Send form: (id, mode, status, model, when, err).
 type ImagineRow = (String, String, String, String, String, String);
 
@@ -4346,16 +4402,23 @@ fn imagine_done_note(job: &Value, n: u32) -> String {
     format!("done{cost}{extra}")
 }
 
+/// Attach the LAN token (when present) to a request — every /v1 call carries
+/// auth explicitly; there is no default-header client to forget it in.
+fn imagine_auth(req: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+    if token.is_empty() { req } else { req.bearer_auth(token) }
+}
+
 /// GET /v1/jobs?limit=40 → Ok(rows) | Err("auth"|"offline"). 401/403 = the
 /// token is wrong; anything else unreachable/broken = offline (the view says
 /// which). Never panics — an unparsable 200 is just zero rows.
-async fn imagine_fetch_jobs(client: &reqwest::Client, base: &str) -> Result<Vec<ImagineRow>, String> {
-    match client
-        .get(format!("{base}/v1/jobs?limit=40"))
-        .timeout(std::time::Duration::from_secs(6))
-        .send()
-        .await
-    {
+async fn imagine_fetch_jobs(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+) -> Result<Vec<ImagineRow>, String> {
+    let req = imagine_auth(client.get(format!("{base}/v1/jobs?limit=40")), token)
+        .timeout(std::time::Duration::from_secs(6));
+    match req.send().await {
         Ok(resp) if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 => {
             Err("auth".into())
         }
@@ -4368,8 +4431,13 @@ async fn imagine_fetch_jobs(client: &reqwest::Client, base: &str) -> Result<Vec<
 }
 
 /// GET /v1/jobs/{id} → the full JobResult (Null on any failure).
-async fn imagine_fetch_job(client: &reqwest::Client, base: &str, id: &str) -> Value {
-    json_get(client, format!("{base}/v1/jobs/{id}")).await
+async fn imagine_fetch_job(client: &reqwest::Client, base: &str, token: &str, id: &str) -> Value {
+    let req = imagine_auth(client.get(format!("{base}/v1/jobs/{id}")), token)
+        .timeout(std::time::Duration::from_secs(8));
+    match req.send().await {
+        Ok(resp) => resp.json::<Value>().await.unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    }
 }
 
 /// GET /v1/library/{job_id}/content → decoded RGBA (w, h, pixels), ready to
@@ -4378,10 +4446,10 @@ async fn imagine_fetch_job(client: &reqwest::Client, base: &str, id: &str) -> Va
 async fn imagine_fetch_preview(
     client: &reqwest::Client,
     base: &str,
+    token: &str,
     job_id: &str,
 ) -> Result<(u32, u32, Vec<u8>), String> {
-    let resp = client
-        .get(format!("{base}/v1/library/{job_id}/content"))
+    let resp = imagine_auth(client.get(format!("{base}/v1/library/{job_id}/content")), token)
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
@@ -4401,6 +4469,7 @@ async fn imagine_fetch_preview(
 async fn imagine_generate_call(
     client: &reqwest::Client,
     base: &str,
+    token: &str,
     prompt: &str,
     model: &str,
     aspect: &str,
@@ -4410,8 +4479,7 @@ async fn imagine_generate_call(
     if model != "auto" {
         body["model"] = Value::String(model.to_string());
     }
-    let resp = client
-        .post(format!("{base}/v1/images/generations"))
+    let resp = imagine_auth(client.post(format!("{base}/v1/images/generations")), token)
         .json(&body)
         // Image gen is synchronous upstream — a quality 4-image batch takes a
         // while; be patient rather than strand a paid render.
@@ -4456,6 +4524,39 @@ fn apply_imagine_rows(ui: &AppWindow, outcome: &Result<Vec<ImagineRow>, String>)
         }
         Err(e) => ui.set_imagine_status(e.as_str().into()),
     }
+}
+
+/// Ask agentd for the node's Imaginarium reach (`GET /api/imaginarium`, gated —
+/// works with the admin token AND a minted login session) and store it. This is
+/// the DESKTOP path: the winit UI can't read the 0600 /etc/agentd/env, agentd
+/// can — and serves the systemd-parsed values, immune to shell-quoting/dup-line
+/// footguns. Called only when the env token is absent; per-var env still wins.
+/// Returns true when a non-empty token landed.
+async fn imagine_fetch_reach(client: &reqwest::Client, http_base: &str) -> bool {
+    let v = json_get(client, format!("{http_base}/api/imaginarium")).await;
+    let url = v
+        .get("url")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .unwrap_or_default();
+    let token = v
+        .get("token")
+        .and_then(Value::as_str)
+        .map(imagine_token_clean)
+        .unwrap_or_default();
+    if token.is_empty() {
+        return false;
+    }
+    let env_url_set = std::env::var("IMAGINARIUM_URL")
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if let Ok(mut g) = imagine_reach_cell().lock() {
+        if !url.is_empty() && !env_url_set {
+            g.0 = url;
+        }
+        g.1 = token;
+    }
+    true
 }
 
 struct SettingsData {
@@ -6023,39 +6124,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // ── Imagine (🖼): the Imaginarium studio (docs/imaginarium.md) ────────────
-    // A second HTTP client for the node-local Imaginarium daemon — its own
-    // bearer token (IMAGINARIUM_TOKEN), never agentd's: two trust domains, one
-    // idiom. Base + token are the SAME env the MCP proxy plugin inherits, so a
-    // provisioned node wires both surfaces with zero extra config.
-    let imagine_base = imagine_base_url();
-    ui.set_imagine_node_url(imagine_base.clone().into());
-    let imagine_client = Arc::new({
-        let mut builder = reqwest::Client::builder();
-        if let Ok(t) = std::env::var("IMAGINARIUM_TOKEN") {
-            if !t.is_empty() {
-                let mut headers = reqwest::header::HeaderMap::new();
-                if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {t}")) {
-                    headers.insert(reqwest::header::AUTHORIZATION, val);
+    // The reach (base URL + LAN token) is process-global and re-read on EVERY
+    // call: env seeds it, and on a desktop node — where the winit window never
+    // sees /etc/agentd/env — agentd's `GET /api/imaginarium` fills it in after
+    // login. No baked default-header client: a token that arrives late still
+    // reaches the next request. The xAI key never appears UI-side.
+    {
+        let (b, t) = imagine_reach();
+        ui.set_imagine_node_url(b.into());
+        if t.is_empty() {
+            // Desktop path: ask agentd once at boot (post-login re-exec has the
+            // agentd token, so this succeeds exactly when it can). A refresh
+            // click retries it, so a race here only costs one ⟳.
+            let client = Arc::clone(&http_client);
+            let hb = http_base.clone();
+            let uw = ui.as_weak();
+            rt.spawn(async move {
+                if imagine_fetch_reach(&client, &hb).await {
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = uw.upgrade() {
+                            ui.set_imagine_node_url(imagine_reach().0.into());
+                            ui.invoke_refresh_imagine();
+                        }
+                    })
+                    .ok();
                 }
-                builder = builder.default_headers(headers);
-            }
+            });
         }
-        builder.build().unwrap_or_default()
-    });
+    }
 
     {
         let rt_h = rt.handle().clone();
-        let client = Arc::clone(&imagine_client);
-        let base = imagine_base.clone();
+        let agentd_client = Arc::clone(&http_client);
+        let agentd_base = http_base.clone();
         let uw = ui.as_weak();
         ui.on_refresh_imagine(move || {
-            let client = Arc::clone(&client);
-            let base = base.clone();
+            let agentd_client = Arc::clone(&agentd_client);
+            let agentd_base = agentd_base.clone();
             let uw = uw.clone();
             rt_h.spawn(async move {
-                let outcome = imagine_fetch_jobs(&client, &base).await;
+                // Token still missing (pre-login boot raced, or agentd had none
+                // yet) → retry the agentd reach before giving an honest state.
+                if imagine_reach().1.is_empty() {
+                    imagine_fetch_reach(&agentd_client, &agentd_base).await;
+                }
+                let (base, token) = imagine_reach();
+                let outcome = if token.is_empty() {
+                    Err("unconfigured".to_string())
+                } else {
+                    imagine_fetch_jobs(&reqwest::Client::new(), &base, &token).await
+                };
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = uw.upgrade() {
+                        ui.set_imagine_node_url(base.into());
                         apply_imagine_rows(&ui, &outcome);
                     }
                 })
@@ -6066,8 +6187,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let rt_h = rt.handle().clone();
-        let client = Arc::clone(&imagine_client);
-        let base = imagine_base.clone();
         let uw = ui.as_weak();
         ui.on_imagine_generate(move |prompt, model, aspect, n| {
             // Busy state lands immediately — this callback runs on the Slint thread.
@@ -6077,17 +6196,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let (prompt, model, aspect) = (prompt.to_string(), model.to_string(), aspect.to_string());
             let n = n.max(1) as u32;
-            let client = Arc::clone(&client);
-            let base = base.clone();
             let uw = uw.clone();
             rt_h.spawn(async move {
-                let result = imagine_generate_call(&client, &base, &prompt, &model, &aspect, n).await;
+                let (base, token) = imagine_reach();
+                let client = reqwest::Client::new();
+                let result = if token.is_empty() {
+                    Err("no token — see docs/imaginarium.md".to_string())
+                } else {
+                    imagine_generate_call(&client, &base, &token, &prompt, &model, &aspect, n).await
+                };
                 let (note, preview, job_id, failed) = match &result {
                     Ok(job) => {
                         let status = job.get("status").and_then(Value::as_str).unwrap_or("");
                         let id = job.get("job_id").and_then(Value::as_str).unwrap_or("").to_string();
                         if status == "done" && !id.is_empty() {
-                            match imagine_fetch_preview(&client, &base, &id).await {
+                            match imagine_fetch_preview(&client, &base, &token, &id).await {
                                 Ok(px) => (imagine_done_note(job, n), Some(px), id, false),
                                 Err(e) => (format!("generated, preview failed: {e}"), None, id, false),
                             }
@@ -6102,7 +6225,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(e) => (e.clone(), None, String::new(), true),
                 };
                 // The daemon's jobs list is the shared truth — refresh it either way.
-                let rows = imagine_fetch_jobs(&client, &base).await;
+                let rows = if token.is_empty() {
+                    Err("unconfigured".to_string())
+                } else {
+                    imagine_fetch_jobs(&client, &base, &token).await
+                };
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = uw.upgrade() {
                         ui.set_imagine_busy(false);
@@ -6130,23 +6257,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let rt_h = rt.handle().clone();
-        let client = Arc::clone(&imagine_client);
-        let base = imagine_base.clone();
         let uw = ui.as_weak();
         ui.on_imagine_pick_job(move |id| {
             let id = id.to_string();
-            let client = Arc::clone(&client);
-            let base = base.clone();
             let uw = uw.clone();
             rt_h.spawn(async move {
-                let job = imagine_fetch_job(&client, &base, &id).await;
+                let (base, token) = imagine_reach();
+                let client = reqwest::Client::new();
+                let job = imagine_fetch_job(&client, &base, &token, &id).await;
                 let mode = job.get("mode").and_then(Value::as_str).unwrap_or("").to_string();
                 let status = job.get("status").and_then(Value::as_str).unwrap_or("").to_string();
                 let err = job.get("error").and_then(Value::as_str).unwrap_or("").to_string();
                 let prompt = job.get("prompt").and_then(Value::as_str).unwrap_or("").to_string();
                 let is_image = mode.starts_with("image");
                 let preview = if is_image && status == "done" {
-                    imagine_fetch_preview(&client, &base, &id).await.ok()
+                    imagine_fetch_preview(&client, &base, &token, &id).await.ok()
                 } else {
                     None
                 };

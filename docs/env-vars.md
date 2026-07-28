@@ -52,7 +52,7 @@
 | `APEX_STT_ADDR` / `APEX_STT_URL` | `127.0.0.1:8771` / `…/transcribe` | apex-stt loopback bind / where local STT reaches it |
 | `WHISPER_MODEL` (+ `WHISPER_GGML_URL`/`WHISPER_LANG`) | `…/ggml-base.en.bin` / ggerganov base.en / `en` | apex-stt Whisper ggml model path / install.sh download src / language hint |
 | `IMAGINARIUM_URL` | `http://127.0.0.1:8791` (seeded) | the local Imaginarium fat node. Read by the `imaginarium mcp` proxy plugin (inherited from agentd's env — its presence is what selects proxy mode) and the ui-slint Imagine app. Seeded into `/etc/agentd/env` by install.sh when Imaginarium is provisioned |
-| `IMAGINARIUM_TOKEN` | minted at install | LAN bearer token for the Imaginarium node — the ONLY credential agentd-side processes hold (the xAI key stays in `/etc/imaginarium/env`, never here). Minted once into `/etc/imaginarium/env`, mirrored seed-if-absent into `/etc/agentd/env`; rotate = update both. See `docs/imaginarium.md` |
+| `IMAGINARIUM_TOKEN` | minted at install | LAN bearer token for the Imaginarium node — the ONLY credential agentd-side processes hold (the xAI key stays in `/etc/imaginarium/env`, never here). Minted once into `/etc/imaginarium/env`, mirrored seed-if-absent into `/etc/agentd/env`; rotate = update both (they must agree). The **desktop** ui-slint app can't read the 0600 env file — it fetches the value from agentd's `GET /api/imaginarium` after login; env wins when exported. See `docs/imaginarium.md` |
 | `APEXOS_IMAGINARIUM` | `0` | install.sh (boot-file/install.conf): `1` opts the node into Imaginarium provisioning (clone+build sibling, mint token, unit + MCP plugin when an `XAI_API_KEY` is present). CLI: `--imaginarium` / `--no-imaginarium` |
 
 ---
