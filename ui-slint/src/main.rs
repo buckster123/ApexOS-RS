@@ -1199,7 +1199,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
 /// Plain (Send) render plan built off the Slint thread; the invoke closure turns
 /// the tuples into ReaderBlock/ReaderLink on the Slint thread.
 struct OccipitalRender {
-    mode:        String,   // page|results|recall|dom|click|submit
+    mode:        String,   // page|results|recall|dom|click|submit|distill|related
     title:       String,
     url:         String,
     meta:        String,
@@ -1222,7 +1222,7 @@ fn occipital_payload(content: &Value) -> Option<Value> {
     fn is_occipital(v: &Value) -> bool {
         matches!(
             v.get("kind").and_then(|k| k.as_str()),
-            Some("page" | "results" | "recall" | "dom" | "click" | "submit")
+            Some("page" | "results" | "recall" | "dom" | "click" | "submit" | "distill" | "related")
         )
     }
     if is_occipital(content) {
@@ -1708,6 +1708,194 @@ fn build_occipital_render(p: &Value) -> OccipitalRender {
             }
         }
 
+        // The knowledge web: a curated page's neighbours as rows — the shared
+        // terms (the edge label) lead the detail line, the overlap score is
+        // the chip. An empty neighbourhood explains itself via the meta.
+        "related" => {
+            let title = {
+                let t = json_str(p, "title");
+                if t.is_empty() { json_str(p, "url") } else { t }
+            };
+            let links: Vec<(String, String, String, String)> = p
+                .get("related")
+                .and_then(|r| r.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .take(60)
+                        .map(|r| {
+                            let u = json_str(r, "url");
+                            let t = json_str(r, "title");
+                            let label = if t.trim().is_empty() { u.clone() } else { t };
+                            let shared: Vec<String> = r
+                                .get("shared_entities")
+                                .and_then(|a| a.as_array())
+                                .into_iter()
+                                .flatten()
+                                .chain(r.get("shared_tags").and_then(|a| a.as_array()).into_iter().flatten())
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect();
+                            let mut detail = json_str(r, "summary_head");
+                            if !shared.is_empty() {
+                                detail = format!("🏷 {} — {detail}", shared.join(", "));
+                            }
+                            let score = r
+                                .get("score")
+                                .and_then(|s| s.as_f64())
+                                .map(|s| format!("{s:.1}"))
+                                .unwrap_or_default();
+                            (label, u, detail, score)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let total = p.get("distilled_total").and_then(|t| t.as_u64()).unwrap_or(0);
+            let meta = format!(
+                "{} connected page{} · {total} distilled in store",
+                links.len(),
+                if links.len() == 1 { "" } else { "s" }
+            );
+            let crumb = cap_crumb(&format!("related: {title}"));
+            OccipitalRender {
+                mode: "related".into(),
+                title,
+                url: json_str(p, "url"),
+                meta,
+                badge: String::new(),
+                blocks: Vec::new(),
+                links,
+                crumb_label: crumb,
+                crumb_url: json_str(p, "url"),
+            }
+        }
+
+        // A distillation is curated knowledge — render each page as a card
+        // (title, summary, key-point bullets, a tags/entities line), with the
+        // source pages as steerable link rows. Failures and the undistilled
+        // backlog are surfaced honestly in the meta + a warning block.
+        "distill" => {
+            let empty = Vec::new();
+            let distilled = p.get("distilled").and_then(|d| d.as_array()).unwrap_or(&empty);
+            let failed = p.get("failed").and_then(|f| f.as_array()).unwrap_or(&empty);
+            let remaining = p.get("remaining").and_then(|r| r.as_u64()).unwrap_or(0);
+            let join = |d: &Value, key: &str| -> String {
+                d.get(key)
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                    .unwrap_or_default()
+            };
+
+            let mut blocks: Vec<BlockPlan> = Vec::new();
+            let mut links: Vec<LinkPlan> = Vec::new();
+            for (i, d) in distilled.iter().enumerate() {
+                let url = json_str(d, "url");
+                let title = {
+                    let t = json_str(d, "title");
+                    if t.is_empty() { url.clone() } else { t }
+                };
+                if i > 0 {
+                    blocks.push(("rule".into(), String::new(), 0));
+                }
+                blocks.push(("h2".into(), title.clone(), 0));
+                let summary = json_str(d, "summary");
+                if !summary.is_empty() {
+                    blocks.push(("p".into(), summary.clone(), 0));
+                }
+                for kp in d.get("key_points").and_then(|k| k.as_array()).into_iter().flatten() {
+                    if let Some(s) = kp.as_str() {
+                        blocks.push(("bullet".into(), s.to_string(), 0));
+                    }
+                }
+                let (tags, entities) = (join(d, "tags"), join(d, "entities"));
+                let mut tagline = String::new();
+                if !tags.is_empty() {
+                    tagline = format!("🏷 {tags}");
+                }
+                if !entities.is_empty() {
+                    if !tagline.is_empty() {
+                        tagline.push_str(" · ");
+                    }
+                    tagline.push_str(&entities);
+                }
+                if !tagline.is_empty() {
+                    blocks.push(("quote".into(), tagline, 0));
+                }
+                if !url.is_empty() {
+                    let cached = d.get("from_cache").and_then(|b| b.as_bool()).unwrap_or(false);
+                    let chip = if cached { "cache".into() } else { json_str(d, "backend") };
+                    let detail: String = summary.chars().take(160).collect();
+                    links.push((title, url, detail, chip));
+                }
+            }
+            for f in failed {
+                blocks.push((
+                    "quote".into(),
+                    format!("⚠ {} — {}", json_str(f, "url"), json_str(f, "error")),
+                    0,
+                ));
+            }
+            if distilled.is_empty() && failed.is_empty() {
+                blocks.push((
+                    "quote".into(),
+                    "Nothing to distill — every cached page is already curated.".into(),
+                    0,
+                ));
+            }
+
+            let mut meta = format!(
+                "{} page{} distilled",
+                distilled.len(),
+                if distilled.len() == 1 { "" } else { "s" }
+            );
+            if !failed.is_empty() {
+                meta.push_str(&format!(" · {} failed", failed.len()));
+            }
+            if remaining > 0 {
+                meta.push_str(&format!(" · {remaining} still undistilled"));
+            }
+
+            // A single-page distill gets page-like identity: its title/url up
+            // top, freshness as the badge, and provenance in the meta.
+            let (title, url, badge) = if let [d] = distilled.as_slice() {
+                let u = json_str(d, "url");
+                let t = {
+                    let t = json_str(d, "title");
+                    if t.is_empty() { u.clone() } else { t }
+                };
+                let cached = d.get("from_cache").and_then(|b| b.as_bool()).unwrap_or(false);
+                if cached {
+                    meta.push_str(" · already current (no LLM spend)");
+                } else {
+                    let model = json_str(d, "model");
+                    if !model.is_empty() {
+                        meta.push_str(&format!(" · {model}"));
+                    }
+                }
+                (t, u, if cached { "cache" } else { "live" }.to_string())
+            } else {
+                (
+                    format!(
+                        "Distilled {} page{}",
+                        distilled.len(),
+                        if distilled.len() == 1 { "" } else { "s" }
+                    ),
+                    String::new(),
+                    String::new(),
+                )
+            };
+            let crumb = cap_crumb(&format!("distill: {title}"));
+            OccipitalRender {
+                mode: "distill".into(),
+                title,
+                url: url.clone(),
+                meta,
+                badge,
+                blocks,
+                links,
+                crumb_label: crumb,
+                crumb_url: url,
+            }
+        }
+
         // Unreachable while the `occipital_payload` whitelist and these arms
         // stay in sync. If they drift, say so — the old `_ => recall` wildcard
         // silently rendered every new kind as "0 memory hits" (the two-places
@@ -1793,7 +1981,7 @@ fn apply_occipital_render(ui: &AppWindow, r: OccipitalRender) {
     });
 }
 
-/// Sample render for `APEX_OCCIPITAL_DEMO` (page|results|recall|dom|click|submit)
+/// Sample render for `APEX_OCCIPITAL_DEMO` (page|results|recall|dom|click|submit|distill|related)
 /// — lets the reader window be verified via the snapshot server with no agentd /
 /// no network. The samples mirror the real Occipital payload shapes.
 fn occipital_demo_render(mode: &str) -> OccipitalRender {
@@ -1853,6 +2041,41 @@ fn occipital_demo_render(mode: &str) -> OccipitalRender {
                 {"url": "https://www.raspberrypi.com/products/27w-power-supply/", "title": "Pi 5 27W PSU", "snippet": "5V/5A USB-C PD — the official supply.", "score": 0.83},
                 {"url": "https://forums.raspberrypi.com/viewtopic.php?t=357789", "title": "PD requirements thread", "snippet": "Caps peripherals without 5A.", "score": null}
             ]
+        }),
+        "related" => serde_json::json!({
+            "kind": "related", "url": "https://www.raspberrypi.com/products/raspberry-pi-5/",
+            "title": "Raspberry Pi 5", "count": 2, "distilled_total": 7,
+            "related": [
+                {"url": "https://www.raspberrypi.com/products/27w-power-supply/",
+                 "title": "27W Power Supply",
+                 "summary_head": "The official 27W USB-C PD supply delivers the 5V/5A profile the Pi 5 needs.",
+                 "score": 5.0, "shared_entities": ["Raspberry Pi 5", "USB-C PD"], "shared_tags": ["raspberry-pi"]},
+                {"url": "https://forums.raspberrypi.com/viewtopic.php?t=357789",
+                 "title": "PD requirements thread",
+                 "summary_head": "Without a 5V/5A PD source the firmware caps downstream USB current.",
+                 "score": 1.0, "shared_entities": [], "shared_tags": ["power"]}
+            ]
+        }),
+        "distill" => serde_json::json!({
+            "kind": "distill", "count": 2,
+            "distilled": [
+                {"url": "https://www.raspberrypi.com/products/raspberry-pi-5/",
+                 "title": "Raspberry Pi 5",
+                 "summary": "The Raspberry Pi 5 is a quad-core Cortex-A76 single-board computer at 2.4GHz with up to 16GB RAM. It requires a 5V/5A USB-C PD supply for full performance.",
+                 "key_points": ["BCM2712 quad-core Cortex-A76 @ 2.4GHz", "Up to 16GB LPDDR4X RAM", "Needs 27W (5V/5A) USB-C PD for full peripheral power"],
+                 "entities": ["Raspberry Pi 5", "BCM2712", "VideoCore VII"],
+                 "tags": ["raspberry-pi", "sbc", "hardware"],
+                 "model": "llama3.2", "backend": "ollama", "from_cache": false},
+                {"url": "https://www.raspberrypi.com/products/27w-power-supply/",
+                 "title": "27W Power Supply",
+                 "summary": "The official 27W USB-C PD supply delivers the 5V/5A profile the Pi 5 needs; without it downstream USB current is capped.",
+                 "key_points": ["5V/5A fixed PD profile", "Firmware caps USB to 600mA on weaker supplies"],
+                 "entities": ["USB-C PD"],
+                 "tags": ["power", "raspberry-pi"],
+                 "model": "llama3.2", "backend": "cache", "from_cache": true}
+            ],
+            "failed": [{"url": "https://example.com/spa", "error": "page needs JavaScript — nothing to distill"}],
+            "remaining": 3
         }),
         _ => serde_json::json!({
             "kind": "page", "url": "https://www.raspberrypi.com/products/raspberry-pi-5/",
@@ -3459,6 +3682,107 @@ mod tests {
     }
 
     #[test]
+    fn build_occipital_render_distill_cards_and_rows() {
+        // A sweep: per-page cards (h2/summary/bullets/tag-quote), rule
+        // separators, honest failure + backlog reporting, steerable rows.
+        let r = build_occipital_render(&json!({
+            "kind": "distill", "count": 2,
+            "distilled": [
+                {"url": "https://a", "title": "A", "summary": "What A says.",
+                 "key_points": ["fact one", "fact two"],
+                 "entities": ["Alpha"], "tags": ["alpha", "docs"],
+                 "model": "llama3.2", "backend": "ollama", "from_cache": false},
+                {"url": "https://b", "title": "B", "summary": "What B says.",
+                 "key_points": [], "entities": [], "tags": [],
+                 "model": "llama3.2", "backend": "ollama", "from_cache": true}
+            ],
+            "failed": [{"url": "https://c", "error": "needs JavaScript"}],
+            "remaining": 4
+        }));
+        assert_eq!(r.mode, "distill");
+        assert_eq!(r.title, "Distilled 2 pages");
+        assert_eq!(r.badge, "", "a mixed sweep has no single freshness");
+        assert!(r.meta.contains("2 pages distilled"), "meta: {}", r.meta);
+        assert!(r.meta.contains("1 failed"), "meta: {}", r.meta);
+        assert!(r.meta.contains("4 still undistilled"), "meta: {}", r.meta);
+        assert!(r.blocks.iter().any(|(k, t, _)| k == "h2" && t == "A"));
+        assert!(r.blocks.iter().any(|(k, t, _)| k == "p" && t == "What A says."));
+        assert!(r.blocks.iter().any(|(k, t, _)| k == "bullet" && t == "fact one"));
+        assert!(
+            r.blocks.iter().any(|(k, t, _)| k == "quote" && t.contains("🏷 alpha, docs") && t.contains("Alpha")),
+            "tag/entity line: {:?}", r.blocks
+        );
+        assert!(r.blocks.iter().any(|(k, _, _)| k == "rule"), "pages are separated");
+        assert!(
+            r.blocks.iter().any(|(k, t, _)| k == "quote" && t.contains("⚠") && t.contains("needs JavaScript")),
+            "failures are visible: {:?}", r.blocks
+        );
+        assert_eq!(r.links.len(), 2, "each distilled page is a steerable row");
+        assert_eq!(r.links[0].1, "https://a");
+        assert_eq!(r.links[0].3, "ollama", "fresh distill chips its backend");
+        assert_eq!(r.links[1].3, "cache", "hash-gated re-ask chips cache");
+
+        // Single cached page → page-like identity + honest no-spend meta.
+        let r = build_occipital_render(&json!({
+            "kind": "distill", "count": 1,
+            "distilled": [{"url": "https://a", "title": "A", "summary": "S.",
+                           "key_points": [], "entities": [], "tags": ["t"],
+                           "model": "llama3.2", "backend": "cache", "from_cache": true}],
+            "failed": [], "remaining": 0
+        }));
+        assert_eq!(r.title, "A");
+        assert_eq!(r.url, "https://a");
+        assert_eq!(r.badge, "cache");
+        assert!(r.meta.contains("no LLM spend"), "meta: {}", r.meta);
+        assert_eq!(r.crumb_label, "distill: A");
+
+        // Empty sweep → an honest empty state, not a blank pane.
+        let r = build_occipital_render(&json!({
+            "kind": "distill", "count": 0, "distilled": [], "failed": [], "remaining": 0
+        }));
+        assert!(
+            r.blocks.iter().any(|(k, t, _)| k == "quote" && t.contains("already curated")),
+            "empty sweep says so: {:?}", r.blocks
+        );
+
+        // The payload gate admits the kind (the two-places trap).
+        assert!(occipital_payload(&json!({"kind": "distill", "distilled": []})).is_some());
+    }
+
+    #[test]
+    fn build_occipital_render_related_rows() {
+        let r = build_occipital_render(&json!({
+            "kind": "related", "url": "https://a", "title": "A",
+            "count": 1, "distilled_total": 7,
+            "related": [
+                {"url": "https://b", "title": "B", "summary_head": "What B says.",
+                 "score": 3.0, "shared_entities": ["Alpha"], "shared_tags": ["docs"]}
+            ]
+        }));
+        assert_eq!(r.mode, "related");
+        assert_eq!(r.title, "A");
+        assert_eq!(r.links.len(), 1);
+        assert_eq!(r.links[0].0, "B");
+        assert!(
+            r.links[0].2.starts_with("🏷 Alpha, docs — What B says."),
+            "shared terms lead the detail: {}", r.links[0].2
+        );
+        assert_eq!(r.links[0].3, "3.0", "overlap score is the chip");
+        assert!(r.meta.contains("1 connected page"), "meta: {}", r.meta);
+        assert!(r.meta.contains("7 distilled in store"), "meta: {}", r.meta);
+        assert_eq!(r.crumb_label, "related: A");
+
+        // Empty neighbourhood → the meta explains, the store size disambiguates.
+        let r = build_occipital_render(&json!({
+            "kind": "related", "url": "https://a", "title": "A",
+            "count": 0, "distilled_total": 1, "related": []
+        }));
+        assert!(r.links.is_empty());
+        assert!(r.meta.contains("0 connected pages · 1 distilled in store"), "meta: {}", r.meta);
+        assert!(occipital_payload(&json!({"kind": "related", "related": []})).is_some());
+    }
+
+    #[test]
     fn strip_inline_md_cleans_links_and_emphasis() {
         assert_eq!(strip_inline_md("see [the docs](https://x/y) now"), "see the docs now");
         assert_eq!(strip_inline_md("**bold** and *italic* and `code`"), "bold and italic and code");
@@ -3586,8 +3910,10 @@ mod tests {
         assert!(r.meta.contains("snapshot held"), "meta: {}", r.meta);
 
         // an unknown kind that slips the gate renders honestly, never as recall
-        let r = build_occipital_render(&json!({"kind": "distill", "url": "https://x"}));
-        assert!(r.title.contains("distill"), "title: {}", r.title);
+        // (this probe was "distill" until the distill card landed — it needs a
+        // kind that stays unrendered)
+        let r = build_occipital_render(&json!({"kind": "hologram", "url": "https://x"}));
+        assert!(r.title.contains("hologram"), "title: {}", r.title);
         assert_ne!(r.mode, "recall", "the two-places trap: never silent-recall");
     }
 }
