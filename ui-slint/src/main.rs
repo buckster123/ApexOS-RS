@@ -3565,6 +3565,44 @@ mod tests {
     }
 
     #[test]
+    fn fit_dims_preserves_aspect_and_evens() {
+        use super::fit_dims;
+        // Landscape 720p into a 960×720 stage → width-bound, even dims.
+        assert_eq!(fit_dims(1280, 720, 960, 720), (960, 540));
+        // Portrait into the same stage → height-bound.
+        assert_eq!(fit_dims(720, 1280, 960, 720), (404, 720));
+        // Never upscale past the source.
+        assert_eq!(fit_dims(320, 240, 960, 720), (320, 240));
+        // Odd results round DOWN to even (rawvideo/yuv requirement).
+        let (w, h) = fit_dims(1279, 719, 640, 480);
+        assert_eq!((w % 2, h % 2), (0, 0));
+        // Degenerate inputs stay sane.
+        assert_eq!(fit_dims(0, 0, 960, 720), (2, 2));
+        assert_eq!(fit_dims(1280, 720, 0, 0), (2, 2));
+    }
+
+    #[test]
+    fn parse_ffprobe_video_reads_dims_and_duration() {
+        use super::parse_ffprobe_video;
+        // Typical csv=p=0 output: stream line then format line.
+        assert_eq!(parse_ffprobe_video("1280,720\n8.342000\n"), Some((1280, 720, 8.342)));
+        // Missing duration (N/A on some containers) → 0.0, still playable.
+        assert_eq!(parse_ffprobe_video("640,480\nN/A\n"), Some((640, 480, 0.0)));
+        // Garbage / empty → None.
+        assert_eq!(parse_ffprobe_video(""), None);
+        assert_eq!(parse_ffprobe_video("not,numbers\n"), None);
+    }
+
+    #[test]
+    fn imagine_clock_formats_mm_ss() {
+        use super::imagine_clock;
+        assert_eq!(imagine_clock(0.0), "0:00");
+        assert_eq!(imagine_clock(8.4), "0:08");
+        assert_eq!(imagine_clock(75.0), "1:15");
+        assert_eq!(imagine_clock(-3.0), "0:00");
+    }
+
+    #[test]
     fn imagine_token_clean_heals_operator_forms() {
         use super::imagine_token_clean;
         // The canonical form passes through untouched.
@@ -4523,6 +4561,347 @@ fn apply_imagine_rows(ui: &AppWindow, outcome: &Result<Vec<ImagineRow>, String>)
             });
         }
         Err(e) => ui.set_imagine_status(e.as_str().into()),
+    }
+}
+
+// ── Imagine video player (A1, docs/imagine-studio.md) ─────────────────────────
+// Slint has no video element; the player is a hand-rolled ffmpeg pipeline on
+// three field-proven idioms: fetch-then-decode (clips are 2–20 MB; upstream has
+// no Range and doesn't need it), `ffmpeg -f rawvideo` frames → a bounded
+// channel → a Slint Timer painting SharedPixelBuffers (the thermal-heatmap
+// idiom), and audio demuxed by a second ffmpeg piped into `aplay` (the
+// client-side voice idiom). Clips are 4–15 s, so starting both pipelines
+// together bounds AV drift to tens of ms — no sync engine, on purpose.
+// Decode happens AT WINDOW SIZE (never native res) — that's the old-hardware
+// story. ffmpeg CLI only; gstreamer/libav bindings are a locked-decision no.
+
+/// One decoded frame (or end-of-stream) crossing decoder → Slint thread.
+enum PlayerMsg {
+    Frame(u32, u32, Vec<u8>),
+    End,
+}
+
+/// Playback generation counter — bumping it orphans every in-flight decoder
+/// loop (they check before sending), so stop/replay/new-selection can't race.
+static IMAGINE_PLAY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Live pipeline children (video ffmpeg, audio ffmpeg, aplay) — killed on stop.
+static PLAYER_PROCS: std::sync::Mutex<Vec<tokio::process::Child>> = std::sync::Mutex::new(Vec::new());
+
+thread_local! {
+    /// The paint timer + frame receiver + pacing state (Slint thread only).
+    static PLAYER_TIMER: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
+    static PLAYER_RX: RefCell<Option<tokio::sync::mpsc::Receiver<PlayerMsg>>> = const { RefCell::new(None) };
+    /// (started_at, fps, duration_s, frames_shown)
+    static PLAYER_CLOCK: RefCell<Option<(std::time::Instant, f32, f32, u64)>> = const { RefCell::new(None) };
+    /// The clip pick_job prepared: (cached file, duration_s, src_w, src_h).
+    static IMAGINE_CLIP: RefCell<Option<(std::path::PathBuf, f32, u32, u32)>> = const { RefCell::new(None) };
+}
+
+/// Playback decode rate — constant regardless of source (`fps=` filter), so
+/// pacing math is trivial and slow nodes drop frames instead of drifting.
+const IMAGINE_PLAY_FPS: f32 = 24.0;
+
+fn imagine_cache_dir() -> std::path::PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            std::path::Path::new(&home).join(".cache")
+        });
+    base.join("apexos-rs").join("imagine")
+}
+
+/// Fit (src_w, src_h) into (max_w, max_h) preserving aspect, both dims rounded
+/// DOWN to even (yuv/rawvideo requirement — the cutting-room pitfall). Pure.
+fn fit_dims(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if src_w == 0 || src_h == 0 || max_w < 2 || max_h < 2 {
+        return (2, 2);
+    }
+    let scale = (max_w as f64 / src_w as f64).min(max_h as f64 / src_h as f64).min(1.0);
+    let w = ((src_w as f64 * scale) as u32).max(2) & !1;
+    let h = ((src_h as f64 * scale) as u32).max(2) & !1;
+    (w, h)
+}
+
+/// Parse `ffprobe -show_entries stream=width,height:format=duration` CSV output
+/// (one value per line, in that order once streams precede format). Pure.
+fn parse_ffprobe_video(out: &str) -> Option<(u32, u32, f32)> {
+    let mut w = None;
+    let mut h = None;
+    let mut dur = None;
+    for tok in out.split(['\n', ',']).map(str::trim) {
+        if tok.is_empty() || tok == "N/A" {
+            continue;
+        }
+        if let Ok(i) = tok.parse::<u32>() {
+            if w.is_none() {
+                w = Some(i);
+            } else if h.is_none() {
+                h = Some(i);
+            }
+        } else if let Ok(f) = tok.parse::<f32>() {
+            if dur.is_none() && f > 0.0 {
+                dur = Some(f);
+            }
+        }
+    }
+    Some((w?, h?, dur.unwrap_or(0.0)))
+}
+
+/// ffprobe the clip: (width, height, duration_s). None = ffprobe missing/failed.
+async fn imagine_probe_video(path: &std::path::Path) -> Option<(u32, u32, f32)> {
+    let out = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .await
+        .ok()?;
+    parse_ffprobe_video(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Download a job's content into the imagine cache (skip when already there).
+async fn imagine_download_clip(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    job_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    let dir = imagine_cache_dir();
+    let path = dir.join(format!("{job_id}.mp4"));
+    if tokio::fs::metadata(&path).await.map(|m| m.len() > 0).unwrap_or(false) {
+        return Ok(path);
+    }
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| format!("cache dir: {e}"))?;
+    let resp = imagine_auth(client.get(format!("{base}/v1/library/{job_id}/content")), token)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("fetch failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("content HTTP {}", resp.status().as_u16()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("read failed: {e}"))?;
+    let tmp = dir.join(format!(".{job_id}.tmp"));
+    tokio::fs::write(&tmp, &bytes).await.map_err(|e| format!("cache write: {e}"))?;
+    tokio::fs::rename(&tmp, &path).await.map_err(|e| format!("cache rename: {e}"))?;
+    Ok(path)
+}
+
+/// One decoded RGBA frame at (w, h) — the poster. Uses the same rawvideo path
+/// as playback so a poster failing = playback would have failed too (honest).
+async fn imagine_poster(path: &std::path::Path, w: u32, h: u32) -> Option<(u32, u32, Vec<u8>)> {
+    let out = tokio::process::Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-i"])
+        .arg(path)
+        .args([
+            "-frames:v", "1",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgba",
+            "-vf", &format!("scale={w}:{h}"),
+            "-",
+        ])
+        .output()
+        .await
+        .ok()?;
+    let need = (w * h * 4) as usize;
+    if out.stdout.len() < need {
+        return None;
+    }
+    Some((w, h, out.stdout[..need].to_vec()))
+}
+
+/// Kill every live pipeline child and orphan in-flight decoder loops.
+fn imagine_player_kill() {
+    IMAGINE_PLAY_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut procs) = PLAYER_PROCS.lock() {
+        for child in procs.iter_mut() {
+            let _ = child.start_kill();
+        }
+        procs.clear();
+    }
+}
+
+/// Spawn the two pipelines for `path` at (w, h): rawvideo frames → the channel,
+/// and demuxed audio → `aplay` (best-effort — a node without audio still plays
+/// video). Runs on the tokio runtime; `gen` orphans it when playback stops.
+fn imagine_spawn_pipelines(
+    rt: &tokio::runtime::Handle,
+    path: std::path::PathBuf,
+    w: u32,
+    h: u32,
+    r#gen: u64,
+    tx: tokio::sync::mpsc::Sender<PlayerMsg>,
+) {
+    rt.spawn(async move {
+        use tokio::io::AsyncReadExt;
+
+        // Video: constant-fps rawvideo stream at display size.
+        let mut video = match tokio::process::Command::new("ffmpeg")
+            .args(["-nostdin", "-v", "quiet", "-i"])
+            .arg(&path)
+            .args([
+                "-f", "rawvideo",
+                "-pix_fmt", "rgba",
+                "-vf", &format!("scale={w}:{h},fps={IMAGINE_PLAY_FPS}"),
+                "-an",
+                "-",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[imagine] ffmpeg spawn failed: {e}");
+                let _ = tx.send(PlayerMsg::End).await;
+                return;
+            }
+        };
+        let mut stdout = match video.stdout.take() {
+            Some(s) => s,
+            None => {
+                let _ = tx.send(PlayerMsg::End).await;
+                return;
+            }
+        };
+
+        // Audio: second ffmpeg demuxes to WAV, piped straight into aplay.
+        // Best-effort — desktop PipeWire and kiosk ALSA both reach aplay (the
+        // voice-arc idiom); failure just means a silent clip.
+        let audio = tokio::process::Command::new("ffmpeg")
+            .args(["-nostdin", "-v", "quiet", "-i"])
+            .arg(&path)
+            .args(["-vn", "-f", "wav", "-"])
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn();
+        if let Ok(mut ff_audio) = audio {
+            if let Some(a_stdio) = ff_audio
+                .stdout
+                .take()
+                .and_then(|out| out.into_owned_fd().ok())
+                .map(std::process::Stdio::from)
+            {
+                match tokio::process::Command::new("aplay")
+                    .arg("-q")
+                    .stdin(a_stdio)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+                {
+                    Ok(aplay) => {
+                        if let Ok(mut procs) = PLAYER_PROCS.lock() {
+                            procs.push(ff_audio);
+                            procs.push(aplay);
+                        }
+                    }
+                    Err(_) => {
+                        let _ = ff_audio.start_kill();
+                    }
+                }
+            }
+        }
+
+        // The video child handle joins the kill list too (stdout stays here).
+        if let Ok(mut procs) = PLAYER_PROCS.lock() {
+            procs.push(video);
+        }
+
+        let frame_len = (w * h * 4) as usize;
+        let mut buf = vec![0u8; frame_len];
+        loop {
+            if IMAGINE_PLAY_GEN.load(std::sync::atomic::Ordering::SeqCst) != r#gen {
+                return; // orphaned — a newer playback owns the stage
+            }
+            match stdout.read_exact(&mut buf).await {
+                Ok(_) => {
+                    if tx.send(PlayerMsg::Frame(w, h, buf.clone())).await.is_err() {
+                        return;
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(PlayerMsg::End).await;
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// mm:ss for the progress line.
+fn imagine_clock(t: f32) -> String {
+    let s = t.max(0.0) as u64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Stop playback (Slint thread): kill pipelines, stop the paint timer, drop the
+/// channel + clock. `state` is what the stage shows after ("idle" | "ended" —
+/// ended keeps the last frame up and offers replay).
+fn imagine_player_reset(ui: &AppWindow, state: &str) {
+    imagine_player_kill();
+    PLAYER_TIMER.with(|t| {
+        if let Some(timer) = t.borrow_mut().take() {
+            timer.stop();
+        }
+    });
+    PLAYER_RX.with(|r| r.borrow_mut().take());
+    PLAYER_CLOCK.with(|c| c.borrow_mut().take());
+    ui.set_imagine_video_state(state.into());
+}
+
+/// One paint tick (Slint thread, ~40 ms): drain frames due by the wall clock —
+/// slow decode drops frames and catches up instead of drifting against audio —
+/// paint the newest, update progress, and close the stage on end-of-stream.
+fn imagine_player_tick(ui: &AppWindow) {
+    let Some((start, fps, dur, mut shown)) = PLAYER_CLOCK.with(|c| *c.borrow()) else {
+        return;
+    };
+    let due = (start.elapsed().as_secs_f32() * fps) as u64;
+    let mut latest: Option<(u32, u32, Vec<u8>)> = None;
+    let mut ended = false;
+    PLAYER_RX.with(|r| {
+        if let Some(rx) = r.borrow_mut().as_mut() {
+            while shown <= due {
+                match rx.try_recv() {
+                    Ok(PlayerMsg::Frame(w, h, px)) => {
+                        latest = Some((w, h, px));
+                        shown += 1;
+                    }
+                    Ok(PlayerMsg::End) => {
+                        ended = true;
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+    if let Some((w, h, px)) = latest {
+        let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&px, w, h);
+        ui.set_imagine_preview(slint::Image::from_rgba8(buf));
+    }
+    let t = start.elapsed().as_secs_f32().min(dur.max(0.01));
+    if dur > 0.0 {
+        ui.set_imagine_video_progress((t / dur).min(1.0));
+    }
+    ui.set_imagine_video_time(format!("{} / {}", imagine_clock(t), imagine_clock(dur)).into());
+    PLAYER_CLOCK.with(|c| {
+        if let Some(s) = c.borrow_mut().as_mut() {
+            s.3 = shown;
+        }
+    });
+    if ended {
+        imagine_player_reset(ui, "ended");
+        ui.set_imagine_video_progress(1.0);
     }
 }
 
@@ -6235,6 +6614,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_imagine_busy(false);
                         ui.set_imagine_note(note.into());
                         if let Some((w, h, rgba)) = preview {
+                            // Fresh output owns the stage — stop any playback.
+                            imagine_player_reset(&ui, "idle");
+                            IMAGINE_CLIP.with(|c| c.borrow_mut().take());
                             let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
                                 &rgba, w, h,
                             );
@@ -6261,6 +6643,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_imagine_pick_job(move |id| {
             let id = id.to_string();
             let uw = uw.clone();
+            // A new selection owns the stage — stop any running playback now
+            // (we're on the Slint thread) so its frames can't paint over us.
+            if let Some(ui) = uw.upgrade() {
+                imagine_player_reset(&ui, "idle");
+                ui.set_imagine_video_progress(0.0);
+                ui.set_imagine_video_time("".into());
+                if !id.is_empty() {
+                    ui.set_imagine_note("fetching…".into());
+                }
+            }
+            IMAGINE_CLIP.with(|c| c.borrow_mut().take());
             rt_h.spawn(async move {
                 let (base, token) = imagine_reach();
                 let client = reqwest::Client::new();
@@ -6275,6 +6668,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     None
                 };
+                // Video-ish (video_* AND craft_export renders): fetch the clip
+                // into the cache, probe it, decode a poster frame — playback is
+                // then instant and offline. A probe/poster failure degrades to
+                // the old "open the browser studio" note, honestly worded.
+                // (path, duration, src_w, src_h, poster (w, h, rgba))
+                type ClipPrep = (std::path::PathBuf, f32, u32, u32, (u32, u32, Vec<u8>));
+                let mut clip: Option<ClipPrep> = None;
+                let mut clip_err = String::new();
+                if !is_image && !mode.is_empty() && status == "done" {
+                    match imagine_download_clip(&client, &base, &token, &id).await {
+                        Ok(path) => match imagine_probe_video(&path).await {
+                            Some((sw, sh, dur)) if sw > 0 => {
+                                let (pw, ph) = fit_dims(sw, sh, 960, 720);
+                                match imagine_poster(&path, pw, ph).await {
+                                    Some(poster) => clip = Some((path, dur, sw, sh, poster)),
+                                    None => clip_err = "decode failed (ffmpeg?)".into(),
+                                }
+                            }
+                            _ => clip_err = "probe failed (ffprobe missing?)".into(),
+                        },
+                        Err(e) => clip_err = e,
+                    }
+                }
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = uw.upgrade() {
                         ui.set_imagine_selected_job(id.into());
@@ -6286,11 +6702,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_imagine_preview_kind("image".into());
                             let note = if prompt.is_empty() { status } else { format!("{status} · {prompt}") };
                             ui.set_imagine_note(note.into());
-                        } else if !is_image && !mode.is_empty() {
-                            // Video (and craft renders): no in-app playback in v1 —
-                            // the browser studio on the node plays it.
+                        } else if let Some((path, dur, sw, sh, (pw, ph, px))) = clip {
+                            // The stage becomes a player: poster up, ▶ armed.
+                            IMAGINE_CLIP.with(|c| *c.borrow_mut() = Some((path, dur, sw, sh)));
+                            let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                                &px, pw, ph,
+                            );
+                            ui.set_imagine_preview(slint::Image::from_rgba8(buf));
                             ui.set_imagine_preview_kind("video".into());
-                            let tail = if err.is_empty() { String::new() } else { format!(" · {err}") };
+                            ui.set_imagine_video_state("ready".into());
+                            ui.set_imagine_video_time(
+                                format!("0:00 / {}", imagine_clock(dur)).into(),
+                            );
+                            let note = if prompt.is_empty() {
+                                format!("{mode} · {status}")
+                            } else {
+                                format!("{mode} · {prompt}")
+                            };
+                            ui.set_imagine_note(note.into());
+                        } else if !is_image && !mode.is_empty() {
+                            ui.set_imagine_preview_kind("video".into());
+                            ui.set_imagine_video_state("idle".into());
+                            let tail = if !clip_err.is_empty() {
+                                format!(" · {clip_err}")
+                            } else if !err.is_empty() {
+                                format!(" · {err}")
+                            } else {
+                                String::new()
+                            };
                             ui.set_imagine_note(format!("{mode} · {status}{tail}").into());
                         } else {
                             ui.set_imagine_preview_kind("error".into());
@@ -6305,6 +6744,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .ok();
             });
+        });
+    }
+
+    // Player transport: ▶ decodes at the CURRENT stage size (the old-hardware
+    // rule — never native res), ⏹/replay reuse the cached clip instantly.
+    {
+        let rt_h = rt.handle().clone();
+        let uw = ui.as_weak();
+        ui.on_imagine_video_play(move |max_w, max_h| {
+            let Some(ui) = uw.upgrade() else { return };
+            let Some((path, dur, sw, sh)) = IMAGINE_CLIP.with(|c| c.borrow().clone()) else {
+                return;
+            };
+            imagine_player_reset(&ui, "idle");
+            let r#gen = IMAGINE_PLAY_GEN.load(std::sync::atomic::Ordering::SeqCst);
+            let (w, h) = fit_dims(sw, sh, max_w.max(64) as u32, max_h.max(64) as u32);
+            let (tx, rx) = tokio::sync::mpsc::channel::<PlayerMsg>(8);
+            imagine_spawn_pipelines(&rt_h, path, w, h, r#gen, tx);
+            PLAYER_RX.with(|r| *r.borrow_mut() = Some(rx));
+            PLAYER_CLOCK.with(|c| {
+                *c.borrow_mut() = Some((std::time::Instant::now(), IMAGINE_PLAY_FPS, dur, 0))
+            });
+            ui.set_imagine_video_state("playing".into());
+            let uw_tick = ui.as_weak();
+            let timer = slint::Timer::default();
+            timer.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_millis(40),
+                move || {
+                    if let Some(ui) = uw_tick.upgrade() {
+                        imagine_player_tick(&ui);
+                    }
+                },
+            );
+            PLAYER_TIMER.with(|t| *t.borrow_mut() = Some(timer));
+        });
+    }
+    {
+        let uw = ui.as_weak();
+        ui.on_imagine_video_stop(move || {
+            if let Some(ui) = uw.upgrade() {
+                imagine_player_reset(&ui, "ended");
+            }
         });
     }
 

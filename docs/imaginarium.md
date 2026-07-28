@@ -99,7 +99,9 @@ design undone in one line.
   native kiosk/desktop surface: prompt + model/aspect/count chips →
   `POST /v1/images/generations` → still preview (bytes decoded off-thread →
   `SharedPixelBuffer`, no temp files) + the node's shared jobs rail (the
-  agent's MCP jobs appear there too; video rows point at the browser studio).
+  agent's MCP jobs appear there too). Video and craft-render jobs **play
+  in-app** — an ffmpeg-pipe player (fetch-to-cache → poster → rawvideo frames
+  on a Slint timer + audio via `aplay`; design in `docs/imagine-studio.md`).
   Honest states: node-offline banner, token-rejected banner, a distinct
   **NO TOKEN** state, busy guard. v1 is image-first — video submit, edit/I2V,
   follow-along auto-reveal, and an `imagine_save` workspace-pull tool are

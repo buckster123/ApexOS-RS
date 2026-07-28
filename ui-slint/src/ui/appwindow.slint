@@ -158,6 +158,9 @@ export component AppWindow inherits Window {
     in-out property <[ImagineJobItem]> imagine-jobs;
     in-out property <string>           imagine-selected-job: "";
     in-out property <string>           imagine-prompt-input: "";
+    in-out property <string>           imagine-video-state: "idle";  // idle|ready|playing|ended
+    in-out property <float>            imagine-video-progress: 0.0;
+    in-out property <string>           imagine-video-time: "";
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id is
@@ -279,6 +282,8 @@ export component AppWindow inherits Window {
     callback imagine-generate(string, string, string, int);  // prompt, model|"auto", aspect, n
     callback imagine-pick-job(string);                       // job id → preview
     callback refresh-imagine();
+    callback imagine-video-play(int, int);                   // stage px w, h
+    callback imagine-video-stop();
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -865,6 +870,9 @@ export component AppWindow inherits Window {
                         imagine-jobs: root.imagine-jobs;
                         imagine-selected-job: root.imagine-selected-job;
                         imagine-prompt-input <=> root.imagine-prompt-input;
+                        imagine-video-state: root.imagine-video-state;
+                        imagine-video-progress: root.imagine-video-progress;
+                        imagine-video-time: root.imagine-video-time;
 
                         send-message(t) => { root.send-message(t); }
                         attach-image => { root.refresh-workspace-images(); root.image-picker-open = true; }
@@ -940,6 +948,8 @@ export component AppWindow inherits Window {
                         imagine-generate(p, m, a, n) => { root.imagine-generate(p, m, a, n); }
                         imagine-pick-job(id) => { root.imagine-pick-job(id); }
                         refresh-imagine => { root.refresh-imagine(); }
+                        imagine-video-play(w, h) => { root.imagine-video-play(w, h); }
+                        imagine-video-stop => { root.imagine-video-stop(); }
 
                         req-focus => { root.focus-window(w.id); }
                         req-close => { root.close-window(w.id); }
