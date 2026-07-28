@@ -258,6 +258,34 @@ fn wire_nodes(nodes: &[MemoryNode]) -> Value {
     Value::Array(nodes.iter().map(wire_node).collect())
 }
 
+/// Chars of body a listing row carries — enough to recognize a memory, not to
+/// read it (the `find_by_tags` precedent).
+const SUMMARY_HEAD_CHARS: usize = 200;
+
+/// Listing view — the browse-grade render. A *listing* answers "what exists";
+/// full bodies made a 50-procedure `list_procedures` browse ≈145k chars of
+/// context (apex1, 2026-07-26 — most of a session budget in one result). A row
+/// carries the head plus the total char count, so truncation is structurally
+/// visible, never silent. Full bodies stay one call away: `get_memory(id)`,
+/// or the task-matched fetchers (`find_relevant_procedures`,
+/// `find_matching_schemas`) which return complete texts on purpose.
+fn wire_summary(n: &MemoryNode) -> Value {
+    json!({
+        "id":            n.id,
+        "content_head":  n.content.chars().take(SUMMARY_HEAD_CHARS).collect::<String>(),
+        "content_chars": n.content.chars().count(),
+        "memory_type":   n.memory_type,
+        "tags":          n.tags,
+        "salience":      round2(n.salience),
+        "agent_id":      n.agent_id,
+        "created_at":    wire_time(&n.created_at),
+    })
+}
+
+fn wire_summaries(nodes: &[MemoryNode]) -> Value {
+    Value::Array(nodes.iter().map(wire_summary).collect())
+}
+
 fn round2(x: f32) -> f64 {
     (f64::from(x) * 100.0).round() / 100.0
 }
@@ -720,17 +748,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let scope = agent_scope(args);
             let nodes = brain.storage.read().await.sqlite
                 .find_by_tags(&scope, &tags, limit).await?;
-            let out: Vec<Value> = nodes.into_iter()
-                .map(|n| json!({
-                    "id":          n.id,
-                    "content":     n.content.chars().take(200).collect::<String>(),
-                    "memory_type": n.memory_type,
-                    "tags":        n.tags,
-                    "salience":    n.salience,
-                    "created_at":  n.created_at,
-                }))
-                .collect();
-            Ok(json!(out))
+            Ok(wire_summaries(&nodes))
         }
 
         "delete_tag" => {
@@ -963,7 +981,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let filtered: Vec<_> = nodes.into_iter()
                 .filter(|n| n.salience >= min_salience)
                 .collect();
-            Ok(wire_nodes(&filtered))
+            Ok(wire_summaries(&filtered))
         }
 
         "resolve_intention" => {
@@ -1031,7 +1049,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 // they're rollback records, not skills. (APEX caught this via a goal.)
                 .filter(|n| !n.tags.iter().any(|t| t == "undo_snapshot"))
                 .collect();
-            Ok(wire_nodes(&filtered))
+            Ok(wire_summaries(&filtered))
         }
 
         "find_relevant_procedures" => {
@@ -1217,7 +1235,7 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             };
             let nodes = brain.storage.read().await.sqlite
                 .list_memories_scoped(&scope, &filter).await?;
-            Ok(wire_nodes(&nodes))
+            Ok(wire_summaries(&nodes))
         }
 
         "find_matching_schemas" => {
@@ -2302,6 +2320,125 @@ mod tests {
             resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert!(dump[0].get("access_times").is_some(), "export keeps the raw storage model");
         assert!(dump[0].get("strength").is_some(), "export keeps FSRS state");
+    }
+
+    #[tokio::test]
+    async fn listing_tools_return_summaries_not_bodies() {
+        // The listing contract (layer 3 of the token-efficiency arc): a
+        // listing answers "what exists" — head + total length, never the full
+        // text (a 50-procedure browse was 145k chars). Bodies stay one call
+        // away: get_memory, or the task-matched fetchers which return full
+        // texts on purpose. Truncation must be structurally visible
+        // (content_head + content_chars), never a silent cut.
+        let (brain, _dir) = make_brain().await;
+
+        // Multibyte chars up front so the 200-char head cut would panic if it
+        // were a byte slice; body well past the window.
+        let body = format!("Sécurité déploiement — étape par étape: {}", "x".repeat(400));
+        let store = json!({
+            "jsonrpc":"2.0","id":60,"method":"tools/call",
+            "params":{"name":"store_procedure","arguments":{
+                "content": body, "tags":["deploy-ops"], "agent_id":"FORGE"
+            }}
+        });
+        let resp = dispatch_tool(store, Arc::clone(&brain)).await;
+        assert!(resp["error"].is_null(), "store_procedure failed: {}", resp["error"]);
+        let stored: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let proc_id = stored["id"].as_str().unwrap().to_string();
+
+        // list_procedures → summary rows, no bodies.
+        let listing = json!({
+            "jsonrpc":"2.0","id":61,"method":"tools/call",
+            "params":{"name":"list_procedures","arguments":{"agent_id":"FORGE"}}
+        });
+        let resp = dispatch_tool(listing, Arc::clone(&brain)).await;
+        let rows: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let row = &rows.as_array().expect("array of summaries")[0];
+        assert!(row.get("content").is_none(), "a listing must not carry the body");
+        assert_eq!(row["content_head"].as_str().unwrap().chars().count(), 200,
+            "head is exactly the summary window");
+        assert_eq!(row["content_chars"].as_u64().unwrap() as usize, body.chars().count(),
+            "total length makes the truncation visible");
+        assert!(row.get("strength").is_none() && row.get("access_times").is_none(),
+            "summaries carry no scheduler state");
+
+        // The full body is one get_memory away…
+        let get = json!({
+            "jsonrpc":"2.0","id":62,"method":"tools/call",
+            "params":{"name":"get_memory","arguments":{
+                "memory_id": proc_id, "agent_id":"FORGE"
+            }}
+        });
+        let resp = dispatch_tool(get, Arc::clone(&brain)).await;
+        let node: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(node["content"].as_str().unwrap(), body, "get_memory returns the full body");
+
+        // …and find_relevant_procedures stays a full-text fetcher by design.
+        let frp = json!({
+            "jsonrpc":"2.0","id":63,"method":"tools/call",
+            "params":{"name":"find_relevant_procedures","arguments":{
+                "tags":["deploy-ops"], "agent_id":"FORGE"
+            }}
+        });
+        let resp = dispatch_tool(frp, Arc::clone(&brain)).await;
+        let found: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(found["procedures"][0]["content"].as_str().unwrap(), body,
+            "the task-matched fetcher returns full texts");
+
+        // Intentions, schemas, and find_by_tags share the summary shape.
+        let long_intent = format!("Remember to re-verify the relay after the merge — {}", "y".repeat(300));
+        let store = json!({
+            "jsonrpc":"2.0","id":64,"method":"tools/call",
+            "params":{"name":"store_intention","arguments":{
+                "content": long_intent, "agent_id":"FORGE"
+            }}
+        });
+        let resp = dispatch_tool(store, Arc::clone(&brain)).await;
+        assert!(resp["error"].is_null(), "store_intention failed: {}", resp["error"]);
+        let listing = json!({
+            "jsonrpc":"2.0","id":65,"method":"tools/call",
+            "params":{"name":"list_intentions","arguments":{"agent_id":"FORGE"}}
+        });
+        let resp = dispatch_tool(listing, Arc::clone(&brain)).await;
+        let rows: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(rows[0].get("content").is_none() && rows[0].get("content_head").is_some(),
+            "list_intentions uses the summary view: {rows}");
+
+        let store = json!({
+            "jsonrpc":"2.0","id":66,"method":"tools/call",
+            "params":{"name":"create_schema","arguments":{
+                "content": format!("When a subsystem is swapped, verify the running commit — {}", "z".repeat(300)),
+                "source_ids": [proc_id], "agent_id":"FORGE"
+            }}
+        });
+        let resp = dispatch_tool(store, Arc::clone(&brain)).await;
+        assert!(resp["error"].is_null(), "create_schema failed: {}", resp["error"]);
+        let listing = json!({
+            "jsonrpc":"2.0","id":67,"method":"tools/call",
+            "params":{"name":"list_schemas","arguments":{"agent_id":"FORGE"}}
+        });
+        let resp = dispatch_tool(listing, Arc::clone(&brain)).await;
+        let rows: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(rows[0].get("content").is_none() && rows[0].get("content_head").is_some(),
+            "list_schemas uses the summary view: {rows}");
+
+        let find = json!({
+            "jsonrpc":"2.0","id":68,"method":"tools/call",
+            "params":{"name":"find_by_tags","arguments":{
+                "tags":["deploy-ops"], "agent_id":"FORGE"
+            }}
+        });
+        let resp = dispatch_tool(find, Arc::clone(&brain)).await;
+        let rows: Value = serde_json::from_str(
+            resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(rows[0].get("content").is_none() && rows[0].get("content_head").is_some(),
+            "find_by_tags rows are the same summary shape: {rows}");
     }
 
     #[tokio::test]

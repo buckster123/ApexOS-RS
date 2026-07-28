@@ -327,7 +327,7 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 |------|---------------|---------------|---------|---------|
 | `remember` / `memory_store` | `content` | `memory_type`, `tags`, `salience`, `agent_id` (`memory_store` only takes content/tags/agent_id) | `cortex.remember` | the stored `MemoryNode` |
 | `recall` / `memory_search` | `query` | `top_k` (10), `agent_id` | `cortex.recall` | `[{memory, score}]` |
-| `find_by_tags` | `tags` | `limit` (20, max 200), `agent_id` | sqlite exact-tag AND lookup (precise where recall is fuzzy — provenance queries) | compact rows (content ≤200 chars) |
+| `find_by_tags` | `tags` | `limit` (20, max 200), `agent_id` | sqlite exact-tag AND lookup (precise where recall is fuzzy — provenance queries) | `[summary row]` |
 | `associate` | `source_id`, `target_id` | `link_type` (semantic), `weight` (0.5), `agent_id` | `cortex.associate` | `{status:"ok"}` |
 | `get_memory` | `memory_id` | `agent_id` | sqlite | `MemoryNode` or error |
 | `update_memory` | `memory_id` | `content`, `tags`, `salience`, `agent_id` | sqlite (re-embeds if content changed) | updated `MemoryNode` |
@@ -338,10 +338,10 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 | `episode_add_step` | `episode_id`, `description` | `step_index` (0), `memory_id` | sqlite | `{status, episode_id, step_index}` |
 | `episode_end` | `episode_id` | `summary` | sqlite | `{ended, episode_id}` |
 | `store_intention` | `content` | `salience` (0.7), `tags`, `agent_id` | `remember` (Prospective, tag `intention`) | `{id, status, salience}` |
-| `list_intentions` | — | `min_salience` (0.3), `limit` (50), `agent_id` | sqlite list | `[MemoryNode]` |
+| `list_intentions` | — | `min_salience` (0.3), `limit` (50), `agent_id` | sqlite list | `[summary row]` |
 | `resolve_intention` | `memory_id` | `agent_id` | sets salience 0.1, tag `status:resolved` | `{status, resolved}` |
 | `store_procedure` | `content` | `tags`, `derived_from`, `agent_id` | `remember` (Procedural, tag `procedure`, salience 0.8) | `{id, status}` |
-| `list_procedures` | — | `min_salience` (0.0), `limit` (50), `agent_id` | sqlite list | `[MemoryNode]` |
+| `list_procedures` | — | `min_salience` (0.0), `limit` (50), `agent_id` | sqlite list | `[summary row]` |
 | `find_relevant_procedures` | one of `tags`/`concepts` | `limit` (5), `agent_id` | tag/concept filter | `[MemoryNode]` (empty if neither given) |
 | `record_procedure_outcome` | `procedure_id`, `success` | `agent_id` | nudges salience/difficulty | `{status, procedure_id, success, new_salience}` |
 | `check_inbox` | `agent_id` | `limit` (20) | tag `to:{agent}` (global scope) | `[MemoryNode]` |
@@ -352,6 +352,12 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 > Scoping note: a scoped write (`agent_id` set) is `Private`; an unscoped write is `Shared`.
 > The `visibility` arg in the `remember` schema is **not read** — use `share_memory` to flip
 > an existing memory to shared.
+
+> Listing note: `[summary row]` = `{id, content_head (200 chars), content_chars, memory_type,
+> tags, salience, agent_id, created_at}` — a browse index, not the texts (`list_schemas`
+> shares it). Truncation is visible by construction (`content_head` vs `content_chars`).
+> Full bodies are one call away: `get_memory(id)`, or the task-matched fetchers
+> (`find_relevant_procedures`, `find_matching_schemas`), which return complete texts.
 
 ### MemoryType enum (`MemoryType` in `cerebro/src/types.rs`, snake_case on wire)
 
