@@ -48,3 +48,24 @@ restart = "always"
 # RUST_LOG            = "warn"
 # # OCCIPITAL_EMBED_MODEL = "BAAI/bge-small-en-v1.5"            # Micro+ only (needs --features embeddings)
 # # FASTEMBED_CACHE_DIR   = "/var/lib/agentd/occipital/models"
+
+# Imaginarium — image/video generation (xAI Imagine, BYOK): imaginarium_image_generate /
+# imaginarium_video_generate / …edit / …extend / estimate / jobs. Standalone sibling repo
+# (github.com/buckster123/Imaginarium-RS) — NOT a workspace member.
+#
+# install.sh provisions it OPT-IN (--imaginarium / APEXOS_IMAGINARIUM=1) and appends the
+# live block only when the node is ACTIVE (binary built AND an XAI_API_KEY present in
+# /etc/imaginarium/env — the only file that ever holds the key). The plugin runs the MCP
+# server in PROXY mode: IMAGINARIUM_URL + IMAGINARIUM_TOKEN are inherited from agentd's
+# env (/etc/agentd/env; plugin env overlays, never clears), so every tool call funnels
+# through the local `imaginarium serve` daemon — one library, one jobs DB, no xAI key in
+# any agentd-side process. Do NOT run it without the URL env (local mode would fork a
+# second library AND pull the key into an agentd child). See docs/imaginarium.md.
+#
+# [[plugin]]
+# id      = "imaginarium"
+# cmd     = "/usr/local/bin/imaginarium"
+# args    = ["mcp"]
+# restart = "always"
+# [plugin.env]
+# RUST_LOG = "warn"

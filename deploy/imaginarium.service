@@ -1,0 +1,30 @@
+[Unit]
+Description=Imaginarium fat node (xAI Imagine gateway — image/video generation)
+# The ONE process that holds XAI_API_KEY. agentd's MCP proxy plugin and the UI
+# reach it over loopback :8791 with the LAN token — never the key. Node-local by
+# design for now; to serve the whole colony later, widen --bind (the token gate
+# already refuses a non-loopback bind without auth, same posture as agentd).
+After=network.target
+
+[Service]
+User=imaginarium
+Group=imaginarium
+# Library + jobs DB + token store all live under the data home.
+Environment=IMAGINARIUM_HOME=/var/lib/imaginarium
+# XAI_API_KEY + IMAGINARIUM_TOKEN. Deliberately NOT the `-` (optional) form:
+# this file is load-bearing — without it the node is misconfigured, fail loudly.
+EnvironmentFile=/etc/imaginarium/env
+ExecStart=/usr/local/bin/imaginarium serve --bind 127.0.0.1:8791
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=5
+# Hardening — mirrors agentd's posture.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/imaginarium
+
+[Install]
+WantedBy=multi-user.target
