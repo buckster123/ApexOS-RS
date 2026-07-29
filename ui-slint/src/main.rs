@@ -3542,7 +3542,8 @@ mod tests {
         let v = serde_json::json!([
             { "job_id": "01ABC", "status": "done", "mode": "image_generate",
               "model": "grok-imagine-image-quality",
-              "created_at": "2026-07-28T18:03:11.123Z", "error": null },
+              "created_at": "2026-07-28T18:03:11.123Z", "error": null,
+              "prompt": "marble amphitheater" },
             { "job_id": "01DEF", "status": "failed", "mode": "video_generate",
               "model": "grok-imagine-video",
               "created_at": "2026-07-28 18:05:02", "error": "upstream 500" },
@@ -3550,10 +3551,13 @@ mod tests {
         let rows = imagine_job_rows(&v);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0], ("01ABC".into(), "image_generate".into(), "done".into(),
-                             "image-quality".into(), "2026-07-28 18:03".into(), "".into()));
+                             "image-quality".into(), "2026-07-28 18:03".into(), "".into(),
+                             "marble amphitheater".into()));
         assert_eq!(rows[1].3, "video");
         assert_eq!(rows[1].4, "2026-07-28 18:05");
         assert_eq!(rows[1].5, "upstream 500");
+        // No prompt in the row (old node / import) → "" (backward compatible).
+        assert_eq!(rows[1].6, "");
         // A row without a job_id is skipped, not a panic; non-arrays yield nothing.
         let partial = serde_json::json!([{ "status": "done" }, { "job_id": "01X" }]);
         let rows = imagine_job_rows(&partial);
@@ -3617,6 +3621,38 @@ mod tests {
         // Empty / whitespace-only → empty (treated as unset).
         assert_eq!(imagine_token_clean("   "), "");
         assert_eq!(imagine_token_clean("\"\""), "");
+    }
+
+    #[test]
+    fn imagine_video_body_routes_by_source_kind() {
+        use super::imagine_video_body;
+        // T2V: no source — duration clamped 1..15, auto omits model, defaults omitted.
+        let (path, body) = imagine_video_body("orbit shot", "auto", 8, "default", "default", "", "");
+        assert_eq!(path, "/v1/videos/generations");
+        assert_eq!(body["prompt"], "orbit shot");
+        assert_eq!(body["duration"], 8);
+        assert_eq!(body["no_wait"], true);
+        assert!(body.get("model").is_none());
+        assert!(body.get("image").is_none());
+        assert!(body.get("resolution").is_none());
+        // I2V: image source becomes a library: ref (U1); explicit knobs pass.
+        let (path, body) =
+            imagine_video_body("", "1.5", 20, "1080p", "16:9", "01JOB", "image");
+        assert_eq!(path, "/v1/videos/generations");
+        assert_eq!(body["image"], "library:01JOB");
+        assert_eq!(body["duration"], 15); // clamped
+        assert_eq!(body["model"], "1.5");
+        assert_eq!(body["resolution"], "1080p");
+        assert_eq!(body["aspect_ratio"], "16:9");
+        // Extend: video source → the extensions route, duration clamped 2..10,
+        // no resolution/aspect fields (the route doesn't take them).
+        let (path, body) =
+            imagine_video_body("keep panning", "auto", 15, "720p", "16:9", "01VID", "video");
+        assert_eq!(path, "/v1/videos/extensions");
+        assert_eq!(body["video"], "library:01VID");
+        assert_eq!(body["duration"], 10); // clamped
+        assert!(body.get("resolution").is_none());
+        assert!(body.get("aspect_ratio").is_none());
     }
 
     #[test]
@@ -4400,8 +4436,8 @@ fn imagine_token_clean(raw: &str) -> String {
     t.trim().to_string()
 }
 
-/// A jobs-rail row in Send form: (id, mode, status, model, when, err).
-type ImagineRow = (String, String, String, String, String, String);
+/// A jobs-rail row in Send form: (id, mode, status, model, when, err, prompt).
+type ImagineRow = (String, String, String, String, String, String, String);
 
 /// Rows for the jobs rail from a `GET /v1/jobs` body (array of JobListItem).
 /// Pure — malformed entries are skipped, a non-array yields no rows. Model is
@@ -4422,7 +4458,8 @@ fn imagine_job_rows(v: &Value) -> Vec<ImagineRow> {
                 .take(16)
                 .collect::<String>();
             let err = j.get("error").and_then(Value::as_str).unwrap_or("").to_string();
-            Some((id, mode, status, model, when, err))
+            let prompt = j.get("prompt").and_then(Value::as_str).unwrap_or("").to_string();
+            Some((id, mode, status, model, when, err, prompt))
         })
         .collect()
 }
@@ -4502,25 +4539,20 @@ async fn imagine_fetch_preview(
     Ok((w, h, rgba.into_raw()))
 }
 
-/// POST /v1/images/generations. `model` is the chip slug — "auto" omits the
-/// field (server default), "image"/"quality" pass through (ModelId aliases).
-async fn imagine_generate_call(
+/// POST a generation body to the node and unwrap the JobResult envelope —
+/// shared by image gen (synchronous upstream) and video submit (`no_wait`).
+async fn imagine_post_job(
     client: &reqwest::Client,
     base: &str,
     token: &str,
-    prompt: &str,
-    model: &str,
-    aspect: &str,
-    n: u32,
+    path: &str,
+    body: &Value,
 ) -> Result<Value, String> {
-    let mut body = serde_json::json!({ "prompt": prompt, "n": n, "aspect_ratio": aspect });
-    if model != "auto" {
-        body["model"] = Value::String(model.to_string());
-    }
-    let resp = imagine_auth(client.post(format!("{base}/v1/images/generations")), token)
-        .json(&body)
+    let resp = imagine_auth(client.post(format!("{base}{path}")), token)
+        .json(body)
         // Image gen is synchronous upstream — a quality 4-image batch takes a
-        // while; be patient rather than strand a paid render.
+        // while; be patient rather than strand a paid render. no_wait video
+        // submits return in seconds regardless.
         .timeout(std::time::Duration::from_secs(180))
         .send()
         .await
@@ -4537,6 +4569,104 @@ async fn imagine_generate_call(
     Ok(body)
 }
 
+/// POST /v1/images/generations. `model` is the chip slug — "auto" omits the
+/// field (server default), "image"/"quality" pass through (ModelId aliases).
+async fn imagine_generate_call(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    prompt: &str,
+    model: &str,
+    aspect: &str,
+    n: u32,
+) -> Result<Value, String> {
+    let mut body = serde_json::json!({ "prompt": prompt, "n": n, "aspect_ratio": aspect });
+    if model != "auto" {
+        body["model"] = Value::String(model.to_string());
+    }
+    imagine_post_job(client, base, token, "/v1/images/generations", &body).await
+}
+
+/// Build the video submit request. Pure — returns (route, body). A "video"
+/// source = an extension (continue the clip); an "image" source = I2V via a
+/// `library:` ref (U1 — resolved on the node, never expires); no source = T2V.
+/// Always `no_wait` — the rail polls, the human keeps working.
+fn imagine_video_body(
+    prompt: &str,
+    model: &str,
+    duration: i32,
+    resolution: &str,
+    aspect: &str,
+    source_id: &str,
+    source_kind: &str,
+) -> (&'static str, Value) {
+    if source_kind == "video" && !source_id.is_empty() {
+        let mut body = serde_json::json!({
+            "prompt": prompt,
+            "video": format!("library:{source_id}"),
+            "duration": duration.clamp(2, 10),
+            "no_wait": true,
+        });
+        if model != "auto" {
+            body["model"] = Value::String(model.to_string());
+        }
+        ("/v1/videos/extensions", body)
+    } else {
+        let mut body = serde_json::json!({
+            "prompt": prompt,
+            "duration": duration.clamp(1, 15),
+            "no_wait": true,
+        });
+        if source_kind == "image" && !source_id.is_empty() {
+            body["image"] = Value::String(format!("library:{source_id}"));
+        }
+        if model != "auto" {
+            body["model"] = Value::String(model.to_string());
+        }
+        if !resolution.is_empty() && resolution != "default" {
+            body["resolution"] = Value::String(resolution.to_string());
+        }
+        if !aspect.is_empty() && aspect != "default" {
+            body["aspect_ratio"] = Value::String(aspect.to_string());
+        }
+        ("/v1/videos/generations", body)
+    }
+}
+
+/// Watch a submitted (no_wait) job: poll every 4 s, refresh the rail on each
+/// tick, and when it lands — auto-open it, but ONLY if the user hasn't
+/// selected something else meanwhile (the staging-etiquette rule: feedback for
+/// what you asked for, never a selection steal). Gives up after 15 min.
+fn imagine_watch_job(rt: &tokio::runtime::Handle, uw: slint::Weak<AppWindow>, id: String) {
+    rt.spawn(async move {
+        let started = std::time::Instant::now();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            let (base, token) = imagine_reach();
+            let client = reqwest::Client::new();
+            let job = imagine_fetch_job(&client, &base, &token, &id).await;
+            let status = job.get("status").and_then(Value::as_str).unwrap_or("").to_string();
+            let terminal = matches!(status.as_str(), "done" | "failed" | "expired" | "cancelled");
+            let timed_out = started.elapsed().as_secs() > 900;
+            let uw2 = uw.clone();
+            let id2 = id.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = uw2.upgrade() {
+                    ui.invoke_refresh_imagine();
+                    if terminal && ui.get_imagine_selected_job().as_str() == id2 {
+                        // Re-pick the finished job: the A1 flow fetches + arms ▶.
+                        ui.invoke_imagine_pick_job(id2.into());
+                    }
+                }
+            })
+            .ok();
+            if terminal || timed_out {
+                return;
+            }
+        }
+    });
+}
+
 /// Land a jobs-fetch outcome on the Slint thread: status + the rail rows move
 /// together, so a 401/offline never shows stale jobs under a red dot.
 fn apply_imagine_rows(ui: &AppWindow, outcome: &Result<Vec<ImagineRow>, String>) {
@@ -4547,13 +4677,14 @@ fn apply_imagine_rows(ui: &AppWindow, outcome: &Result<Vec<ImagineRow>, String>)
                 if let Some(model) = m.borrow().as_ref() {
                     model.set_vec(
                         rows.iter()
-                            .map(|(id, mode, status, model_s, when, err)| ImagineJobItem {
+                            .map(|(id, mode, status, model_s, when, err, prompt)| ImagineJobItem {
                                 id: id.into(),
                                 mode: mode.into(),
                                 status: status.into(),
                                 model: model_s.into(),
                                 when: when.into(),
                                 err: err.into(),
+                                prompt: prompt.into(),
                             })
                             .collect::<Vec<_>>(),
                     );
@@ -6628,6 +6759,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         if !job_id.is_empty() {
                             ui.set_imagine_selected_job(job_id.into());
+                        }
+                        apply_imagine_rows(&ui, &rows);
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
+    // Video submit (A2): fire-and-poll. The POST returns in seconds (`no_wait`),
+    // the watcher keeps the rail honest while xAI renders, and the finished clip
+    // auto-arms the A1 player — unless the user moved on (etiquette).
+    {
+        let rt_h = rt.handle().clone();
+        let uw = ui.as_weak();
+        ui.on_imagine_generate_video(move |prompt, model, duration, res, aspect, src_id, src_kind| {
+            if let Some(ui) = uw.upgrade() {
+                ui.set_imagine_busy(true);
+                ui.set_imagine_note("submitting…".into());
+            }
+            let (prompt, model, res, aspect) =
+                (prompt.to_string(), model.to_string(), res.to_string(), aspect.to_string());
+            let (src_id, src_kind) = (src_id.to_string(), src_kind.to_string());
+            let rt_h2 = rt_h.clone();
+            let uw = uw.clone();
+            rt_h.spawn(async move {
+                let (base, token) = imagine_reach();
+                let client = reqwest::Client::new();
+                let result = if token.is_empty() {
+                    Err("no token — see docs/imaginarium.md".to_string())
+                } else {
+                    let (path, body) =
+                        imagine_video_body(&prompt, &model, duration, &res, &aspect, &src_id, &src_kind);
+                    imagine_post_job(&client, &base, &token, path, &body).await
+                };
+                let rows = if token.is_empty() {
+                    Err("unconfigured".to_string())
+                } else {
+                    imagine_fetch_jobs(&client, &base, &token).await
+                };
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = uw.upgrade() {
+                        ui.set_imagine_busy(false);
+                        match &result {
+                            Ok(job) => {
+                                let id = job
+                                    .get("job_id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                let status =
+                                    job.get("status").and_then(Value::as_str).unwrap_or("");
+                                if status == "failed" {
+                                    let msg = job
+                                        .get("error")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("submit failed");
+                                    ui.set_imagine_note(format!("failed: {msg}").into());
+                                } else {
+                                    ui.set_imagine_note(
+                                        "🎞 rendering upstream (~30–90s) — the rail tracks it"
+                                            .into(),
+                                    );
+                                    // The chain is consumed by a successful hand-off.
+                                    ui.set_imagine_chain_source("".into());
+                                    ui.set_imagine_chain_kind("".into());
+                                    ui.set_imagine_prompt_input("".into());
+                                    if !id.is_empty() {
+                                        ui.set_imagine_selected_job(id.clone().into());
+                                        imagine_watch_job(&rt_h2, ui.as_weak(), id);
+                                    }
+                                }
+                            }
+                            Err(e) => ui.set_imagine_note(e.as_str().into()),
                         }
                         apply_imagine_rows(&ui, &rows);
                     }

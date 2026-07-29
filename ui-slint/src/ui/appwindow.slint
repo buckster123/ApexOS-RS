@@ -158,6 +158,9 @@ export component AppWindow inherits Window {
     in-out property <[ImagineJobItem]> imagine-jobs;
     in-out property <string>           imagine-selected-job: "";
     in-out property <string>           imagine-prompt-input: "";
+    in-out property <string>           imagine-gen-mode: "image";    // image|video
+    in-out property <string>           imagine-chain-source: "";     // job id feeding I2V/extend
+    in-out property <string>           imagine-chain-kind: "";       // image|video|""
     in-out property <string>           imagine-video-state: "idle";  // idle|ready|playing|ended
     in-out property <float>            imagine-video-progress: 0.0;
     in-out property <string>           imagine-video-time: "";
@@ -280,6 +283,8 @@ export component AppWindow inherits Window {
     callback calc-key(string);
     callback occipital-steer(string);   // a clicked link / URL-bar "go here" nudge (9c)
     callback imagine-generate(string, string, string, int);  // prompt, model|"auto", aspect, n
+    // prompt, model|"auto", duration s, res|"default", aspect|"default", source id|"", source kind|""
+    callback imagine-generate-video(string, string, int, string, string, string, string);
     callback imagine-pick-job(string);                       // job id → preview
     callback refresh-imagine();
     callback imagine-video-play(int, int);                   // stage px w, h
@@ -870,6 +875,9 @@ export component AppWindow inherits Window {
                         imagine-jobs: root.imagine-jobs;
                         imagine-selected-job: root.imagine-selected-job;
                         imagine-prompt-input <=> root.imagine-prompt-input;
+                        imagine-gen-mode <=> root.imagine-gen-mode;
+                        imagine-chain-source <=> root.imagine-chain-source;
+                        imagine-chain-kind <=> root.imagine-chain-kind;
                         imagine-video-state: root.imagine-video-state;
                         imagine-video-progress: root.imagine-video-progress;
                         imagine-video-time: root.imagine-video-time;
@@ -946,6 +954,7 @@ export component AppWindow inherits Window {
                         calc-key(k) => { root.calc-key(k); }
                         occipital-steer(u) => { root.occipital-steer(u); }
                         imagine-generate(p, m, a, n) => { root.imagine-generate(p, m, a, n); }
+                        imagine-generate-video(p, m, d, r, a, sid, sk) => { root.imagine-generate-video(p, m, d, r, a, sid, sk); }
                         imagine-pick-job(id) => { root.imagine-pick-job(id); }
                         refresh-imagine => { root.refresh-imagine(); }
                         imagine-video-play(w, h) => { root.imagine-video-play(w, h); }
