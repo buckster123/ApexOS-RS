@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, WmState, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, UsbCandidate, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, ImagineJobItem, BoardCard } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, WmState, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, UsbCandidate, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, ImagineJobItem, CutSegItem, BoardCard } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { IdentityWizard } from "components/identity_wizard.slint";
 import { ImagePicker } from "components/image_picker.slint";
@@ -166,6 +166,13 @@ export component AppWindow inherits Window {
     in-out property <string>           imagine-video-time: "";
     in property <[ImageItem]>          imagine-prompt-files;
     in-out property <bool>             imagine-prompt-picker-open: false;
+    in-out property <[CutSegItem]>     imagine-cut-segments;
+    in-out property <int>              imagine-cut-selected: -1;
+    in-out property <string>           imagine-cut-total: "";
+    in-out property <string>           imagine-cut-music-label: "";
+    in-out property <int>              imagine-cut-letterbox-ix: 0;
+    in-out property <int>              imagine-cut-fades-ix: 1;
+    in-out property <bool>             imagine-cut-loudnorm: false;
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id is
@@ -293,6 +300,13 @@ export component AppWindow inherits Window {
     callback imagine-video-stop();
     callback imagine-prompt-files-refresh();
     callback imagine-prompt-load(string);                    // workspace-relative path
+    callback imagine-cut-add(string);                        // done job id → segment/music
+    callback imagine-cut-remove(int);
+    callback imagine-cut-move(int, int);
+    callback imagine-cut-add-card();
+    callback imagine-cut-set(string, string);                // editor verb on the selection
+    callback imagine-cut-music-clear();
+    callback imagine-cut-render();
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -887,6 +901,13 @@ export component AppWindow inherits Window {
                         imagine-video-time: root.imagine-video-time;
                         imagine-prompt-files: root.imagine-prompt-files;
                         imagine-prompt-picker-open <=> root.imagine-prompt-picker-open;
+                        imagine-cut-segments: root.imagine-cut-segments;
+                        imagine-cut-selected <=> root.imagine-cut-selected;
+                        imagine-cut-total: root.imagine-cut-total;
+                        imagine-cut-music-label: root.imagine-cut-music-label;
+                        imagine-cut-letterbox-ix <=> root.imagine-cut-letterbox-ix;
+                        imagine-cut-fades-ix <=> root.imagine-cut-fades-ix;
+                        imagine-cut-loudnorm <=> root.imagine-cut-loudnorm;
 
                         send-message(t) => { root.send-message(t); }
                         attach-image => { root.refresh-workspace-images(); root.image-picker-open = true; }
@@ -962,6 +983,13 @@ export component AppWindow inherits Window {
                         imagine-generate(p, m, a, n) => { root.imagine-generate(p, m, a, n); }
                         imagine-generate-video(p, m, d, r, a, sid, sk) => { root.imagine-generate-video(p, m, d, r, a, sid, sk); }
                         imagine-pick-job(id) => { root.imagine-pick-job(id); }
+                        imagine-cut-add(id) => { root.imagine-cut-add(id); }
+                        imagine-cut-remove(ix) => { root.imagine-cut-remove(ix); }
+                        imagine-cut-move(ix, d) => { root.imagine-cut-move(ix, d); }
+                        imagine-cut-add-card => { root.imagine-cut-add-card(); }
+                        imagine-cut-set(f, v) => { root.imagine-cut-set(f, v); }
+                        imagine-cut-music-clear => { root.imagine-cut-music-clear(); }
+                        imagine-cut-render => { root.imagine-cut-render(); }
                         refresh-imagine => { root.refresh-imagine(); }
                         imagine-video-play(w, h) => { root.imagine-video-play(w, h); }
                         imagine-video-stop => { root.imagine-video-stop(); }
