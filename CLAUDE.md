@@ -230,6 +230,7 @@ Load only the relevant doc when entering a subsystem.
 | `docs/occipital.md` | Web cortex integration — registration, deploy, policy |
 | `docs/imaginarium.md` | Image/video-gen node — provisioning, MCP proxy, key isolation |
 | `docs/imagine-studio.md` | Studio arc charter — video player, craft engine, slice ledger |
+| `docs/imagine-craft-skill.md` | The agent cutting room — APEX drives the timeline API (A7) |
 | `docs/self-update.md` | Daemon self-update loop (mk3) — design + invariants |
 | `docs/colony-mesh.md` | Mesh expansion — spine/edge, relay → capabilities → spawn |
 | `docs/colony-federation.md` | Cross-cerebro federation — share/query/consolidate charter |

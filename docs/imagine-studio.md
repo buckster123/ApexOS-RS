@@ -67,7 +67,7 @@ as each lands.
 | A4 | ApexOS-RS | **Image edit flow**: prompt + up to 3 sources (library chain / workspace picker), riding U1's job MediaRef | ✅ |
 | A5 | ApexOS-RS | **The Cutting Room**: native timeline mode in the Imagine window — library picker with thumbnails, clip in/out/gain, segment captions, fades, style controls, render → job | ✅ #298 |
 | A6 | ApexOS-RS | **Score with Sonus**: music-bed picker off `/api/sonus/files` + `/api/sonus/stream` → library audio import → timeline bed; plus "🎵 ask APEX to compose" firing a queued `user_prompt` (the occipital-steer idiom). Honest no-sonus degrade | ✅ #299 |
-| A7 | — | **The agent story**: adapt the cutting-room skill so APEX drives the timeline API conversationally (procedure + soul evolution on the visual-artist node) | ☐ |
+| A7 | — | **The agent story**: adapt the cutting-room skill so APEX drives the timeline API conversationally (procedure + soul evolution on the visual-artist node) | ✅ Imag#8 + `docs/imagine-craft-skill.md` |
 
 ## The merged timeline contract — LANDED as version 1 (U2a/U2b, 2026-07-29)
 
