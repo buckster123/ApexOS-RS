@@ -4635,21 +4635,48 @@ fn imagine_video_body(
     }
 }
 
-/// Watch a submitted (no_wait) job: poll every 4 s, refresh the rail on each
-/// tick, and when it lands — auto-open it, but ONLY if the user hasn't
-/// selected something else meanwhile (the staging-etiquette rule: feedback for
-/// what you asked for, never a selection steal). Gives up after 15 min.
+/// Jobs currently being driven by a watcher — clicking a pending row twice, or
+/// submit + click, must not stack duplicate upstream-wait loops.
+static IMAGINE_WATCHED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Drive a submitted (no_wait) job to completion. THE LOAD-BEARING ROUTE
+/// CHOICE: `GET /v1/jobs/{id}` is a pure local-DB read — nothing on the node
+/// polls xAI for a no_wait job, so a watcher on it spins on "pending" forever
+/// (the 2026-07-29 field bug). `POST /v1/jobs/{id}/wait` is the route that
+/// actually polls upstream and downloads the finished asset into the library;
+/// it returns a terminal job as-is and a still-running job on its internal
+/// window, so we loop it with a generous client timeout. Each round refreshes
+/// the rail; on landing, the clip is auto-opened ONLY if the user hasn't
+/// selected something else meanwhile (staging etiquette). Gives up after 20 min.
 fn imagine_watch_job(rt: &tokio::runtime::Handle, uw: slint::Weak<AppWindow>, id: String) {
+    {
+        let mut watched = IMAGINE_WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+        if watched.contains(&id) {
+            return;
+        }
+        watched.push(id.clone());
+    }
     rt.spawn(async move {
         let started = std::time::Instant::now();
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
             let (base, token) = imagine_reach();
             let client = reqwest::Client::new();
-            let job = imagine_fetch_job(&client, &base, &token, &id).await;
+            // The server's internal wait window is shorter than this client
+            // timeout — a slow render comes back as still-running, not an error.
+            let job = match imagine_auth(
+                client.post(format!("{base}/v1/jobs/{id}/wait")),
+                &token,
+            )
+            .timeout(std::time::Duration::from_secs(180))
+            .send()
+            .await
+            {
+                Ok(resp) => resp.json::<Value>().await.unwrap_or(Value::Null),
+                Err(_) => Value::Null,
+            };
             let status = job.get("status").and_then(Value::as_str).unwrap_or("").to_string();
             let terminal = matches!(status.as_str(), "done" | "failed" | "expired" | "cancelled");
-            let timed_out = started.elapsed().as_secs() > 900;
+            let timed_out = started.elapsed().as_secs() > 1200;
             let uw2 = uw.clone();
             let id2 = id.clone();
             slint::invoke_from_event_loop(move || {
@@ -4663,8 +4690,11 @@ fn imagine_watch_job(rt: &tokio::runtime::Handle, uw: slint::Weak<AppWindow>, id
             })
             .ok();
             if terminal || timed_out {
+                let mut watched = IMAGINE_WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+                watched.retain(|w| w != &id);
                 return;
             }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
     });
 }
@@ -6903,6 +6933,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(e) => clip_err = e,
                     }
                 }
+                // A pending/running video job needs a driver: nothing on the
+                // node advances a no_wait job by itself (GET /jobs/{id} is a DB
+                // read) — so SELECTING a stuck job adopts it into the upstream
+                // wait loop. Clicking a stale row heals it.
+                let rendering = !is_image
+                    && !mode.is_empty()
+                    && matches!(status.as_str(), "pending" | "running");
+                if rendering {
+                    imagine_watch_job(&tokio::runtime::Handle::current(), uw.clone(), id.clone());
+                }
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = uw.upgrade() {
                         ui.set_imagine_selected_job(id.into());
@@ -6934,7 +6974,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_imagine_note(note.into());
                         } else if !is_image && !mode.is_empty() {
                             ui.set_imagine_preview_kind("video".into());
-                            ui.set_imagine_video_state("idle".into());
+                            ui.set_imagine_video_state(
+                                if rendering { "rendering" } else { "idle" }.into(),
+                            );
                             let tail = if !clip_err.is_empty() {
                                 format!(" · {clip_err}")
                             } else if !err.is_empty() {

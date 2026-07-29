@@ -559,7 +559,9 @@ export component ImagineView {
                     }
                     Text {
                         text: root.preview-kind == "video"
-                                ? "video job — no local preview (needs ffmpeg/ffprobe on this node)"
+                                ? (root.video-state == "rendering"
+                                   ? "🎞 rendering upstream — the rail tracks it; this pane comes alive when it lands"
+                                   : "video job — no local preview (needs ffmpeg/ffprobe on this node)")
                             : root.preview-kind == "error" ? ""
                             : (root.status == "offline"
                                 ? "imaginarium node unreachable — is imaginarium.service running?"
