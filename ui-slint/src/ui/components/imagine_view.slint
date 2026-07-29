@@ -285,6 +285,9 @@ export component ImagineView {
     // Score with Sonus (A6): the node's sonus tracks feed the music bed.
     in property <[SonusFileItem]>  score-files;
     in-out property <bool>         score-picker-open: false;
+    // Image-edit sources (A4): armed library refs; >0 reroutes GENERATE to edits.
+    in property <[ImageItem]>      edit-sources;
+    in property <int>              edit-count: 0;
 
     callback generate(string, string, string, int);  // prompt, model slug|"auto", aspect, n
     // prompt, model|"auto", duration s, res|"default", aspect|"default", source job id|"", source kind|""
@@ -305,6 +308,8 @@ export component ImagineView {
     callback score-refresh();                        // repopulate the sonus track list
     callback cut-score(string);                      // sonus file name → import → music bed
     callback cut-score-compose();                    // "🎵 ask APEX" — queued user_prompt
+    callback edit-add(string);                       // job id → arm as edit source
+    callback edit-remove(string);                    // job id → disarm
 
     function fire-generate() {
         if (root.gen-mode == "cut") {
@@ -446,6 +451,7 @@ export component ImagineView {
                         x: 10px;
                         y: 8px;
                         text: root.gen-mode == "cut" ? "caption text — then SET CAPTION on a segment…"
+                            : root.gen-mode == "image" && root.edit-count > 0 ? "describe the change…"
                             : root.gen-mode == "video"
                             ? (root.chain-kind == "video" ? "describe the continuation…"
                                : root.chain-kind == "image" ? "how should it move? (optional)"
@@ -714,6 +720,23 @@ export component ImagineView {
                     }
                 }
 
+                // Armed edit sources (A4): each chip is one library ref, ✕ disarms.
+                if root.gen-mode == "image" && root.edit-count > 0: HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "✎";
+                        width: 14px;
+                        color: Palette.primary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                    for src in root.edit-sources: OptionChip {
+                        label: src.name + " ✕";
+                        active: true;
+                        clicked => { root.edit-remove(src.path); }
+                    }
+                }
+
                 if root.gen-mode == "image": HorizontalLayout {
                     spacing: 6px;
                     Text {
@@ -917,6 +940,8 @@ export component ImagineView {
                             : root.gen-mode == "video"
                                 ? (root.chain-kind == "video" ? "⏩ EXTEND  (" + root.video-cost + ")"
                                    : "🎞 GENERATE  (" + root.video-cost + ")")
+                            : root.edit-count > 0
+                                ? "✎ EDIT IMAGE  (" + root.edit-count + " src)"
                                 : "✦ GENERATE  (~$" + (root.model-ix == 2 ? "0.05" : "0.02") + "/img)";
                         color: (root.busy || root.status != "ok"
                                 || (root.prompt-input == "" && !(root.gen-mode == "video" && root.chain-kind == "image")))
@@ -1009,6 +1034,34 @@ export component ImagineView {
 
                 // ChainBar (A3): feed the selected result into the next verb.
                 // Grows as targets ship — image→ANIMATE (I2V), video→EXTEND.
+                if root.selected-job != "" && root.gen-mode != "cut"
+                   && root.preview-kind == "image": Rectangle {
+                    height: 26px;
+                    width: edit-chip-row.preferred-width + 16px;
+                    x: parent.width - self.width - 14px;
+                    y: 40px;
+                    border-radius: Palette.radius-sm;
+                    background: edit-ta.has-hover ? Palette.secondary : Palette.surface;
+                    border-width: 1px;
+                    border-color: Palette.secondary;
+                    animate background { duration: 120ms; }
+                    edit-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.edit-add(root.selected-job); }
+                    }
+                    edit-chip-row := HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        Text {
+                            text: "✎ EDIT";
+                            color: edit-ta.has-hover ? Palette.text-bright : Palette.secondary;
+                            font-size: 10px * Personas.font-scale;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
                 if root.selected-job != "" && root.gen-mode != "cut"
                    && (root.preview-kind == "image" || root.video-live): Rectangle {
                     height: 26px;

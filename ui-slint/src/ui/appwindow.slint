@@ -173,6 +173,8 @@ export component AppWindow inherits Window {
     in-out property <int>              imagine-cut-letterbox-ix: 0;
     in-out property <int>              imagine-cut-fades-ix: 1;
     in-out property <bool>             imagine-cut-loudnorm: false;
+    in-out property <[ImageItem]>      imagine-edit-sources;
+    in-out property <int>              imagine-edit-count: 0;
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id is
@@ -309,6 +311,8 @@ export component AppWindow inherits Window {
     callback imagine-cut-render();
     callback imagine-cut-score(string);                      // sonus track → music bed
     callback imagine-cut-score-compose();                    // queued user_prompt to APEX
+    callback imagine-edit-add(string);                       // arm image as edit source
+    callback imagine-edit-remove(string);
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -910,6 +914,8 @@ export component AppWindow inherits Window {
                         imagine-cut-letterbox-ix <=> root.imagine-cut-letterbox-ix;
                         imagine-cut-fades-ix <=> root.imagine-cut-fades-ix;
                         imagine-cut-loudnorm <=> root.imagine-cut-loudnorm;
+                        imagine-edit-sources: root.imagine-edit-sources;
+                        imagine-edit-count: root.imagine-edit-count;
 
                         send-message(t) => { root.send-message(t); }
                         attach-image => { root.refresh-workspace-images(); root.image-picker-open = true; }
@@ -994,6 +1000,8 @@ export component AppWindow inherits Window {
                         imagine-cut-render => { root.imagine-cut-render(); }
                         imagine-cut-score(n) => { root.imagine-cut-score(n); }
                         imagine-cut-score-compose => { root.imagine-cut-score-compose(); }
+                        imagine-edit-add(id) => { root.imagine-edit-add(id); }
+                        imagine-edit-remove(id) => { root.imagine-edit-remove(id); }
                         refresh-imagine => { root.refresh-imagine(); }
                         imagine-video-play(w, h) => { root.imagine-video-play(w, h); }
                         imagine-video-stop => { root.imagine-video-stop(); }
