@@ -119,6 +119,8 @@ thread_local! {
     static OCCIPITAL_TRAIL: RefCell<Option<Rc<slint::VecModel<ReaderLink>>>> = const { RefCell::new(None) };
     // Imagine (🖼) — the Imaginarium studio's shared node jobs list.
     static IMAGINE_JOBS: RefCell<Option<Rc<slint::VecModel<ImagineJobItem>>>> = const { RefCell::new(None) };
+    // Imagine prompt-from-file picker rows (workspace text files).
+    static IMAGINE_PROMPT_FILES: RefCell<Option<Rc<slint::VecModel<ImageItem>>>> = const { RefCell::new(None) };
     // Adaptive UI (Loop 6, docs/adaptive-ui.md): per-AppKind bitmasks, bit index =
     // the AppKind ordinal (APP_TABLE order). AGENT_OPENED marks windows the agent
     // created via `ui_open`; a USER close of one moves the bit to UI_LATCHED —
@@ -6039,6 +6041,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_imagine_jobs(slint::ModelRc::from(imagine_jobs_vec.clone()));
     IMAGINE_JOBS.with(|m| *m.borrow_mut() = Some(imagine_jobs_vec.clone()));
 
+    // Imagine prompt-from-file picker (workspace text files via agentd).
+    let imagine_prompt_files_vec: Rc<slint::VecModel<ImageItem>> = Rc::new(slint::VecModel::default());
+    ui.set_imagine_prompt_files(slint::ModelRc::from(imagine_prompt_files_vec.clone()));
+    IMAGINE_PROMPT_FILES.with(|m| *m.borrow_mut() = Some(imagine_prompt_files_vec.clone()));
+
     // Feedback subsystem: bind the toast model + global callbacks.
     let toasts_vec: Rc<slint::VecModel<ToastItem>> = Rc::new(slint::VecModel::default());
     ui.global::<Notifications>().set_toasts(slint::ModelRc::from(toasts_vec.clone()));
@@ -6992,6 +6999,108 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ui) = uw.upgrade() {
                 imagine_player_reset(&ui, "ended");
             }
+        });
+    }
+
+    // Prompt from file: list the workspace's text files via agentd (the twin of
+    // the image-attach picker), and load a picked one into the prompt box — so
+    // anything written INTO the system (agent notes, USB imports, uploads)
+    // becomes generation fuel without retyping.
+    {
+        let rt_h = rt.handle().clone();
+        let client = Arc::clone(&http_client);
+        let base = http_base.clone();
+        let uw = ui.as_weak();
+        ui.on_imagine_prompt_files_refresh(move || {
+            let client = Arc::clone(&client);
+            let base = base.clone();
+            let uw = uw.clone();
+            rt_h.spawn(async move {
+                let body = json_get(&client, format!("{base}/api/workspace/texts")).await;
+                let rows: Vec<(String, String)> = body
+                    .get("texts")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| {
+                                Some((
+                                    t.get("path")?.as_str()?.to_string(),
+                                    t.get("name")?.as_str()?.to_string(),
+                                ))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                slint::invoke_from_event_loop(move || {
+                    if uw.upgrade().is_some() {
+                        IMAGINE_PROMPT_FILES.with(|m| {
+                            if let Some(model) = m.borrow().as_ref() {
+                                model.set_vec(
+                                    rows.into_iter()
+                                        .map(|(path, name)| ImageItem {
+                                            path: path.into(),
+                                            name: name.into(),
+                                        })
+                                        .collect::<Vec<_>>(),
+                                );
+                            }
+                        });
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+    {
+        let rt_h = rt.handle().clone();
+        let client = Arc::clone(&http_client);
+        let base = http_base.clone();
+        let uw = ui.as_weak();
+        ui.on_imagine_prompt_load(move |path| {
+            let path = path.to_string();
+            let client = Arc::clone(&client);
+            let base = base.clone();
+            let uw = uw.clone();
+            rt_h.spawn(async move {
+                // The confined workspace download route; reqwest encodes the
+                // query. Prompts are text — cap at 4 KB so a stray novel can't
+                // flood the box (xAI prompts top out far below that).
+                let text = match client
+                    .get(format!("{base}/api/workspace/download"))
+                    .query(&[("path", path.as_str())])
+                    .timeout(std::time::Duration::from_secs(8))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        resp.text().await.unwrap_or_default()
+                    }
+                    _ => String::new(),
+                };
+                let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = uw.upgrade() {
+                        if text.trim().is_empty() {
+                            ui.set_imagine_note(format!("couldn't read {name}").into());
+                        } else {
+                            let mut t = text.trim().to_string();
+                            let truncated = t.chars().count() > 4000;
+                            if truncated {
+                                t = t.chars().take(4000).collect();
+                            }
+                            ui.set_imagine_prompt_input(t.into());
+                            ui.set_imagine_note(
+                                format!(
+                                    "📄 prompt loaded from {name}{}",
+                                    if truncated { " (truncated to 4k chars)" } else { "" }
+                                )
+                                .into(),
+                            );
+                        }
+                    }
+                })
+                .ok();
+            });
         });
     }
 

@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, ImagineJobItem, BoardCard, WmState } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, ImagineJobItem, ImageItem, BoardCard, WmState } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -210,6 +210,8 @@ export component AppWindowFrame inherits Rectangle {
     in property <string>           imagine-video-state;
     in property <float>            imagine-video-progress;
     in property <string>           imagine-video-time;
+    in property <[ImageItem]>      imagine-prompt-files;
+    in-out property <bool>         imagine-prompt-picker-open;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -293,6 +295,8 @@ export component AppWindowFrame inherits Rectangle {
     callback refresh-imagine();
     callback imagine-video-play(int, int);                   // stage px w, h
     callback imagine-video-stop();
+    callback imagine-prompt-files-refresh();
+    callback imagine-prompt-load(string);                    // workspace-relative path
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -782,12 +786,16 @@ export component AppWindowFrame inherits Rectangle {
             video-state: root.imagine-video-state;
             video-progress: root.imagine-video-progress;
             video-time: root.imagine-video-time;
+            prompt-files: root.imagine-prompt-files;
+            prompt-picker-open <=> root.imagine-prompt-picker-open;
             generate(p, m, a, n) => { root.imagine-generate(p, m, a, n); }
             generate-video(p, m, d, r, a, sid, sk) => { root.imagine-generate-video(p, m, d, r, a, sid, sk); }
             pick-job(id) => { root.imagine-pick-job(id); }
             refresh => { root.refresh-imagine(); }
             video-play(w, h) => { root.imagine-video-play(w, h); }
             video-stop => { root.imagine-video-stop(); }
+            prompt-files-refresh => { root.imagine-prompt-files-refresh(); }
+            prompt-load(p) => { root.imagine-prompt-load(p); }
         }
     }
 

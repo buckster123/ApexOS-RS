@@ -317,6 +317,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/sessions/{id}/message", post(session_message_handler))
         .route("/api/sessions/{id}/image",   post(session_image_handler))
         .route("/api/workspace/images",      get(workspace_images_handler))
+        .route("/api/workspace/texts",       get(workspace_texts_handler))
         .route("/api/workspace/list",        get(workspace_list_handler))
         .route("/api/workspace/read",        get(workspace_read_handler))
         .route("/api/workspace/download",    get(workspace_download_handler))
@@ -4918,6 +4919,54 @@ async fn workspace_images_handler() -> impl IntoResponse {
     // Newest first — most useful for "the screenshot I just took".
     images.sort_by(|a, b| b["modified"].as_u64().unwrap_or(0).cmp(&a["modified"].as_u64().unwrap_or(0)));
     Json(serde_json::json!({ "images": images }))
+}
+
+/// GET /api/workspace/texts — list text files under the workspace for the
+/// Imagine app's "prompt from file" picker (twin of /api/workspace/images):
+/// anything written into the workspace — agent notes, USB imports, uploads —
+/// becomes generation fuel. Scans the root + text-bearing subdirs, newest
+/// first, capped so the picker stays a picker.
+async fn workspace_texts_handler() -> impl IntoResponse {
+    let ws = std::env::var("AGENTD_WORKSPACE")
+        .ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
+    let ws_path = std::path::Path::new(&ws);
+    let exts = ["txt", "md", "prompt"];
+    let subdirs = ["", "notes", "prompts", "uploads", "docs", "imagine"];
+    let mut texts: Vec<serde_json::Value> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for sub in subdirs {
+        let dir = if sub.is_empty() { ws_path.to_path_buf() } else { ws_path.join(sub) };
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let p = entry.path();
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            if !exts.contains(&ext.as_str()) { continue; }
+            let abs = p.to_string_lossy().to_string();
+            if !seen.insert(abs.clone()) { continue; }
+            let rel = p.strip_prefix(ws_path).map(|r| r.to_string_lossy().to_string())
+                .unwrap_or_else(|_| abs.clone());
+            let meta = entry.metadata().await.ok();
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let modified = meta.as_ref().and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()).unwrap_or(0);
+            texts.push(serde_json::json!({
+                "path": rel,
+                "name": p.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                "size": size,
+                "modified": modified,
+            }));
+        }
+    }
+
+    texts.sort_by(|a, b| b["modified"].as_u64().unwrap_or(0).cmp(&a["modified"].as_u64().unwrap_or(0)));
+    texts.truncate(60);
+    Json(serde_json::json!({ "texts": texts }))
 }
 
 /// GET /api/workspace/list?path=<rel> — browse the workspace tree for the Explorer
