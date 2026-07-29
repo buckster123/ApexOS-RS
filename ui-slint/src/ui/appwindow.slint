@@ -164,6 +164,8 @@ export component AppWindow inherits Window {
     in-out property <string>           imagine-video-state: "idle";  // idle|ready|playing|ended
     in-out property <float>            imagine-video-progress: 0.0;
     in-out property <string>           imagine-video-time: "";
+    in property <[ImageItem]>          imagine-prompt-files;
+    in-out property <bool>             imagine-prompt-picker-open: false;
 
     // ── Window manager (G2) ─────────────────────────────────────────────
     // Rust owns the set; model order = z-order (last on top). focused-id is
@@ -289,6 +291,8 @@ export component AppWindow inherits Window {
     callback refresh-imagine();
     callback imagine-video-play(int, int);                   // stage px w, h
     callback imagine-video-stop();
+    callback imagine-prompt-files-refresh();
+    callback imagine-prompt-load(string);                    // workspace-relative path
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -881,6 +885,8 @@ export component AppWindow inherits Window {
                         imagine-video-state: root.imagine-video-state;
                         imagine-video-progress: root.imagine-video-progress;
                         imagine-video-time: root.imagine-video-time;
+                        imagine-prompt-files: root.imagine-prompt-files;
+                        imagine-prompt-picker-open <=> root.imagine-prompt-picker-open;
 
                         send-message(t) => { root.send-message(t); }
                         attach-image => { root.refresh-workspace-images(); root.image-picker-open = true; }
@@ -959,6 +965,8 @@ export component AppWindow inherits Window {
                         refresh-imagine => { root.refresh-imagine(); }
                         imagine-video-play(w, h) => { root.imagine-video-play(w, h); }
                         imagine-video-stop => { root.imagine-video-stop(); }
+                        imagine-prompt-files-refresh => { root.imagine-prompt-files-refresh(); }
+                        imagine-prompt-load(p) => { root.imagine-prompt-load(p); }
 
                         req-focus => { root.focus-window(w.id); }
                         req-close => { root.close-window(w.id); }
