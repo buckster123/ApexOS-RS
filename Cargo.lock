@@ -7321,6 +7321,7 @@ name = "ui-slint"
 version = "0.1.0"
 dependencies = [
  "apexos-protocol",
+ "base64 0.22.1",
  "chrono",
  "env_logger",
  "futures-util",

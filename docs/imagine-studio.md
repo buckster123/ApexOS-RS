@@ -65,8 +65,8 @@ as each lands.
 | U2b | Imaginarium | **Craft engine expressiveness** (part 2): versioned merged timeline contract (style block, segment kinds `clip`/`still`+Ken Burns/`card`, speed, letterbox recipes), two-pass loudnorm ship pass, content-hash segment caching, provenance field | ✅ Imag#6 |
 | U3 | Imaginarium | **Thumbnails/posters** (`thumb.jpg` on completion via the contact-sheet recipe + `/v1/library/{id}/thumb`) + **async craft render** (job id immediately, poll like any job) | ✅ Imag#7 |
 | A4 | ApexOS-RS | **Image edit flow**: prompt + up to 3 sources (library chain / workspace picker), riding U1's job MediaRef | ☐ |
-| A5 | ApexOS-RS | **The Cutting Room**: native timeline mode in the Imagine window — library picker with thumbnails, clip in/out/gain, segment captions, fades, style controls, render → job | ✅ |
-| A6 | ApexOS-RS | **Score with Sonus**: music-bed picker off `/api/sonus/files` + `/api/sonus/stream` → library audio import → timeline bed; plus "🎵 ask APEX to compose" firing a queued `user_prompt` (the occipital-steer idiom). Honest no-sonus degrade | ☐ |
+| A5 | ApexOS-RS | **The Cutting Room**: native timeline mode in the Imagine window — library picker with thumbnails, clip in/out/gain, segment captions, fades, style controls, render → job | ✅ #298 |
+| A6 | ApexOS-RS | **Score with Sonus**: music-bed picker off `/api/sonus/files` + `/api/sonus/stream` → library audio import → timeline bed; plus "🎵 ask APEX to compose" firing a queued `user_prompt` (the occipital-steer idiom). Honest no-sonus degrade | ✅ |
 | A7 | — | **The agent story**: adapt the cutting-room skill so APEX drives the timeline API conversationally (procedure + soul evolution on the visual-artist node) | ☐ |
 
 ## The merged timeline contract — LANDED as version 1 (U2a/U2b, 2026-07-29)

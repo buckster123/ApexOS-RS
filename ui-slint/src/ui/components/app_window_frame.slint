@@ -310,7 +310,9 @@ export component AppWindowFrame inherits Rectangle {
     callback imagine-cut-add-card();
     callback imagine-cut-set(string, string);
     callback imagine-cut-music-clear();
-    callback imagine-cut-render();                    // workspace-relative path
+    callback imagine-cut-render();
+    callback imagine-cut-score(string);
+    callback imagine-cut-score-compose();                    // workspace-relative path
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -809,6 +811,7 @@ export component AppWindowFrame inherits Rectangle {
             cut-letterbox-ix <=> root.imagine-cut-letterbox-ix;
             cut-fades-ix <=> root.imagine-cut-fades-ix;
             cut-loudnorm <=> root.imagine-cut-loudnorm;
+            score-files: root.sonus-files;
             generate(p, m, a, n) => { root.imagine-generate(p, m, a, n); }
             generate-video(p, m, d, r, a, sid, sk) => { root.imagine-generate-video(p, m, d, r, a, sid, sk); }
             pick-job(id) => { root.imagine-pick-job(id); }
@@ -824,6 +827,9 @@ export component AppWindowFrame inherits Rectangle {
             cut-set(f, v) => { root.imagine-cut-set(f, v); }
             cut-music-clear => { root.imagine-cut-music-clear(); }
             cut-render => { root.imagine-cut-render(); }
+            score-refresh => { root.refresh-sonus(); }
+            cut-score(n) => { root.imagine-cut-score(n); }
+            cut-score-compose => { root.imagine-cut-score-compose(); }
         }
     }
 

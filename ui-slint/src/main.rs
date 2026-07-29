@@ -126,6 +126,10 @@ thread_local! {
     static CUT_MODEL: RefCell<Option<Rc<slint::VecModel<CutSegItem>>>> = const { RefCell::new(None) };
     // Music bed: (job id, display label).
     static CUT_MUSIC: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+    // Sonus tracks already imported into the imaginarium library this session
+    // (track name → library job id) — scoring twice must not duplicate imports.
+    static CUT_SONUS_IMPORTED: RefCell<std::collections::HashMap<String, String>> =
+        RefCell::new(std::collections::HashMap::new());
     // U3 poster cache — job id → fetch state. Failed stays failed (audio jobs
     // have no thumb; retrying every 3s watcher tick would be a storm).
     static IMAGINE_THUMBS: RefCell<std::collections::HashMap<String, ThumbState>> =
@@ -3757,6 +3761,19 @@ mod tests {
     }
 
     #[test]
+    fn sonus_scoring_maps_mimes_and_briefs() {
+        use super::{cut_compose_prompt, sonus_mime_for_name};
+        assert_eq!(sonus_mime_for_name("dream.wav"), "audio/wav");
+        assert_eq!(sonus_mime_for_name("BED.MP3"), "audio/mpeg");
+        assert_eq!(sonus_mime_for_name("weird.flac"), "audio/flac");
+        assert_eq!(sonus_mime_for_name("noext"), "audio/wav");
+        let brief = cut_compose_prompt("3 segments · ~12s · 🎵");
+        assert!(brief.starts_with("(cutting room)"));
+        assert!(brief.contains("3 segments · ~12s"));
+        assert!(cut_compose_prompt("").contains("empty timeline"));
+    }
+
+    #[test]
     fn cut_apply_steps_and_reopens_the_out_point() {
         use super::{cut_apply, CutSeg};
         let mut seg = CutSeg::clip("01A", "x");
@@ -5249,6 +5266,34 @@ fn cut_apply(seg: &mut CutSeg, field: &str, value: &str) {
         "caption-clear" => seg.caption.clear(),
         _ => {}
     }
+}
+
+/// Data-URL mime for a sonus track by extension — the import route derives the
+/// stored extension from the filename hint, so this only needs to be sane.
+fn sonus_mime_for_name(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
+        "ogg" => "audio/ogg",
+        "m4a" => "audio/mp4",
+        "opus" => "audio/opus",
+        _ => "audio/wav",
+    }
+}
+
+/// The brief handed to APEX when the human hits "ask APEX to compose" —
+/// a plain queued user_prompt (the occipital-steer idiom: rides the WS through
+/// the TurnGate, so it can never race an in-flight turn).
+fn cut_compose_prompt(total: &str) -> String {
+    format!(
+        "(cutting room) I'm editing a video in the Imagine window ({}). \
+         Compose a music bed for it with your sonus tools — something short and \
+         cinematic that fits the cut. When the track has rendered into the sonus \
+         library, tell me its filename; I'll score the cut with it from the \
+         🎵 SCORE picker.",
+        if total.is_empty() { "empty timeline so far" } else { total }
+    )
 }
 
 // ── Imagine video player (A1, docs/imagine-studio.md) ─────────────────────────
@@ -7875,6 +7920,145 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    // Score with Sonus (A6): stream the track from agentd, import it into the
+    // imaginarium library as audio (the U2a coverage), and set it as the bed.
+    // A session cache keeps re-scoring from duplicating imports.
+    {
+        let rt_h = rt.handle().clone();
+        let agentd_client = Arc::clone(&http_client);
+        let agentd_base = http_base.clone();
+        let uw = ui.as_weak();
+        ui.on_imagine_cut_score(move |name| {
+            let name = name.to_string();
+            let stem: String = name
+                .rsplit('/')
+                .next()
+                .unwrap_or(&name)
+                .trim_end_matches(".wav")
+                .trim_end_matches(".mp3")
+                .chars()
+                .take(26)
+                .collect();
+            // Already imported this session → just point the bed at it
+            // (thread-locals are main-thread; the check happens HERE, not in
+            // the task).
+            let cached = CUT_SONUS_IMPORTED.with(|c| c.borrow().get(&name).cloned());
+            if let Some(id) = cached {
+                if let Some(ui) = uw.upgrade() {
+                    CUT_MUSIC.with(|m| *m.borrow_mut() = Some((id, stem.clone())));
+                    ui.set_imagine_note(format!("🎵 scored with {stem}").into());
+                    cut_project(&ui);
+                }
+                return;
+            }
+            if let Some(ui) = uw.upgrade() {
+                ui.set_imagine_note(format!("🎵 bringing in {name}…").into());
+            }
+            let agentd_client = Arc::clone(&agentd_client);
+            let agentd_base = agentd_base.clone();
+            let uw = uw.clone();
+            rt_h.spawn(async move {
+                let outcome: Result<(String, String), String> = async {
+                    let stem = stem.clone();
+                    // Stream the bytes off agentd (traversal-guarded route).
+                    let resp = agentd_client
+                        .get(format!("{agentd_base}/api/sonus/stream"))
+                        .query(&[("name", name.as_str())])
+                        .timeout(std::time::Duration::from_secs(60))
+                        .send()
+                        .await
+                        .map_err(|e| format!("sonus stream failed: {e}"))?;
+                    if !resp.status().is_success() {
+                        return Err(format!("sonus stream HTTP {}", resp.status().as_u16()));
+                    }
+                    let bytes = resp
+                        .bytes()
+                        .await
+                        .map_err(|e| format!("sonus read failed: {e}"))?;
+                    if bytes.len() > 38 * 1024 * 1024 {
+                        return Err("track is over the 38 MB import ceiling — trim it in Audio first".into());
+                    }
+                    use base64::Engine as _;
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    let body = serde_json::json!({
+                        "data": format!("data:{};base64,{b64}", sonus_mime_for_name(&name)),
+                        "filename": name,
+                        "note": format!("sonus · {name}"),
+                    });
+                    let (base, token) = imagine_reach();
+                    if token.is_empty() {
+                        return Err("no imaginarium token — see docs/imaginarium.md".into());
+                    }
+                    let job = imagine_post_job(
+                        &reqwest::Client::new(),
+                        &base,
+                        &token,
+                        "/v1/library/import",
+                        &body,
+                    )
+                    .await?;
+                    let id = job
+                        .get("job_id")
+                        .and_then(Value::as_str)
+                        .ok_or("import gave no job id")?
+                        .to_string();
+                    Ok((id, stem))
+                }
+                .await;
+                let name2 = name.clone();
+                slint::invoke_from_event_loop(move || {
+                    let Some(ui) = uw.upgrade() else { return };
+                    match outcome {
+                        Ok((id, stem)) => {
+                            CUT_SONUS_IMPORTED.with(|c| {
+                                c.borrow_mut().insert(name2.clone(), id.clone());
+                            });
+                            CUT_MUSIC.with(|m| *m.borrow_mut() = Some((id, stem.clone())));
+                            ui.set_imagine_note(format!("🎵 scored with {stem}").into());
+                            cut_project(&ui);
+                            ui.invoke_refresh_imagine();
+                        }
+                        Err(e) => ui.set_imagine_note(format!("score failed: {e}").into()),
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+    // "🎵 ask APEX to compose" — the steer idiom: a queued user_prompt through
+    // the WS TurnGate. The brief lands in chat; new tracks appear in the picker.
+    {
+        let tx_score = tx.clone();
+        let uw = ui.as_weak();
+        ui.on_imagine_cut_score_compose(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let total = ui.get_imagine_cut_total().to_string();
+            clear_face_hold();
+            maybe_push_time_divider();
+            push_message(MessageItem {
+                role: "user".into(),
+                text: "🎵 compose a bed for my cut…".into(),
+                streaming: false,
+                call_id: "".into(),
+                tool_name: "".into(),
+                tool_args: "".into(),
+                tool_output: "".into(),
+                tool_status: "".into(),
+                awaiting_approval: false,
+            });
+            let frame = serde_json::json!({
+                "type": "user_prompt",
+                "text": cut_compose_prompt(&total),
+            })
+            .to_string();
+            tx_score.send(frame).ok();
+            ui.set_imagine_note(
+                "🎵 asked APEX — watch the chat; the track appears in SCORE when it lands".into(),
+            );
+            bump_scroll(&ui);
+        });
+    }
+
     // Render: POST the v1 timeline with ?no_wait=true (U3 — the node renders in
     // the background), select the pending craft job, and let the standard
     // watcher drive it home (for craft jobs /wait returns the DB row each pass).
