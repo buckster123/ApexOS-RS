@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, ImagineJobItem, ImageItem, BoardCard, WmState } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, ImagineJobItem, CutSegItem, ImageItem, BoardCard, WmState } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -212,6 +212,13 @@ export component AppWindowFrame inherits Rectangle {
     in property <string>           imagine-video-time;
     in property <[ImageItem]>      imagine-prompt-files;
     in-out property <bool>         imagine-prompt-picker-open;
+    in property <[CutSegItem]>     imagine-cut-segments;
+    in-out property <int>          imagine-cut-selected;
+    in property <string>           imagine-cut-total;
+    in property <string>           imagine-cut-music-label;
+    in-out property <int>          imagine-cut-letterbox-ix;
+    in-out property <int>          imagine-cut-fades-ix;
+    in-out property <bool>         imagine-cut-loudnorm;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -296,7 +303,14 @@ export component AppWindowFrame inherits Rectangle {
     callback imagine-video-play(int, int);                   // stage px w, h
     callback imagine-video-stop();
     callback imagine-prompt-files-refresh();
-    callback imagine-prompt-load(string);                    // workspace-relative path
+    callback imagine-prompt-load(string);
+    callback imagine-cut-add(string);
+    callback imagine-cut-remove(int);
+    callback imagine-cut-move(int, int);
+    callback imagine-cut-add-card();
+    callback imagine-cut-set(string, string);
+    callback imagine-cut-music-clear();
+    callback imagine-cut-render();                    // workspace-relative path
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -788,6 +802,13 @@ export component AppWindowFrame inherits Rectangle {
             video-time: root.imagine-video-time;
             prompt-files: root.imagine-prompt-files;
             prompt-picker-open <=> root.imagine-prompt-picker-open;
+            cut-segments: root.imagine-cut-segments;
+            cut-selected <=> root.imagine-cut-selected;
+            cut-total: root.imagine-cut-total;
+            cut-music-label: root.imagine-cut-music-label;
+            cut-letterbox-ix <=> root.imagine-cut-letterbox-ix;
+            cut-fades-ix <=> root.imagine-cut-fades-ix;
+            cut-loudnorm <=> root.imagine-cut-loudnorm;
             generate(p, m, a, n) => { root.imagine-generate(p, m, a, n); }
             generate-video(p, m, d, r, a, sid, sk) => { root.imagine-generate-video(p, m, d, r, a, sid, sk); }
             pick-job(id) => { root.imagine-pick-job(id); }
@@ -796,6 +817,13 @@ export component AppWindowFrame inherits Rectangle {
             video-stop => { root.imagine-video-stop(); }
             prompt-files-refresh => { root.imagine-prompt-files-refresh(); }
             prompt-load(p) => { root.imagine-prompt-load(p); }
+            cut-add(id) => { root.imagine-cut-add(id); }
+            cut-remove(ix) => { root.imagine-cut-remove(ix); }
+            cut-move(ix, d) => { root.imagine-cut-move(ix, d); }
+            cut-add-card => { root.imagine-cut-add-card(); }
+            cut-set(f, v) => { root.imagine-cut-set(f, v); }
+            cut-music-clear => { root.imagine-cut-music-clear(); }
+            cut-render => { root.imagine-cut-render(); }
         }
     }
 

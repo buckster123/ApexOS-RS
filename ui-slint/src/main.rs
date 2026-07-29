@@ -121,6 +121,15 @@ thread_local! {
     static IMAGINE_JOBS: RefCell<Option<Rc<slint::VecModel<ImagineJobItem>>>> = const { RefCell::new(None) };
     // Imagine prompt-from-file picker rows (workspace text files).
     static IMAGINE_PROMPT_FILES: RefCell<Option<Rc<slint::VecModel<ImageItem>>>> = const { RefCell::new(None) };
+    // The Cutting Room (A5): Rust owns the edit list; the model is its projection.
+    static CUT_SEGS: RefCell<Vec<CutSeg>> = const { RefCell::new(Vec::new()) };
+    static CUT_MODEL: RefCell<Option<Rc<slint::VecModel<CutSegItem>>>> = const { RefCell::new(None) };
+    // Music bed: (job id, display label).
+    static CUT_MUSIC: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+    // U3 poster cache — job id → fetch state. Failed stays failed (audio jobs
+    // have no thumb; retrying every 3s watcher tick would be a storm).
+    static IMAGINE_THUMBS: RefCell<std::collections::HashMap<String, ThumbState>> =
+        RefCell::new(std::collections::HashMap::new());
     // Adaptive UI (Loop 6, docs/adaptive-ui.md): per-AppKind bitmasks, bit index =
     // the AppKind ordinal (APP_TABLE order). AGENT_OPENED marks windows the agent
     // created via `ui_open`; a USER close of one moves the bit to UI_LATCHED —
@@ -3671,6 +3680,108 @@ mod tests {
     }
 
     #[test]
+    fn cut_timeline_builds_the_v1_contract() {
+        use super::{cut_build_timeline, CutSeg};
+        let mut clip = CutSeg::clip("01VID", "hammer strike");
+        clip.in_s = 1.0;
+        clip.out_s = 5.0;
+        clip.gain_ix = 1; // -6dB
+        clip.speed_ix = 3; // 2×
+        clip.caption = "the forge wakes".into();
+        let mut still = CutSeg::still("01IMG", "poster");
+        still.dur_ix = 2; // 4s
+        still.zoom_ix = 2; // push+ → 1.25
+        let mut card = CutSeg::card();
+        card.color_ix = 2; // rust
+        card.caption = "FIN".into();
+
+        let body = cut_build_timeline(&[clip, still, card], Some("01WAV"), 2, true, 1);
+        assert_eq!(body["version"], 1);
+        let clips = body["clips"].as_array().unwrap();
+        assert_eq!(clips.len(), 3);
+        // clip: trim + gain + speed + a whole-segment caption
+        assert_eq!(clips[0]["job_id"], "01VID");
+        assert_eq!(clips[0]["gain_db"], -6.0);
+        assert_eq!(clips[0]["speed"], 2.0);
+        assert_eq!(clips[0]["captions"][0]["text"], "the forge wakes");
+        assert_eq!(clips[0]["captions"][0]["fontsize"], 0); // inherit
+        // still: kind + dur + Ken Burns
+        assert_eq!(clips[1]["kind"], "still");
+        assert_eq!(clips[1]["dur_s"], 4.0);
+        assert_eq!(clips[1]["zoom_to"], 1.25);
+        // card: color + big caption
+        assert_eq!(clips[2]["kind"], "card");
+        assert_eq!(clips[2]["card_color"], "#B7410E");
+        assert_eq!(clips[2]["captions"][0]["fontsize"], 44);
+        assert!(clips[2].get("job_id").is_none());
+        // style: letterbox reveal + loudnorm; fades preset SOFT
+        assert_eq!(body["style"]["letterbox_frac"], 0.12);
+        assert_eq!(body["style"]["letterbox_reveal_s"], 1.5);
+        assert_eq!(body["style"]["loudnorm"], true);
+        assert_eq!(body["video_fade_in_s"], 0.3);
+        assert_eq!(body["audio_fade_out_s"], 0.5);
+        // music bed on the master clock
+        assert_eq!(body["music"]["job_id"], "01WAV");
+        assert_eq!(body["music"]["gain_db"], -8.0);
+
+        // bare defaults: no style/fades/music keys at all, speed omitted at 1×
+        let bare = cut_build_timeline(&[CutSeg::clip("01A", "x")], None, 0, false, 0);
+        assert!(bare.get("style").is_none());
+        assert!(bare.get("music").is_none());
+        assert!(bare.get("video_fade_in_s").is_none());
+        assert!(bare["clips"][0].get("speed").is_none());
+        assert!(bare["clips"][0].get("captions").is_none());
+    }
+
+    #[test]
+    fn cut_details_and_totals_read_honestly() {
+        use super::{cut_detail, cut_total_label, CutSeg};
+        let mut c = CutSeg::clip("01A", "x");
+        assert_eq!(cut_detail(&c), "full");
+        c.in_s = 1.0;
+        assert_eq!(cut_detail(&c), "1.0s→end");
+        c.out_s = 5.0;
+        c.speed_ix = 2;
+        c.gain_ix = 0;
+        assert_eq!(cut_detail(&c), "1.0–5.0s · 1.5× · -12dB");
+        let mut s = CutSeg::still("01B", "y");
+        s.dur_ix = 1;
+        s.zoom_ix = 1;
+        assert_eq!(cut_detail(&s), "3s · push");
+
+        // totals: known seconds sum (speed-adjusted); open clips flag "+?"
+        let open = CutSeg::clip("01C", "z");
+        assert_eq!(cut_total_label(&[c.clone(), s.clone()], true), "2 segments · ~6s · 🎵");
+        assert!(cut_total_label(&[open], false).ends_with("~0s+?"));
+        assert_eq!(cut_total_label(&[], false), "");
+    }
+
+    #[test]
+    fn cut_apply_steps_and_reopens_the_out_point() {
+        use super::{cut_apply, CutSeg};
+        let mut seg = CutSeg::clip("01A", "x");
+        cut_apply(&mut seg, "in", "0.5");
+        cut_apply(&mut seg, "in", "0.5");
+        assert_eq!(seg.in_s, 1.0);
+        cut_apply(&mut seg, "in", "-2.0");
+        assert_eq!(seg.in_s, 0.0); // floor
+        // out steps up from in when unset; stepping back through in reopens (0)
+        seg.in_s = 1.0;
+        cut_apply(&mut seg, "out", "2.0");
+        assert_eq!(seg.out_s, 3.0);
+        cut_apply(&mut seg, "out", "-2.0");
+        assert_eq!(seg.out_s, 0.0);
+        cut_apply(&mut seg, "caption", "  hello  ");
+        assert_eq!(seg.caption, "hello");
+        cut_apply(&mut seg, "caption-clear", "");
+        assert_eq!(seg.caption, "");
+        // unknown fields are a no-op, never a panic
+        let before = seg.clone();
+        cut_apply(&mut seg, "warp", "9");
+        assert_eq!(seg, before);
+    }
+
+    #[test]
     fn arrange_rects_presets() {
         use super::{arrange_rects, ARRANGE_GAP};
         let (aw, ah) = (1200.0, 700.0);
@@ -4700,7 +4811,8 @@ fn imagine_watch_job(rt: &tokio::runtime::Handle, uw: slint::Weak<AppWindow>, id
 }
 
 /// Land a jobs-fetch outcome on the Slint thread: status + the rail rows move
-/// together, so a 401/offline never shows stale jobs under a red dot.
+/// together, so a 401/offline never shows stale jobs under a red dot. Rows
+/// pick up their U3 poster from the cache when it has landed.
 fn apply_imagine_rows(ui: &AppWindow, outcome: &Result<Vec<ImagineRow>, String>) {
     match outcome {
         Ok(rows) => {
@@ -4709,14 +4821,19 @@ fn apply_imagine_rows(ui: &AppWindow, outcome: &Result<Vec<ImagineRow>, String>)
                 if let Some(model) = m.borrow().as_ref() {
                     model.set_vec(
                         rows.iter()
-                            .map(|(id, mode, status, model_s, when, err, prompt)| ImagineJobItem {
-                                id: id.into(),
-                                mode: mode.into(),
-                                status: status.into(),
-                                model: model_s.into(),
-                                when: when.into(),
-                                err: err.into(),
-                                prompt: prompt.into(),
+                            .map(|(id, mode, status, model_s, when, err, prompt)| {
+                                let thumb = imagine_thumb_for(id);
+                                ImagineJobItem {
+                                    id: id.into(),
+                                    mode: mode.into(),
+                                    status: status.into(),
+                                    model: model_s.into(),
+                                    when: when.into(),
+                                    err: err.into(),
+                                    prompt: prompt.into(),
+                                    has_thumb: thumb.is_some(),
+                                    thumb: thumb.unwrap_or_default(),
+                                }
                             })
                             .collect::<Vec<_>>(),
                     );
@@ -4724,6 +4841,413 @@ fn apply_imagine_rows(ui: &AppWindow, outcome: &Result<Vec<ImagineRow>, String>)
             });
         }
         Err(e) => ui.set_imagine_status(e.as_str().into()),
+    }
+}
+
+// ── The Cutting Room (A5, docs/imagine-studio.md) ────────────────────────────
+// CUT mode turns the Imagine rail into a timeline editor over the node's craft
+// engine (timeline contract v1, Imaginarium U2a/U2b/U3): click done jobs to add
+// segments (video→clip, image→still, audio→music bed), trim with steppers,
+// caption through the prompt box, style with chips, render with ?no_wait=true —
+// the existing watcher tracks the craft job like any other. Rust owns the edit
+// list; Slint sees only its projection.
+
+/// Poster fetch state — `Failed` is terminal (audio jobs 404 by design; the
+/// 3s watcher cadence must not become a refetch storm).
+enum ThumbState {
+    Loading,
+    Ready(slint::Image),
+    Failed,
+}
+
+fn imagine_thumb_for(id: &str) -> Option<slint::Image> {
+    IMAGINE_THUMBS.with(|t| match t.borrow().get(id) {
+        Some(ThumbState::Ready(img)) => Some(img.clone()),
+        _ => None,
+    })
+}
+
+/// Fetch missing posters for done rows (bounded per pass) and repaint the rows
+/// they belong to as each lands. Runs on the Slint thread; the fetches don't.
+fn imagine_thumb_backfill(rt: &tokio::runtime::Handle, uw: slint::Weak<AppWindow>) {
+    let missing: Vec<String> = IMAGINE_JOBS.with(|m| {
+        let Some(model) = m.borrow().as_ref().cloned() else {
+            return Vec::new();
+        };
+        use slint::Model as _;
+        let mut ids = Vec::new();
+        for row in model.iter() {
+            if row.status.as_str() == "done" {
+                let id = row.id.to_string();
+                let fresh = IMAGINE_THUMBS.with(|t| !t.borrow().contains_key(&id));
+                if fresh {
+                    ids.push(id);
+                }
+            }
+            if ids.len() >= 12 {
+                break;
+            }
+        }
+        ids
+    });
+    if missing.is_empty() {
+        return;
+    }
+    IMAGINE_THUMBS.with(|t| {
+        let mut t = t.borrow_mut();
+        for id in &missing {
+            t.insert(id.clone(), ThumbState::Loading);
+        }
+    });
+    rt.spawn(async move {
+        let (base, token) = imagine_reach();
+        let client = reqwest::Client::new();
+        for id in missing {
+            let fetched: Option<(u32, u32, Vec<u8>)> = async {
+                let resp = imagine_auth(
+                    client.get(format!("{base}/v1/library/{id}/thumb")),
+                    &token,
+                )
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+                .ok()?;
+                if !resp.status().is_success() {
+                    return None;
+                }
+                let bytes = resp.bytes().await.ok()?;
+                let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+                let (w, h) = (img.width(), img.height());
+                Some((w, h, img.into_raw()))
+            }
+            .await;
+            let uw2 = uw.clone();
+            let id2 = id.clone();
+            slint::invoke_from_event_loop(move || {
+                let state = match fetched {
+                    Some((w, h, rgba)) => {
+                        let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                            &rgba, w, h,
+                        );
+                        ThumbState::Ready(slint::Image::from_rgba8(buf))
+                    }
+                    None => ThumbState::Failed,
+                };
+                IMAGINE_THUMBS.with(|t| {
+                    t.borrow_mut().insert(id2.clone(), state);
+                });
+                if let Some(ui) = uw2.upgrade() {
+                    // Repaint the row that just got its poster (in place), and
+                    // the cut timeline in case it references this job.
+                    use slint::Model as _;
+                    IMAGINE_JOBS.with(|m| {
+                        if let Some(model) = m.borrow().as_ref() {
+                            for ix in 0..model.row_count() {
+                                if let Some(mut row) = model.row_data(ix) {
+                                    if row.id.as_str() == id2 {
+                                        if let Some(img) = imagine_thumb_for(&id2) {
+                                            row.thumb = img;
+                                            row.has_thumb = true;
+                                            model.set_row_data(ix, row);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    cut_project(&ui);
+                }
+            })
+            .ok();
+        }
+    });
+}
+
+/// One timeline segment, Rust-side truth. kind: 0 clip · 1 still · 2 card.
+#[derive(Clone, Debug, PartialEq)]
+struct CutSeg {
+    kind: u8,
+    job_id: String,
+    label: String,
+    in_s: f32,
+    out_s: f32,
+    gain_ix: i32,  // 0 → -12dB · 1 → -6 · 2 → 0
+    speed_ix: i32, // 0 → 0.5× · 1 → 1× · 2 → 1.5× · 3 → 2×
+    dur_ix: i32,   // 0 → 2s · 1 → 3s · 2 → 4s · 3 → 6s
+    zoom_ix: i32,  // 0 static · 1 → 1.12 · 2 → 1.25
+    color_ix: i32,
+    caption: String,
+}
+
+const CUT_GAINS_DB: [f64; 3] = [-12.0, -6.0, 0.0];
+const CUT_SPEEDS: [f64; 4] = [0.5, 1.0, 1.5, 2.0];
+const CUT_DURS_S: [f64; 4] = [2.0, 3.0, 4.0, 6.0];
+const CUT_ZOOM_TO: [f64; 3] = [1.0, 1.12, 1.25];
+const CUT_CARD_COLORS: [&str; 4] = ["#000000", "#101418", "#B7410E", "#0E2A1C"];
+
+impl CutSeg {
+    fn clip(job_id: &str, label: &str) -> Self {
+        Self {
+            kind: 0,
+            job_id: job_id.into(),
+            label: label.into(),
+            in_s: 0.0,
+            out_s: 0.0,
+            gain_ix: 2,
+            speed_ix: 1,
+            dur_ix: 1,
+            zoom_ix: 1,
+            color_ix: 1,
+            caption: String::new(),
+        }
+    }
+    fn still(job_id: &str, label: &str) -> Self {
+        Self { kind: 1, ..Self::clip(job_id, label) }
+    }
+    fn card() -> Self {
+        Self { kind: 2, ..Self::clip("", "card") }
+    }
+}
+
+/// The row's summary line — trim window, speed, gain / duration + zoom / color.
+fn cut_detail(seg: &CutSeg) -> String {
+    match seg.kind {
+        0 => {
+            let win = if seg.out_s > seg.in_s {
+                format!("{:.1}–{:.1}s", seg.in_s, seg.out_s)
+            } else if seg.in_s > 0.0 {
+                format!("{:.1}s→end", seg.in_s)
+            } else {
+                "full".into()
+            };
+            let speed = if seg.speed_ix != 1 {
+                format!(" · {}×", CUT_SPEEDS[seg.speed_ix.clamp(0, 3) as usize])
+            } else {
+                String::new()
+            };
+            let gain = if seg.gain_ix != 2 {
+                format!(" · {}dB", CUT_GAINS_DB[seg.gain_ix.clamp(0, 2) as usize])
+            } else {
+                String::new()
+            };
+            format!("{win}{speed}{gain}")
+        }
+        1 => format!(
+            "{}s · {}",
+            CUT_DURS_S[seg.dur_ix.clamp(0, 3) as usize],
+            ["static", "push", "push+"][seg.zoom_ix.clamp(0, 2) as usize]
+        ),
+        _ => format!("{}s card", CUT_DURS_S[seg.dur_ix.clamp(0, 3) as usize]),
+    }
+}
+
+/// Rough master-clock length — clips with an open out-point are unknown until
+/// the node probes them, shown as "+?".
+fn cut_total_label(segs: &[CutSeg], music: bool) -> String {
+    if segs.is_empty() {
+        return String::new();
+    }
+    let mut known = 0.0f64;
+    let mut open = false;
+    for s in segs {
+        match s.kind {
+            0 => {
+                if s.out_s > s.in_s {
+                    known += ((s.out_s - s.in_s) as f64)
+                        / CUT_SPEEDS[s.speed_ix.clamp(0, 3) as usize];
+                } else {
+                    open = true;
+                }
+            }
+            _ => known += CUT_DURS_S[s.dur_ix.clamp(0, 3) as usize],
+        }
+    }
+    format!(
+        "{} segment{} · ~{:.0}s{}{}",
+        segs.len(),
+        if segs.len() == 1 { "" } else { "s" },
+        known,
+        if open { "+?" } else { "" },
+        if music { " · 🎵" } else { "" }
+    )
+}
+
+/// Build the craft request (timeline contract v1) from the edit list — pure.
+/// Captions ride segment-local with an over-long window (clamped by the
+/// segment's real duration at render; drawtext past-dur enables never fire).
+fn cut_build_timeline(
+    segs: &[CutSeg],
+    music: Option<&str>,
+    letterbox_ix: i32,
+    loudnorm: bool,
+    fades_ix: i32,
+) -> Value {
+    let clips: Vec<Value> = segs
+        .iter()
+        .map(|s| {
+            let caption = (!s.caption.is_empty()).then(|| {
+                serde_json::json!([{
+                    "text": s.caption,
+                    "start_s": 0.0,
+                    "end_s": 600.0,
+                    "fontsize": if s.kind == 2 { 44 } else { 0 },
+                }])
+            });
+            let mut v = match s.kind {
+                0 => {
+                    let mut c = serde_json::json!({
+                        "job_id": s.job_id,
+                        "in_s": s.in_s,
+                        "out_s": s.out_s,
+                        "gain_db": CUT_GAINS_DB[s.gain_ix.clamp(0, 2) as usize],
+                    });
+                    let speed = CUT_SPEEDS[s.speed_ix.clamp(0, 3) as usize];
+                    if (speed - 1.0).abs() > 1e-6 {
+                        c["speed"] = serde_json::json!(speed);
+                    }
+                    c
+                }
+                1 => {
+                    let mut c = serde_json::json!({
+                        "kind": "still",
+                        "job_id": s.job_id,
+                        "dur_s": CUT_DURS_S[s.dur_ix.clamp(0, 3) as usize],
+                    });
+                    let zoom = CUT_ZOOM_TO[s.zoom_ix.clamp(0, 2) as usize];
+                    if zoom > 1.0 {
+                        c["zoom_to"] = serde_json::json!(zoom);
+                    }
+                    c
+                }
+                _ => serde_json::json!({
+                    "kind": "card",
+                    "dur_s": CUT_DURS_S[s.dur_ix.clamp(0, 3) as usize],
+                    "card_color": CUT_CARD_COLORS[s.color_ix.clamp(0, 3) as usize],
+                }),
+            };
+            if let Some(c) = caption {
+                v["captions"] = c;
+            }
+            v
+        })
+        .collect();
+
+    let mut style = serde_json::Map::new();
+    match letterbox_ix {
+        1 => {
+            style.insert("letterbox_frac".into(), serde_json::json!(0.12));
+        }
+        2 => {
+            style.insert("letterbox_frac".into(), serde_json::json!(0.12));
+            style.insert("letterbox_reveal_s".into(), serde_json::json!(1.5));
+        }
+        _ => {}
+    }
+    if loudnorm {
+        style.insert("loudnorm".into(), serde_json::json!(true));
+    }
+
+    let mut body = serde_json::json!({
+        "version": 1,
+        "clips": clips,
+        "note": format!("cutting room · {} segments", segs.len()),
+    });
+    if !style.is_empty() {
+        body["style"] = Value::Object(style);
+    }
+    match fades_ix {
+        1 => {
+            body["video_fade_in_s"] = serde_json::json!(0.3);
+            body["video_fade_out_s"] = serde_json::json!(0.3);
+            body["audio_fade_in_s"] = serde_json::json!(0.3);
+            body["audio_fade_out_s"] = serde_json::json!(0.5);
+        }
+        2 => {
+            body["video_fade_in_s"] = serde_json::json!(0.75);
+            body["video_fade_out_s"] = serde_json::json!(0.75);
+            body["audio_fade_in_s"] = serde_json::json!(0.5);
+            body["audio_fade_out_s"] = serde_json::json!(1.0);
+        }
+        _ => {}
+    }
+    if let Some(id) = music {
+        body["music"] = serde_json::json!({
+            "job_id": id,
+            "gain_db": -8.0,
+            "fade_in_s": 0.3,
+            "fade_out_s": 0.8,
+        });
+    }
+    body
+}
+
+/// Re-project the edit list into the Slint model + the summary label.
+fn cut_project(ui: &AppWindow) {
+    let (rows, total) = CUT_SEGS.with(|s| {
+        let segs = s.borrow();
+        let music = CUT_MUSIC.with(|m| m.borrow().is_some());
+        let rows: Vec<CutSegItem> = segs
+            .iter()
+            .map(|seg| {
+                let thumb = (!seg.job_id.is_empty())
+                    .then(|| imagine_thumb_for(&seg.job_id))
+                    .flatten();
+                CutSegItem {
+                    kind: seg.kind as i32,
+                    id: seg.job_id.as_str().into(),
+                    label: seg.label.as_str().into(),
+                    detail: cut_detail(seg).into(),
+                    caption: seg.caption.as_str().into(),
+                    has_thumb: thumb.is_some(),
+                    thumb: thumb.unwrap_or_default(),
+                    in_s: seg.in_s,
+                    out_s: seg.out_s,
+                    gain_ix: seg.gain_ix,
+                    speed_ix: seg.speed_ix,
+                    dur_ix: seg.dur_ix,
+                    zoom_ix: seg.zoom_ix,
+                    color_ix: seg.color_ix,
+                }
+            })
+            .collect();
+        (rows, cut_total_label(&segs, music))
+    });
+    CUT_MODEL.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            model.set_vec(rows);
+        }
+    });
+    ui.set_imagine_cut_total(total.into());
+    ui.set_imagine_cut_music_label(
+        CUT_MUSIC
+            .with(|m| m.borrow().as_ref().map(|(_, l)| l.clone()))
+            .unwrap_or_default()
+            .into(),
+    );
+}
+
+/// Apply one editor verb to the selected segment. Stepper deltas clamp sanely;
+/// unknown fields are ignored (a UI/Rust drift shows as a no-op, not a panic).
+fn cut_apply(seg: &mut CutSeg, field: &str, value: &str) {
+    let num = value.parse::<f32>().unwrap_or(0.0);
+    match field {
+        "in" => seg.in_s = (seg.in_s + num).max(0.0),
+        "out" => {
+            // out steps from its current point; stepping down through in_s
+            // reopens the clip (0 = full remaining).
+            let base = if seg.out_s > 0.0 { seg.out_s } else { seg.in_s };
+            let next = base + num;
+            seg.out_s = if next > seg.in_s { next } else { 0.0 };
+        }
+        "gain" => seg.gain_ix = num as i32,
+        "speed" => seg.speed_ix = num as i32,
+        "dur" => seg.dur_ix = num as i32,
+        "zoom" => seg.zoom_ix = num as i32,
+        "color" => seg.color_ix = num as i32,
+        "caption" => seg.caption = value.trim().chars().take(120).collect(),
+        "caption-clear" => seg.caption.clear(),
+        _ => {}
     }
 }
 
@@ -6076,6 +6600,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_imagine_prompt_files(slint::ModelRc::from(imagine_prompt_files_vec.clone()));
     IMAGINE_PROMPT_FILES.with(|m| *m.borrow_mut() = Some(imagine_prompt_files_vec.clone()));
 
+    // The Cutting Room timeline (A5) — projection of the Rust edit list.
+    let cut_segs_vec: Rc<slint::VecModel<CutSegItem>> = Rc::new(slint::VecModel::default());
+    ui.set_imagine_cut_segments(slint::ModelRc::from(cut_segs_vec.clone()));
+    CUT_MODEL.with(|m| *m.borrow_mut() = Some(cut_segs_vec.clone()));
+
     // Feedback subsystem: bind the toast model + global callbacks.
     let toasts_vec: Rc<slint::VecModel<ToastItem>> = Rc::new(slint::VecModel::default());
     ui.global::<Notifications>().set_toasts(slint::ModelRc::from(toasts_vec.clone()));
@@ -6709,6 +7238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let agentd_client = Arc::clone(&agentd_client);
             let agentd_base = agentd_base.clone();
             let uw = uw.clone();
+            let rt_h2 = rt_h.clone();
             rt_h.spawn(async move {
                 // Token still missing (pre-login boot raced, or agentd had none
                 // yet) → retry the agentd reach before giving an honest state.
@@ -6725,6 +7255,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(ui) = uw.upgrade() {
                         ui.set_imagine_node_url(base.into());
                         apply_imagine_rows(&ui, &outcome);
+                        // Backfill U3 posters for rows that don't have one yet.
+                        imagine_thumb_backfill(&rt_h2, ui.as_weak());
                     }
                 })
                 .ok();
@@ -7190,6 +7722,223 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .into(),
                             );
                         }
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
+    // ── The Cutting Room callbacks (A5) ──────────────────────────────────────
+    // Add: the rail row's mode can't tell an audio import from a video craft
+    // (both craft_export) — fetch the job once and route by the REAL asset
+    // kind: video→clip, image→still, audio→music bed.
+    {
+        let rt_h = rt.handle().clone();
+        let uw = ui.as_weak();
+        ui.on_imagine_cut_add(move |id| {
+            let id = id.to_string();
+            let uw = uw.clone();
+            rt_h.spawn(async move {
+                let (base, token) = imagine_reach();
+                let client = reqwest::Client::new();
+                let job = imagine_fetch_job(&client, &base, &token, &id).await;
+                slint::invoke_from_event_loop(move || {
+                    let Some(ui) = uw.upgrade() else { return };
+                    let status = job.get("status").and_then(Value::as_str).unwrap_or("");
+                    if status != "done" {
+                        ui.set_imagine_note("only finished jobs can join the cut".into());
+                        return;
+                    }
+                    let kind = job
+                        .get("assets")
+                        .and_then(|a| a.get(0))
+                        .and_then(|a| a.get("kind"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let label: String = job
+                        .get("prompt")
+                        .and_then(Value::as_str)
+                        .filter(|p| !p.is_empty())
+                        .unwrap_or("untitled")
+                        .chars()
+                        .take(26)
+                        .collect();
+                    match kind {
+                        "video" => {
+                            CUT_SEGS.with(|s| s.borrow_mut().push(CutSeg::clip(&id, &label)));
+                            ui.set_imagine_cut_selected(
+                                CUT_SEGS.with(|s| s.borrow().len() as i32 - 1),
+                            );
+                            ui.set_imagine_note(format!("🎞 added: {label}").into());
+                        }
+                        "image" => {
+                            CUT_SEGS.with(|s| s.borrow_mut().push(CutSeg::still(&id, &label)));
+                            ui.set_imagine_cut_selected(
+                                CUT_SEGS.with(|s| s.borrow().len() as i32 - 1),
+                            );
+                            ui.set_imagine_note(format!("🖼 added as still: {label}").into());
+                        }
+                        "audio" => {
+                            CUT_MUSIC.with(|m| *m.borrow_mut() = Some((id.clone(), label.clone())));
+                            ui.set_imagine_note(format!("🎵 music bed set: {label}").into());
+                        }
+                        other => {
+                            ui.set_imagine_note(
+                                format!("can't cut this job (asset kind {other:?})").into(),
+                            );
+                            return;
+                        }
+                    }
+                    cut_project(&ui);
+                })
+                .ok();
+            });
+        });
+    }
+    {
+        let uw = ui.as_weak();
+        ui.on_imagine_cut_remove(move |ix| {
+            if let Some(ui) = uw.upgrade() {
+                CUT_SEGS.with(|s| {
+                    let mut segs = s.borrow_mut();
+                    let ix = ix as usize;
+                    if ix < segs.len() {
+                        segs.remove(ix);
+                    }
+                });
+                let len = CUT_SEGS.with(|s| s.borrow().len() as i32);
+                if ui.get_imagine_cut_selected() >= len {
+                    ui.set_imagine_cut_selected(len - 1);
+                }
+                cut_project(&ui);
+            }
+        });
+    }
+    {
+        let uw = ui.as_weak();
+        ui.on_imagine_cut_move(move |ix, delta| {
+            if let Some(ui) = uw.upgrade() {
+                let moved = CUT_SEGS.with(|s| {
+                    let mut segs = s.borrow_mut();
+                    let from = ix as usize;
+                    let to = ix + delta;
+                    if from < segs.len() && to >= 0 && (to as usize) < segs.len() {
+                        segs.swap(from, to as usize);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if moved {
+                    if ui.get_imagine_cut_selected() == ix {
+                        ui.set_imagine_cut_selected(ix + delta);
+                    }
+                    cut_project(&ui);
+                }
+            }
+        });
+    }
+    {
+        let uw = ui.as_weak();
+        ui.on_imagine_cut_add_card(move || {
+            if let Some(ui) = uw.upgrade() {
+                CUT_SEGS.with(|s| s.borrow_mut().push(CutSeg::card()));
+                ui.set_imagine_cut_selected(CUT_SEGS.with(|s| s.borrow().len() as i32 - 1));
+                cut_project(&ui);
+            }
+        });
+    }
+    {
+        let uw = ui.as_weak();
+        ui.on_imagine_cut_set(move |field, value| {
+            if let Some(ui) = uw.upgrade() {
+                let sel = ui.get_imagine_cut_selected();
+                CUT_SEGS.with(|s| {
+                    let mut segs = s.borrow_mut();
+                    if sel >= 0 {
+                        if let Some(seg) = segs.get_mut(sel as usize) {
+                            cut_apply(seg, field.as_str(), value.as_str());
+                        }
+                    }
+                });
+                cut_project(&ui);
+            }
+        });
+    }
+    {
+        let uw = ui.as_weak();
+        ui.on_imagine_cut_music_clear(move || {
+            if let Some(ui) = uw.upgrade() {
+                CUT_MUSIC.with(|m| m.borrow_mut().take());
+                cut_project(&ui);
+            }
+        });
+    }
+    // Render: POST the v1 timeline with ?no_wait=true (U3 — the node renders in
+    // the background), select the pending craft job, and let the standard
+    // watcher drive it home (for craft jobs /wait returns the DB row each pass).
+    {
+        let rt_h = rt.handle().clone();
+        let uw = ui.as_weak();
+        ui.on_imagine_cut_render(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            if CUT_SEGS.with(|s| s.borrow().is_empty()) {
+                ui.set_imagine_note("the timeline is empty — add segments first".into());
+                return;
+            }
+            let body = cut_build_timeline(
+                &CUT_SEGS.with(|s| s.borrow().clone()),
+                CUT_MUSIC
+                    .with(|m| m.borrow().as_ref().map(|(id, _)| id.clone()))
+                    .as_deref(),
+                ui.get_imagine_cut_letterbox_ix(),
+                ui.get_imagine_cut_loudnorm(),
+                ui.get_imagine_cut_fades_ix(),
+            );
+            ui.set_imagine_busy(true);
+            ui.set_imagine_note("✂ submitting the cut…".into());
+            let rt_h2 = rt_h.clone();
+            let uw = uw.clone();
+            rt_h.spawn(async move {
+                let (base, token) = imagine_reach();
+                let client = reqwest::Client::new();
+                let result = if token.is_empty() {
+                    Err("no token — see docs/imaginarium.md".to_string())
+                } else {
+                    imagine_post_job(
+                        &client,
+                        &base,
+                        &token,
+                        "/v1/craft/video/render?no_wait=true",
+                        &body,
+                    )
+                    .await
+                };
+                slint::invoke_from_event_loop(move || {
+                    let Some(ui) = uw.upgrade() else { return };
+                    ui.set_imagine_busy(false);
+                    match result {
+                        Ok(job) => {
+                            let id = job
+                                .get("job_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string();
+                            if id.is_empty() {
+                                ui.set_imagine_note("render submit gave no job id".into());
+                                return;
+                            }
+                            ui.set_imagine_note(
+                                "✂ rendering on the node — the rail tracks it".into(),
+                            );
+                            ui.set_imagine_selected_job(id.clone().into());
+                            ui.set_imagine_preview_kind("video".into());
+                            ui.set_imagine_video_state("rendering".into());
+                            ui.invoke_refresh_imagine();
+                            imagine_watch_job(&rt_h2, ui.as_weak(), id);
+                        }
+                        Err(e) => ui.set_imagine_note(format!("render failed: {e}").into()),
                     }
                 })
                 .ok();

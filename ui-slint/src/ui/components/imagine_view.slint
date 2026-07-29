@@ -1,7 +1,7 @@
 import { ScrollView } from "std-widgets.slint";
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
-import { ImagineJobItem, ImageItem } from "../types.slint";
+import { ImagineJobItem, ImageItem, CutSegItem } from "../types.slint";
 
 // ── ImagineView (🖼) — the Imaginarium studio window ─────────────────────────
 //
@@ -42,6 +42,108 @@ component OptionChip inherits Rectangle {
     }
 }
 
+// A tiny square icon button (timeline row verbs).
+component MiniBtn inherits Rectangle {
+    in property <string> glyph;
+    callback clicked;
+    width: 18px;
+    height: 18px;
+    border-radius: Palette.radius-sm;
+    background: mb-ta.has-hover ? Palette.surface-hi : transparent;
+    mb-ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.glyph;
+        color: Palette.text-dim;
+        font-size: 10px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// One Cutting Room timeline row: poster/glyph · label + detail · ▲ ▼ ✕.
+component CutRow inherits Rectangle {
+    in property <CutSegItem> seg;
+    in property <bool> selected;
+    callback pick;
+    callback move-up;
+    callback move-down;
+    callback remove;
+
+    height: 40px;
+    border-radius: Palette.radius-sm;
+    background: root.selected ? Palette.primary-dim
+              : (cut-ta.has-hover ? Palette.surface-hi : Palette.surface);
+    border-width: 1px;
+    border-color: root.selected ? Palette.primary : Palette.border;
+    animate background, border-color { duration: 120ms; }
+
+    cut-ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.pick(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 4px;
+        spacing: 6px;
+
+        if root.seg.has-thumb: Rectangle {
+            width: 40px;
+            height: 28px;
+            y: (parent.height - self.height) / 2;
+            border-radius: Palette.radius-sm;
+            clip: true;
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.seg.thumb;
+                image-fit: cover;
+            }
+        }
+        if !root.seg.has-thumb: Text {
+            width: 22px;
+            text: root.seg.kind == 2 ? "▦" : (root.seg.kind == 1 ? "🖼" : "🎞");
+            font-size: 13px;
+            color: Palette.text-dim;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            spacing: 0px;
+            horizontal-stretch: 1;
+            alignment: center;
+            Text {
+                text: (root.seg.caption != "" ? "💬 " : "") + root.seg.label;
+                color: Palette.text-bright;
+                font-size: 10px * Personas.font-scale;
+                font-weight: 700;
+                overflow: elide;
+            }
+            Text {
+                text: root.seg.detail;
+                color: Palette.text-dim;
+                font-size: 9px * Personas.font-scale;
+                overflow: elide;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 0px;
+            MiniBtn { glyph: "▲"; clicked => { root.move-up(); } }
+            MiniBtn { glyph: "▼"; clicked => { root.move-down(); } }
+        }
+        VerticalLayout {
+            alignment: center;
+            MiniBtn { glyph: "✕"; clicked => { root.remove(); } }
+        }
+    }
+}
+
 // One job row: status dot · mode glyph + model · timestamp; click = preview it.
 component JobRow inherits Rectangle {
     in property <ImagineJobItem> job;
@@ -64,6 +166,21 @@ component JobRow inherits Rectangle {
     row := HorizontalLayout {
         padding: 8px;
         spacing: 8px;
+
+        // U3 poster (480px jpg, cached Rust-side) — the library picker's eye.
+        if root.job.has-thumb: Rectangle {
+            width: 44px;
+            height: 30px;
+            y: (parent.height - self.height) / 2;
+            border-radius: Palette.radius-sm;
+            clip: true;
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.job.thumb;
+                image-fit: cover;
+            }
+        }
 
         // Status dot — green done, amber in-flight, red failed/expired.
         Rectangle {
@@ -154,6 +271,18 @@ export component ImagineView {
     in property <[ImageItem]>      prompt-files;
     in-out property <bool>         prompt-picker-open: false;
 
+    // ── The Cutting Room (A5) ───────────────────────────────────────────
+    in property <[CutSegItem]>     cut-segments;
+    in-out property <int>          cut-selected: -1;
+    in property <string>           cut-total: "";
+    in property <string>           cut-music-label: "";
+    in-out property <int>          cut-letterbox-ix: 0;   // 0 off · 1 bars · 2 reveal
+    in-out property <int>          cut-fades-ix: 1;       // 0 off · 1 soft · 2 film
+    in-out property <bool>         cut-loudnorm: false;
+    // The selected segment's projection (out-of-range → defaults, editor hides).
+    property <bool> cut-has-sel: root.cut-selected >= 0 && root.cut-selected < root.cut-segments.length;
+    property <CutSegItem> cur: root.cut-segments[max(0, root.cut-selected)];
+
     callback generate(string, string, string, int);  // prompt, model slug|"auto", aspect, n
     // prompt, model|"auto", duration s, res|"default", aspect|"default", source job id|"", source kind|""
     callback generate-video(string, string, int, string, string, string, string);
@@ -163,8 +292,18 @@ export component ImagineView {
     callback video-stop();
     callback prompt-files-refresh();                 // populate the picker list
     callback prompt-load(string);                    // workspace-relative path → prompt box
+    callback cut-add(string);                        // done job id → clip/still/music by kind
+    callback cut-remove(int);
+    callback cut-move(int, int);                     // index, ±1
+    callback cut-add-card();
+    callback cut-set(string, string);                // editor verb → selected segment
+    callback cut-music-clear();
+    callback cut-render();
 
     function fire-generate() {
+        if (root.gen-mode == "cut") {
+            return;   // the prompt box is the caption composer here
+        }
         if (root.gen-mode == "video") {
             root.fire-generate-video();
         } else if (root.prompt-input != "" && !root.busy && root.status == "ok") {
@@ -266,6 +405,7 @@ export component ImagineView {
                     spacing: 6px;
                     OptionChip { label: "🖼 IMAGE"; active: root.gen-mode == "image"; clicked => { root.gen-mode = "image"; } }
                     OptionChip { label: "🎞 VIDEO"; active: root.gen-mode == "video"; clicked => { root.gen-mode = "video"; } }
+                    OptionChip { label: "✂ CUT"; active: root.gen-mode == "cut"; clicked => { root.gen-mode = "cut"; } }
                 }
 
                 // Prompt — multi-line, Enter generates, Shift+Enter newline
@@ -299,7 +439,8 @@ export component ImagineView {
                     if field.text == "": Text {
                         x: 10px;
                         y: 8px;
-                        text: root.gen-mode == "video"
+                        text: root.gen-mode == "cut" ? "caption text — then SET CAPTION on a segment…"
+                            : root.gen-mode == "video"
                             ? (root.chain-kind == "video" ? "describe the continuation…"
                                : root.chain-kind == "image" ? "how should it move? (optional)"
                                : "describe the video…")
@@ -320,6 +461,242 @@ export component ImagineView {
                             root.prompt-files-refresh();
                             root.prompt-picker-open = true;
                         }
+                    }
+                }
+
+                // ── The Cutting Room (A5): timeline · editor · style · render ──
+                if root.gen-mode == "cut": Text {
+                    text: root.cut-total == "" ? "TIMELINE — click a done job below to add it"
+                                               : "TIMELINE — " + root.cut-total;
+                    color: Palette.text-dim;
+                    font-size: 9px * Personas.font-scale;
+                    letter-spacing: 1.5px;
+                    height: 16px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                if root.gen-mode == "cut": Rectangle {
+                    height: min(128px, max(44px, root.cut-segments.length * 46px));
+                    ScrollView {
+                        width: parent.width;
+                        height: parent.height;
+                        VerticalLayout {
+                            spacing: 4px;
+                            alignment: start;
+                            for seg[ix] in root.cut-segments: CutRow {
+                                seg: seg;
+                                selected: root.cut-selected == ix;
+                                pick => { root.cut-selected = ix; }
+                                move-up => { root.cut-move(ix, -1); }
+                                move-down => { root.cut-move(ix, 1); }
+                                remove => { root.cut-remove(ix); }
+                            }
+                            if root.cut-segments.length == 0: Text {
+                                text: "empty reel — add finished jobs, or a card ▦";
+                                color: Palette.text-dim;
+                                font-size: 10px * Personas.font-scale;
+                            }
+                        }
+                    }
+                }
+
+                if root.gen-mode == "cut": HorizontalLayout {
+                    spacing: 6px;
+                    OptionChip { label: "+ ▦ CARD"; active: false; clicked => { root.cut-add-card(); } }
+                    // Music bed: set by clicking an audio job; cleared here.
+                    Rectangle { horizontal-stretch: 1; }
+                    if root.cut-music-label != "": OptionChip {
+                        label: "🎵 " + root.cut-music-label + " ✕";
+                        active: true;
+                        clicked => { root.cut-music-clear(); }
+                    }
+                }
+
+                // Segment editor — chips act on the selected row via cut-set.
+                if root.gen-mode == "cut" && root.cut-has-sel && root.cur.kind == 0: HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "IN " + Math.round(root.cur.in-s * 10) / 10 + "s";
+                        width: 58px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        vertical-alignment: center;
+                    }
+                    OptionChip { label: "−1";  active: false; clicked => { root.cut-set("in", "-1.0"); } }
+                    OptionChip { label: "−½";  active: false; clicked => { root.cut-set("in", "-0.5"); } }
+                    OptionChip { label: "+½";  active: false; clicked => { root.cut-set("in", "0.5"); } }
+                    OptionChip { label: "+1";  active: false; clicked => { root.cut-set("in", "1.0"); } }
+                }
+                if root.gen-mode == "cut" && root.cut-has-sel && root.cur.kind == 0: HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: root.cur.out-s > root.cur.in-s
+                            ? "OUT " + Math.round(root.cur.out-s * 10) / 10 + "s"
+                            : "OUT end";
+                        width: 58px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        vertical-alignment: center;
+                    }
+                    OptionChip { label: "−1";  active: false; clicked => { root.cut-set("out", "-1.0"); } }
+                    OptionChip { label: "−½";  active: false; clicked => { root.cut-set("out", "-0.5"); } }
+                    OptionChip { label: "+½";  active: false; clicked => { root.cut-set("out", "0.5"); } }
+                    OptionChip { label: "+1";  active: false; clicked => { root.cut-set("out", "1.0"); } }
+                }
+                if root.gen-mode == "cut" && root.cut-has-sel && root.cur.kind == 0: HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "SPEED";
+                        width: 58px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        letter-spacing: 1px;
+                        vertical-alignment: center;
+                    }
+                    OptionChip { label: "½×";  active: root.cur.speed-ix == 0; clicked => { root.cut-set("speed", "0"); } }
+                    OptionChip { label: "1×";  active: root.cur.speed-ix == 1; clicked => { root.cut-set("speed", "1"); } }
+                    OptionChip { label: "1½×"; active: root.cur.speed-ix == 2; clicked => { root.cut-set("speed", "2"); } }
+                    OptionChip { label: "2×";  active: root.cur.speed-ix == 3; clicked => { root.cut-set("speed", "3"); } }
+                }
+                if root.gen-mode == "cut" && root.cut-has-sel && root.cur.kind == 0: HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "GAIN";
+                        width: 58px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        letter-spacing: 1px;
+                        vertical-alignment: center;
+                    }
+                    OptionChip { label: "−12"; active: root.cur.gain-ix == 0; clicked => { root.cut-set("gain", "0"); } }
+                    OptionChip { label: "−6";  active: root.cur.gain-ix == 1; clicked => { root.cut-set("gain", "1"); } }
+                    OptionChip { label: "0dB"; active: root.cur.gain-ix == 2; clicked => { root.cut-set("gain", "2"); } }
+                }
+                if root.gen-mode == "cut" && root.cut-has-sel && root.cur.kind != 0: HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "DUR";
+                        width: 58px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        letter-spacing: 1px;
+                        vertical-alignment: center;
+                    }
+                    OptionChip { label: "2s"; active: root.cur.dur-ix == 0; clicked => { root.cut-set("dur", "0"); } }
+                    OptionChip { label: "3s"; active: root.cur.dur-ix == 1; clicked => { root.cut-set("dur", "1"); } }
+                    OptionChip { label: "4s"; active: root.cur.dur-ix == 2; clicked => { root.cut-set("dur", "2"); } }
+                    OptionChip { label: "6s"; active: root.cur.dur-ix == 3; clicked => { root.cut-set("dur", "3"); } }
+                }
+                if root.gen-mode == "cut" && root.cut-has-sel && root.cur.kind == 1: HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "ZOOM";
+                        width: 58px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        letter-spacing: 1px;
+                        vertical-alignment: center;
+                    }
+                    OptionChip { label: "STATIC"; active: root.cur.zoom-ix == 0; clicked => { root.cut-set("zoom", "0"); } }
+                    OptionChip { label: "PUSH";   active: root.cur.zoom-ix == 1; clicked => { root.cut-set("zoom", "1"); } }
+                    OptionChip { label: "PUSH+";  active: root.cur.zoom-ix == 2; clicked => { root.cut-set("zoom", "2"); } }
+                }
+                if root.gen-mode == "cut" && root.cut-has-sel && root.cur.kind == 2: HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "BG";
+                        width: 58px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        letter-spacing: 1px;
+                        vertical-alignment: center;
+                    }
+                    // Swatches mirror CUT_CARD_COLORS Rust-side.
+                    for c[ix] in [#000000, #101418, #B7410E, #0E2A1C]: Rectangle {
+                        width: 24px;
+                        height: 20px;
+                        border-radius: Palette.radius-sm;
+                        background: c;
+                        border-width: root.cur.color-ix == ix ? 2px : 1px;
+                        border-color: root.cur.color-ix == ix ? Palette.primary : Palette.border;
+                        sw-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.cut-set("color", ix); }
+                        }
+                    }
+                }
+                if root.gen-mode == "cut" && root.cut-has-sel: HorizontalLayout {
+                    spacing: 4px;
+                    OptionChip {
+                        label: "💬 SET CAPTION";
+                        active: root.cur.caption != "";
+                        clicked => { root.cut-set("caption", root.prompt-input); }
+                    }
+                    if root.cur.caption != "": OptionChip {
+                        label: "✕ CLEAR";
+                        active: false;
+                        clicked => { root.cut-set("caption-clear", ""); }
+                    }
+                }
+
+                // Style: letterbox · fades · loudnorm (the U2b style block).
+                if root.gen-mode == "cut": HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "LOOK";
+                        width: 58px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        letter-spacing: 1px;
+                        vertical-alignment: center;
+                    }
+                    OptionChip { label: "PLAIN";  active: root.cut-letterbox-ix == 0; clicked => { root.cut-letterbox-ix = 0; } }
+                    OptionChip { label: "BARS";   active: root.cut-letterbox-ix == 1; clicked => { root.cut-letterbox-ix = 1; } }
+                    OptionChip { label: "REVEAL"; active: root.cut-letterbox-ix == 2; clicked => { root.cut-letterbox-ix = 2; } }
+                }
+                if root.gen-mode == "cut": HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "FINISH";
+                        width: 58px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        letter-spacing: 1px;
+                        vertical-alignment: center;
+                    }
+                    OptionChip { label: "CUTS";   active: root.cut-fades-ix == 0; clicked => { root.cut-fades-ix = 0; } }
+                    OptionChip { label: "SOFT";   active: root.cut-fades-ix == 1; clicked => { root.cut-fades-ix = 1; } }
+                    OptionChip { label: "FILM";   active: root.cut-fades-ix == 2; clicked => { root.cut-fades-ix = 2; } }
+                    OptionChip { label: "♪ NORM"; active: root.cut-loudnorm; clicked => { root.cut-loudnorm = !root.cut-loudnorm; } }
+                }
+
+                if root.gen-mode == "cut": Rectangle {
+                    height: 36px;
+                    border-radius: Palette.radius;
+                    background: (root.busy || root.status != "ok" || root.cut-segments.length == 0)
+                        ? Palette.surface
+                        : (cutgo-ta.has-hover ? Palette.primary : Palette.primary-dim);
+                    border-width: 1px;
+                    border-color: (root.busy || root.status != "ok" || root.cut-segments.length == 0)
+                        ? Palette.border : Palette.primary;
+                    animate background { duration: 120ms; }
+                    cutgo-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            if (!root.busy && root.status == "ok" && root.cut-segments.length > 0) {
+                                root.cut-render();
+                            }
+                        }
+                    }
+                    Text {
+                        text: root.busy ? "WORKING…" : "✂ RENDER THE CUT  (free · on-node)";
+                        color: (root.busy || root.status != "ok" || root.cut-segments.length == 0)
+                            ? Palette.text-dim : Palette.text-bright;
+                        font-size: 11px * Personas.font-scale;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
                     }
                 }
 
@@ -507,7 +884,7 @@ export component ImagineView {
                 }
 
                 // Generate — disabled while busy/offline; shows the rough spend.
-                Rectangle {
+                if root.gen-mode != "cut": Rectangle {
                     height: 36px;
                     border-radius: Palette.radius;
                     background: (root.busy || root.status != "ok"
@@ -554,7 +931,13 @@ export component ImagineView {
                         for job in root.jobs: JobRow {
                             job: job;
                             selected: root.selected-job == job.id;
-                            pick(id) => { root.pick-job(id); }
+                            pick(id) => {
+                                if (root.gen-mode == "cut") {
+                                    root.cut-add(id);
+                                } else {
+                                    root.pick-job(id);
+                                }
+                            }
                         }
                         if root.jobs.length == 0: Text {
                             text: root.status == "ok" ? "no jobs yet — generate something ✦" : "";
@@ -612,7 +995,7 @@ export component ImagineView {
 
                 // ChainBar (A3): feed the selected result into the next verb.
                 // Grows as targets ship — image→ANIMATE (I2V), video→EXTEND.
-                if root.selected-job != ""
+                if root.selected-job != "" && root.gen-mode != "cut"
                    && (root.preview-kind == "image" || root.video-live): Rectangle {
                     height: 26px;
                     width: chain-row.preferred-width + 16px;

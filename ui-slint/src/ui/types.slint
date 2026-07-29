@@ -347,6 +347,28 @@ export struct ImagineJobItem {
     when:   string,   // created_at, trimmed for display
     err:    string,   // error text ("" when none)
     prompt: string,   // the job's prompt ("" for imports) — U1 projection
+    thumb:  image,    // U3 poster (480px jpg), cached Rust-side
+    has-thumb: bool,
+}
+
+// One Cutting Room timeline segment (A5). Rust owns the edit list; this is
+// its projection — display strings plus the raw editable values the editor
+// chips bind against. kind: 0 clip · 1 still · 2 card.
+export struct CutSegItem {
+    kind:     int,
+    id:       string,  // source job id ("" for cards)
+    label:    string,  // glyph + stem for the row
+    detail:   string,  // trim/dur/gain summary line
+    caption:  string,  // segment caption text ("" = none)
+    thumb:    image,
+    has-thumb: bool,
+    in-s:     float,
+    out-s:    float,   // 0 = full remaining
+    gain-ix:  int,     // 0 → -12dB · 1 → -6 · 2 → 0
+    speed-ix: int,     // 0 → ½× · 1 → 1× · 2 → 1½× · 3 → 2×
+    dur-ix:   int,     // stills/cards: 0 → 2s · 1 → 3s · 2 → 4s · 3 → 6s
+    zoom-ix:  int,     // 0 static · 1 push (→1.12) · 2 push+ (→1.25)
+    color-ix: int,     // card swatch index
 }
 
 export struct MessageItem {
