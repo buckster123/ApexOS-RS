@@ -139,8 +139,16 @@ export component ImagineView {
     property <int> vaspect-ix: 0;  // 0 auto · then vaspect-labels[ix-1]
     property <[int]>    vdur-secs: [4, 6, 8, 10, 15];
     property <[string]> vaspect-labels: ["16:9", "9:16", "1:1"];
-    // ~cost in cents: duration × 5¢/s (video) or 8¢/s (video-1.5).
-    property <string> video-cost: "~" + root.vdur-secs[root.vdur-ix] * (root.vmodel-ix == 2 ? 8 : 5) + "¢";
+    // Cinematic pipeline (T2I2V): no source + toggle on → the node crafts a
+    // quality still from the prompt first, then video-1.5 animates it at
+    // 1080p — the path around v1.5 being I2V-only. Rides as source-kind
+    // "cinematic" so the callback signature stays put.
+    property <bool> cinema-on: false;
+    // ~cost in cents: duration × 5¢/s (video) or 8¢/s (video-1.5);
+    // cinematic adds the 5¢ quality still and always runs v1.5.
+    property <string> video-cost: root.cinema-on && root.chain-source == ""
+        ? "~" + (root.vdur-secs[root.vdur-ix] * 8 + 5) + "¢"
+        : "~" + root.vdur-secs[root.vdur-ix] * (root.vmodel-ix == 2 ? 8 : 5) + "¢";
 
     // Prompt-from-file (any workspace text — agent notes, USB imports — is fuel).
     in property <[ImageItem]>      prompt-files;
@@ -169,7 +177,7 @@ export component ImagineView {
     }
 
     function fire-generate-video() {
-        // I2V may run promptless; T2V and extend require a prompt (server rule).
+        // I2V may run promptless; T2V, extend, and cinematic require a prompt.
         if (!root.busy && root.status == "ok"
             && (root.prompt-input != "" || root.chain-kind == "image")) {
             root.generate-video(
@@ -179,7 +187,8 @@ export component ImagineView {
                 root.vres-ix == 1 ? "480p" : (root.vres-ix == 2 ? "720p" : (root.vres-ix == 3 ? "1080p" : "default")),
                 root.vaspect-ix == 0 ? "default" : root.vaspect-labels[root.vaspect-ix - 1],
                 root.chain-source,
-                root.chain-kind);
+                root.chain-kind != "" ? root.chain-kind
+                    : (root.cinema-on ? "cinematic" : ""));
         }
     }
 
@@ -431,6 +440,30 @@ export component ImagineView {
                         label: label;
                         active: root.vaspect-ix == ix + 1;
                         clicked => { root.vaspect-ix = ix + 1; }
+                    }
+                }
+
+                // Cinematic pipeline toggle (T2I2V): only offered when nothing
+                // is chained — a chained source already picks the modality.
+                if root.gen-mode == "video" && root.chain-source == "": HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "PIPE";
+                        width: 52px;
+                        color: Palette.text-dim;
+                        font-size: 9px * Personas.font-scale;
+                        letter-spacing: 1.5px;
+                        vertical-alignment: center;
+                    }
+                    OptionChip {
+                        label: "🎬 DIRECT";
+                        active: !root.cinema-on;
+                        clicked => { root.cinema-on = false; }
+                    }
+                    OptionChip {
+                        label: "✨ CINEMA (still → 1080p)";
+                        active: root.cinema-on;
+                        clicked => { root.cinema-on = true; }
                     }
                 }
 

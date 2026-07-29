@@ -6812,9 +6812,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rt_h = rt.handle().clone();
         let uw = ui.as_weak();
         ui.on_imagine_generate_video(move |prompt, model, duration, res, aspect, src_id, src_kind| {
+            let cinematic = src_kind.as_str() == "cinematic";
             if let Some(ui) = uw.upgrade() {
                 ui.set_imagine_busy(true);
-                ui.set_imagine_note("submitting…".into());
+                ui.set_imagine_note(
+                    if cinematic { "✨ 1/2 — crafting the quality still…" } else { "submitting…" }
+                        .into(),
+                );
             }
             let (prompt, model, res, aspect) =
                 (prompt.to_string(), model.to_string(), res.to_string(), aspect.to_string());
@@ -6826,6 +6830,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let client = reqwest::Client::new();
                 let result = if token.is_empty() {
                     Err("no token — see docs/imaginarium.md".to_string())
+                } else if src_kind == "cinematic" {
+                    // T2I2V (André's pipeline, 2026-07-29): video-1.5 is
+                    // I2V-only upstream — so craft a quality still from the
+                    // prompt first (synchronous), then hand its library ref to
+                    // v1.5 at 1080p. Two visible spends, one button.
+                    let mut still =
+                        serde_json::json!({ "prompt": prompt, "n": 1, "model": "quality" });
+                    if !aspect.is_empty() && aspect != "default" {
+                        still["aspect_ratio"] = Value::String(aspect.clone());
+                    }
+                    match imagine_post_job(&client, &base, &token, "/v1/images/generations", &still)
+                        .await
+                    {
+                        Ok(img) => {
+                            let img_id = img
+                                .get("job_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string();
+                            if img.get("status").and_then(Value::as_str) == Some("done")
+                                && !img_id.is_empty()
+                            {
+                                let uw3 = uw.clone();
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = uw3.upgrade() {
+                                        ui.set_imagine_note(
+                                            "✨ 2/2 — still crafted, v1.5 animating at 1080p…"
+                                                .into(),
+                                        );
+                                        ui.invoke_refresh_imagine();
+                                    }
+                                })
+                                .ok();
+                                let (path, body) = imagine_video_body(
+                                    &prompt, "1.5", duration, "1080p", &aspect, &img_id, "image",
+                                );
+                                imagine_post_job(&client, &base, &token, path, &body).await
+                            } else {
+                                let msg = img
+                                    .get("error")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("still generation did not complete");
+                                Err(format!("cinematic step 1 failed: {msg}"))
+                            }
+                        }
+                        Err(e) => Err(format!("cinematic step 1 failed: {e}")),
+                    }
                 } else {
                     let (path, body) =
                         imagine_video_body(&prompt, &model, duration, &res, &aspect, &src_id, &src_kind);
