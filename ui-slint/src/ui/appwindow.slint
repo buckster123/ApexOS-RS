@@ -307,6 +307,8 @@ export component AppWindow inherits Window {
     callback imagine-cut-set(string, string);                // editor verb on the selection
     callback imagine-cut-music-clear();
     callback imagine-cut-render();
+    callback imagine-cut-score(string);                      // sonus track → music bed
+    callback imagine-cut-score-compose();                    // queued user_prompt to APEX
     // Window management (Desktop mode)
     callback launch-app(int);                 // AppKind ordinal: 0=chat 1=system 2=sensor 3=sessions 4=settings
     callback focus-window(int);               // id
@@ -990,6 +992,8 @@ export component AppWindow inherits Window {
                         imagine-cut-set(f, v) => { root.imagine-cut-set(f, v); }
                         imagine-cut-music-clear => { root.imagine-cut-music-clear(); }
                         imagine-cut-render => { root.imagine-cut-render(); }
+                        imagine-cut-score(n) => { root.imagine-cut-score(n); }
+                        imagine-cut-score-compose => { root.imagine-cut-score-compose(); }
                         refresh-imagine => { root.refresh-imagine(); }
                         imagine-video-play(w, h) => { root.imagine-video-play(w, h); }
                         imagine-video-stop => { root.imagine-video-stop(); }
