@@ -103,9 +103,11 @@ design undone in one line.
   in-app** — an ffmpeg-pipe player (fetch-to-cache → poster → rawvideo frames
   on a Slint timer + audio via `aplay`; design in `docs/imagine-studio.md`).
   Honest states: node-offline banner, token-rejected banner, a distinct
-  **NO TOKEN** state, busy guard. v1 is image-first — video submit, edit/I2V,
-  follow-along auto-reveal, and an `imagine_save` workspace-pull tool are
-  parked in `BACKLOG.md`.
+  **NO TOKEN** state, busy guard. The studio arc (`docs/imagine-studio.md`)
+  has since added **video generation** (T2V + I2V via `library:` chain refs,
+  `no_wait` submit + rail polling) and the first **ChainBar** edges
+  (image→ANIMATE, video→EXTEND). Still parked in `BACKLOG.md`: edit flows,
+  follow-along auto-reveal, `imagine_save`.
 
   **How the app gets its reach** (base URL + LAN token): env
   (`IMAGINARIUM_URL`/`IMAGINARIUM_TOKEN`) wins when set — the kiosk unit reads

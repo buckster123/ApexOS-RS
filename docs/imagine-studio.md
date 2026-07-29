@@ -56,10 +56,10 @@ as each lands.
 
 | # | Repo | Slice | Status |
 |---|------|-------|--------|
-| A1 | ApexOS-RS | **Video player** in the Imagine app: fetch-to-cache, poster frame, play/stop/replay, progress line, the degrade ladder | ☐ |
-| U1 | Imaginarium | **Client ergonomics**: `library:{job_id}` MediaRef (kills download→base64 chains + the 40 MB chain ceiling), `?i=` multi-asset content addressing (n>1 batches reachable), jobs-list projection carrying prompt + first-asset kind | ☐ |
-| A2 | ApexOS-RS | **Video generation**: T2V + I2V (source = library job via chain or workspace image), duration/aspect/resolution chips, `no_wait` submit + jobs-rail polling, modality/model validation mirrored | ☐ |
-| A3 | ApexOS-RS | **ChainBar native**: result actions on the preview (→ I2V · → Extend · → Edit · → Craft), growing as the targets ship | ☐ |
+| A1 | ApexOS-RS | **Video player** in the Imagine app: fetch-to-cache, poster frame, play/stop/replay, progress line, the degrade ladder | ✅ #293 |
+| U1 | Imaginarium | **Client ergonomics**: `library:{job_id}` MediaRef (kills download→base64 chains + the 40 MB chain ceiling), `?i=` multi-asset content addressing (n>1 batches reachable), jobs-list projection carrying prompt + first-asset kind | ✅ Imag#4 |
+| A2 | ApexOS-RS | **Video generation**: T2V + I2V (source = library job via chain), duration/aspect/resolution chips, `no_wait` submit + watcher polling with etiquette-guarded auto-open, modality/model validation mirrored (1080p only when I2V) | ✅ #294 |
+| A3 | ApexOS-RS | **ChainBar native**: result actions on the preview (image→ANIMATE, video→EXTEND; → Edit/→ Craft land with A4/A5), chain-source chip with clear, jobs rail shows U1's prompt projection | ✅ #294 (first edges) |
 | U2a | Imaginarium | **Craft engine correctness** (the cutting-room port, part 1): per-segment normalize filter → concat, **master-clock single audio pass + music-bed audio track** (`AssetKind::Audio`, library audio sniff/mime/import/content-type), segment-owned captions (makes the lost-overlay bug unrepresentable), ffprobe durations, `-nostdin` + even-dimension pitfalls as tests | ☐ |
 | U2b | Imaginarium | **Craft engine expressiveness** (part 2): versioned merged timeline contract (style block, segment kinds `clip`/`still`+Ken Burns/`card`, speed, letterbox recipes), two-pass loudnorm ship pass, content-hash segment caching, provenance field | ☐ |
 | U3 | Imaginarium | **Thumbnails/posters** (`thumb.jpg` on completion via the contact-sheet recipe + `/v1/library/{id}/thumb`) + **async craft render** (job id immediately, poll like any job) | ☐ |

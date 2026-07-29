@@ -346,6 +346,7 @@ export struct ImagineJobItem {
     model:  string,   // grok-imagine-image | …-quality | …-video | …
     when:   string,   // created_at, trimmed for display
     err:    string,   // error text ("" when none)
+    prompt: string,   // the job's prompt ("" for imports) — U1 projection
 }
 
 export struct MessageItem {
