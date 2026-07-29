@@ -219,6 +219,8 @@ export component AppWindowFrame inherits Rectangle {
     in-out property <int>          imagine-cut-letterbox-ix;
     in-out property <int>          imagine-cut-fades-ix;
     in-out property <bool>         imagine-cut-loudnorm;
+    in property <[ImageItem]>      imagine-edit-sources;
+    in property <int>              imagine-edit-count;
 
     // ── App callbacks (forwarded to root AppWindow) ─────────────────────
     callback send-message(string);
@@ -312,7 +314,9 @@ export component AppWindowFrame inherits Rectangle {
     callback imagine-cut-music-clear();
     callback imagine-cut-render();
     callback imagine-cut-score(string);
-    callback imagine-cut-score-compose();                    // workspace-relative path
+    callback imagine-cut-score-compose();
+    callback imagine-edit-add(string);
+    callback imagine-edit-remove(string);                    // workspace-relative path
     // set-model is shared with Settings (declared above).
 
     // ── Window-management callbacks ─────────────────────────────────────
@@ -812,6 +816,8 @@ export component AppWindowFrame inherits Rectangle {
             cut-fades-ix <=> root.imagine-cut-fades-ix;
             cut-loudnorm <=> root.imagine-cut-loudnorm;
             score-files: root.sonus-files;
+            edit-sources: root.imagine-edit-sources;
+            edit-count: root.imagine-edit-count;
             generate(p, m, a, n) => { root.imagine-generate(p, m, a, n); }
             generate-video(p, m, d, r, a, sid, sk) => { root.imagine-generate-video(p, m, d, r, a, sid, sk); }
             pick-job(id) => { root.imagine-pick-job(id); }
@@ -830,6 +836,8 @@ export component AppWindowFrame inherits Rectangle {
             score-refresh => { root.refresh-sonus(); }
             cut-score(n) => { root.imagine-cut-score(n); }
             cut-score-compose => { root.imagine-cut-score-compose(); }
+            edit-add(id) => { root.imagine-edit-add(id); }
+            edit-remove(id) => { root.imagine-edit-remove(id); }
         }
     }
 

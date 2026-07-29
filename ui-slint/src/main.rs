@@ -130,6 +130,10 @@ thread_local! {
     // (track name → library job id) — scoring twice must not duplicate imports.
     static CUT_SONUS_IMPORTED: RefCell<std::collections::HashMap<String, String>> =
         RefCell::new(std::collections::HashMap::new());
+    // Image-edit sources (A4): up to 3 library refs feeding /v1/images/edits.
+    static EDIT_SOURCES: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    static EDIT_SOURCES_MODEL: RefCell<Option<Rc<slint::VecModel<ImageItem>>>> =
+        const { RefCell::new(None) };
     // U3 poster cache — job id → fetch state. Failed stays failed (audio jobs
     // have no thumb; retrying every 3s watcher tick would be a storm).
     static IMAGINE_THUMBS: RefCell<std::collections::HashMap<String, ThumbState>> =
@@ -3761,6 +3765,26 @@ mod tests {
     }
 
     #[test]
+    fn edit_body_carries_library_refs() {
+        use super::imagine_edit_body;
+        let sources = vec![
+            ("01AAA".to_string(), "a".to_string()),
+            ("01BBB".to_string(), "b".to_string()),
+        ];
+        let body = imagine_edit_body("make it night", 2, &sources);
+        assert_eq!(body["prompt"], "make it night");
+        assert_eq!(body["n"], 2);
+        assert_eq!(body["images"][0], "library:01AAA");
+        assert_eq!(body["images"][1], "library:01BBB");
+        // model/aspect stay absent — the server's edit default rules
+        assert!(body.get("model").is_none());
+        assert!(body.get("aspect_ratio").is_none());
+        // a fourth source never leaves the client
+        let four: Vec<(String, String)> = (0..4).map(|i| (format!("0{i}"), "x".into())).collect();
+        assert_eq!(imagine_edit_body("p", 1, &four)["images"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
     fn sonus_scoring_maps_mimes_and_briefs() {
         use super::{cut_compose_prompt, sonus_mime_for_name};
         assert_eq!(sonus_mime_for_name("dream.wav"), "audio/wav");
@@ -5282,6 +5306,37 @@ fn sonus_mime_for_name(name: &str) -> &'static str {
     }
 }
 
+/// Build the image-edit request (A4): up to 3 `library:` refs, model left to
+/// the server's edit default (the gen chips' aliases don't apply). Pure.
+fn imagine_edit_body(prompt: &str, n: u32, sources: &[(String, String)]) -> Value {
+    let images: Vec<Value> = sources
+        .iter()
+        .take(3)
+        .map(|(id, _)| Value::String(format!("library:{id}")))
+        .collect();
+    serde_json::json!({ "prompt": prompt, "images": images, "n": n })
+}
+
+/// Re-project the edit-source list into its chip row model.
+fn edit_sources_project(ui: &AppWindow) {
+    let rows: Vec<ImageItem> = EDIT_SOURCES.with(|s| {
+        s.borrow()
+            .iter()
+            .map(|(id, stem)| ImageItem {
+                name: stem.as_str().into(),
+                path: id.as_str().into(),
+            })
+            .collect()
+    });
+    let n = rows.len() as i32;
+    EDIT_SOURCES_MODEL.with(|m| {
+        if let Some(model) = m.borrow().as_ref() {
+            model.set_vec(rows);
+        }
+    });
+    ui.set_imagine_edit_count(n);
+}
+
 /// The brief handed to APEX when the human hits "ask APEX to compose" —
 /// a plain queued user_prompt (the occipital-steer idiom: rides the WS through
 /// the TurnGate, so it can never race an in-flight turn).
@@ -6650,6 +6705,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_imagine_cut_segments(slint::ModelRc::from(cut_segs_vec.clone()));
     CUT_MODEL.with(|m| *m.borrow_mut() = Some(cut_segs_vec.clone()));
 
+    // Image-edit source chips (A4).
+    let edit_sources_vec: Rc<slint::VecModel<ImageItem>> = Rc::new(slint::VecModel::default());
+    ui.set_imagine_edit_sources(slint::ModelRc::from(edit_sources_vec.clone()));
+    EDIT_SOURCES_MODEL.with(|m| *m.borrow_mut() = Some(edit_sources_vec.clone()));
+
     // Feedback subsystem: bind the toast model + global callbacks.
     let toasts_vec: Rc<slint::VecModel<ToastItem>> = Rc::new(slint::VecModel::default());
     ui.global::<Notifications>().set_toasts(slint::ModelRc::from(toasts_vec.clone()));
@@ -7313,10 +7373,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rt_h = rt.handle().clone();
         let uw = ui.as_weak();
         ui.on_imagine_generate(move |prompt, model, aspect, n| {
+            // Armed edit sources reroute this submit to /v1/images/edits (A4).
+            // Thread-local read happens HERE — never inside the tokio task.
+            let edit_sources = EDIT_SOURCES.with(|s| s.borrow().clone());
+            let editing = !edit_sources.is_empty();
             // Busy state lands immediately — this callback runs on the Slint thread.
             if let Some(ui) = uw.upgrade() {
                 ui.set_imagine_busy(true);
-                ui.set_imagine_note("generating…".into());
+                ui.set_imagine_note(if editing { "✎ editing…" } else { "generating…" }.into());
             }
             let (prompt, model, aspect) = (prompt.to_string(), model.to_string(), aspect.to_string());
             let n = n.max(1) as u32;
@@ -7326,6 +7390,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let client = reqwest::Client::new();
                 let result = if token.is_empty() {
                     Err("no token — see docs/imaginarium.md".to_string())
+                } else if editing {
+                    let body = imagine_edit_body(&prompt, n, &edit_sources);
+                    imagine_post_job(&client, &base, &token, "/v1/images/edits", &body).await
                 } else {
                     imagine_generate_call(&client, &base, &token, &prompt, &model, &aspect, n).await
                 };
@@ -7368,6 +7435,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_imagine_preview(slint::Image::from_rgba8(buf));
                             ui.set_imagine_preview_kind("image".into());
                             ui.set_imagine_prompt_input("".into());
+                            if editing {
+                                // The edit consumed its sources — disarm.
+                                EDIT_SOURCES.with(|s| s.borrow_mut().clear());
+                                edit_sources_project(&ui);
+                            }
                         } else if failed {
                             ui.set_imagine_preview_kind("error".into());
                         }
@@ -7771,6 +7843,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .ok();
             });
+        });
+    }
+
+    // ── Image-edit sources (A4) ──────────────────────────────────────────────
+    // ✎ EDIT on a previewed image arms it as a source (≤3, deduped); the next
+    // image-mode GENERATE routes to /v1/images/edits with library: refs.
+    {
+        let uw = ui.as_weak();
+        ui.on_imagine_edit_add(move |id| {
+            let Some(ui) = uw.upgrade() else { return };
+            let id = id.to_string();
+            // Label from the rail row (prompt stem, else model) — no refetch.
+            let stem: String = IMAGINE_JOBS.with(|m| {
+                use slint::Model as _;
+                m.borrow().as_ref().and_then(|model| {
+                    model
+                        .iter()
+                        .find(|r| r.id.as_str() == id)
+                        .map(|r| if r.prompt.is_empty() { r.model } else { r.prompt })
+                })
+            })
+            .map(|s| s.to_string().chars().take(18).collect())
+            .unwrap_or_else(|| id.chars().take(8).collect());
+            let outcome = EDIT_SOURCES.with(|s| {
+                let mut list = s.borrow_mut();
+                if list.iter().any(|(i, _)| *i == id) {
+                    "already a source"
+                } else if list.len() >= 3 {
+                    "edit takes at most 3 sources"
+                } else {
+                    list.push((id.clone(), stem.clone()));
+                    "armed"
+                }
+            });
+            if outcome == "armed" {
+                ui.set_imagine_gen_mode("image".into());
+                ui.set_imagine_note(format!("✎ source armed: {stem}").into());
+            } else {
+                ui.set_imagine_note(outcome.into());
+            }
+            edit_sources_project(&ui);
+        });
+    }
+    {
+        let uw = ui.as_weak();
+        ui.on_imagine_edit_remove(move |id| {
+            if let Some(ui) = uw.upgrade() {
+                EDIT_SOURCES.with(|s| s.borrow_mut().retain(|(i, _)| i.as_str() != id.as_str()));
+                edit_sources_project(&ui);
+            }
         });
     }
 
