@@ -145,6 +145,42 @@ APEX assimilated the substrate-update letter (prompt caching + self-update + git
 
 ## Features / Roadmap
 
+### Media UX (harvested 2026-07-30 — André's field poke after the Sonus-RS cutover finale)
+
+APEX rendered `workspace/film/same_voice_new_bones_teaser.mp4` and there was
+no way to *watch* it from the shell. Three findings, one theme: playback of
+workspace media is under-served on desktop nodes.
+
+- **🎬 No general video player** — the only video surface is the Imagine
+  app's player, which browses the *Imaginarium library* (daemon-side,
+  `/var/lib/imaginarium`), not the workspace — a craft render muxed outside
+  imaginarium (APEX's ffmpeg teaser) is invisible to it, and the Files app
+  can navigate to the .mp4 but can't open it. Fix shape: a lean **Media
+  player app** (video+audio over the existing GStreamer/player seam the
+  Imagine player already proves out) fed by workspace paths, + Files-app
+  "open" routing media extensions to it. Absorbing the 🎵 Sonus player's
+  playback into it is optional consolidation.
+- **🔇 Sonus app silent on DESKTOP nodes** — root cause known, not a
+  regression: `/api/sonus/play` spawns a **server-side** child
+  (`sonus_player()` in the gateway) → the agentd system user can't reach the
+  logged-in user's PipeWire (the documented desktop-audio gotcha; kiosks
+  fine). Fix = the client-side-TTS pattern: 🎵 plays locally in the UI
+  process (`GET /api/sonus/stream` → local decode/aplay), falling back to
+  `/api/sonus/play` on kiosk. The Imagine video player already plays sound
+  client-side — proof the path works.
+- **✏️ Imagine app naming + library completeness** — rename the Slint app
+  "Imagine" → **"Imaginarium"** (Imagine is xAI's model/API brand; the
+  product surface is ours), and check the library view actually lists
+  edit/craft job outputs (video_edit/craft rows), not just plain
+  generations. Related seam (tracked in Sonus-RS Post-v1 + here): craft's
+  `music` slot needs an in-library job_id — an `imaginarium_audio_import`
+  MCP tool (or path-accepting slot) closes the cross-plugin gap APEX
+  documented as Cerebro procedure `e5d9e01a-ac14-41fc-808e-ff65d5c58732`.
+- *(Non-issue, by design: the Files app not reaching
+  `/var/lib/imaginarium` is the confinement working — the Imaginarium
+  library is daemon-owned and browsed via the Imagine app/API; workspace
+  media like `workspace/film/` is fully in reach.)*
+
 ### Symbiosis (runtime cognitive loop) — still open
 
 - ✅ **DONE — Sleep loop wired (step 1)** — soul.md Session-shutdown deposit section (`fa2eba8`, deployed live). APEX is now instructed to session_save/store_intention/dream_run on shutdown.
