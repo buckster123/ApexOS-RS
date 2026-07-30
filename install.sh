@@ -34,7 +34,7 @@
 #   APEXOS_IMAGINARIUM=1
 #
 # Idempotency: the resolved choices are saved to /etc/agentd/install.conf and
-# restored on every re-run, so `apexos-update` (a no-flag, no-USB re-run) keeps the
+# restored on every re-run, so `apexos-update` (a flag-forwarding, no-USB re-run) keeps the
 # same deployment shape instead of re-auto-detecting (no headless→kiosk flip).
 # Precedence: CLI flag > USB apexos.conf > install.conf > auto-detect. Change a
 # node's shape with a flag, a fresh USB file, or by deleting install.conf.
@@ -1899,10 +1899,14 @@ hdr "Update command"
 cat > /usr/local/bin/apexos-update <<'UPD'
 #!/usr/bin/env bash
 # ApexOS-RS self-update — pull latest, rebuild, hot-swap binaries + restart.
+# Flags forward to install.sh: `apexos-update --sonus` adds an add-on to this
+# node (persisted in install.conf, so future plain runs keep it updated);
+# `apexos-update --tui` opens the interactive picker seeded with the node's
+# current choices — new add-ons shipped since install appear as new rows.
 set -euo pipefail
 if [[ $EUID -ne 0 ]]; then exec sudo -E "$0" "$@"; fi
 echo "── ApexOS-RS update — pulling, building, hot-swapping… ──"
-curl -fsSL https://raw.githubusercontent.com/buckster123/ApexOS-RS/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/buckster123/ApexOS-RS/main/install.sh | bash -s -- "$@"
 UPD
 chmod 755 /usr/local/bin/apexos-update
 ok "apexos-update installed — run 'apexos-update' anytime to pull + rebuild"
