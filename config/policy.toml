@@ -191,6 +191,30 @@ mode = "suggest"
 "imaginarium_video_edit"     = "ask"
 "imaginarium_video_extend"   = "ask"
 
+# Sonus music-gen tools (sonus-mcp, Sonus-RS sibling) -------------------------
+# Same money logic as imaginarium. Reads + downloads are free: allow
+# (check_credits is THE spend gate — free, check before generating). A song
+# generation costs cents (2 variants/run): allow, the image-gen footing.
+# The nine extended tools are honest not-yet stubs in Sonus-RS v1 — seeded
+# "ask" NOW so a post-v1 implementation (stems/wav/video/SFX all spend) can't
+# inherit silent spend; flip individually as they land and earn trust.
+"check_credits"           = "allow"
+"check_status"            = "allow"
+"check_status_until_done" = "allow"
+"download_track"          = "allow"
+"generate_song"           = "allow"
+"generate_lyrics"         = "allow"
+"extend_track"            = "allow"
+"generate_album"          = "ask"
+"separate_stems"          = "ask"
+"replace_section"         = "ask"
+"boost_style"             = "ask"
+"convert_to_wav"          = "ask"
+"create_music_video"      = "ask"
+"generate_sounds"         = "ask"
+"clone_voice_validate"    = "ask"
+"clone_voice_create"      = "ask"
+
 # Cerebro plugin tools --------------------------------------------------------
 "remember"     = "allow"
 "recall"       = "allow"

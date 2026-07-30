@@ -19,13 +19,26 @@ cmd     = "/usr/local/bin/apexos-tools"
 args    = []
 restart = "always"
 
-# Sonus — music generation (Python, optional — uncomment when deployed)
+# Sonus — Suno music generation (generate_song / check_status / download_track …).
+# Pure-Rust drop-in for the old Python hermes-sonus plugin: same tool names, no venv.
+# Standalone sibling repo (github.com/buckster123/Sonus-RS) — NOT a workspace member,
+# so `cargo build --release --workspace` does NOT produce this binary.
+#
+# install.sh provisions it OPT-IN (--sonus / TUI add-on / APEXOS_SONUS=1 — BYOK paid
+# key) and APPENDS the live [[plugin]] block only when a SUNO_API_KEY sits in
+# /etc/sonus/env (INSTALLED ≠ ACTIVE). The key stays OUT of this file and out of
+# /etc/agentd/env: sonus-mcp self-loads /etc/sonus/env (root:agentd 0640).
+# This template stays COMMENTED so agentd is never pointed at a missing binary.
+# Uncomment below only for a manual (non-install.sh) deploy. See docs/sonus.md.
+#
 # [[plugin]]
 # id      = "sonus"
 # cmd     = "/usr/local/bin/sonus-mcp"
+# args    = []
 # restart = "always"
 # [plugin.env]
 # SUNO_DOWNLOAD_DIR = "/var/lib/agentd/workspace/sonus"
+# RUST_LOG          = "warn"
 
 # Occipital — the agent's reading cortex: web_search / web_fetch / web_recall / web_save / web_forget.
 # Standalone sibling repo (github.com/buckster123/Occipital-RS) — NOT a workspace member, so
