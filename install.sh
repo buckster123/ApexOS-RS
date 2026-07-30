@@ -47,6 +47,7 @@
 #   --no-sensor             Skip apex-sensor-bridge (no sensorhead attached)
 #   --no-occipital          Skip the Occipital web cortex (clone + build of the sibling repo)
 #   --imaginarium           Install the Imaginarium image/video-gen node (xAI Imagine, BYOK — opt-in)
+#   --sonus                 Install Sonus-RS music generation (Suno via sunoapi.org, BYOK — opt-in)
 #   --no-voice              Skip whisper + piper wake-word
 #   --api-key=KEY           Set ANTHROPIC_API_KEY non-interactively
 #   --openrouter-key=KEY    Set OPENROUTER_API_KEY
@@ -305,7 +306,7 @@ load_persisted_config() {
     fi
     return 0
   fi
-  local c_mode c_tier c_no_ui c_no_sensor c_no_api c_voice c_no_occipital c_imaginarium
+  local c_mode c_tier c_no_ui c_no_sensor c_no_api c_voice c_no_occipital c_imaginarium c_sonus
   c_mode=$(_envval "$CONF_FILE" APEXOS_MODE)
   c_tier=$(_envval "$CONF_FILE" APEXOS_TIER)
   c_no_ui=$(_envval "$CONF_FILE" APEXOS_NO_UI)
@@ -314,6 +315,7 @@ load_persisted_config() {
   c_voice=$(_envval "$CONF_FILE" APEXOS_VOICE)
   c_no_occipital=$(_envval "$CONF_FILE" APEXOS_NO_OCCIPITAL)
   c_imaginarium=$(_envval "$CONF_FILE" APEXOS_IMAGINARIUM)
+  c_sonus=$(_envval "$CONF_FILE" APEXOS_SONUS)
   [[ -n "$c_mode" ]] && ! $MODE_CLI && MODE="$c_mode"
   [[ -n "$c_tier" ]] && ! $TIER_CLI && TIER="$c_tier"
   [[ -n "$c_no_ui"     ]] && ! $NO_UI_CLI          && { _truthy "$c_no_ui"     && NO_UI=true          || NO_UI=false; }
@@ -322,6 +324,7 @@ load_persisted_config() {
   [[ -n "$c_no_occipital" ]] && ! $NO_OCCIPITAL_CLI && { _truthy "$c_no_occipital" && NO_OCCIPITAL=true || NO_OCCIPITAL=false; }
   [[ -n "$c_voice"     ]] && ! $NO_VOICE_CLI       && { _truthy "$c_voice"     && NO_VOICE=false      || NO_VOICE=true; }
   [[ -n "$c_imaginarium" ]] && ! $IMAGINARIUM_CLI  && { _truthy "$c_imaginarium" && NO_IMAGINARIUM=false || NO_IMAGINARIUM=true; }
+  [[ -n "$c_sonus" ]] && ! $SONUS_CLI && { _truthy "$c_sonus" && NO_SONUS=false || NO_SONUS=true; }
   ok "Restored install choices from $CONF_FILE (mode=$MODE tier=$TIER)"
 }
 
@@ -341,6 +344,13 @@ NO_OCCIPITAL=false; OCC_FEATURES=""; OCCIPITAL_INSTALLED=false
 # plugin registered. IMAG_ENV is the ONE file that ever holds the xAI key.
 NO_IMAGINARIUM=true; IMAGINARIUM_INSTALLED=false; IMAGINARIUM_ACTIVE=false
 IMAG_ENV=/etc/imaginarium/env
+# Sonus (Suno music-gen MCP sibling, Sonus-RS) defaults OFF — BYOK paid key, so
+# opt-in like imaginarium: --sonus, the TUI add-on, or APEXOS_SONUS=1.
+# INSTALLED = binary + env file provisioned; ACTIVE = a SUNO_API_KEY present too,
+# so the MCP plugin gets registered. No daemon here: the MCP child (agentd user)
+# SELF-LOADS SONUS_ENV (root:agentd 0640) — the key stays out of every agentd env.
+NO_SONUS=true; SONUS_INSTALLED=false; SONUS_ACTIVE=false
+SONUS_ENV=/etc/sonus/env
 API_KEY=""; OPENROUTER_KEY=""; API_KEY_SRC=""
 TIER="auto"; MODE="auto"; REPO_DIR=""
 IS_DESKTOP=false   # MODE==desktop → build the UI but launch a winit window, not the kiosk service
@@ -350,7 +360,7 @@ IS_DESKTOP=false   # MODE==desktop → build the UI but launch a winit window, n
 # user did NOT pass. (Precedence: CLI > USB file > install.conf > auto-detect.)
 MODE_CLI=false; TIER_CLI=false
 NO_UI_CLI=false; NO_CEREBRO_API_CLI=false; NO_SENSOR_CLI=false; NO_VOICE_CLI=false
-NO_OCCIPITAL_CLI=false; IMAGINARIUM_CLI=false
+NO_OCCIPITAL_CLI=false; IMAGINARIUM_CLI=false; SONUS_CLI=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -362,6 +372,8 @@ for arg in "$@"; do
     --no-occipital)        NO_OCCIPITAL=true; NO_OCCIPITAL_CLI=true ;;
     --imaginarium)         NO_IMAGINARIUM=false; IMAGINARIUM_CLI=true ;;
     --no-imaginarium)      NO_IMAGINARIUM=true;  IMAGINARIUM_CLI=true ;;
+    --sonus)               NO_SONUS=false; SONUS_CLI=true ;;
+    --no-sonus)            NO_SONUS=true;  SONUS_CLI=true ;;
     --no-voice)            NO_VOICE=true;  NO_VOICE_CLI=true ;;
     --voice)               NO_VOICE=false; NO_VOICE_CLI=true ;;
     --api-key=*)           API_KEY="${arg#*=}"; API_KEY_SRC="--api-key flag" ;;
@@ -623,6 +635,7 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
   UI_STATE="ON";     $NO_UI && UI_STATE="OFF"
   OCC_STATE="ON";    $NO_OCCIPITAL && OCC_STATE="OFF"
   IMAG_STATE="OFF";  $NO_IMAGINARIUM || IMAG_STATE="ON"
+  SONUS_STATE="OFF"; $NO_SONUS || SONUS_STATE="ON"
 
   ADDONS=$(tui_checklist "Components" \
     "Select the components to install:\n(Space to toggle, Enter to confirm)" \
@@ -630,6 +643,7 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
     "cerebro"     "Cerebro API      REST dashboard + memory UI on :8765"        "$API_STATE" \
     "occipital"   "Web Cortex       web_search/fetch + semantic recall"         "$OCC_STATE" \
     "imaginarium" "Imaginarium      xAI Imagine image/video gen (paid key)"     "$IMAG_STATE" \
+    "sonus"       "Sonus            Suno music generation (paid key)"           "$SONUS_STATE" \
     "sensor"      "Sensor Head      BME688 air quality + MLX90640 thermal cam"  "$SENSOR_STATE" \
     "voice"       "Voice            Wake-word + whisper transcription"          "OFF")
 
@@ -638,6 +652,7 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
   echo "$ADDONS" | grep -q '"cerebro"'     || NO_CEREBRO_API=true
   echo "$ADDONS" | grep -q '"occipital"'   && NO_OCCIPITAL=false || NO_OCCIPITAL=true
   echo "$ADDONS" | grep -q '"imaginarium"' && NO_IMAGINARIUM=false || NO_IMAGINARIUM=true
+  echo "$ADDONS" | grep -q '"sonus"'       && NO_SONUS=false || NO_SONUS=true
   echo "$ADDONS" | grep -q '"sensor"'      && NO_SENSOR=false || NO_SENSOR=true
   echo "$ADDONS" | grep -q '"voice"'       && NO_VOICE=false  || NO_VOICE=true
 fi
@@ -726,6 +741,7 @@ if ! $YES; then
   case "$TIER" in micro|standard|pro) OCC_RECALL="semantic recall (bge-small)" ;; esac
   ! $NO_OCCIPITAL   && ADDONS_LIST+="  ✓ occipital     (web cortex — $OCC_RECALL)\n"
   ! $NO_IMAGINARIUM && ADDONS_LIST+="  ✓ imaginarium   (xAI Imagine image/video gen)\n"
+  ! $NO_SONUS       && ADDONS_LIST+="  ✓ sonus         (Suno music generation)\n"
   ! $NO_SENSOR      && ADDONS_LIST+="  ✓ sensor-head   (BME688 + MLX90640)\n"
   ! $NO_VOICE       && ADDONS_LIST+="  ✓ voice         (whisper transcription)\n"
   [[ -n "$API_KEY" ]]        && KEY_STATUS="Anthropic key: set" \
@@ -1368,6 +1384,85 @@ if ! $NO_IMAGINARIUM; then
   fi
 fi
 
+# ── Sonus (Suno music generation) ─────────────────────────────────────────────
+# Pure-Rust drop-in for the Python hermes-sonus plugin: sonus-mcp from the
+# Sonus-RS sibling repo, same tool names, no venv. UNLIKE imaginarium there is
+# NO daemon — the MCP child itself talks to sunoapi.org, so key isolation works
+# differently: SUNO_API_KEY lives ONLY in /etc/sonus/env (root:agentd 0640) and
+# the sonus-mcp binary SELF-LOADS that file (process env wins, empty vars don't
+# shadow). agentd's env and plugins.toml never carry the key. Opt-in (BYOK paid
+# key); best-effort like the other siblings: a failure warns + continues.
+# CUTOVER NOTE: the Python launcher lived at /usr/local/bin/sonus-mcp too — on a
+# node with the legacy stanza already live, installing this binary over that
+# path IS the cutover (the stanza's cmd is unchanged; agentd restart picks it up).
+if ! $NO_SONUS; then
+  hdr "Sonus (Suno music generation)"
+  SONUS_DIR="$(dirname "$REPO_DIR")/Sonus-RS"   # sibling of the ApexOS-RS clone
+
+  sonus_provision() {
+    ensure_bootstrap_deps                              # git/curl/ca-certs (idempotent)
+    if [[ -d "$SONUS_DIR/.git" ]]; then
+      [[ "$BUILD_USER" != "root" ]] && chown -R "$BUILD_USER:" "$SONUS_DIR"
+      info "Updating Sonus-RS clone at $SONUS_DIR …"
+      local GIT_SONUS=(git -C "$SONUS_DIR")
+      [[ "$BUILD_USER" != "root" ]] && GIT_SONUS=(sudo -u "$BUILD_USER" git -C "$SONUS_DIR")
+      "${GIT_SONUS[@]}" checkout -- Cargo.lock 2>/dev/null || true   # self-heal build drift
+      "${GIT_SONUS[@]}" pull --ff-only
+    else
+      info "Cloning Sonus-RS …"
+      git clone --depth=1 https://github.com/buckster123/Sonus-RS "$SONUS_DIR"
+      [[ "$BUILD_USER" != "root" ]] && chown -R "$BUILD_USER:" "$SONUS_DIR"
+    fi
+    info "Building sonus-mcp …"
+    # NOT --locked: a foreign repo whose committed lock we don't gate-keep (same
+    # stance as occipital/imaginarium); the checkout above keeps re-runs clean.
+    sudo -u "$BUILD_USER" "$CARGO" build --release -p sonus-mcp \
+      --manifest-path "$SONUS_DIR/Cargo.toml" 2>&1 \
+      | grep --line-buffered -E "(^[[:space:]]*Compiling sonus|Finished|^error)" || true
+    [[ -x "$SONUS_DIR/target/release/sonus-mcp" ]] \
+      || { warn "sonus-mcp build produced no binary"; return 1; }
+    install -m 755 "$SONUS_DIR/target/release/sonus-mcp" /usr/local/bin/sonus-mcp
+
+    # Downloads land inside the agent workspace so the Sonus player app and the
+    # Imagine SCORE picker see them with zero further wiring.
+    install -d -o agentd -g agentd /var/lib/agentd/workspace/sonus 2>/dev/null || true
+
+    # /etc/sonus/env — the ONE file that ever holds the Suno key. root:agentd
+    # 0640 (NOT 0600 root:root like imaginarium): there's no daemon for systemd
+    # to feed it to — the MCP child runs as the agentd user and reads the file
+    # itself. Seed-if-absent; perms re-asserted on every run.
+    install -d /etc/sonus
+    if [[ ! -f "$SONUS_ENV" ]]; then
+      {
+        echo "# Sonus node env — the Suno key lives HERE and only here."
+        echo "# The sonus-mcp plugin child self-loads this file; agentd never sees the key."
+        echo "# Add your sunoapi.org key to activate the agent tools, then re-run apexos-update:"
+        echo "SUNO_API_KEY="
+      } > "$SONUS_ENV"
+      ok "Sonus env seeded → $SONUS_ENV (add SUNO_API_KEY to activate)"
+    fi
+    chmod 640 "$SONUS_ENV"; chown root:agentd "$SONUS_ENV"
+    ok "sonus-mcp → /usr/local/bin/sonus-mcp (library: workspace/sonus)"
+    return 0
+  }
+
+  if sonus_provision; then
+    SONUS_INSTALLED=true
+    # ACTIVE only when the operator has dropped a Suno key in. A keyless
+    # sonus-mcp stays up and answers honestly, but registering it would hand
+    # the agent 16 tools that all say "no key" — same INSTALLED ≠ ACTIVE
+    # stance as imaginarium. Add the key + re-run apexos-update to activate.
+    if [[ -n "$(_envval "$SONUS_ENV" SUNO_API_KEY)" ]]; then
+      SONUS_ACTIVE=true
+    else
+      warn "No SUNO_API_KEY in $SONUS_ENV yet — sonus installed but not registered."
+      info "Add the key there, then re-run apexos-update to activate the agent tools."
+    fi
+  else
+    warn "Sonus not installed — node runs without music gen; apexos-update retries"
+  fi
+fi
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 hdr "Configuration"
 
@@ -1443,6 +1538,29 @@ if $IMAGINARIUM_ACTIVE && [[ -f /etc/agentd/plugins.toml ]] \
     echo 'RUST_LOG = "warn"'
   } >> /etc/agentd/plugins.toml
   ok "Imaginarium plugin registered in /etc/agentd/plugins.toml"
+fi
+
+# Enable the Sonus MCP plugin only when ACTIVE (binary built AND a Suno key in
+# /etc/sonus/env — the binary self-loads that file, so the stanza carries no
+# key). Same anchored-grep idempotency as occipital/imaginarium: skips the
+# commented template AND a prior run / a legacy Python-era stanza / an APEX
+# register_mcp_server entry. On legacy nodes whose uncommented python stanza
+# already points at /usr/local/bin/sonus-mcp, the binary install above IS the
+# cutover and this append correctly no-ops.
+if $SONUS_ACTIVE && [[ -f /etc/agentd/plugins.toml ]] \
+   && ! grep -qE '^[[:space:]]*id[[:space:]]*=[[:space:]]*"sonus"' /etc/agentd/plugins.toml; then
+  {
+    echo ""
+    echo "[[plugin]]"
+    echo 'id      = "sonus"'
+    echo 'cmd     = "/usr/local/bin/sonus-mcp"'
+    echo "args    = []"
+    echo 'restart = "always"'
+    echo "[plugin.env]"
+    echo 'SUNO_DOWNLOAD_DIR = "/var/lib/agentd/workspace/sonus"'
+    echo 'RUST_LOG          = "warn"'
+  } >> /etc/agentd/plugins.toml
+  ok "Sonus plugin registered in /etc/agentd/plugins.toml"
 fi
 
 # ── policy-sync ───────────────────────────────────────────────────────────────
@@ -1628,6 +1746,7 @@ write_install_conf() {
     echo "APEXOS_NO_CEREBRO_API=$NO_CEREBRO_API"
     echo "APEXOS_VOICE=$( $NO_VOICE && echo false || echo true )"
     echo "APEXOS_IMAGINARIUM=$( $NO_IMAGINARIUM && echo false || echo true )"
+    echo "APEXOS_SONUS=$( $NO_SONUS && echo false || echo true )"
   } > "$tmp"
   chmod 644 "$tmp"; chown root:root "$tmp"
   mv "$tmp" "$CONF_FILE"

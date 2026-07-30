@@ -11,7 +11,7 @@
 - `docs/agentd-protocol.md` — the WS wire contract (events, frames, session routing, examples).
 - Deferred/post-v1 ledger → end of `docs/build-roadmap.md`.
 
-Reference runtime: `../ApexOS` (Rust — **do NOT modify**). Siblings: `../Occipital-RS` (web cortex, standalone), `../Imaginarium-RS` (xAI-Imagine image/video-gen node, standalone), ApexOS-RV (`github.com/buckster123/ApexOS-RV`, no_std RISC-V — pins `apexos-protocol` as its wire contract).
+Reference runtime: `../ApexOS` (Rust — **do NOT modify**). Siblings: `../Occipital-RS` (web cortex, standalone), `../Imaginarium-RS` (xAI-Imagine image/video-gen node, standalone), `../Sonus-RS` (Suno music-gen MCP plugin, standalone — replaces python hermes-sonus), ApexOS-RV (`github.com/buckster123/ApexOS-RV`, no_std RISC-V — pins `apexos-protocol` as its wire contract).
 
 ---
 
@@ -171,7 +171,7 @@ The full ledger is **`docs/gotchas.md`** — grep it for your subsystem; entries
 - **Slint/UI**: `#[tokio::main]` ban · `invoke_from_event_loop` · `SharedString` · bare `Rectangle` ≠ layout · no key-repeat / no wheel-scroll on linuxkms (→ `ScrollView` pattern) · mono emoji · `touch build.rs`
 - **agentd core**: per-session turn gate · history trim + honest markers · session JSONL append order + `repair_history` · serde `#[derive(Default)]` shadowing trap · prompt-cache byte-stable prefix (never put volatile text in soul/embodiment/priming)
 - **Identity/memory**: `agent_id` is system-**stamped**, never model-supplied · per-agent workspace stamping · CCBS boot priming · evolution undo snapshots private + H4 snapshot gate · PAC lint gate · `soul_rehearse` · wakeup bounds
-- **Mesh/colony**: LAN bind + per-peer tokens · a2a lands in per-peer sessions · federation relays (provenance-stamped copies, `shared_only()` wire boundary, dream-digest echo-guard) · beacon · capabilities · cross-node spawn guards · vast.ai bridge invariants · imaginarium sibling node (key isolation, INSTALLED≠ACTIVE, proxy-mode-only plugin)
+- **Mesh/colony**: LAN bind + per-peer tokens · a2a lands in per-peer sessions · federation relays (provenance-stamped copies, `shared_only()` wire boundary, dream-digest echo-guard) · beacon · capabilities · cross-node spawn guards · vast.ai bridge invariants · imaginarium sibling node (key isolation, INSTALLED≠ACTIVE, proxy-mode-only plugin) · sonus sibling (no-daemon key isolation, self-loaded env file, python-stanza cutover)
 - **Sensors/voice/vision**: SensorHead is external Python · persistence filter + sensitivity profiles · `SensorAlert` pairing · TTS/STT are workspace-excluded sidecars (ort decoupling) · client-side audio on desktop · camera/audio groups
 - **FS/safety**: confinement lives in the tool (`apexos-confine`) · git roots · USB exo-workspace under the workspace · eject via root systemd unit, never sudo (`NoNewPrivileges`)
 - **Adaptive UI**: tool-family idiom (no protocol changes) · latch etiquette (human always wins) · mutation cap · drag guard · reflex trigger mirror · geometry seed deferral
@@ -229,6 +229,7 @@ Load only the relevant doc when entering a subsystem.
 | `docs/usb-workspace.md` | USB exo-workspace — marker-gated mount, eject, prep |
 | `docs/occipital.md` | Web cortex integration — registration, deploy, policy |
 | `docs/imaginarium.md` | Image/video-gen node — provisioning, MCP proxy, key isolation |
+| `docs/sonus.md` | Music-gen sibling — provisioning, no-daemon key isolation, python cutover |
 | `docs/imagine-studio.md` | Studio arc charter — video player, craft engine, slice ledger |
 | `docs/imagine-craft-skill.md` | The agent cutting room — APEX drives the timeline API (A7) |
 | `docs/self-update.md` | Daemon self-update loop (mk3) — design + invariants |
