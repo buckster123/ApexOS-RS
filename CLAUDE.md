@@ -230,6 +230,7 @@ Load only the relevant doc when entering a subsystem.
 | `docs/occipital.md` | Web cortex integration — registration, deploy, policy |
 | `docs/imaginarium.md` | Image/video-gen node — provisioning, MCP proxy, key isolation |
 | `docs/sonus.md` | Music-gen sibling — provisioning, no-daemon key isolation, python cutover |
+| `docs/fabrica.md` | **Fabrica charter** — workboard→Fabrica, worker tier, Mandala Mode, code regime (LOCKED) |
 | `docs/imagine-studio.md` | Studio arc charter — video player, craft engine, slice ledger |
 | `docs/imagine-craft-skill.md` | The agent cutting room — APEX drives the timeline API (A7) |
 | `docs/self-update.md` | Daemon self-update loop (mk3) — design + invariants |

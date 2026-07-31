@@ -14,6 +14,20 @@
 
 ---
 
+## Fabrica arc — charter LOCKED 2026-07-31 (`docs/fabrica.md`)
+
+The workboard becomes **Fabrica**; the execution model grows the **worker
+tier** (W1a→W1d, W2: conductor goals fanning batches to persistent, parkable,
+evidence-leaving child sessions) and **Mandala Mode** (M1a→M2: depth-N
+recursion under conservation laws), plus the **code regime**
+(`goal_create{mode:"code"}`, Cerebro-resident specialization, git worktrees,
+per-task model mix). Slice ladder + locked decisions live in the charter;
+brainstorm inputs preserved in `docs/ideas/fabrica/`. Implementation is a
+fresh full-window arc (André: ultra/max, full send) — start at W1a with the
+charter as north star.
+
+---
+
 ## Top 10 — do next
 
 > Re-groomed 2026-06-23 (André + FORGE); updated 2026-06-27 after the USB arc, 2026-07-02 after the Occipital hub + colony deliberation. **7 of 10 done**; **#10 is in flight** (distillation — single-page + bounded no-URL sweep — shipped + live-verified colony-wide; auto-distill-on-ingest is deliberately NOT built, distillation is explicit-only; remaining slices deprioritized by the colony). Remaining: **#7 PARKED** (no Pi-4 hardware), **#8 hotspot mode** (parked by the colony deliberation — niche). **The colony-memory-federation arc (`docs/colony-federation.md`) — the colony's unanimous #1 from the first formal deliberation (2026-07-01) — is CODE-COMPLETE (all 4 slices shipped 2026-07-02):** memory relay ✓ + federated recall ✓ (live-verified colony-wide) → dream digest exchange ✓ (field-proven: #220 unblocked the nightly push, #248 fixed a bug the live pushes surfaced) → procedure replication ✓ (field test pending). Next-arc candidates: sensor fusion (the colony's own arc+2), Occipital slice 3, ingest_file.
