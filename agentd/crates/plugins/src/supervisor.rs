@@ -779,9 +779,9 @@ impl Supervisor {
             return;
         }
 
-        // Virtual tools: task_fanout / worker_report / list_workers — route to the
-        // worker driver (deferred ack, the goal_tx shape; Fabrica W tier).
-        if matches!(call.tool.as_str(), "task_fanout" | "worker_report" | "list_workers") {
+        // Virtual tools: task_fanout / worker_report / worker_cancel / list_workers —
+        // route to the worker driver (deferred ack, the goal_tx shape; Fabrica W tier).
+        if matches!(call.tool.as_str(), "task_fanout" | "worker_report" | "worker_cancel" | "list_workers") {
             let call_id = call.id;
             let tool    = call.tool.clone();
             let args    = call.args.clone();

@@ -24,8 +24,10 @@ recursion under conservation laws), plus the **code regime**
 per-task model mix). Slice ladder + locked decisions live in the charter;
 brainstorm inputs preserved in `docs/ideas/fabrica/`. Implementation is a
 fresh full-window arc (André: ultra/max, full send) — start at W1a with the
-charter as north star. *Progress: W1a `#306` + W1b `#307` merged 2026-07-31;
-W1c in flight.*
+charter as north star. *Progress: W1a `#306` · W1b `#307` · W1c `#308`+`#309`
+(field-proven on apex1, first live fire + same-day evidence-read-root fix)
+merged 2026-07-31; W1d (batch yolo, approval digest, cancel cascade, inline,
+per-task model) in flight — the W1 ladder completes with it.*
 
 ---
 

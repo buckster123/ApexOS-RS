@@ -142,6 +142,24 @@ impl TurnEngine {
         }
     }
 
+    /// Derive an engine variant running on a DIFFERENT provider — the per-task
+    /// model seam (Fabrica W1d: `task_fanout{model?}`). The caller builds a
+    /// sibling provider sharing every live arc except a pinned model. Shares
+    /// the semaphore (the global provider-call cap is a law, not a default)
+    /// and every prompt Arc, so it chains after the other `with_*` variants.
+    pub fn with_provider(&self, provider: impl Provider + 'static) -> Self {
+        Self {
+            provider:   Arc::new(provider),
+            sem:        self.sem.clone(),
+            system:     Arc::clone(&self.system),
+            embodiment: Arc::clone(&self.embodiment),
+            priming:    Arc::clone(&self.priming),
+            style:      Arc::clone(&self.style),
+            ambient:    Arc::clone(&self.ambient),
+            ambient_seen: Arc::clone(&self.ambient_seen),
+        }
+    }
+
     /// Derive an engine variant carrying a per-session persona/skin response-style
     /// fragment (G5 tier-2), appended after priming. Shares every other Arc, so it
     /// chains cleanly after `with_system`/`with_priming` in `root_turn`.

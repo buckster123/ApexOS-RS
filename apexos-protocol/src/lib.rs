@@ -50,6 +50,34 @@ pub struct GoalId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct WorkerId(pub u64);
 
+// ── Session-id classes (wire-relevant: ids travel every frame) ──────────────
+// The id space is a strict three-way partition, enforced daemon-side (boot
+// seeding, persistence, hydration — see agentd) and USED by frontends (e.g.
+// grouping worker sessions on the board):
+//
+//   normal < 1<<62 ≤ worker < 1<<63 ≤ spawn
+
+/// Session ids in `[WORKER_SESSION_BASE, SPAWN_SESSION_BASE)` are persistent
+/// WORKER sessions — `task_fanout` children (Fabrica W tier). Unlike spawns
+/// they persist (`sessions/<id>.jsonl` is a parked worker's truth).
+pub const WORKER_SESSION_BASE: u64 = 1 << 62;
+
+/// Session ids at/above this base are EPHEMERAL SPAWN sessions — local
+/// sub-agents and cross-node spawn children. Never persisted; spawn
+/// provenance is stamped onto their memory writes (H6).
+pub const SPAWN_SESSION_BASE: u64 = 1 << 63;
+
+/// Bounded range check — deliberately not `>=`: the spawn range sits above
+/// and must stay disjoint (never both predicates true for one id).
+pub fn is_worker_session(session_id: u64) -> bool {
+    (WORKER_SESSION_BASE..SPAWN_SESSION_BASE).contains(&session_id)
+}
+
+/// Whether `session_id` is an ephemeral spawn session (see [`SPAWN_SESSION_BASE`]).
+pub fn is_spawn_session(session_id: u64) -> bool {
+    session_id >= SPAWN_SESSION_BASE
+}
+
 /// Lifecycle state of an autonomous Goal run (docs/ideas/goal-driver-design.md).
 /// P2a uses Acting / Done / Failed; the rest are reserved for later slices.
 /// `Cancelled` is terminal-by-operator (goal_cancel) — distinct from Failed (a
@@ -435,6 +463,10 @@ pub enum Event {
         /// (or an older event) reads it as false. (P2e, goal-driver-design.md #3)
         #[serde(default)]
         yolo:      bool,
+        /// The goal's own dedicated session — lets the worker driver cascade-cancel
+        /// a cancelled conductor's batch (W1d). `None` on legacy frames.
+        #[serde(default)]
+        session:   Option<SessionId>,
     },
 
     // worker tier (docs/fabrica.md, W1a)
@@ -467,6 +499,10 @@ pub enum Event {
         /// Short context for the current state — queue position, block reason,
         /// stall note, "" otherwise.
         detail:  String,
+        /// Batch-inherited yolo (`task_fanout{yolo:"inherit"}`, W1d): this worker
+        /// auto-approves its own ask tools. AUTO marker on the board card.
+        #[serde(default)]
+        yolo:    bool,
     },
 }
 
@@ -577,7 +613,7 @@ mod tests {
         let j = r#"{"type":"worker_state_changed","worker":3,"batch":1,"parent":7,
             "session":4611686018427387904,"task":"write the tests","state":"running","detail":""}"#;
         match serde_json::from_str::<Event>(j).unwrap() {
-            Event::WorkerStateChanged { worker, batch, parent, session, task, state, detail } => {
+            Event::WorkerStateChanged { worker, batch, parent, session, task, state, detail, yolo } => {
                 assert_eq!(worker, WorkerId(3));
                 assert_eq!(batch, 1);
                 assert_eq!(parent, SessionId(7));
@@ -585,6 +621,7 @@ mod tests {
                 assert_eq!(task, "write the tests");
                 assert_eq!(state, WorkerState::Running);
                 assert_eq!(detail, "");
+                assert!(!yolo, "missing yolo reads false (W1a-era frame)");
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -594,6 +631,27 @@ mod tests {
             let enc = serde_json::to_string(&s).unwrap();
             assert_eq!(enc, enc.to_lowercase(), "snake_case wire form: {enc}");
             assert_eq!(serde_json::from_str::<WorkerState>(&enc).unwrap(), s);
+        }
+    }
+
+    #[test]
+    fn session_id_space_is_a_three_way_partition() {
+        // normal < 1<<62 ≤ worker < 1<<63 ≤ spawn — the ranges never overlap.
+        for id in [0u64, 1, 42, WORKER_SESSION_BASE - 1] {
+            assert!(!is_worker_session(id), "{id} must be normal");
+            assert!(!is_spawn_session(id), "{id} must be normal");
+        }
+        // Worker range: persisted, NOT spawn (a worker id that also read as spawn
+        // would silently skip JSONL persistence — the exact trap the bounded
+        // range check exists to prevent).
+        for id in [WORKER_SESSION_BASE, WORKER_SESSION_BASE + 1, SPAWN_SESSION_BASE - 1] {
+            assert!(is_worker_session(id), "{id} must be worker");
+            assert!(!is_spawn_session(id), "{id} must not be spawn");
+        }
+        // Spawn range: ephemeral, NOT worker.
+        for id in [SPAWN_SESSION_BASE, SPAWN_SESSION_BASE + 1, u64::MAX] {
+            assert!(is_spawn_session(id), "{id} must be spawn");
+            assert!(!is_worker_session(id), "{id} must not be worker");
         }
     }
 
