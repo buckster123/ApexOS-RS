@@ -45,6 +45,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use apexos_core::{ActionId, BatchWorkerRow, BusHandle, Event, GoalState, GoalYoloSessions, SessionId, ToolOutput, ToolSpec, WorkerId, WorkerModels, WorkerState};
+
+use crate::mandala::{self, Addr, BudgetVec, CellForm, CellRecord, Invariant, Lattice, MandalaRecord};
 use apexos_plugins::ToolProxy;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
@@ -270,6 +272,48 @@ pub fn worker_cancel_spec() -> ToolSpec {
                 "worker": { "type": "integer", "description": "One worker id (from task_fanout's ack or list_workers)." },
                 "batch":  { "type": "integer", "description": "A whole batch id — cancels every non-terminal worker in it." }
             }
+        }),
+    }
+}
+
+pub fn mandala_create_spec() -> ToolSpec {
+    ToolSpec {
+        name: "mandala_create".into(),
+        description: "Open a MANDALA: a depth-capable recursion manifold over the worker tier for \
+                      runs too large for one flat fan-out (multi-day refactors, ports, sustained \
+                      research). You write the INVARIANT once — objective, definition of done, and \
+                      the verify command — and every cell at every depth receives those exact bytes; \
+                      no level can paraphrase the goal. Then grow the tree with \
+                      task_fanout{mandala, parent_cell}: each cell is a real worker with an address \
+                      (0.2.1 = root→2nd child→1st), a strictly descending budget, and the full \
+                      evidence trail. This slice grows depth one cell at a time (parallel rings and \
+                      sub-conductors arrive in later slices). Inspect with mandala_status.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "objective":  { "type": "string", "description": "What the whole mandala exists to accomplish." },
+                "done_when":  { "type": "string", "description": "The definition of done — concrete, checkable." },
+                "verify":     { "type": "string", "description": "THE verify command (e.g. 'cargo test -p x') — every cell at every depth checks against this exact command, run through normal policied tools." },
+                "lattice":    { "type": "string", "enum": ["spine", "quad", "fan", "spiral", "funnel"],
+                                "description": "The geometry preset (default spine — serial refinement; width caps beyond 1 activate in later slices)." },
+                "depth":      { "type": "integer", "description": "Depth budget (default 6, max 6)." },
+                "steps":      { "type": "integer", "description": "Root step budget, contracts 0.5× per level (default 32)." },
+                "deadline_s": { "type": "integer", "description": "Horizon for the whole mandala in seconds (default 86400)." }
+            },
+            "required": ["objective", "done_when", "verify"]
+        }),
+    }
+}
+
+pub fn mandala_status_spec() -> ToolSpec {
+    ToolSpec {
+        name: "mandala_status".into(),
+        description: "Read a mandala's live tree: every cell's address, state, worker, budget and \
+                      evidence path, plus the geometry picture (open cells vs the 64-cell budget). \
+                      Omit `mandala` to list all mandalas.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": { "mandala": { "type": "integer", "description": "A mandala id from mandala_create." } }
         }),
     }
 }
@@ -660,6 +704,8 @@ pub fn spawn_worker_driver(
     workers_path: PathBuf,
     batches_path: PathBuf,
     agents_dir:   PathBuf,
+    mandalas_path: PathBuf,
+    worktrees_dir: PathBuf,
     cap:          usize,
     proxy:        ToolProxy,
     yolo_set:     GoalYoloSessions,
@@ -668,6 +714,13 @@ pub fn spawn_worker_driver(
     tokio::spawn(async move {
         let mut workers: HashMap<u64, Worker>   = HashMap::new();
         let mut batches: HashMap<u64, BatchMeta> = HashMap::new();
+        // Mandala state (M1a): records + per-mandala cell trees + worker→cell
+        // binding. THE FILESYSTEM IS THE TREE — these maps are rebuilt from
+        // disk at boot; the driver only caches what the tree dirs say.
+        let mut mandalas: HashMap<u64, MandalaRecord> = HashMap::new();
+        let mut trees: HashMap<u64, HashMap<String, CellRecord>> = HashMap::new();
+        let mut cell_by_worker: HashMap<u64, (u64, Addr)> = HashMap::new();
+        let mut next_mandala_id: u64 = 1;
         // Driver-private counters. Workers persist, so the reload MUST re-seed
         // all three past what's on disk (the next_goal_id discipline) — never
         // blind-reset like the spawn counter (safe there only because spawns
@@ -679,6 +732,8 @@ pub fn spawn_worker_driver(
         reload_workers(&mut workers, &bus, &workers_path,
                        &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid).await;
         reload_batches(&mut batches, &batches_path, &mut next_batch_id);
+        reload_mandalas(&mut mandalas, &mut trees, &mut cell_by_worker,
+                        &mandalas_path, &worktrees_dir, &mut next_mandala_id);
 
         // Artifact confinement root: the node agent's workspace (workers run
         // as the node agent — resolve_agent_id on an unbound worker session).
@@ -695,11 +750,27 @@ pub fn spawn_worker_driver(
                 Some((session, call_id, tool, args)) = req_rx.recv() => {
                     match tool.as_str() {
                         "task_fanout" => {
-                            fanout(&mut workers, &mut batches, &bus, cap, max_steps, &proxy, &yolo_set, &models, session, call_id, args,
-                                   &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid).await;
-                            save_workers(&workers, &workers_path);
-                            save_batches(&batches, &batches_path);
+                            // Mandala-scoped fan (M1a): validate the cell FIRST — address,
+                            // budget descent, geometry — and hand fanout the invariant-
+                            // bearing context; a plain fan passes None straight through.
+                            match prepare_mandala_cell(&mandalas, &trees, &bus, session, call_id, &args).await {
+                                Err(()) => {} // honest refusal already emitted
+                                Ok(ctx) => {
+                                    let minted = fanout(&mut workers, &mut batches, &bus, cap, max_steps, &proxy, &yolo_set, &models, session, call_id, args,
+                                           &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid, ctx.as_ref()).await;
+                                    if let (Some(ctx), Some(wid)) = (ctx, minted) {
+                                        bind_cell_worker(&mut trees, &mut cell_by_worker, &worktrees_dir, ctx, wid);
+                                    }
+                                    save_workers(&workers, &workers_path);
+                                    save_batches(&batches, &batches_path);
+                                }
+                            }
                         }
+                        "mandala_create" => {
+                            create_mandala(&mut mandalas, &mut trees, &bus, &worktrees_dir, &mut next_mandala_id, session, call_id, args).await;
+                            mandala::save_mandalas(&mandalas, &mandalas_path);
+                        }
+                        "mandala_status" => handle_mandala_status(&mandalas, &trees, &bus, session, call_id).await,
                         "worker_report" => record_report(&mut workers, &bus, &workspace, session, call_id, args).await,
                         "worker_cancel" => {
                             if cancel_request(&mut workers, &bus, &proxy, &agents_dir, &yolo_set, &models, session, call_id, args).await {
@@ -707,6 +778,7 @@ pub fn spawn_worker_driver(
                                 if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
                                     save_batches(&batches, &batches_path);
                                 }
+                                sync_cells(&mut trees, &cell_by_worker, &workers, &worktrees_dir, &agents_dir);
                                 save_workers(&workers, &workers_path);
                             }
                         }
@@ -724,6 +796,7 @@ pub fn spawn_worker_driver(
                                 if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
                                     save_batches(&batches, &batches_path);
                                 }
+                                sync_cells(&mut trees, &cell_by_worker, &workers, &worktrees_dir, &agents_dir);
                                 save_workers(&workers, &workers_path);
                             }
                         }
@@ -770,6 +843,7 @@ pub fn spawn_worker_driver(
                                 if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
                                     save_batches(&batches, &batches_path);
                                 }
+                                sync_cells(&mut trees, &cell_by_worker, &workers, &worktrees_dir, &agents_dir);
                                 save_workers(&workers, &workers_path);
                             }
                         }
@@ -788,6 +862,7 @@ pub fn spawn_worker_driver(
                     if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
                         save_batches(&batches, &batches_path);
                     }
+                    if stalled { sync_cells(&mut trees, &cell_by_worker, &workers, &worktrees_dir, &agents_dir); }
                     if stalled || parked { save_workers(&workers, &workers_path); }
                 }
             }
@@ -851,31 +926,47 @@ async fn fanout(
     yolo_set: &GoalYoloSessions, models: &WorkerModels,
     call_session: SessionId, call_id: ActionId, args: serde_json::Value,
     next_worker_id: &mut u64, next_batch_id: &mut u64, next_worker_sid: &mut u64,
-) {
+    cell: Option<&CellCtx>,
+) -> Option<u64> {
     let refuse = |msg: String| Event::ToolResult {
         session: call_session, call: call_id,
         output: ToolOutput { ok: false, content: serde_json::json!(msg) },
     };
     if apexos_core::is_worker_session(call_session.0) {
         bus.emit(refuse("workers cannot fan out further work (depth-1 by design; sub-conducting arrives with M-tier vouchers)".into())).await;
-        return;
+        return None;
     }
     let inline = match args["mode"].as_str() {
         None | Some("async") => false,
         Some("inline") => true,
         Some(other) => {
             bus.emit(refuse(format!("unknown mode \"{other}\" — async (default) or inline"))).await;
-            return;
+            return None;
         }
     };
-    let tasks = match parse_tasks(&args) {
+    let mut tasks = match parse_tasks(&args) {
         Ok(t) => t,
-        Err(e) => { bus.emit(refuse(e)).await; return; }
+        Err(e) => { bus.emit(refuse(e)).await; return None; }
     };
     if inline && tasks.len() > INLINE_MAX_TASKS {
         bus.emit(refuse(format!(
             "inline mode is short-batch-only ({} tasks > {INLINE_MAX_TASKS}) — use mode async; the batch report arrives via the AwaitingBatch loop", tasks.len()))).await;
-        return;
+        return None;
+    }
+    // Mandala cell (M1a): depth grows one cell at a time — zero new
+    // concurrency until the B bit arms (M1b). The invariant axis rides the
+    // task verbatim, injected here mechanically, never model-relayed.
+    if let Some(ctx) = cell {
+        if tasks.len() != 1 {
+            bus.emit(refuse(format!(
+                "a mandala cell is one task ({} given) — parallel rings arm in M1b; grow depth cell by cell", tasks.len()))).await;
+            return None;
+        }
+        let (prompt, model) = tasks.remove(0);
+        tasks.push((format!("{}
+
+CELL {} — your task within the mandala:
+{}", ctx.directive_prefix, ctx.addr.0, prompt), model));
     }
 
     // Batch-inherited yolo: workers get the PARENT's auto-approve bit and never
@@ -890,6 +981,7 @@ async fn fanout(
     *next_batch_id += 1;
     let mut deadline_s = parse_batch_deadline(&args);
     if inline { deadline_s = deadline_s.min(INLINE_DEADLINE_CEIL_S); }
+    if let Some(ctx) = cell { deadline_s = deadline_s.min(ctx.budget.deadline_s); }
     batches.insert(batch, BatchMeta {
         parent: call_session.0, created_epoch: epoch_now(), deadline_s, reported: false,
         inline_ack: if inline { Some((call_session.0, call_id.0)) } else { None },
@@ -936,10 +1028,12 @@ async fn fanout(
     }
 
     admit_queued(workers, bus, proxy, yolo_set, models, cap, max_steps).await;
-    eprintln!("[worker] batch {batch} fanned: {n} tasks from session {} (cap {cap}, deadline {deadline_s}s{}{})",
+    eprintln!("[worker] batch {batch} fanned: {n} tasks from session {} (cap {cap}, deadline {deadline_s}s{}{}{})",
               call_session.0,
               if inline { ", inline" } else { "" },
-              if yolo { ", yolo:inherit" } else { "" });
+              if yolo { ", yolo:inherit" } else { "" },
+              if let Some(c) = cell { format!(", cell {}", c.addr.0) } else { String::new() });
+    minted.first().map(|(wid, _)| *wid)
 }
 
 /// Admit Queued workers (FIFO by id) while slots remain: Queued → Running,
@@ -1365,6 +1459,271 @@ async fn handle_list_workers(workers: &HashMap<u64, Worker>, bus: &BusHandle, ca
             "workers": list, "count": list.len(),
             "cap": cap, "slots_used": slots_used(workers),
         }) } }).await;
+}
+
+// ── Mandala runtime (M1a) — the driver's side of the tree ───────────────────
+
+/// A validated cell-spawn context: everything fanout needs to mint the cell's
+/// worker, computed and refused-early by prepare_mandala_cell.
+pub(crate) struct CellCtx {
+    mandala: u64,
+    addr: Addr,
+    budget: BudgetVec,
+    invariant_hash: String,
+    directive_prefix: String,
+}
+
+/// Validate a mandala-scoped task_fanout: known mandala, live parent cell,
+/// geometry budget (open cells), ring width, and the budget-descent law.
+/// Ok(None) = a plain (non-mandala) fan; Err(()) = refused, ToolResult sent.
+async fn prepare_mandala_cell(
+    mandalas: &HashMap<u64, MandalaRecord>,
+    trees: &HashMap<u64, HashMap<String, CellRecord>>,
+    bus: &BusHandle,
+    call_session: SessionId, call_id: ActionId, args: &serde_json::Value,
+) -> Result<Option<CellCtx>, ()> {
+    let Some(mid) = args["mandala"].as_u64() else { return Ok(None) };
+    let refuse = |msg: String| Event::ToolResult {
+        session: call_session, call: call_id,
+        output: ToolOutput { ok: false, content: serde_json::json!(msg) },
+    };
+    let Some(m) = mandalas.get(&mid) else {
+        bus.emit(refuse(format!("no mandala {mid} — mandala_create first, or mandala_status to list"))).await;
+        return Err(());
+    };
+    if m.conductor != call_session.0 {
+        bus.emit(refuse(format!("mandala {mid} belongs to session {} — only its conductor grows it (vouchers arrive in M1c)", m.conductor))).await;
+        return Err(());
+    }
+    let tree = trees.get(&mid).cloned().unwrap_or_default();
+    let parent_addr = match args["parent_cell"].as_str() {
+        None => Addr(Addr::ROOT.into()),
+        Some(s) => match Addr::parse(s) {
+            Some(a) => a,
+            None => { bus.emit(refuse(format!("'{s}' is not a cell address (like 0 or 0.2.1)"))).await; return Err(()); }
+        },
+    };
+    let Some(parent) = tree.get(&parent_addr.0) else {
+        bus.emit(refuse(format!("mandala {mid} has no cell {} — mandala_status shows the tree", parent_addr.0))).await;
+        return Err(());
+    };
+    // Geometry: open cells vs the mandala's conserved budget.
+    let open = mandala::open_cells(&tree);
+    if open >= m.budget.cells as usize {
+        bus.emit(refuse(format!(
+            "geometry budget exhausted: {open} open cells of {} — integrate or cancel before growing", m.budget.cells))).await;
+        return Err(());
+    }
+    // Ring width: the child ring's preset cap (M1a spawns serially, but the
+    // lattice's width law already bounds how many siblings may EXIST).
+    let ring = parent_addr.depth(); // children of depth-d sit in ring d
+    let width = mandala::ring_width(m.lattice, ring);
+    let ordinal = mandala::next_child_ordinal(&tree, &parent_addr);
+    if width == 0 || ordinal >= width as u32 {
+        bus.emit(refuse(format!(
+            "ring {ring} of the {:?} lattice is full (width {width}) — go deeper or pick another parent", m.lattice))).await;
+        return Err(());
+    }
+    // The descent law.
+    let child_budget = mandala::contract_child(&parent.budget);
+    if !mandala::admissible(&parent.budget, &child_budget, width - ordinal as u8) {
+        bus.emit(refuse(format!(
+            "budget descent refused at cell {}: parent depth {} steps {} — the vector must strictly descend and stay positive",
+            parent_addr.0, parent.budget.depth, parent.budget.steps))).await;
+        return Err(());
+    }
+    Ok(Some(CellCtx {
+        mandala: mid,
+        addr: parent_addr.child(ordinal),
+        budget: child_budget,
+        invariant_hash: m.invariant.hash.clone(),
+        directive_prefix: m.invariant.directive_block(),
+    }))
+}
+
+/// The minted cell binds to its worker: the cell file lands in the tree
+/// (position IS identity) and the runtime index follows.
+fn bind_cell_worker(
+    trees: &mut HashMap<u64, HashMap<String, CellRecord>>,
+    cell_by_worker: &mut HashMap<u64, (u64, Addr)>,
+    worktrees_dir: &Path,
+    ctx: CellCtx, worker_id: u64,
+) {
+    let cell = CellRecord {
+        addr: ctx.addr.clone(),
+        form: CellForm::SPINE,
+        task: String::new(), // the worker record holds the full task; the tree holds structure
+        budget: ctx.budget,
+        invariant_hash: ctx.invariant_hash,
+        worker: Some(worker_id),
+        state: "open".into(),
+        evidence: None,
+        reparented_to: None,
+    };
+    let tree_dir = worktrees_dir.join(ctx.mandala.to_string());
+    mandala::save_cell(&tree_dir, &cell);
+    cell_by_worker.insert(worker_id, (ctx.mandala, ctx.addr.clone()));
+    trees.entry(ctx.mandala).or_default().insert(cell.addr.0.clone(), cell);
+    eprintln!("[mandala] {} grew cell {} (worker {worker_id})", ctx.mandala, ctx.addr.0);
+}
+
+/// Mirror worker terminal states into their cell files — the tree stays
+/// readable without joining workers.json, and evidence paths ride along.
+fn sync_cells(
+    trees: &mut HashMap<u64, HashMap<String, CellRecord>>,
+    cell_by_worker: &HashMap<u64, (u64, Addr)>,
+    workers: &HashMap<u64, Worker>,
+    worktrees_dir: &Path, agents_dir: &Path,
+) {
+    for (wid, (mid, addr)) in cell_by_worker {
+        let Some(w) = workers.get(wid) else { continue };
+        if !is_terminal(w.state) { continue; }
+        let Some(cell) = trees.get_mut(mid).and_then(|t| t.get_mut(&addr.0)) else { continue };
+        let state = format!("{:?}", w.state).to_lowercase();
+        if cell.state == state { continue; }
+        cell.state = state;
+        cell.evidence = Some(evidence_path(agents_dir, *wid).to_string_lossy().into_owned());
+        mandala::save_cell(&worktrees_dir.join(mid.to_string()), cell);
+    }
+}
+
+/// mandala_create: write the invariant ONCE (content-addressed), mint the
+/// root cell, persist. The conductor session owns the mandala.
+#[allow(clippy::too_many_arguments)]
+async fn create_mandala(
+    mandalas: &mut HashMap<u64, MandalaRecord>,
+    trees: &mut HashMap<u64, HashMap<String, CellRecord>>,
+    bus: &BusHandle, worktrees_dir: &Path, next_mandala_id: &mut u64,
+    call_session: SessionId, call_id: ActionId, args: serde_json::Value,
+) {
+    let refuse = |msg: &str| Event::ToolResult {
+        session: call_session, call: call_id,
+        output: ToolOutput { ok: false, content: serde_json::json!(msg) },
+    };
+    let (objective, done_when, verify) = match (args["objective"].as_str(), args["done_when"].as_str(), args["verify"].as_str()) {
+        (Some(o), Some(d), Some(v)) if !o.trim().is_empty() && !d.trim().is_empty() && !v.trim().is_empty() =>
+            (o.trim(), d.trim(), v.trim()),
+        _ => { bus.emit(refuse("objective, done_when and verify are all required — the invariant is written once and never paraphrased")).await; return; }
+    };
+    if apexos_core::is_worker_session(call_session.0) {
+        bus.emit(refuse("workers cannot open mandalas (sub-conducting arrives with M1c vouchers)")).await;
+        return;
+    }
+    let lattice = match args["lattice"].as_str() {
+        None => Lattice::Spine,
+        Some(s) => match Lattice::parse(s) {
+            Some(l) => l,
+            None => { bus.emit(refuse("unknown lattice — spine, quad, fan, spiral or funnel")).await; return; }
+        },
+    };
+    let budget = BudgetVec {
+        depth: args["depth"].as_u64().map(|n| (n as u8).clamp(1, mandala::DEPTH_CEIL)).unwrap_or(mandala::DEPTH_CEIL),
+        cells: mandala::CELLS_CEIL,
+        steps: args["steps"].as_u64().map(|n| (n as u16).clamp(1, 512)).unwrap_or(32),
+        deadline_s: args["deadline_s"].as_u64().map(|n| n.clamp(300, 604_800)).unwrap_or(86_400),
+    };
+    let id = *next_mandala_id;
+    *next_mandala_id += 1;
+    let invariant = Invariant::new(objective, done_when, verify);
+    let root = CellRecord {
+        addr: Addr(Addr::ROOT.into()),
+        form: CellForm::SPINE,
+        task: objective.to_string(),
+        budget,
+        invariant_hash: invariant.hash.clone(),
+        worker: None, // the conductor itself is the root mind
+        state: "open".into(),
+        evidence: None,
+        reparented_to: None,
+    };
+    mandala::save_cell(&worktrees_dir.join(id.to_string()), &root);
+    trees.entry(id).or_default().insert(root.addr.0.clone(), root);
+    let hash = invariant.hash.clone();
+    mandalas.insert(id, MandalaRecord {
+        id, conductor: call_session.0, lattice, budget, invariant, state: "open".into(),
+    });
+    bus.emit(Event::ToolResult { session: call_session, call: call_id,
+        output: ToolOutput { ok: true, content: serde_json::json!({
+            "mandala": id, "root": Addr::ROOT, "lattice": format!("{lattice:?}").to_lowercase(),
+            "invariant_hash": hash,
+            "budget": { "depth": budget.depth, "cells": budget.cells, "steps": budget.steps, "deadline_s": budget.deadline_s },
+            "status": "open",
+            "next": "grow the tree with task_fanout{mandala, parent_cell?, tasks:[one task]}",
+        }) } }).await;
+    eprintln!("[mandala] {id} opened by session {} ({lattice:?}, depth {})", call_session.0, budget.depth);
+}
+
+/// mandala_status: the tree as data — addresses, states, workers, evidence.
+async fn handle_mandala_status(
+    mandalas: &HashMap<u64, MandalaRecord>,
+    trees: &HashMap<u64, HashMap<String, CellRecord>>,
+    bus: &BusHandle, call_session: SessionId, call_id: ActionId,
+) {
+    let render = |m: &MandalaRecord| {
+        let tree = trees.get(&m.id).cloned().unwrap_or_default();
+        let mut addrs: Vec<&String> = tree.keys().collect();
+        addrs.sort();
+        serde_json::json!({
+            "mandala": m.id, "conductor": m.conductor,
+            "lattice": format!("{:?}", m.lattice).to_lowercase(),
+            "state": m.state,
+            "invariant_hash": m.invariant.hash,
+            "objective": m.invariant.objective,
+            "open_cells": mandala::open_cells(&tree),
+            "cells_budget": m.budget.cells,
+            "cells": addrs.iter().map(|a| {
+                let c = &tree[a.as_str()];
+                serde_json::json!({
+                    "addr": c.addr.0, "state": c.state, "worker": c.worker,
+                    "depth_left": c.budget.depth, "steps_left": c.budget.steps,
+                    "evidence": c.evidence,
+                    "reparented_to": c.reparented_to.as_ref().map(|r| r.0.clone()),
+                })
+            }).collect::<Vec<_>>(),
+        })
+    };
+    let content = {
+        let mut ms: Vec<&MandalaRecord> = mandalas.values().collect();
+        ms.sort_by_key(|m| m.id);
+        serde_json::json!({ "mandalas": ms.iter().map(|m| render(m)).collect::<Vec<_>>(), "count": ms.len() })
+    };
+    bus.emit(Event::ToolResult { session: call_session, call: call_id,
+        output: ToolOutput { ok: true, content } }).await;
+}
+
+/// Boot: reload mandalas.json + every tree dir (THE FILESYSTEM IS THE TREE —
+/// reconstruction scans, reparenting heals), rebuild the worker→cell index,
+/// re-save any reparented cells so the healing persists.
+fn reload_mandalas(
+    mandalas: &mut HashMap<u64, MandalaRecord>,
+    trees: &mut HashMap<u64, HashMap<String, CellRecord>>,
+    cell_by_worker: &mut HashMap<u64, (u64, Addr)>,
+    mandalas_path: &Path, worktrees_dir: &Path, next_mandala_id: &mut u64,
+) {
+    *mandalas = mandala::load_mandalas(mandalas_path);
+    let ids: Vec<u64> = mandalas.keys().copied().collect();
+    for id in ids {
+        *next_mandala_id = (*next_mandala_id).max(id + 1);
+        let tree_dir = worktrees_dir.join(id.to_string());
+        let mut tree = mandala::load_tree(&tree_dir);
+        for cell in tree.values() {
+            if let Some(rep) = &cell.reparented_to {
+                mandala::save_cell(&tree_dir, cell);
+                eprintln!("[mandala] {} cell {} reparented to {}", id, cell.addr.0, rep.0);
+            }
+            if let Some(w) = cell.worker {
+                cell_by_worker.insert(w, (id, cell.addr.clone()));
+            }
+        }
+        // Open cells whose workers vanished entirely (pruned by hand) stay
+        // open in the tree — mandala_status surfaces them; the conductor or a
+        // later slice's review procedure decides. Never silently closed.
+        tree.shrink_to_fit();
+        trees.insert(id, tree);
+    }
+    if !mandalas.is_empty() {
+        eprintln!("[mandala] reloaded {} mandala(s) from {}", mandalas.len(), mandalas_path.display());
+    }
 }
 
 #[cfg(test)]

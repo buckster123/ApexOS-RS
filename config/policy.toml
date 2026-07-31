@@ -125,6 +125,12 @@ mode = "suggest"
 # worker_cancel: stop one worker or a whole batch (terminal, evidence still
 # lands). allow — the goal_cancel rationale: strictly de-escalating.
 "worker_cancel"    = "allow"
+# Mandala Mode (M1a): mandala_create writes the invariant + opens the tree —
+# it runs nothing itself (cells are ordinary policy-gated workers; the verify
+# command executes through the worker's own policied tools). mandala_status
+# is a read. allow, the goal_create rationale.
+"mandala_create"   = "allow"
+"mandala_status"   = "allow"
 
 # Scheduler — two families on one engine. schedule_wakeup is the agent's CONTINUITY
 # tool (one-shot note-to-future-self into its own root thread): allow, because a
