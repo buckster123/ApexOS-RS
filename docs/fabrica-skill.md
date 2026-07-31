@@ -50,6 +50,19 @@ accepted a "done" without reading anything, you didn't integrate — you hoped.
 - **Steer sparingly.** A running worker takes a mid-flight send (it queues
   into its turn). An idle/blocked worker wakes on one. Use `worker_cancel`
   when a task is wrong, not a send asking it to stop.
+- **Watch on a wakeup cadence, never a busy loop.** Conducting means long
+  quiet stretches punctuated by looks: after each `mandala_status` /
+  `list_workers` look, `schedule_wakeup(60–120s, "check <thing>")` and END
+  your turn. Every inline poll is a paid turn — and a conductor spinning
+  in yolo is nearly impossible to steer, because the wakeup gap is exactly
+  where incoming messages land.
+- **Steers are turns, and turns are laps.** A send to a stepping worker
+  runs as its own turn: it consumes a lap of the worker's budget, and it
+  leaves one surplus driver directive queued behind it. On measured cells
+  that surplus can even outrun a K-stall break (a break stops NEW fuel; it
+  can't un-burn what's queued — the brake, not a wall). Steer measured
+  cells at verdict boundaries when you can, and when you need a hold that
+  nothing outruns: `worker_cancel`.
 
 ## Conducting a mandala (the M tier, growing)
 
