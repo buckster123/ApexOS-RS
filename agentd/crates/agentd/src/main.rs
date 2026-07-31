@@ -256,6 +256,8 @@ async fn main() -> anyhow::Result<()> {
     // here; the driver owns the worker map, counters, and workers.json.
     let (worker_tx, worker_rx) = mpsc::channel::<(SessionId, ActionId, String, serde_json::Value)>(8);
     let workers_path = log_dir.join("workers.json"); // restart: Running→Parked, never lost
+    let batches_path = log_dir.join("batches.json"); // batch deadlines survive restarts
+    let agents_dir   = log_dir.join("agents");       // terminal evidence files (the evidence rule)
 
     // Peer registry — /etc/agentd/peers.toml (created empty if missing)
     let peers_path = PathBuf::from(
@@ -509,6 +511,7 @@ async fn main() -> anyhow::Result<()> {
     let health_proxy  = tool_proxy.clone();   // boot-health Cerebro reachability probe
     let self_update_proxy = tool_proxy.clone(); // apply_daemon_update: session_save + resume intention
     let goal_proxy = tool_proxy.clone();        // goal driver: episode_start/end wrapping each goal
+    let worker_proxy = tool_proxy.clone();      // worker driver: per-worker episodes (W1c)
 
     // Federated-memory import worker (colony-federation Slice 1) — the gateway's
     // /api/mesh/memory handler validated + provenance-stamped the args; this just
@@ -623,7 +626,10 @@ async fn main() -> anyhow::Result<()> {
     let hw_tier = tier_from_ram(read_ram_mb());
     let worker_cap = worker::worker_cap_from_env(std::env::var("AGENTD_WORKER_CAP").ok().as_deref(), hw_tier);
     eprintln!("[agentd] worker cap: {worker_cap} (tier {hw_tier}; AGENTD_WORKER_CAP overrides)");
-    worker::spawn_worker_driver(handle.clone(), bcast.subscribe(), worker_rx, workers_path, worker_cap);
+    worker::spawn_worker_driver(
+        handle.clone(), bcast.subscribe(), worker_rx,
+        workers_path, batches_path, agents_dir, worker_cap, worker_proxy,
+    );
 
     // Council handler — wire supervisor channel and spawn handler.
     if sv_cmd_tx.send(SupervisorCmd::SetCouncilTx { tx: council_tx }).await.is_err() {
@@ -1667,9 +1673,7 @@ fn spawn_agent_router(
                 // never touches `histories` — the eviction rides the state event,
                 // so the router stays the sole owner of history residency. The
                 // JSONL on disk is truth; the revive edge above reloads it.
-                Ok(Event::WorkerStateChanged { session, state, .. })
-                    if state == apexos_core::WorkerState::Parked =>
-                {
+                Ok(Event::WorkerStateChanged { session, state: apexos_core::WorkerState::Parked, .. }) => {
                     if histories.lock().await.remove(&session).is_some() {
                         eprintln!("[worker] session {} evicted from RAM (parked)", session.0);
                     }

@@ -21,7 +21,17 @@
 //! a send is human/conductor intent, the emergency entrance — Queued workers
 //! just wait a little longer. No report at all still means Done with the
 //! final text as the deliverable (the W1a single-turn rule, now the fallback).
-//! Artifacts + Cerebro episodes + `TaskBatchDone` land in W1c.
+//!
+//! W1c — the evidence rule: every terminal worker writes
+//! `<log_dir>/agents/<worker_id>.json` (tmp+rename) and closes a Cerebro
+//! episode; `worker_report{done}` may declare workspace-confined `artifacts`
+//! (the `apexos-confine` gate — a bad path refuses the report so the model
+//! retries, never a silent drop). One `task_fanout` call = one batch with a
+//! `batch_deadline_s` bound: `TaskBatchDone` fires on all-terminal or at the
+//! deadline with stragglers marked `timed_out` (still revivable). Rows carry
+//! evidence PATHS, never payloads — integration must read the artifacts. The
+//! goal driver consumes `TaskBatchDone` for its AwaitingBatch posture; this
+//! driver never prompts the conductor directly.
 //!
 //! Deliberate departure from goal.rs: the worker map is a PLAIN `HashMap`
 //! owned by the driver task — no `Arc<Mutex<…>>`. Every access is serialized
@@ -31,10 +41,11 @@
 //! reports) goes through the request channel, the house seam.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use apexos_core::{ActionId, BusHandle, Event, SessionId, ToolOutput, ToolSpec, WorkerId, WorkerState};
+use apexos_core::{ActionId, BatchWorkerRow, BusHandle, Event, SessionId, ToolOutput, ToolSpec, WorkerId, WorkerState};
+use apexos_plugins::ToolProxy;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
@@ -56,11 +67,16 @@ const IDLE_TTL: Duration = Duration::from_secs(1800);
 /// the goal budget's rule. Override via `WORKER_MAX_STEPS` (clamped 1–100).
 const DEFAULT_MAX_STEPS: u32 = 12;
 
+/// Default batch report bound: without a deadline, one forever-parked worker
+/// wedges an AwaitingBatch conductor forever (the charter's exact warning).
+/// Per-call override via `task_fanout{batch_deadline_s}`, clamped 60s–24h.
+const DEFAULT_BATCH_DEADLINE_S: u64 = 3600;
+
 /// The worker's reported outcome for the in-flight step (via `worker_report`),
 /// applied on `TurnComplete` — `goal.rs`'s Verdict, worker vocabulary.
 enum Verdict {
     Continue(Option<String>), // optional steer for the next step
-    Done(String),             // the summary (required — enforced at record time)
+    Done { summary: String, artifacts: Vec<String> }, // summary required; artifacts confined
     Blocked(String),          // reason; sits awaiting input, slot-free
     Yield,                    // go Idle awaiting input, wake free
 }
@@ -73,12 +89,24 @@ struct Worker {
     state:   WorkerState,
     step:    u32,   // in-flight step, 1-indexed (the goal driver's convention)
     summary: Option<String>,   // the done-verdict summary (persisted — the human-facing line)
+    artifacts: Vec<String>,    // done-declared, workspace-confined paths (W1c)
+    episode: Option<String>,   // Cerebro episode id wrapping this run (W1c, best-effort)
     started: Instant,          // stall clock while Running; idle/TTL clock otherwise
     pending: Option<Verdict>,  // the worker_report verdict, applied on TurnComplete
     /// Whether a turn is live on this session right now. Distinguishes the two
     /// Blocked flavors: an approval-suspended turn (inflight — holds a slot, the
     /// human's clock) vs a verdict-blocked worker (no turn — slot-free, TTL clock).
     turn_inflight: bool,
+}
+
+/// One batch's report bookkeeping. Persisted (batches.json) so the deadline
+/// survives a restart — a parked-by-restart batch still reports, else the
+/// conductor's AwaitingBatch posture would wait forever.
+struct BatchMeta {
+    parent:        u64,
+    created_epoch: u64, // unix seconds (Instant doesn't survive restarts)
+    deadline_s:    u64,
+    reported:      bool,
 }
 
 /// The on-disk form (transient `started`/`pending`/`turn_inflight` dropped).
@@ -96,9 +124,26 @@ struct PersistedWorker {
     step:    u32,
     #[serde(default)]
     summary: Option<String>,
+    #[serde(default)]
+    artifacts: Vec<String>,
+    #[serde(default)]
+    episode: Option<String>,
 }
 
 fn default_step() -> u32 { 1 }
+
+#[derive(Serialize, Deserialize)]
+struct PersistedBatch {
+    batch:         u64,
+    parent:        u64,
+    created_epoch: u64,
+    deadline_s:    u64,
+    reported:      bool,
+}
+
+fn epoch_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
 
 // ── Tool specs ───────────────────────────────────────────────────────────────
 
@@ -130,7 +175,9 @@ pub fn task_fanout_spec() -> ToolSpec {
                     }
                 },
                 "mode": { "type": "string", "enum": ["async"],
-                          "description": "Batch mode. async (the default) is the only mode in this slice; inline lands later." }
+                          "description": "Batch mode. async (the default) is the only mode in this slice; inline lands later." },
+                "batch_deadline_s": { "type": "integer",
+                          "description": "Report bound in seconds (default 3600, clamped 60-86400): at the deadline the batch reports with unfinished workers marked timed_out (still revivable) instead of waiting forever." }
             },
             "required": ["tasks"]
         }),
@@ -154,6 +201,8 @@ pub fn worker_report_spec() -> ToolSpec {
                 "status":  { "type": "string", "enum": ["continue", "done", "blocked", "yield"],
                              "description": "done = task complete (summary required); continue = another step; yield = pause for input; blocked = stuck." },
                 "summary": { "type": "string", "description": "REQUIRED with done: what was delivered and where it lives." },
+                "artifacts": { "type": "array", "items": { "type": "string" },
+                             "description": "With done: workspace paths of files you produced (the evidence the conductor reads). Workspace-confined — outside paths are refused." },
                 "next":    { "type": "string", "description": "Optional steer for the next step (status=continue)." },
                 "reason":  { "type": "string", "description": "Why you're stuck (status=blocked)." }
             },
@@ -274,15 +323,60 @@ fn max_steps_from_env() -> u32 {
 }
 
 /// Map `worker_report` args to a verdict. Absent/unknown status = continue
-/// (the goal_step convention); `done`'s summary requirement is enforced at
-/// record time so the model gets an actionable refusal, not a silent default.
+/// (the goal_step convention); `done`'s summary requirement and artifact
+/// confinement are enforced at record time so the model gets an actionable
+/// refusal, not a silent default.
 fn parse_verdict(args: &serde_json::Value) -> Verdict {
     match args["status"].as_str() {
-        Some("done")    => Verdict::Done(args["summary"].as_str().unwrap_or("").trim().to_string()),
+        Some("done") => Verdict::Done {
+            summary: args["summary"].as_str().unwrap_or("").trim().to_string(),
+            artifacts: artifact_strings(args),
+        },
         Some("blocked") => Verdict::Blocked(args["reason"].as_str().unwrap_or("blocked").to_string()),
         Some("yield")   => Verdict::Yield,
         _               => Verdict::Continue(args["next"].as_str().map(str::to_owned)),
     }
+}
+
+fn artifact_strings(args: &serde_json::Value) -> Vec<String> {
+    args["artifacts"].as_array().map(|a| {
+        a.iter().filter_map(|v| v.as_str())
+            .map(str::trim).filter(|s| !s.is_empty())
+            .map(str::to_owned).collect()
+    }).unwrap_or_default()
+}
+
+/// Pure batch-deadline resolver: absent → 3600s; anything given clamps to
+/// 60s–24h (a deadline of zero would report the batch before it runs; no
+/// deadline at all is the forever-wedged-conductor the charter forbids).
+fn parse_batch_deadline(args: &serde_json::Value) -> u64 {
+    args["batch_deadline_s"].as_u64()
+        .map(|n| n.clamp(60, 86_400))
+        .unwrap_or(DEFAULT_BATCH_DEADLINE_S)
+}
+
+/// Validate done-declared artifact paths against the node agent's workspace
+/// (the apexos-confine gate — same law as every fs tool). Relative paths are
+/// rooted at the workspace first. Returns the canonical forms, or the first
+/// offending path as the refusal message.
+fn confine_artifacts(paths: &[String], workspace: &Path) -> Result<Vec<String>, String> {
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let requested = if Path::new(p).is_absolute() {
+            PathBuf::from(p)
+        } else {
+            workspace.join(p)
+        };
+        // Declarations point at files a confined tool already wrote inside the
+        // workspace, so no read-roots and no secret filter apply here — the
+        // only question is "is it inside the workspace".
+        match apexos_confine::confine_fs(&requested, apexos_confine::Access::Read, workspace, &[], |_| false) {
+            Ok(canon) => out.push(canon.to_string_lossy().into_owned()),
+            Err(_) => return Err(format!(
+                "artifact path '{p}' is outside the agent workspace — declare workspace paths only")),
+        }
+    }
+    Ok(out)
 }
 
 /// Extract the task prompts from `task_fanout` args — item = string | {prompt}.
@@ -337,6 +431,7 @@ fn save_workers(workers: &HashMap<u64, Worker>, path: &PathBuf) {
     let mut snapshot: Vec<PersistedWorker> = workers.iter().map(|(id, w)| PersistedWorker {
         id: *id, batch: w.batch, parent: w.parent, session: w.session,
         task: w.task.clone(), state: w.state, step: w.step, summary: w.summary.clone(),
+        artifacts: w.artifacts.clone(), episode: w.episode.clone(),
     }).collect();
     snapshot.sort_by_key(|w| w.id); // deterministic file → readable diffs
     if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
@@ -357,6 +452,105 @@ fn load_workers(path: &PathBuf) -> Vec<PersistedWorker> {
         .unwrap_or_default()
 }
 
+fn save_batches(batches: &HashMap<u64, BatchMeta>, path: &PathBuf) {
+    let mut snapshot: Vec<PersistedBatch> = batches.iter().map(|(id, b)| PersistedBatch {
+        batch: *id, parent: b.parent, created_epoch: b.created_epoch,
+        deadline_s: b.deadline_s, reported: b.reported,
+    }).collect();
+    snapshot.sort_by_key(|b| b.batch);
+    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+    if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &json).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
+fn load_batches(path: &PathBuf) -> Vec<PersistedBatch> {
+    std::fs::read_to_string(path).ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+// ── Evidence + episodes (W1c — the terminal worker's trail) ─────────────────
+
+fn evidence_path(agents_dir: &Path, worker_id: u64) -> PathBuf {
+    agents_dir.join(format!("{worker_id}.json"))
+}
+
+/// Write the terminal evidence file — tmp+rename (this file is the whole
+/// point of the evidence rule; a torn write here poisons integration). The
+/// summary rides along for humans, but the batch report hands the conductor
+/// this PATH — reading it is what integration means.
+fn write_evidence(agents_dir: &Path, worker_id: u64, w: &Worker) {
+    let _ = std::fs::create_dir_all(agents_dir);
+    let doc = serde_json::json!({
+        "worker":    worker_id,
+        "batch":     w.batch,
+        "parent":    w.parent,
+        "session":   w.session,
+        "task":      w.task,
+        "state":     format!("{:?}", w.state).to_lowercase(),
+        "step":      w.step,
+        "summary":   w.summary,
+        "artifacts": w.artifacts,
+        "episode":   w.episode,
+        "history":   format!("sessions/{}.jsonl", w.session), // the full transcript, same log_dir
+        "completed_at": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Ok(json) = serde_json::to_string_pretty(&doc) {
+        let path = evidence_path(agents_dir, worker_id);
+        let tmp  = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &json).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
+/// Start a Cerebro episode wrapping this worker's run (best-effort — None if
+/// unreachable; never blocks admission). Attributed to the node agent, the
+/// goal driver's convention.
+async fn episode_start_worker(proxy: &ToolProxy, wid: u64, batch: u64, task: &str) -> Option<String> {
+    let title = format!("worker {wid} (batch {batch}): {}", task.chars().take(80).collect::<String>());
+    match proxy.call("episode_start", serde_json::json!({
+        "title": title, "agent_id": apexos_core::node_agent_id(), "tags": ["worker"]
+    })).await {
+        Ok(out) if out.ok => crate::parse_cerebro_id(&out, "episode_id"),
+        Ok(out) => { eprintln!("[worker] episode_start not ok: {:?}", out.content); None }
+        Err(e)  => { eprintln!("[worker] episode_start: {e}"); None }
+    }
+}
+
+/// Close a worker's episode with the outcome (best-effort) — the run becomes
+/// a recallable, dream-able memory.
+async fn episode_end_worker(proxy: &ToolProxy, episode_id: &str, w: &Worker, step: u32) {
+    let (outcome, valence) = match w.state {
+        WorkerState::Done      => ("completed", "positive"),
+        WorkerState::Failed    => ("failed",    "negative"),
+        WorkerState::Cancelled => ("cancelled", "neutral"),
+        _                      => ("ended",     "neutral"),
+    };
+    let summary = match &w.summary {
+        Some(s) => format!("worker {outcome} at step {step}: {s}"),
+        None    => format!("worker {outcome} at step {step}: {}", w.task.chars().take(120).collect::<String>()),
+    };
+    if let Err(e) = proxy.call("episode_end", serde_json::json!({
+        "episode_id": episode_id, "summary": summary, "valence": valence
+    })).await {
+        eprintln!("[worker] episode_end: {e}");
+    }
+}
+
+/// The terminal trail, in one place: evidence file + episode close. Called on
+/// every path into Done/Failed (verdict, fallback, budget, stall).
+async fn finalize_terminal(proxy: &ToolProxy, agents_dir: &Path, wid: u64, w: &Worker) {
+    write_evidence(agents_dir, wid, w);
+    if let Some(ep) = w.episode.clone() {
+        episode_end_worker(proxy, &ep, w, w.step).await;
+    }
+}
+
 // ── Events ───────────────────────────────────────────────────────────────────
 
 /// One emission chokepoint, the goal driver's `emit_state` twin. `task` is
@@ -375,19 +569,25 @@ async fn emit_state(bus: &BusHandle, id: u64, w: &Worker, detail: &str) {
 
 // ── The driver ───────────────────────────────────────────────────────────────
 
-/// Spawn the worker driver: `task_fanout`/`list_workers` arrive on `req_rx`
-/// (supervisor-routed, deferred ack), worker turns complete via the bus
-/// subscription, stalls fail on a 30s tick. Owns every counter and the map —
-/// nothing else touches worker state.
+/// Spawn the worker driver: `task_fanout`/`worker_report`/`list_workers`
+/// arrive on `req_rx` (supervisor-routed, deferred ack), worker turns complete
+/// via the bus subscription, stalls fail and batches report on a 30s tick.
+/// Owns every counter, the worker map, and the batch ledger — nothing else
+/// touches worker state.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_worker_driver(
     bus:          BusHandle,
     mut bcast_rx: broadcast::Receiver<Event>,
     mut req_rx:   mpsc::Receiver<(SessionId, ActionId, String, serde_json::Value)>,
     workers_path: PathBuf,
+    batches_path: PathBuf,
+    agents_dir:   PathBuf,
     cap:          usize,
+    proxy:        ToolProxy,
 ) {
     tokio::spawn(async move {
-        let mut workers: HashMap<u64, Worker> = HashMap::new();
+        let mut workers: HashMap<u64, Worker>   = HashMap::new();
+        let mut batches: HashMap<u64, BatchMeta> = HashMap::new();
         // Driver-private counters. Workers persist, so the reload MUST re-seed
         // all three past what's on disk (the next_goal_id discipline) — never
         // blind-reset like the spawn counter (safe there only because spawns
@@ -398,6 +598,11 @@ pub fn spawn_worker_driver(
 
         reload_workers(&mut workers, &bus, &workers_path,
                        &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid).await;
+        reload_batches(&mut batches, &batches_path, &mut next_batch_id);
+
+        // Artifact confinement root: the node agent's workspace (workers run
+        // as the node agent — resolve_agent_id on an unbound worker session).
+        let workspace = apexos_core::agent_workspace_root(&apexos_core::node_agent_id());
 
         let step_timeout = step_timeout_from_env();
         let idle_ttl     = idle_ttl_from_env();
@@ -408,12 +613,13 @@ pub fn spawn_worker_driver(
                 Some((session, call_id, tool, args)) = req_rx.recv() => {
                     match tool.as_str() {
                         "task_fanout" => {
-                            fanout(&mut workers, &bus, cap, max_steps, session, call_id, args,
+                            fanout(&mut workers, &mut batches, &bus, cap, max_steps, &proxy, session, call_id, args,
                                    &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid).await;
                             save_workers(&workers, &workers_path);
+                            save_batches(&batches, &batches_path);
                         }
-                        "worker_report" => record_report(&mut workers, &bus, session, call_id, args).await,
-                        "list_workers" => handle_list_workers(&workers, &bus, cap, session, call_id).await,
+                        "worker_report" => record_report(&mut workers, &bus, &workspace, session, call_id, args).await,
+                        "list_workers" => handle_list_workers(&workers, &bus, cap, &agents_dir, session, call_id).await,
                         _ => {}
                     }
                 }
@@ -422,8 +628,11 @@ pub fn spawn_worker_driver(
                         // A worker's turn completed → apply its reported verdict
                         // (or the no-report fallback: Done, final text = deliverable).
                         Ok(Event::TurnComplete { session }) if apexos_core::is_worker_session(session.0) => {
-                            if advance(&mut workers, &bus, session.0, max_steps).await {
-                                admit_queued(&mut workers, &bus, cap, max_steps).await;
+                            if advance(&mut workers, &bus, &proxy, &agents_dir, session.0, max_steps).await {
+                                admit_queued(&mut workers, &bus, &proxy, cap, max_steps).await;
+                                if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
+                                    save_batches(&batches, &batches_path);
+                                }
                                 save_workers(&workers, &workers_path);
                             }
                         }
@@ -453,14 +662,30 @@ pub fn spawn_worker_driver(
                     }
                 }
                 _ = tick.tick() => {
-                    let stalled = fail_stalled(&mut workers, &bus, step_timeout).await;
+                    let stalled = fail_stalled(&mut workers, &bus, &proxy, &agents_dir, step_timeout).await;
                     let parked  = park_idle(&mut workers, &bus, idle_ttl).await;
-                    if stalled { admit_queued(&mut workers, &bus, cap, max_steps).await; }
+                    if stalled { admit_queued(&mut workers, &bus, &proxy, cap, max_steps).await; }
+                    if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
+                        save_batches(&batches, &batches_path);
+                    }
                     if stalled || parked { save_workers(&workers, &workers_path); }
                 }
             }
         }
     });
+}
+
+/// Boot: reload the batch ledger, re-seeding the batch counter defensively
+/// (workers.json usually re-seeds it too, but an all-terminal batch whose
+/// workers were pruned by hand must still never collide).
+fn reload_batches(batches: &mut HashMap<u64, BatchMeta>, path: &PathBuf, next_batch_id: &mut u64) {
+    for pb in load_batches(path) {
+        *next_batch_id = (*next_batch_id).max(pb.batch + 1);
+        batches.insert(pb.batch, BatchMeta {
+            parent: pb.parent, created_epoch: pb.created_epoch,
+            deadline_s: pb.deadline_s, reported: pb.reported,
+        });
+    }
 }
 
 /// Boot: reload persisted workers, parking every non-terminal one — the state
@@ -480,6 +705,7 @@ async fn reload_workers(
         workers.insert(pw.id, Worker {
             batch: pw.batch, parent: pw.parent, session: pw.session,
             task: pw.task, state, step: pw.step, summary: pw.summary,
+            artifacts: pw.artifacts, episode: pw.episode,
             started: Instant::now(), pending: None, turn_inflight: false,
         });
     }
@@ -498,7 +724,8 @@ async fn reload_workers(
 /// are the M-tier mechanism; there is no partial fan below the conductor).
 #[allow(clippy::too_many_arguments)]
 async fn fanout(
-    workers: &mut HashMap<u64, Worker>, bus: &BusHandle, cap: usize, max_steps: u32,
+    workers: &mut HashMap<u64, Worker>, batches: &mut HashMap<u64, BatchMeta>,
+    bus: &BusHandle, cap: usize, max_steps: u32, proxy: &ToolProxy,
     call_session: SessionId, call_id: ActionId, args: serde_json::Value,
     next_worker_id: &mut u64, next_batch_id: &mut u64, next_worker_sid: &mut u64,
 ) {
@@ -524,6 +751,10 @@ async fn fanout(
 
     let batch = *next_batch_id;
     *next_batch_id += 1;
+    let deadline_s = parse_batch_deadline(&args);
+    batches.insert(batch, BatchMeta {
+        parent: call_session.0, created_epoch: epoch_now(), deadline_s, reported: false,
+    });
     let mut minted: Vec<(u64, u64)> = Vec::with_capacity(tasks.len()); // (worker_id, session)
     for task in tasks {
         let wid = *next_worker_id;  *next_worker_id  += 1;
@@ -531,12 +762,20 @@ async fn fanout(
         workers.insert(wid, Worker {
             batch, parent: call_session.0, session: sid,
             task, state: WorkerState::Queued, step: 1, summary: None,
+            artifacts: Vec::new(), episode: None,
             started: Instant::now(), pending: None, turn_inflight: false,
         });
         minted.push((wid, sid));
     }
 
-    // Ack first (the goal_create shape): ids now, work proceeds in background.
+    // Cards BEFORE the ack: bus order is delivery order, so the goal driver's
+    // batch tracking (WorkerStateChanged → pending set) is provably armed
+    // before the conductor's turn can resume off the ack and complete.
+    for (wid, _) in &minted {
+        let w = &workers[wid];
+        emit_state(bus, *wid, w, "queued").await;
+    }
+
     let n = minted.len();
     let admitted_now = (cap.saturating_sub(slots_used(workers))).min(n);
     bus.emit(Event::ToolResult {
@@ -546,28 +785,30 @@ async fn fanout(
             "workers": minted.iter().map(|(w, s)| serde_json::json!({ "worker": w, "session": s })).collect::<Vec<_>>(),
             "count": n, "cap": cap,
             "admitted": admitted_now, "queued": n - admitted_now,
+            "batch_deadline_s": deadline_s,
             "status": "fanned",
         }) },
     }).await;
 
-    // Cards for the whole batch (Queued), then the admission pass flips up to
-    // `cap` of them Running and sends their work orders.
-    for (wid, _) in &minted {
-        let w = &workers[wid];
-        emit_state(bus, *wid, w, "queued").await;
-    }
-    admit_queued(workers, bus, cap, max_steps).await;
-    eprintln!("[worker] batch {batch} fanned: {n} tasks from session {} (cap {cap})", call_session.0);
+    admit_queued(workers, bus, proxy, cap, max_steps).await;
+    eprintln!("[worker] batch {batch} fanned: {n} tasks from session {} (cap {cap}, deadline {deadline_s}s)", call_session.0);
 }
 
 /// Admit Queued workers (FIFO by id) while slots remain: Queued → Running,
 /// stall clock armed, the work order goes out as an ordinary gated UserPrompt
 /// on the worker's own session.
-async fn admit_queued(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, cap: usize, max_steps: u32) {
+async fn admit_queued(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, cap: usize, max_steps: u32) {
     while slots_used(workers) < cap {
         let Some(id) = next_queued(workers) else { break };
+        // Open the Cerebro episode at first admission — work actually begins
+        // here, not at mint (a never-admitted worker leaves no episode).
+        let episode = {
+            let w = &workers[&id];
+            if w.episode.is_none() { episode_start_worker(proxy, id, w.batch, &w.task).await } else { None }
+        };
         let (session, text) = {
             let w = workers.get_mut(&id).unwrap();
+            if episode.is_some() { w.episode = episode; }
             w.state = WorkerState::Running;
             w.started = Instant::now();
             w.turn_inflight = true;
@@ -584,7 +825,7 @@ async fn admit_queued(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, cap: 
 /// for the in-flight step (applied on the upcoming TurnComplete) and ack now.
 /// `done` without a summary is refused so the model retries with one (the
 /// charter: done REQUIRES a summary — it's the line the conductor reads).
-async fn record_report(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, call_session: SessionId, call_id: ActionId, args: serde_json::Value) {
+async fn record_report(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, workspace: &Path, call_session: SessionId, call_id: ActionId, args: serde_json::Value) {
     let status = args["status"].as_str().unwrap_or("continue").to_string();
     if status == "done" && args["summary"].as_str().map(str::trim).unwrap_or("").is_empty() {
         bus.emit(Event::ToolResult { session: call_session, call: call_id,
@@ -592,9 +833,23 @@ async fn record_report(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, call
                 "done requires a summary — one paragraph: what was delivered and where it lives") } }).await;
         return;
     }
+    // Artifact declarations are workspace-confined (the evidence rule's
+    // security line) — a bad path refuses the whole report so the model
+    // corrects it; canonical forms replace the raw strings on accept.
+    let mut verdict = parse_verdict(&args);
+    if let Verdict::Done { artifacts, .. } = &mut verdict {
+        match confine_artifacts(artifacts, workspace) {
+            Ok(canonical) => *artifacts = canonical,
+            Err(msg) => {
+                bus.emit(Event::ToolResult { session: call_session, call: call_id,
+                    output: ToolOutput { ok: false, content: serde_json::json!(msg) } }).await;
+                return;
+            }
+        }
+    }
     let recorded = workers.iter_mut()
         .find(|(_, w)| w.session == call_session.0 && matches!(w.state, WorkerState::Running | WorkerState::Blocked))
-        .map(|(_, w)| { w.pending = Some(parse_verdict(&args)); })
+        .map(|(_, w)| { w.pending = Some(verdict); })
         .is_some();
     let content = if recorded {
         serde_json::json!({ "recorded": status, "note": "applied when this step completes" })
@@ -609,7 +864,7 @@ async fn record_report(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, call
 /// its summary), blocked (park awaiting input, slot-free), yield (Idle), or
 /// continue (next step under the ceiling). No report = Done, the final text
 /// is the deliverable (the W1a single-turn rule, now the fallback).
-async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, session: u64, max_steps: u32) -> bool {
+async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path, session: u64, max_steps: u32) -> bool {
     let Some(id) = workers.iter()
         .find(|(_, w)| w.session == session && matches!(w.state, WorkerState::Running | WorkerState::Blocked))
         .map(|(id, _)| *id)
@@ -620,10 +875,11 @@ async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, session: u
         let w = workers.get_mut(&id).unwrap();
         w.turn_inflight = false;
         match w.pending.take() {
-            Some(Verdict::Done(summary)) => {
+            Some(Verdict::Done { summary, artifacts }) => {
                 w.state = WorkerState::Done;
                 let detail: String = summary.chars().take(120).collect();
                 w.summary = Some(summary);
+                w.artifacts = artifacts;
                 (detail, None)
             }
             Some(Verdict::Blocked(reason)) => {
@@ -658,6 +914,10 @@ async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, session: u
     emit_state(bus, id, w, &detail).await;
     eprintln!("[worker] {id} → {:?} at step {}{}", w.state, w.step,
               if detail.is_empty() { String::new() } else { format!(" ({detail})") });
+    // The evidence rule: every path into a terminal state leaves the trail.
+    if matches!(w.state, WorkerState::Done | WorkerState::Failed) {
+        finalize_terminal(proxy, agents_dir, id, w).await;
+    }
     if let Some((sid, directive)) = next_directive {
         bus.emit(Event::UserPrompt { session: SessionId(sid), text: directive, images: vec![] }).await;
     }
@@ -746,28 +1006,90 @@ async fn resume_from_approval(workers: &mut HashMap<u64, Worker>, bus: &BusHandl
 /// Fail any Running worker whose turn has stalled past the timeout (errored/
 /// aborted turns emit no TurnComplete). Blocked is exempt — an approval wait
 /// runs on the human's clock, not the stall clock.
-async fn fail_stalled(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, step_timeout: Duration) -> bool {
+async fn fail_stalled(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path, step_timeout: Duration) -> bool {
     let stalled: Vec<u64> = workers.iter_mut()
         .filter(|(_, w)| w.state == WorkerState::Running && w.started.elapsed() > step_timeout)
-        .map(|(id, w)| { w.state = WorkerState::Failed; *id })
+        .map(|(id, w)| { w.state = WorkerState::Failed; w.turn_inflight = false; *id })
         .collect();
     let changed = !stalled.is_empty();
     for id in stalled {
         let w = &workers[&id];
         emit_state(bus, id, w, "step stalled — no completion").await;
         eprintln!("[worker] {id} failed (stalled > {}s)", step_timeout.as_secs());
+        finalize_terminal(proxy, agents_dir, id, w).await;
     }
     changed
 }
 
+/// Batch bookkeeping: an unreported batch reports when every worker is
+/// terminal, or when its deadline passes — stragglers ride the report marked
+/// `timed_out` (still revivable; a later revive finishes them outside it).
+/// Rows carry evidence PATHS, never payloads. One report per batch.
+async fn check_batches(workers: &HashMap<u64, Worker>, batches: &mut HashMap<u64, BatchMeta>, bus: &BusHandle, agents_dir: &Path) -> bool {
+    let now = epoch_now();
+    let due: Vec<u64> = batches.iter()
+        .filter(|(_, b)| !b.reported)
+        .filter(|(id, b)| {
+            let members: Vec<&Worker> = workers.values().filter(|w| w.batch == **id).collect();
+            let all_terminal = !members.is_empty() && members.iter().all(|w| is_terminal(w.state));
+            let expired = now >= b.created_epoch.saturating_add(b.deadline_s);
+            all_terminal || expired
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    let changed = !due.is_empty();
+    for batch in due {
+        let meta = batches.get_mut(&batch).unwrap();
+        meta.reported = true;
+        let parent = meta.parent;
+        let rows = batch_rows(workers, batch, agents_dir);
+        let (done, failed, timed_out) = rows.iter().fold((0, 0, 0), |(d, f, t), r| match () {
+            _ if r.timed_out => (d, f, t + 1),
+            _ if r.state == WorkerState::Done => (d + 1, f, t),
+            _ => (d, f + 1, t),
+        });
+        eprintln!("[worker] batch {batch} reported: {done} done, {failed} failed, {timed_out} timed out");
+        bus.emit(Event::TaskBatchDone { batch, parent: SessionId(parent), rows }).await;
+    }
+    changed
+}
+
+fn is_terminal(state: WorkerState) -> bool {
+    matches!(state, WorkerState::Done | WorkerState::Failed | WorkerState::Cancelled)
+}
+
+/// Build a batch's report rows — pure over the worker map (unit-tested).
+fn batch_rows(workers: &HashMap<u64, Worker>, batch: u64, agents_dir: &Path) -> Vec<BatchWorkerRow> {
+    let mut rows: Vec<(u64, BatchWorkerRow)> = workers.iter()
+        .filter(|(_, w)| w.batch == batch)
+        .map(|(id, w)| {
+            let terminal = is_terminal(w.state);
+            (*id, BatchWorkerRow {
+                worker: WorkerId(*id),
+                state: w.state,
+                evidence: if terminal {
+                    evidence_path(agents_dir, *id).to_string_lossy().into_owned()
+                } else { String::new() },
+                timed_out: !terminal,
+            })
+        })
+        .collect();
+    rows.sort_by_key(|(id, _)| *id);
+    rows.into_iter().map(|(_, r)| r).collect()
+}
+
 /// Conductor visibility: a snapshot of all workers plus the admission picture.
-async fn handle_list_workers(workers: &HashMap<u64, Worker>, bus: &BusHandle, cap: usize, call_session: SessionId, call_id: ActionId) {
+/// Terminal workers carry their evidence path — paths, not payloads, even here.
+async fn handle_list_workers(workers: &HashMap<u64, Worker>, bus: &BusHandle, cap: usize, agents_dir: &Path, call_session: SessionId, call_id: ActionId) {
     let mut rows: Vec<(u64, serde_json::Value)> = workers.iter().map(|(id, w)| (*id, serde_json::json!({
         "worker": id, "batch": w.batch, "parent": w.parent, "session": w.session,
         "state": format!("{:?}", w.state).to_lowercase(),
         "step": w.step,
         "task": w.task.chars().take(100).collect::<String>(),
         "summary": w.summary.as_deref().map(|s| s.chars().take(200).collect::<String>()),
+        "evidence": if is_terminal(w.state) {
+            serde_json::json!(evidence_path(agents_dir, *id).to_string_lossy())
+        } else { serde_json::Value::Null },
     }))).collect();
     rows.sort_by_key(|(id, _)| *id);
     let list: Vec<serde_json::Value> = rows.into_iter().map(|(_, j)| j).collect();
@@ -841,6 +1163,7 @@ mod tests {
     fn mk(state: WorkerState) -> Worker {
         Worker { batch: 1, parent: 0, session: apexos_core::WORKER_SESSION_BASE,
                  task: "t".into(), state, step: 1, summary: None,
+                 artifacts: Vec::new(), episode: None,
                  started: Instant::now(), pending: None, turn_inflight: false }
     }
 
@@ -876,6 +1199,7 @@ mod tests {
             id: 7, batch: 2, parent: 3, session: apexos_core::WORKER_SESSION_BASE + 6,
             task: "refactor the parser".into(), state: WorkerState::Running,
             step: 3, summary: Some("parser refactored".into()),
+            artifacts: vec!["out/parser.rs".into()], episode: Some("ep_x".into()),
         };
         let back: PersistedWorker = serde_json::from_str(&serde_json::to_string(&pw).unwrap()).unwrap();
         assert_eq!(back.id, 7);
@@ -885,12 +1209,14 @@ mod tests {
         assert_eq!(back.task, "refactor the parser");
         assert_eq!(back.step, 3);
         assert_eq!(back.summary.as_deref(), Some("parser refactored"));
+        assert_eq!(back.artifacts, vec!["out/parser.rs"]);
+        assert_eq!(back.episode.as_deref(), Some("ep_x"));
     }
 
     #[test]
-    fn persisted_worker_w1a_json_defaults_step_and_summary() {
-        // A workers.json written by W1a has no step/summary keys — the serde
-        // defaults (step 1, no summary) must carry it, never a parse failure.
+    fn persisted_worker_earlier_slice_json_defaults_new_fields() {
+        // A workers.json written by W1a/W1b lacks step/summary/artifacts/episode —
+        // the serde defaults must carry it, never a parse failure.
         let legacy = format!(
             r#"{{"id":1,"batch":1,"parent":0,"session":{},"task":"x","state":"parked"}}"#,
             apexos_core::WORKER_SESSION_BASE
@@ -898,6 +1224,8 @@ mod tests {
         let pw: PersistedWorker = serde_json::from_str(&legacy).unwrap();
         assert_eq!(pw.step, 1);
         assert!(pw.summary.is_none());
+        assert!(pw.artifacts.is_empty());
+        assert!(pw.episode.is_none());
     }
 
     #[test]
@@ -919,8 +1247,8 @@ mod tests {
 
     #[test]
     fn parse_verdict_maps_status() {
-        assert!(matches!(parse_verdict(&serde_json::json!({"status":"done","summary":"shipped"})),
-                         Verdict::Done(s) if s == "shipped"));
+        assert!(matches!(parse_verdict(&serde_json::json!({"status":"done","summary":"shipped","artifacts":["a.md"]})),
+                         Verdict::Done { summary, artifacts } if summary == "shipped" && artifacts == vec!["a.md"]));
         assert!(matches!(parse_verdict(&serde_json::json!({"status":"blocked","reason":"no key"})),
                          Verdict::Blocked(r) if r == "no key"));
         assert!(matches!(parse_verdict(&serde_json::json!({"status":"yield"})), Verdict::Yield));
@@ -928,6 +1256,58 @@ mod tests {
                          Verdict::Continue(Some(s)) if s == "tests"));
         // Absent/unknown status defaults to continue (the goal_step convention).
         assert!(matches!(parse_verdict(&serde_json::json!({})), Verdict::Continue(None)));
+    }
+
+    #[test]
+    fn batch_deadline_clamps_and_defaults() {
+        assert_eq!(parse_batch_deadline(&serde_json::json!({})), DEFAULT_BATCH_DEADLINE_S);
+        assert_eq!(parse_batch_deadline(&serde_json::json!({"batch_deadline_s": 5})), 60);
+        assert_eq!(parse_batch_deadline(&serde_json::json!({"batch_deadline_s": 999_999})), 86_400);
+        assert_eq!(parse_batch_deadline(&serde_json::json!({"batch_deadline_s": 300})), 300);
+    }
+
+    #[test]
+    fn confine_artifacts_gates_the_workspace() {
+        let ws = std::env::temp_dir().join(format!("apexos-worker-ws-{}", std::process::id()));
+        std::fs::create_dir_all(ws.join("out")).unwrap();
+        std::fs::write(ws.join("out/report.md"), "x").unwrap();
+        let ws = ws.canonicalize().unwrap();
+        // Relative path roots at the workspace; canonical form comes back.
+        let ok = confine_artifacts(&["out/report.md".into()], &ws).unwrap();
+        assert!(ok[0].starts_with(&*ws.to_string_lossy()));
+        // Traversal and absolute escapes refuse with the offending path named.
+        assert!(confine_artifacts(&["../escape.md".into()], &ws).is_err());
+        assert!(confine_artifacts(&["/etc/passwd".into()], &ws).is_err());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn batch_rows_are_pointers_with_straggler_marks() {
+        let agents = Path::new("/var/lib/agentd/events/agents");
+        let mut m = HashMap::new();
+        m.insert(1, Worker { batch: 7, ..mk(WorkerState::Done) });
+        m.insert(2, Worker { batch: 7, ..mk(WorkerState::Failed) });
+        m.insert(3, Worker { batch: 7, ..mk(WorkerState::Parked) });   // straggler
+        m.insert(4, Worker { batch: 8, ..mk(WorkerState::Running) });  // other batch
+        let rows = batch_rows(&m, 7, agents);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].worker, WorkerId(1));
+        assert!(rows[0].evidence.ends_with("agents/1.json"));
+        assert!(!rows[0].timed_out);
+        assert!(rows[1].evidence.ends_with("agents/2.json"));
+        assert!(rows[2].timed_out, "non-terminal at report time = timed_out");
+        assert!(rows[2].evidence.is_empty(), "no evidence file for a straggler");
+    }
+
+    #[test]
+    fn terminal_states_are_exactly_done_failed_cancelled() {
+        for s in [WorkerState::Done, WorkerState::Failed, WorkerState::Cancelled] {
+            assert!(is_terminal(s), "{s:?}");
+        }
+        for s in [WorkerState::Queued, WorkerState::Running, WorkerState::Idle,
+                  WorkerState::Parked, WorkerState::Blocked] {
+            assert!(!is_terminal(s), "{s:?}");
+        }
     }
 
     #[test]

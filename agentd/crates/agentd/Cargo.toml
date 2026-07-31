@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 apexos-core    = { path = "../core" }
+apexos-confine = { path = "../../../apexos-confine" }
 apexos-gateway = { path = "../gateway" }
 apexos-plugins = { path = "../plugins" }
 apexos-agent   = { path = "../agent" }

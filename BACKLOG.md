@@ -24,7 +24,21 @@ recursion under conservation laws), plus the **code regime**
 per-task model mix). Slice ladder + locked decisions live in the charter;
 brainstorm inputs preserved in `docs/ideas/fabrica/`. Implementation is a
 fresh full-window arc (André: ultra/max, full send) — start at W1a with the
-charter as north star.
+charter as north star. *Progress: W1a `#306` + W1b `#307` merged 2026-07-31;
+W1c in flight.*
+
+---
+
+## 🔧 install — low-RAM build guard needs a bigger swapfile (field, 2026-07-31)
+
+**P2 · install.sh `ensure_build_swap`** — apex2 (Pi 5, 4 GB) OOMed building
+ui-slint during the 07-31 colony update **with the guard active and its 2 GB
+temp swapfile mounted**: the UI's working set has outgrown the #175-era
+sizing (~5.5 GB measured then; it's bigger now). Fix in a polish round: size
+the temp swapfile from a fresh measurement (likely 4 GB on ≤4 GB boards, or
+`max(2GB, 6GB − RAM)`), re-measure the actual peak on apex2, and note the
+number in the low-RAM gotcha. Not urgent — apex1 (8 GB) and apex-3 (x86)
+build fine and carry the colony meanwhile.
 
 ---
 

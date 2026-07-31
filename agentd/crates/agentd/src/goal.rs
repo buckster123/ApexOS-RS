@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use apexos_core::{ActionId, BusHandle, Event, GoalId, GoalState, GoalYoloSessions, SessionId, ToolOutput, ToolSpec};
+use apexos_core::{ActionId, BatchWorkerRow, BusHandle, Event, GoalId, GoalState, GoalYoloSessions, SessionId, ToolOutput, ToolSpec};
 use apexos_plugins::ToolProxy;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -48,6 +48,12 @@ struct Goal {
     pending:      Option<Verdict>, // the agent's goal_step verdict, applied on TurnComplete
     episode:      Option<String>,  // Cerebro episode id wrapping this run (ended on Done/Failed)
     yolo:         bool,            // goal-scoped yolo: this goal auto-approves its OWN ask tools (#3)
+    /// The AwaitingBatch posture (Fabrica W1c): this goal fanned a `task_fanout`
+    /// batch and its step loop is HELD — no advance, stall clock paused — until
+    /// `TaskBatchDone` delivers the report (paths, not payloads). Transient:
+    /// a restart parks the goal Blocked anyway, and the batch deadline
+    /// guarantees the report side never wedges.
+    awaiting_batch: bool,
 }
 
 type Goals = Arc<Mutex<HashMap<u64, Goal>>>;
@@ -260,6 +266,13 @@ pub fn spawn_goal_driver(
         let goals: Goals = Arc::new(Mutex::new(HashMap::new()));
         reload_goals(&goals, &bus, &next_goal_id, &goals_path, &goal_yolo).await;
         let step_timeout = step_timeout_from_env();
+        // AwaitingBatch bookkeeping (W1c): batches in flight per conductor
+        // session, armed off WorkerStateChanged (which the worker driver emits
+        // BEFORE the fan-out ack, so this is provably set before the fanning
+        // turn can complete). `done` guards against a straggler's late state
+        // events re-arming a batch that already reported.
+        let mut pending_batches: HashMap<u64, std::collections::HashSet<u64>> = HashMap::new();
+        let mut done_batches: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
@@ -276,7 +289,18 @@ pub fn spawn_goal_driver(
                 ev = bcast_rx.recv() => {
                     match ev {
                         Ok(Event::TurnComplete { session }) => {
-                            if advance(&goals, &bus, &proxy, &goal_yolo, session.0).await { save_goals(&goals, &goals_path).await; }
+                            // AwaitingBatch hold: a conductor whose batch is still in
+                            // flight does NOT advance — the verdict stays pending, the
+                            // stall clock pauses, and TaskBatchDone resumes the loop
+                            // with the report. (docs/fabrica.md W1c)
+                            let has_pending_batch = pending_batches.get(&session.0).is_some_and(|s| !s.is_empty());
+                            if has_pending_batch {
+                                if hold_awaiting_batch(&goals, &bus, session.0).await {
+                                    save_goals(&goals, &goals_path).await;
+                                }
+                            } else if advance(&goals, &bus, &proxy, &goal_yolo, session.0).await {
+                                save_goals(&goals, &goals_path).await;
+                            }
                         }
                         // A goal step hit an `ask`-gated tool → ApprovalPending in the goal's
                         // own (unwatched) session. Park the goal Blocked instead of stalling
@@ -286,6 +310,30 @@ pub fn spawn_goal_driver(
                         Ok(Event::ApprovalPending { session, call }) => {
                             let parked = block_on_approval(&goals, &bus, session.0, &call.tool).await;
                             if parked { save_goals(&goals, &goals_path).await; }
+                        }
+                        // Track fanned batches per conductor session (W1c). Late
+                        // events from a revived straggler must not re-arm a
+                        // batch that already reported.
+                        Ok(Event::WorkerStateChanged { batch, parent, .. }) => {
+                            if !done_batches.contains(&batch) {
+                                pending_batches.entry(parent.0).or_default().insert(batch);
+                            }
+                        }
+                        // The batch reported → resume an awaiting conductor with the
+                        // integrate directive (paths, not payloads).
+                        Ok(Event::TaskBatchDone { batch, parent, rows }) => {
+                            done_batches.insert(batch);
+                            let none_left = {
+                                let set = pending_batches.entry(parent.0).or_default();
+                                set.remove(&batch);
+                                set.is_empty()
+                            };
+                            if none_left {
+                                pending_batches.remove(&parent.0);
+                                if resume_after_batch(&goals, &bus, parent.0, batch, &rows).await {
+                                    save_goals(&goals, &goals_path).await;
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -320,6 +368,7 @@ async fn reload_goals(goals: &Goals, bus: &BusHandle, next_goal_id: &Arc<AtomicU
                 objective: pg.objective.clone(), session: pg.session, state,
                 step: pg.step, max_steps: pg.max_steps, step_started: Instant::now(),
                 pending: None, episode: pg.episode.clone(), yolo: pg.yolo,
+                awaiting_batch: false,
             });
             announce.push((pg.id, pg.objective, state, pg.step, pg.max_steps, pg.yolo));
         }
@@ -433,6 +482,7 @@ async fn create_goal(
     goals.lock().await.insert(gid, Goal {
         objective: objective.clone(), session: sid, state: GoalState::Acting,
         step: 1, max_steps, step_started: Instant::now(), pending: None, episode, yolo,
+        awaiting_batch: false,
     });
 
     bus.emit(Event::ToolResult { session: call_session, call: call_id,
@@ -564,11 +614,13 @@ fn parse_step_timeout(raw: Option<&str>) -> Duration {
 type StalledGoal = (u64, u64, String, u32, u32, Option<String>, bool);
 
 /// Fail any Acting goal whose current step has stalled past the step timeout.
+/// An AwaitingBatch conductor is exempt — its stall clock is paused; the batch
+/// deadline (worker driver side) is the bound that guarantees it resumes.
 async fn fail_stalled(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, goal_yolo: &GoalYoloSessions, step_timeout: Duration) -> bool {
     let failed: Vec<StalledGoal> = {
         let mut g = goals.lock().await;
         g.iter_mut()
-            .filter(|(_, go)| go.state == GoalState::Acting && go.step_started.elapsed() > step_timeout)
+            .filter(|(_, go)| go.state == GoalState::Acting && !go.awaiting_batch && go.step_started.elapsed() > step_timeout)
             .map(|(gid, go)| { go.state = GoalState::Failed; (*gid, go.session, go.objective.clone(), go.step, go.max_steps, go.episode.clone(), go.yolo) })
             .collect()
     };
@@ -609,6 +661,79 @@ async fn episode_end_goal(proxy: &ToolProxy, episode_id: &str, state: GoalState,
     })).await {
         eprintln!("[goal] episode_end: {e}");
     }
+}
+
+/// The conductor's turn completed while its batch is still in flight → enter
+/// the AwaitingBatch posture (W1c): no advance, verdict stays pending, stall
+/// clock paused. Idempotent across multiple TurnCompletes (a woken conductor
+/// answering a human mid-wait re-holds harmlessly).
+async fn hold_awaiting_batch(goals: &Goals, bus: &BusHandle, session: u64) -> bool {
+    let held = {
+        let mut g = goals.lock().await;
+        match g.iter_mut().find(|(_, go)| go.session == session && go.state == GoalState::Acting) {
+            Some((gid, go)) if !go.awaiting_batch => {
+                go.awaiting_batch = true;
+                Some((*gid, go.objective.clone(), go.step, go.max_steps, go.yolo))
+            }
+            _ => None,
+        }
+    };
+    if let Some((gid, objective, step, max_steps, yolo)) = held {
+        emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps, "awaiting batch", yolo).await;
+        eprintln!("[goal] {gid} awaiting batch (stall clock paused)");
+        true
+    } else { false }
+}
+
+/// The batch reported → resume the awaiting conductor with the integrate
+/// directive. The report hands PATHS, never payloads: integration means the
+/// conductor actually reads the evidence files (the verification triangle's
+/// integrator leg). The integrate turn is a real step (budget-honest, clamped
+/// at the ceiling so the report always gets its turn).
+async fn resume_after_batch(goals: &Goals, bus: &BusHandle, session: u64, batch: u64, rows: &[BatchWorkerRow]) -> bool {
+    let resumed = {
+        let mut g = goals.lock().await;
+        match g.iter_mut().find(|(_, go)| go.session == session && go.state == GoalState::Acting && go.awaiting_batch) {
+            Some((gid, go)) => {
+                go.awaiting_batch = false;
+                go.pending = None; // the fanning step's verdict is superseded by the report
+                go.step = (go.step + 1).min(go.max_steps);
+                go.step_started = Instant::now();
+                Some((*gid, go.objective.clone(), go.step, go.max_steps, go.yolo))
+            }
+            None => None,
+        }
+    };
+    if let Some((gid, objective, step, max_steps, yolo)) = resumed {
+        emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps, &format!("batch {batch} reported — integrating"), yolo).await;
+        bus.emit(Event::UserPrompt {
+            session: SessionId(session),
+            text: directive_integrate(&objective, step, max_steps, batch, rows),
+            images: vec![],
+        }).await;
+        eprintln!("[goal] {gid} resumed from batch {batch} at step {step}");
+        true
+    } else { false }
+}
+
+/// The integrate work order: the batch report as pointers. Reading the
+/// evidence is the step — trusting a summary string is a hinge, and hinges
+/// fold (docs/fabrica.md, the evidence rule).
+fn directive_integrate(objective: &str, step: u32, max_steps: u32, batch: u64, rows: &[BatchWorkerRow]) -> String {
+    let mut lines = String::new();
+    for r in rows {
+        let mark = if r.timed_out { " (timed_out — still revivable)" } else { "" };
+        let evidence = if r.evidence.is_empty() { "no evidence file" } else { &r.evidence };
+        lines.push_str(&format!("- worker {} [{:?}]{mark}: {evidence}\n", r.worker.0, r.state));
+    }
+    format!(
+        "Continue the GOAL (step {step}/{max_steps}). OBJECTIVE: {objective}\n\n\
+         Batch {batch} has reported. Workers:\n{lines}\n\
+         INTEGRATE NOW — the rows above are pointers, not results: read each evidence file \
+         (and the artifact paths it declares), verify the work actually meets the objective, \
+         and only then proceed. A failed or timed-out worker is integration data — fix, re-fan, \
+         or work around it. Call `goal_step{{status:\"done\"}}` when the objective is fully met."
+    )
 }
 
 /// A goal step requested an `ask`-gated tool → ApprovalPending in the goal's own
@@ -665,6 +790,24 @@ mod tests {
             assert!(d.contains("minimum tools"), "discipline missing: {d}");
             assert!(d.contains("screenshot_mirror"), "named inspection tool missing: {d}");
         }
+    }
+
+    #[test]
+    fn integrate_directive_hands_paths_not_payloads() {
+        use apexos_core::{BatchWorkerRow, WorkerId, WorkerState};
+        let rows = vec![
+            BatchWorkerRow { worker: WorkerId(3), state: WorkerState::Done,
+                             evidence: "events/agents/3.json".into(), timed_out: false },
+            BatchWorkerRow { worker: WorkerId(4), state: WorkerState::Parked,
+                             evidence: String::new(), timed_out: true },
+        ];
+        let d = directive_integrate("ship the parser", 4, 12, 9, &rows);
+        assert!(d.contains("step 4/12"));
+        assert!(d.contains("Batch 9"));
+        assert!(d.contains("events/agents/3.json"), "the pointer must ride the directive");
+        assert!(d.contains("timed_out — still revivable"));
+        assert!(d.contains("read each evidence file"), "integration = reading, not trusting");
+        assert!(d.contains("goal_step"));
     }
 
     #[test]

@@ -74,8 +74,10 @@ subscribes to the bus separately, so this never affects routing.
 Global/status events include `goal_state_changed` (the Work Board's goal lane) and
 its twin `worker_state_changed` (Fabrica W1a — the WORKERS lane: `{worker, batch,
 parent, session, task, state queued|running|idle|parked|blocked|done|failed|cancelled,
-detail}`, ids as bare numbers). Both are deliberately session-less so every client's
-board sees them.
+detail}`, ids as bare numbers), plus `task_batch_done` (W1c — a batch reported:
+`{batch, parent, rows:[{worker, state, evidence, timed_out?}]}` where `evidence` is
+the worker's terminal evidence-file path — pointers, never payloads). All deliberately
+session-less so every client's board sees them.
 
 Full event list: `apexos-protocol/src/lib.rs` — `Event` enum.
 
