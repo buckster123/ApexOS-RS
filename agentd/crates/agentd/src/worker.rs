@@ -9,10 +9,19 @@
 //! slots free. Restart parks every non-terminal worker — `workers.json` +
 //! `sessions/<id>.jsonl` are truth, nothing is lost (revive-on-send is W1b).
 //!
-//! W1a workers are SINGLE-TURN: the charter says the final text IS the work
-//! product, and the turn's completion is the verdict (`TurnComplete` → Done).
-//! `worker_report` verdicts (continue/yield/blocked) and multi-step loops land
-//! in W1b; artifacts + Cerebro episodes + `TaskBatchDone` land in W1c.
+//! W1b: workers report through `worker_report{continue|done|blocked|yield}` —
+//! `goal_step`'s mirror. `done` requires a summary; `yield` goes Idle (history
+//! in RAM, no thermal slot, a send wakes it free); a verdict-`blocked` worker
+//! likewise sits slot-free awaiting input. Idle/non-inflight-Blocked workers
+//! past the idle TTL park: the state event carries the eviction (the router
+//! removes the RAM history; `sessions/<id>.jsonl` stays truth) and a send is
+//! the ONLY Parked→Running edge (PB-3) — the router hydrates through
+//! `load_one`/`repair_history`, this driver flips the state off the same
+//! UserPrompt event. Revive/wake deliberately BYPASSES the admission cap:
+//! a send is human/conductor intent, the emergency entrance — Queued workers
+//! just wait a little longer. No report at all still means Done with the
+//! final text as the deliverable (the W1a single-turn rule, now the fallback).
+//! Artifacts + Cerebro episodes + `TaskBatchDone` land in W1c.
 //!
 //! Deliberate departure from goal.rs: the worker map is a PLAIN `HashMap`
 //! owned by the driver task — no `Arc<Mutex<…>>`. Every access is serialized
@@ -38,18 +47,43 @@ const MAX_BATCH_TASKS: usize = 32;
 /// Override via `WORKER_STEP_TIMEOUT_SECS` (30s floor), mirroring the goal knob.
 const STEP_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// An Idle (yielded) or verdict-blocked worker that receives no send within
+/// this window parks: RAM history evicted, JSONL stays truth. Override via
+/// `WORKER_IDLE_TTL_SECS` (60s floor).
+const IDLE_TTL: Duration = Duration::from_secs(1800);
+
+/// Step ceiling for `worker_report{continue}` loops — code disposes, exactly
+/// the goal budget's rule. Override via `WORKER_MAX_STEPS` (clamped 1–100).
+const DEFAULT_MAX_STEPS: u32 = 12;
+
+/// The worker's reported outcome for the in-flight step (via `worker_report`),
+/// applied on `TurnComplete` — `goal.rs`'s Verdict, worker vocabulary.
+enum Verdict {
+    Continue(Option<String>), // optional steer for the next step
+    Done(String),             // the summary (required — enforced at record time)
+    Blocked(String),          // reason; sits awaiting input, slot-free
+    Yield,                    // go Idle awaiting input, wake free
+}
+
 struct Worker {
     batch:   u64,
     parent:  u64,   // conductor session that fanned this worker out
     session: u64,   // dedicated session in the WORKER_SESSION_BASE range (persisted)
     task:    String,
     state:   WorkerState,
-    started: Instant, // stall clock — re-armed on admission and on approval resolution
+    step:    u32,   // in-flight step, 1-indexed (the goal driver's convention)
+    summary: Option<String>,   // the done-verdict summary (persisted — the human-facing line)
+    started: Instant,          // stall clock while Running; idle/TTL clock otherwise
+    pending: Option<Verdict>,  // the worker_report verdict, applied on TurnComplete
+    /// Whether a turn is live on this session right now. Distinguishes the two
+    /// Blocked flavors: an approval-suspended turn (inflight — holds a slot, the
+    /// human's clock) vs a verdict-blocked worker (no turn — slot-free, TTL clock).
+    turn_inflight: bool,
 }
 
-/// The on-disk form (transient `started` dropped). New fields added by later
-/// slices MUST carry `#[serde(default)]` so an old workers.json still loads
-/// (the PersistedGoal discipline).
+/// The on-disk form (transient `started`/`pending`/`turn_inflight` dropped).
+/// New fields added by later slices MUST carry `#[serde(default)]` so an old
+/// workers.json still loads (the PersistedGoal discipline).
 #[derive(Serialize, Deserialize)]
 struct PersistedWorker {
     id:      u64,
@@ -58,7 +92,13 @@ struct PersistedWorker {
     session: u64,
     task:    String,
     state:   WorkerState,
+    #[serde(default = "default_step")]
+    step:    u32,
+    #[serde(default)]
+    summary: Option<String>,
 }
+
+fn default_step() -> u32 { 1 }
 
 // ── Tool specs ───────────────────────────────────────────────────────────────
 
@@ -97,6 +137,31 @@ pub fn task_fanout_spec() -> ToolSpec {
     }
 }
 
+pub fn worker_report_spec() -> ToolSpec {
+    ToolSpec {
+        name: "worker_report".into(),
+        description: "Report the outcome of the CURRENT worker step — only meaningful while running \
+                      as a fanned-out worker. `done`: the task is complete — REQUIRES a `summary` \
+                      (one paragraph: what was delivered and where); your summary + final text are \
+                      what the conductor reads. `continue`: take another step, optionally steering \
+                      it via `next`. `yield`: pause Idle awaiting input (a send wakes you). \
+                      `blocked`: an unresolvable dependency — park awaiting help with a `reason`. \
+                      Not calling this at all also completes the task, with your final text as the \
+                      deliverable. The driver applies your verdict when this turn completes.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "status":  { "type": "string", "enum": ["continue", "done", "blocked", "yield"],
+                             "description": "done = task complete (summary required); continue = another step; yield = pause for input; blocked = stuck." },
+                "summary": { "type": "string", "description": "REQUIRED with done: what was delivered and where it lives." },
+                "next":    { "type": "string", "description": "Optional steer for the next step (status=continue)." },
+                "reason":  { "type": "string", "description": "Why you're stuck (status=blocked)." }
+            },
+            "required": ["status"]
+        }),
+    }
+}
+
 pub fn list_workers_spec() -> ToolSpec {
     ToolSpec {
         name: "list_workers".into(),
@@ -118,22 +183,35 @@ pub fn worker_system(parent_agent: &str) -> String {
     format!(
         "You are a task-scoped WORKER on {parent_agent}'s node — one of a batch fanned out by a \
          conductor. You exist for exactly one task, delivered in your prompt. Work it directly \
-         with the minimum tools required. Your final text IS the work product — the conductor \
-         reads it, so make it the complete deliverable (or a precise account of what you did and \
-         where the results live), not a status update. Skip orientation: no memory recall, inbox \
-         checks, or self-inspection unless the task itself asks for them. Approval-gated tools \
-         still ask a human — prefer ungated paths. Do not spawn agents or fan out further work: \
-         workers are depth-1 by design."
+         with the minimum tools required. Report through worker_report: done{{summary}} when the \
+         task is complete — the summary plus your final text are the deliverable the conductor \
+         reads; continue to take another step; yield to pause for input; blocked{{reason}} if \
+         truly stuck. Not reporting also completes the task, with your final text as the \
+         deliverable. Skip orientation: no memory recall, inbox checks, or self-inspection unless \
+         the task itself asks for them. Approval-gated tools still ask a human — prefer ungated \
+         paths. Do not spawn agents or fan out further work: workers are depth-1 by design."
     )
 }
 
-/// The single-turn work order (W1a). Per-worker text rides here, never in the
-/// shared system charter, so the system prefix stays identical across a batch.
-fn directive(worker_id: u64, batch: u64, task: &str) -> String {
+/// The first-step work order. Per-worker text rides here, never in the shared
+/// system charter, so the system prefix stays identical across a batch.
+fn directive_first(worker_id: u64, batch: u64, max_steps: u32, task: &str) -> String {
     format!(
-        "WORKER {worker_id} (batch {batch}) — one task, one turn.\n\nTASK:\n{task}\n\n\
-         Complete the task NOW, in this single turn. Your final text is the deliverable."
+        "WORKER {worker_id} (batch {batch}) — step 1/{max_steps}.\n\nTASK:\n{task}\n\n\
+         Work the task NOW. When it is complete, call `worker_report{{status:\"done\", \
+         summary:\"…\"}}` — don't burn steps you don't need. `continue` takes another step, \
+         `yield` pauses for input, `blocked{{reason}}` parks it. No report also completes the \
+         task: your final text is the deliverable."
     )
+}
+
+/// The continue-step work order (`worker_report{{continue}}` took another step).
+fn directive_continue(worker_id: u64, batch: u64, step: u32, max_steps: u32, task: &str, steer: Option<&str>) -> String {
+    let head = format!("Continue WORKER {worker_id} (batch {batch}) — step {step}/{max_steps}. TASK: {task}");
+    match steer {
+        Some(s) => format!("{head}\n\nFocus this step on: {s}\n\nCall `worker_report{{status:\"done\", summary:\"…\"}}` when complete."),
+        None    => format!("{head}\n\nKeep making concrete progress. Call `worker_report{{status:\"done\", summary:\"…\"}}` when complete."),
+    }
 }
 
 // ── Pure resolvers (unit-tested) ─────────────────────────────────────────────
@@ -169,6 +247,44 @@ fn step_timeout_from_env() -> Duration {
     parse_step_timeout(std::env::var("WORKER_STEP_TIMEOUT_SECS").ok().as_deref())
 }
 
+/// Pure idle-TTL resolver: a valid ≥60s value wins; anything else falls back
+/// to the 1800s default. Parking is cheap to undo (a send revives) but a typo
+/// shouldn't churn park/revive cycles every sweep.
+fn parse_idle_ttl(raw: Option<&str>) -> Duration {
+    raw.and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n >= 60)
+        .map(Duration::from_secs)
+        .unwrap_or(IDLE_TTL)
+}
+
+fn idle_ttl_from_env() -> Duration {
+    parse_idle_ttl(std::env::var("WORKER_IDLE_TTL_SECS").ok().as_deref())
+}
+
+/// Pure step-ceiling resolver: any parseable value clamps to 1–100, else the
+/// default 12 (the goal budget's shape — code disposes on runaway continues).
+fn parse_max_steps(raw: Option<&str>) -> u32 {
+    raw.and_then(|s| s.parse::<u32>().ok())
+        .map(|n| n.clamp(1, 100))
+        .unwrap_or(DEFAULT_MAX_STEPS)
+}
+
+fn max_steps_from_env() -> u32 {
+    parse_max_steps(std::env::var("WORKER_MAX_STEPS").ok().as_deref())
+}
+
+/// Map `worker_report` args to a verdict. Absent/unknown status = continue
+/// (the goal_step convention); `done`'s summary requirement is enforced at
+/// record time so the model gets an actionable refusal, not a silent default.
+fn parse_verdict(args: &serde_json::Value) -> Verdict {
+    match args["status"].as_str() {
+        Some("done")    => Verdict::Done(args["summary"].as_str().unwrap_or("").trim().to_string()),
+        Some("blocked") => Verdict::Blocked(args["reason"].as_str().unwrap_or("blocked").to_string()),
+        Some("yield")   => Verdict::Yield,
+        _               => Verdict::Continue(args["next"].as_str().map(str::to_owned)),
+    }
+}
+
 /// Extract the task prompts from `task_fanout` args — item = string | {prompt}.
 /// Errors are conductor-facing strings (the tool result), not panics.
 fn parse_tasks(args: &serde_json::Value) -> Result<Vec<String>, String> {
@@ -197,15 +313,17 @@ fn parked_form(state: WorkerState) -> WorkerState {
     }
 }
 
-/// A worker occupies a thermal slot while Running or Blocked (mid-turn either
-/// way — an approval-parked turn is still resident). Parked/Queued/terminal
-/// hold no slot.
-fn holds_slot(state: WorkerState) -> bool {
-    matches!(state, WorkerState::Running | WorkerState::Blocked)
+/// A worker occupies a thermal slot while a turn is live on its session:
+/// Running, or Blocked with the turn suspended on an approval (still
+/// resident, still mid-flight). The thermal budget is RUNNING residency
+/// (docs/fabrica.md) — Idle (yielded), verdict-blocked (turn completed),
+/// Parked, Queued, and terminal states hold no slot.
+fn holds_slot(w: &Worker) -> bool {
+    w.state == WorkerState::Running || (w.state == WorkerState::Blocked && w.turn_inflight)
 }
 
 fn slots_used(workers: &HashMap<u64, Worker>) -> usize {
-    workers.values().filter(|w| holds_slot(w.state)).count()
+    workers.values().filter(|w| holds_slot(w)).count()
 }
 
 /// The FIFO: the lowest-id Queued worker is next (ids are mint-ordered).
@@ -218,7 +336,7 @@ fn next_queued(workers: &HashMap<u64, Worker>) -> Option<u64> {
 fn save_workers(workers: &HashMap<u64, Worker>, path: &PathBuf) {
     let mut snapshot: Vec<PersistedWorker> = workers.iter().map(|(id, w)| PersistedWorker {
         id: *id, batch: w.batch, parent: w.parent, session: w.session,
-        task: w.task.clone(), state: w.state,
+        task: w.task.clone(), state: w.state, step: w.step, summary: w.summary.clone(),
     }).collect();
     snapshot.sort_by_key(|w| w.id); // deterministic file → readable diffs
     if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
@@ -282,32 +400,37 @@ pub fn spawn_worker_driver(
                        &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid).await;
 
         let step_timeout = step_timeout_from_env();
+        let idle_ttl     = idle_ttl_from_env();
+        let max_steps    = max_steps_from_env();
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
                 Some((session, call_id, tool, args)) = req_rx.recv() => {
                     match tool.as_str() {
                         "task_fanout" => {
-                            fanout(&mut workers, &bus, cap, session, call_id, args,
+                            fanout(&mut workers, &bus, cap, max_steps, session, call_id, args,
                                    &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid).await;
                             save_workers(&workers, &workers_path);
                         }
+                        "worker_report" => record_report(&mut workers, &bus, session, call_id, args).await,
                         "list_workers" => handle_list_workers(&workers, &bus, cap, session, call_id).await,
                         _ => {}
                     }
                 }
                 ev = bcast_rx.recv() => {
                     match ev {
+                        // A worker's turn completed → apply its reported verdict
+                        // (or the no-report fallback: Done, final text = deliverable).
                         Ok(Event::TurnComplete { session }) if apexos_core::is_worker_session(session.0) => {
-                            if finish_done(&mut workers, &bus, session.0).await {
-                                admit_queued(&mut workers, &bus, cap).await;
+                            if advance(&mut workers, &bus, session.0, max_steps).await {
+                                admit_queued(&mut workers, &bus, cap, max_steps).await;
                                 save_workers(&workers, &workers_path);
                             }
                         }
                         // A worker's turn hit an ask-gated tool: the turn is suspended on
                         // the approval, NOT dead — a human can grant it from the board and
                         // the turn proceeds. Mark Blocked (stall-exempt) so the lane tells
-                        // the truth; the slot stays held (the turn is still resident).
+                        // the truth; the slot stays held (the turn is still in flight).
                         Ok(Event::ApprovalPending { session, call }) if apexos_core::is_worker_session(session.0) => {
                             if block_on_approval(&mut workers, &bus, session.0, &call.tool).await {
                                 save_workers(&workers, &workers_path);
@@ -319,14 +442,21 @@ pub fn spawn_worker_driver(
                             let resumed = resume_from_approval(&mut workers, &bus, session.0).await;
                             if resumed { save_workers(&workers, &workers_path); }
                         }
+                        // A send landed on a worker session — the revive/wake edge
+                        // (PB-3). The router hydrates a parked worker's history off
+                        // this same event; here the state flips and the clocks re-arm.
+                        Ok(Event::UserPrompt { session, .. }) if apexos_core::is_worker_session(session.0) => {
+                            let woke = wake_on_send(&mut workers, &bus, session.0).await;
+                            if woke { save_workers(&workers, &workers_path); }
+                        }
                         _ => {}
                     }
                 }
                 _ = tick.tick() => {
-                    if fail_stalled(&mut workers, &bus, step_timeout).await {
-                        admit_queued(&mut workers, &bus, cap).await;
-                        save_workers(&workers, &workers_path);
-                    }
+                    let stalled = fail_stalled(&mut workers, &bus, step_timeout).await;
+                    let parked  = park_idle(&mut workers, &bus, idle_ttl).await;
+                    if stalled { admit_queued(&mut workers, &bus, cap, max_steps).await; }
+                    if stalled || parked { save_workers(&workers, &workers_path); }
                 }
             }
         }
@@ -349,7 +479,8 @@ async fn reload_workers(
         let state = parked_form(pw.state);
         workers.insert(pw.id, Worker {
             batch: pw.batch, parent: pw.parent, session: pw.session,
-            task: pw.task, state, started: Instant::now(),
+            task: pw.task, state, step: pw.step, summary: pw.summary,
+            started: Instant::now(), pending: None, turn_inflight: false,
         });
     }
     let mut ids: Vec<u64> = workers.keys().copied().collect();
@@ -367,7 +498,7 @@ async fn reload_workers(
 /// are the M-tier mechanism; there is no partial fan below the conductor).
 #[allow(clippy::too_many_arguments)]
 async fn fanout(
-    workers: &mut HashMap<u64, Worker>, bus: &BusHandle, cap: usize,
+    workers: &mut HashMap<u64, Worker>, bus: &BusHandle, cap: usize, max_steps: u32,
     call_session: SessionId, call_id: ActionId, args: serde_json::Value,
     next_worker_id: &mut u64, next_batch_id: &mut u64, next_worker_sid: &mut u64,
 ) {
@@ -399,7 +530,8 @@ async fn fanout(
         let sid = *next_worker_sid; *next_worker_sid += 1;
         workers.insert(wid, Worker {
             batch, parent: call_session.0, session: sid,
-            task, state: WorkerState::Queued, started: Instant::now(),
+            task, state: WorkerState::Queued, step: 1, summary: None,
+            started: Instant::now(), pending: None, turn_inflight: false,
         });
         minted.push((wid, sid));
     }
@@ -424,21 +556,22 @@ async fn fanout(
         let w = &workers[wid];
         emit_state(bus, *wid, w, "queued").await;
     }
-    admit_queued(workers, bus, cap).await;
+    admit_queued(workers, bus, cap, max_steps).await;
     eprintln!("[worker] batch {batch} fanned: {n} tasks from session {} (cap {cap})", call_session.0);
 }
 
 /// Admit Queued workers (FIFO by id) while slots remain: Queued → Running,
 /// stall clock armed, the work order goes out as an ordinary gated UserPrompt
 /// on the worker's own session.
-async fn admit_queued(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, cap: usize) {
+async fn admit_queued(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, cap: usize, max_steps: u32) {
     while slots_used(workers) < cap {
         let Some(id) = next_queued(workers) else { break };
         let (session, text) = {
             let w = workers.get_mut(&id).unwrap();
             w.state = WorkerState::Running;
             w.started = Instant::now();
-            (w.session, directive(id, w.batch, &w.task))
+            w.turn_inflight = true;
+            (w.session, directive_first(id, w.batch, max_steps, &w.task))
         };
         let w = &workers[&id];
         emit_state(bus, id, w, "").await;
@@ -447,18 +580,140 @@ async fn admit_queued(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, cap: 
     }
 }
 
-/// A worker session's turn completed → Done (W1a: single-turn workers; the
-/// final text in the session JSONL is the deliverable). Frees the slot.
-async fn finish_done(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, session: u64) -> bool {
-    let hit = workers.iter_mut()
+/// The worker called `worker_report` from within its turn — record the verdict
+/// for the in-flight step (applied on the upcoming TurnComplete) and ack now.
+/// `done` without a summary is refused so the model retries with one (the
+/// charter: done REQUIRES a summary — it's the line the conductor reads).
+async fn record_report(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, call_session: SessionId, call_id: ActionId, args: serde_json::Value) {
+    let status = args["status"].as_str().unwrap_or("continue").to_string();
+    if status == "done" && args["summary"].as_str().map(str::trim).unwrap_or("").is_empty() {
+        bus.emit(Event::ToolResult { session: call_session, call: call_id,
+            output: ToolOutput { ok: false, content: serde_json::json!(
+                "done requires a summary — one paragraph: what was delivered and where it lives") } }).await;
+        return;
+    }
+    let recorded = workers.iter_mut()
+        .find(|(_, w)| w.session == call_session.0 && matches!(w.state, WorkerState::Running | WorkerState::Blocked))
+        .map(|(_, w)| { w.pending = Some(parse_verdict(&args)); })
+        .is_some();
+    let content = if recorded {
+        serde_json::json!({ "recorded": status, "note": "applied when this step completes" })
+    } else {
+        serde_json::json!("worker_report has no effect outside a running worker session")
+    };
+    bus.emit(Event::ToolResult { session: call_session, call: call_id,
+        output: ToolOutput { ok: recorded, content } }).await;
+}
+
+/// A worker session's turn completed → apply the reported verdict: done (with
+/// its summary), blocked (park awaiting input, slot-free), yield (Idle), or
+/// continue (next step under the ceiling). No report = Done, the final text
+/// is the deliverable (the W1a single-turn rule, now the fallback).
+async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, session: u64, max_steps: u32) -> bool {
+    let Some(id) = workers.iter()
         .find(|(_, w)| w.session == session && matches!(w.state, WorkerState::Running | WorkerState::Blocked))
-        .map(|(id, w)| { w.state = WorkerState::Done; *id });
-    if let Some(id) = hit {
+        .map(|(id, _)| *id)
+    else { return false };
+
+    // Mutate first (plain owned map — no lock-release dance needed), emit after.
+    let (detail, next_directive) = {
+        let w = workers.get_mut(&id).unwrap();
+        w.turn_inflight = false;
+        match w.pending.take() {
+            Some(Verdict::Done(summary)) => {
+                w.state = WorkerState::Done;
+                let detail: String = summary.chars().take(120).collect();
+                w.summary = Some(summary);
+                (detail, None)
+            }
+            Some(Verdict::Blocked(reason)) => {
+                w.state = WorkerState::Blocked; // no turn in flight → slot-free, TTL clock
+                w.started = Instant::now();
+                (reason.chars().take(120).collect::<String>(), None)
+            }
+            Some(Verdict::Yield) => {
+                w.state = WorkerState::Idle;
+                w.started = Instant::now();
+                ("yielded — awaiting input".to_string(), None)
+            }
+            Some(Verdict::Continue(steer)) => {
+                if w.step >= max_steps {
+                    w.state = WorkerState::Done; // budget reached — code disposes
+                    ("step budget reached".to_string(), None)
+                } else {
+                    w.step += 1;
+                    w.started = Instant::now();
+                    w.turn_inflight = true;
+                    let d = directive_continue(id, w.batch, w.step, max_steps, &w.task, steer.as_deref());
+                    (String::new(), Some((w.session, d)))
+                }
+            }
+            None => {
+                w.state = WorkerState::Done;
+                ("final text is the deliverable".to_string(), None)
+            }
+        }
+    };
+    let w = &workers[&id];
+    emit_state(bus, id, w, &detail).await;
+    eprintln!("[worker] {id} → {:?} at step {}{}", w.state, w.step,
+              if detail.is_empty() { String::new() } else { format!(" ({detail})") });
+    if let Some((sid, directive)) = next_directive {
+        bus.emit(Event::UserPrompt { session: SessionId(sid), text: directive, images: vec![] }).await;
+    }
+    true
+}
+
+/// A send landed on a worker session — the one revive/wake edge (PB-3):
+/// Parked → Running (the router hydrated the history off this same event),
+/// Idle → Running (wake free), verdict-Blocked → Running (unblocked by input).
+/// Deliberately BYPASSES the admission cap — a send is human/conductor intent,
+/// the emergency entrance; Queued workers just wait a little longer. Running /
+/// approval-Blocked sends simply queue in the TurnGate (no state change);
+/// Queued and terminal workers are left untouched.
+async fn wake_on_send(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, session: u64) -> bool {
+    let hit = workers.iter_mut()
+        .find(|(_, w)| w.session == session
+            && (matches!(w.state, WorkerState::Parked | WorkerState::Idle)
+                || (w.state == WorkerState::Blocked && !w.turn_inflight)))
+        .map(|(id, w)| {
+            let from = w.state;
+            w.state = WorkerState::Running;
+            w.started = Instant::now();
+            w.turn_inflight = true;
+            (*id, from)
+        });
+    if let Some((id, from)) = hit {
         let w = &workers[&id];
-        emit_state(bus, id, w, "").await;
-        eprintln!("[worker] {id} done");
+        let detail = match from {
+            WorkerState::Parked => "revived by send",
+            WorkerState::Idle   => "woken by send",
+            _                   => "unblocked by send",
+        };
+        emit_state(bus, id, w, detail).await;
+        eprintln!("[worker] {id} {detail}");
         true
     } else { false }
+}
+
+/// Park Idle / verdict-blocked workers that have sat past the idle TTL: the
+/// state event carries the eviction (the router drops the RAM history);
+/// `sessions/<id>.jsonl` stays truth and a send revives. No slot changes —
+/// these states hold none.
+async fn park_idle(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, idle_ttl: Duration) -> bool {
+    let parked: Vec<u64> = workers.iter_mut()
+        .filter(|(_, w)| matches!(w.state, WorkerState::Idle)
+            || (w.state == WorkerState::Blocked && !w.turn_inflight))
+        .filter(|(_, w)| w.started.elapsed() > idle_ttl)
+        .map(|(id, w)| { w.state = WorkerState::Parked; *id })
+        .collect();
+    let changed = !parked.is_empty();
+    for id in parked {
+        let w = &workers[&id];
+        emit_state(bus, id, w, "idle TTL — parked (a send revives)").await;
+        eprintln!("[worker] {id} parked (idle TTL)");
+    }
+    changed
 }
 
 /// A worker's turn is suspended on an approval card → Blocked (stall-exempt,
@@ -510,7 +765,9 @@ async fn handle_list_workers(workers: &HashMap<u64, Worker>, bus: &BusHandle, ca
     let mut rows: Vec<(u64, serde_json::Value)> = workers.iter().map(|(id, w)| (*id, serde_json::json!({
         "worker": id, "batch": w.batch, "parent": w.parent, "session": w.session,
         "state": format!("{:?}", w.state).to_lowercase(),
+        "step": w.step,
         "task": w.task.chars().take(100).collect::<String>(),
+        "summary": w.summary.as_deref().map(|s| s.chars().take(200).collect::<String>()),
     }))).collect();
     rows.sort_by_key(|(id, _)| *id);
     let list: Vec<serde_json::Value> = rows.into_iter().map(|(_, j)| j).collect();
@@ -581,24 +838,31 @@ mod tests {
         }
     }
 
+    fn mk(state: WorkerState) -> Worker {
+        Worker { batch: 1, parent: 0, session: apexos_core::WORKER_SESSION_BASE,
+                 task: "t".into(), state, step: 1, summary: None,
+                 started: Instant::now(), pending: None, turn_inflight: false }
+    }
+
     #[test]
-    fn slot_accounting_counts_running_and_blocked_only() {
-        let mk = |state| Worker { batch: 1, parent: 0, session: apexos_core::WORKER_SESSION_BASE,
-                                  task: "t".into(), state, started: Instant::now() };
+    fn slot_accounting_counts_live_turns_only() {
+        // Thermal slot = a live turn: Running, or Blocked with the turn suspended
+        // on an approval. Idle/verdict-blocked (turn completed) hold none — the
+        // thermal budget is RUNNING residency (docs/fabrica.md).
         let mut m = HashMap::new();
         m.insert(1, mk(WorkerState::Running));
-        m.insert(2, mk(WorkerState::Blocked));
-        m.insert(3, mk(WorkerState::Queued));
-        m.insert(4, mk(WorkerState::Parked));
-        m.insert(5, mk(WorkerState::Done));
+        m.insert(2, Worker { turn_inflight: true, ..mk(WorkerState::Blocked) });  // approval wait
+        m.insert(3, mk(WorkerState::Blocked));                                   // verdict-blocked
+        m.insert(4, mk(WorkerState::Idle));
+        m.insert(5, mk(WorkerState::Queued));
+        m.insert(6, mk(WorkerState::Parked));
+        m.insert(7, mk(WorkerState::Done));
         assert_eq!(slots_used(&m), 2);
-        assert_eq!(next_queued(&m), Some(3));
+        assert_eq!(next_queued(&m), Some(5));
     }
 
     #[test]
     fn fifo_picks_the_lowest_queued_id() {
-        let mk = |state| Worker { batch: 1, parent: 0, session: apexos_core::WORKER_SESSION_BASE,
-                                  task: "t".into(), state, started: Instant::now() };
         let mut m = HashMap::new();
         m.insert(9, mk(WorkerState::Queued));
         m.insert(4, mk(WorkerState::Queued));
@@ -611,6 +875,7 @@ mod tests {
         let pw = PersistedWorker {
             id: 7, batch: 2, parent: 3, session: apexos_core::WORKER_SESSION_BASE + 6,
             task: "refactor the parser".into(), state: WorkerState::Running,
+            step: 3, summary: Some("parser refactored".into()),
         };
         let back: PersistedWorker = serde_json::from_str(&serde_json::to_string(&pw).unwrap()).unwrap();
         assert_eq!(back.id, 7);
@@ -618,18 +883,62 @@ mod tests {
         assert_eq!(back.session, apexos_core::WORKER_SESSION_BASE + 6);
         assert_eq!(back.state, WorkerState::Running);
         assert_eq!(back.task, "refactor the parser");
+        assert_eq!(back.step, 3);
+        assert_eq!(back.summary.as_deref(), Some("parser refactored"));
     }
 
     #[test]
-    fn charter_and_directive_carry_the_contract() {
+    fn persisted_worker_w1a_json_defaults_step_and_summary() {
+        // A workers.json written by W1a has no step/summary keys — the serde
+        // defaults (step 1, no summary) must carry it, never a parse failure.
+        let legacy = format!(
+            r#"{{"id":1,"batch":1,"parent":0,"session":{},"task":"x","state":"parked"}}"#,
+            apexos_core::WORKER_SESSION_BASE
+        );
+        let pw: PersistedWorker = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(pw.step, 1);
+        assert!(pw.summary.is_none());
+    }
+
+    #[test]
+    fn charter_and_directives_carry_the_contract() {
         let sys = worker_system("APEX");
-        assert!(sys.contains("final text IS the work product"));
+        assert!(sys.contains("worker_report"), "the verdict tool must ride the charter");
         assert!(sys.contains("depth-1"), "the no-fanout law must ride the charter");
         assert!(sys.contains("Skip orientation"));
-        let d = directive(3, 1, "write the tests");
-        assert!(d.contains("WORKER 3 (batch 1)"));
-        assert!(d.contains("write the tests"));
-        assert!(d.contains("one turn"));
+        assert!(sys.contains("final text"), "the no-report fallback must be named");
+        let first = directive_first(3, 1, 12, "write the tests");
+        assert!(first.contains("WORKER 3 (batch 1)"));
+        assert!(first.contains("step 1/12"));
+        assert!(first.contains("write the tests"));
+        assert!(first.contains("worker_report"));
+        let cont = directive_continue(3, 1, 4, 12, "write the tests", Some("edge cases"));
+        assert!(cont.contains("step 4/12"));
+        assert!(cont.contains("edge cases"));
+    }
+
+    #[test]
+    fn parse_verdict_maps_status() {
+        assert!(matches!(parse_verdict(&serde_json::json!({"status":"done","summary":"shipped"})),
+                         Verdict::Done(s) if s == "shipped"));
+        assert!(matches!(parse_verdict(&serde_json::json!({"status":"blocked","reason":"no key"})),
+                         Verdict::Blocked(r) if r == "no key"));
+        assert!(matches!(parse_verdict(&serde_json::json!({"status":"yield"})), Verdict::Yield));
+        assert!(matches!(parse_verdict(&serde_json::json!({"status":"continue","next":"tests"})),
+                         Verdict::Continue(Some(s)) if s == "tests"));
+        // Absent/unknown status defaults to continue (the goal_step convention).
+        assert!(matches!(parse_verdict(&serde_json::json!({})), Verdict::Continue(None)));
+    }
+
+    #[test]
+    fn idle_ttl_and_max_steps_clamp_and_default() {
+        assert_eq!(parse_idle_ttl(None), IDLE_TTL);
+        assert_eq!(parse_idle_ttl(Some("10")), IDLE_TTL);   // below the 60s floor
+        assert_eq!(parse_idle_ttl(Some("300")), Duration::from_secs(300));
+        assert_eq!(parse_max_steps(None), DEFAULT_MAX_STEPS);
+        assert_eq!(parse_max_steps(Some("0")), 1);          // clamped to the floor
+        assert_eq!(parse_max_steps(Some("500")), 100);      // clamped to the ceiling
+        assert_eq!(parse_max_steps(Some("3")), 3);
     }
 
     #[test]

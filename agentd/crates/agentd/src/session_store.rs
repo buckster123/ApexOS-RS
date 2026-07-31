@@ -42,6 +42,26 @@ impl SessionStore {
         }
     }
 
+    /// Load ONE session's history from disk — the parked-worker revive edge
+    /// (Fabrica W1b). Same per-file body as `load_all` (parse line-wise, then
+    /// `repair_history` for API validity — honest markers, file untouched),
+    /// but on demand: a Parked worker's JSONL hydrates only when a send
+    /// arrives, never at boot. Returns None on a missing/unreadable file or
+    /// an empty history.
+    pub async fn load_one(&self, id: SessionId) -> Option<Vec<Message>> {
+        let text = fs::read_to_string(self.session_path(id)).await.ok()?;
+        let mut messages: Vec<Message> = text.lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        if apexos_core::history::repair_history(&mut messages) {
+            eprintln!(
+                "[session] repaired {} on revive ({} messages) — restored tool pairing/ordering",
+                id.0, messages.len()
+            );
+        }
+        if messages.is_empty() { None } else { Some(messages) }
+    }
+
     /// Load all persisted sessions into memory on daemon startup.
     pub async fn load_all(&self) -> HashMap<SessionId, Vec<Message>> {
         let mut result = HashMap::new();
@@ -86,4 +106,49 @@ impl SessionStore {
         result
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apexos_core::ContentBlock;
+
+    fn tmp_store(tag: &str) -> SessionStore {
+        let dir = std::env::temp_dir().join(format!("apexos-sstore-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sessions")).unwrap();
+        SessionStore { sessions_dir: dir.join("sessions") }
+    }
+
+    fn user_msg(text: &str) -> Message {
+        Message::User { content: vec![ContentBlock::Text { text: text.into() }] }
+    }
+
+    #[tokio::test]
+    async fn load_one_round_trips_a_worker_session() {
+        let store = tmp_store("one");
+        let wid = SessionId(apexos_core::WORKER_SESSION_BASE + 3);
+        store.append(wid, &user_msg("the task")).await;
+        store.append(wid, &user_msg("more context")).await;
+        let loaded = store.load_one(wid).await.expect("history on disk");
+        assert_eq!(loaded.len(), 2);
+        assert!(store.load_one(SessionId(apexos_core::WORKER_SESSION_BASE + 99)).await.is_none());
+        let _ = std::fs::remove_dir_all(store.sessions_dir.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn load_all_skips_worker_range_but_load_one_serves_it() {
+        // The residency law: boot hydration ignores parked workers; the revive
+        // edge reads the same file on demand.
+        let store = tmp_store("skip");
+        let normal = SessionId(7);
+        let worker = SessionId(apexos_core::WORKER_SESSION_BASE);
+        store.append(normal, &user_msg("chat")).await;
+        store.append(worker, &user_msg("task")).await;
+        let all = store.load_all().await;
+        assert!(all.contains_key(&normal));
+        assert!(!all.contains_key(&worker), "worker JSONL must not hydrate at boot");
+        assert!(store.load_one(worker).await.is_some(), "revive edge must still read it");
+        let _ = std::fs::remove_dir_all(store.sessions_dir.parent().unwrap());
+    }
 }

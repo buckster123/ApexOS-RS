@@ -1625,25 +1625,53 @@ fn spawn_agent_router(
                 ev = rx.recv() => match ev {
                 // ── new root turn (serialized per session) ───────────────────
                 Ok(Event::UserPrompt { session, text, images }) => {
-                    // Parked-worker guard (Fabrica W1a): a worker session with JSONL
-                    // truth on disk but no memory residency is Parked. Running this
-                    // prompt would fabricate a blank history and append over the real
-                    // one — silent corruption of the revive substrate. Refuse honestly
-                    // BEFORE the gate takes a slot; W1b's revive-on-send replaces this
-                    // refusal with the reload edge (load + repair_history) right here.
-                    if apexos_core::is_worker_session(session.0)
+                    // Parked-worker revive edge (Fabrica W1b, PB-3): a worker session
+                    // with JSONL truth on disk but no memory residency is Parked, and
+                    // a send is the ONLY Parked→Running edge — hydrate through
+                    // `load_one` (repair_history inside, the boot path's code) and
+                    // admit normally; the worker driver flips its state off this same
+                    // UserPrompt event. An unreadable file still refuses BEFORE the
+                    // gate takes a slot: a blank-history turn appended over real JSONL
+                    // truth is silent corruption, and refusal is the honest failure.
+                    let revive_ok = if apexos_core::is_worker_session(session.0)
                         && !histories.lock().await.contains_key(&session)
                         && session_store.exists(session)
                     {
-                        eprintln!("[worker] session {} is parked — prompt dropped (revive-on-send lands in W1b)", session.0);
-                        bus.emit(Event::Error {
-                            session: None,
-                            message: format!("worker session {} is parked; revive-on-send lands in W1b", session.0),
-                        }).await;
-                    } else if let Some((text, images)) = gate.admit(session, text, images) {
+                        match session_store.load_one(session).await {
+                            Some(h) => {
+                                eprintln!("[worker] session {} revived from disk ({} messages)", session.0, h.len());
+                                histories.lock().await.insert(session, h);
+                                true
+                            }
+                            None => {
+                                eprintln!("[worker] session {} is parked but its JSONL is unreadable — prompt dropped", session.0);
+                                bus.emit(Event::Error {
+                                    session: None,
+                                    message: format!("worker session {} could not be revived (unreadable history)", session.0),
+                                }).await;
+                                false
+                            }
+                        }
+                    } else { true };
+                    if revive_ok {
                         // Run now if the session's slot is free, else queue FIFO behind
                         // the in-flight turn (runs when it frees the slot via turn_done).
-                        to_run = Some((session, text, images));
+                        if let Some((text, images)) = gate.admit(session, text, images) {
+                            to_run = Some((session, text, images));
+                        }
+                    }
+                }
+
+                // ── worker parked → evict its history from RAM ───────────────
+                // (Fabrica W1b) The worker driver decides WHEN to park (TTL) but
+                // never touches `histories` — the eviction rides the state event,
+                // so the router stays the sole owner of history residency. The
+                // JSONL on disk is truth; the revive edge above reloads it.
+                Ok(Event::WorkerStateChanged { session, state, .. })
+                    if state == apexos_core::WorkerState::Parked =>
+                {
+                    if histories.lock().await.remove(&session).is_some() {
+                        eprintln!("[worker] session {} evicted from RAM (parked)", session.0);
                     }
                 }
 
@@ -2342,6 +2370,7 @@ async fn gather_tools(
     tools.push(goal::goal_resume_spec());
     tools.push(goal::goal_cancel_spec());
     tools.push(worker::task_fanout_spec());
+    tools.push(worker::worker_report_spec());
     tools.push(worker::list_workers_spec());
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());
