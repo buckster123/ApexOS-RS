@@ -25,9 +25,23 @@ per-task model mix). Slice ladder + locked decisions live in the charter;
 brainstorm inputs preserved in `docs/ideas/fabrica/`. Implementation is a
 fresh full-window arc (André: ultra/max, full send) — start at W1a with the
 charter as north star. *Progress: W1a `#306` · W1b `#307` · W1c `#308`+`#309`
-(field-proven on apex1, first live fire + same-day evidence-read-root fix)
-merged 2026-07-31; W1d (batch yolo, approval digest, cancel cascade, inline,
-per-task model) in flight — the W1 ladder completes with it.*
+· W1d `#310`+`#311` · M1a `#312` merged + field-proven 2026-07-31; M1b
+`#313` (gates/rings/diamonds, review procedure, git worktrees, closure)
+merged + field-proven 2026-08-01 — the restart composition ran live (two
+diamonds, mid-barrier restart, revival, inline-fix integration, closure).
+Next: W2 mesh workers (remote parked-state ownership is its own design),
+then M1c (R bit, measures, vouchers).*
+
+- **[UI · MEDIUM] Approvals lane must rebuild from supervisor state, not
+  only live events.** `board_turn_done` (ui-slint `main.rs`) clears the
+  entire blocked lane on a main-session turn completion, including per-batch
+  approval digest cards whose approvals are still pending — the card
+  vanishes while the grant is still needed (recon-predicted, field-confirmed
+  2026-08-01: worker 18's `run_command` card invisible while the worker sat
+  suspended). Fix direction: approvals render from a queryable pending set
+  (supervisor state or a replayed snapshot on connect), so a cleared lane
+  self-heals without waiting for the next `WorkerStateChanged`. Until then
+  the worker-side heuristic is in `docs/gotchas.md` + the skill doc.
 
 ---
 

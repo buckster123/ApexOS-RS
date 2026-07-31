@@ -1511,12 +1511,15 @@ async fn check_batches(workers: &HashMap<u64, Worker>, batches: &mut HashMap<u64
         let parent = meta.parent;
         let inline_ack = meta.inline_ack.take();
         let rows = batch_rows(workers, batch, agents_dir);
-        let (done, failed, timed_out) = rows.iter().fold((0, 0, 0), |(d, f, t), r| match () {
-            _ if r.timed_out => (d, f, t + 1),
-            _ if r.state == WorkerState::Done => (d + 1, f, t),
-            _ => (d, f + 1, t),
+        // Cancelled is its own count — lumping it under "failed" reads as a
+        // defect where there was a decision (first smoke's tally confusion).
+        let (done, failed, cancelled, timed_out) = rows.iter().fold((0, 0, 0, 0), |(d, f, c, t), r| match () {
+            _ if r.timed_out => (d, f, c, t + 1),
+            _ if r.state == WorkerState::Done => (d + 1, f, c, t),
+            _ if r.state == WorkerState::Cancelled => (d, f, c + 1, t),
+            _ => (d, f + 1, c, t),
         });
-        eprintln!("[worker] batch {batch} reported: {done} done, {failed} failed, {timed_out} timed out");
+        eprintln!("[worker] batch {batch} reported: {done} done, {failed} failed, {cancelled} cancelled, {timed_out} timed out");
         bus.emit(Event::TaskBatchDone { batch, parent: SessionId(parent), rows: rows.clone() }).await;
         // Inline: the report is the blocked task_fanout call's result — rows
         // plus each worker's summary (short batches want answers in hand; the
@@ -1535,7 +1538,7 @@ async fn check_batches(workers: &HashMap<u64, Worker>, batches: &mut HashMap<u64
                 session: SessionId(ack_session), call: ActionId(ack_action),
                 output: ToolOutput { ok: true, content: serde_json::json!({
                     "batch": batch, "mode": "inline",
-                    "done": done, "failed": failed, "timed_out": timed_out,
+                    "done": done, "failed": failed, "cancelled": cancelled, "timed_out": timed_out,
                     "workers": inline_rows,
                 }) },
             }).await;
@@ -1722,14 +1725,17 @@ fn gate_note(timeout_s: u64) -> String {
 }
 
 /// The merge ritual appended at barrier open for code mandalas — the
-/// J-barrier's declared work, concrete: merge, verify, commit.
+/// J-barrier's declared work, concrete: merge, verify, commit. The artifacts
+/// line is mechanical on purpose: the first field gate (2026-07-31) legally
+/// skipped declaring them because the ritual didn't demand it.
 fn merge_ritual(repo: &str, branches: &[String]) -> String {
     let list = if branches.is_empty() { "(none delivered)".to_string() } else { branches.join(", ") };
     format!(
         "\n\nMERGE RITUAL — repo: {repo}\nDelivered cell branches: {list}\nMerge each \
          delivered branch (git_merge), resolve conflicts, run the VERIFY command from the \
          invariant through your normal tools, and commit the merged result before \
-         reporting done."
+         reporting done. Report done with the merged files declared in `artifacts` — the \
+         evidence rule reaches the join too."
     )
 }
 
@@ -2868,6 +2874,11 @@ mod tests {
         let note = gate_note(1200);
         assert!(note.contains("1200s"));
         assert!(note.contains("evidence"));
+        // The join declares its artifacts — mechanical since the first field
+        // gate legally skipped them (2026-07-31 smoke find).
+        let mr = merge_ritual("/ws/code/proj", &["apex/w/0.1.0".into()]);
+        assert!(mr.contains("artifacts"), "the evidence rule reaches the join");
+        assert!(mr.contains("VERIFY"));
     }
 
     #[test]
