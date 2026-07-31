@@ -136,6 +136,35 @@ sustained research. What it adds over a batch is an **axis** and a **tree**.
   closure automatically when the goal ends; from a chat session, close it
   yourself once every cell is terminal (it refuses otherwise, on purpose —
   `worker_cancel{batch}` is the kill switch, closing is bookkeeping).
+- **Write measures like instruments, not like wishes** (`measure` on a task
+  arms the R bit): a command whose integer output IS the remaining work —
+  failing tests, clippy warnings, `grep -rc TODO`, lines left in a
+  worklist. The cell runs it each lap and reports the number; it must
+  strictly decrease or two flat laps break the ring (K-stall) and escalate
+  with the history attached. At 0, report done — looping at 0 counts as a
+  stall. A good measure makes "is this working?" a number; a bad one
+  (vibes, percentages you invent) makes the guard blind.
+- **Budget follows progress — don't ask, cut.** An R-cell that reaches its
+  step ceiling while its measure is still falling RENEWS automatically:
+  the driver moves steps from the parent cell's vector into yours (half
+  the remainder, floor one — geometric, so it always ends). There is no
+  tool to request more steps, by design: the only way to earn laps is to
+  make the number go down. When you're escalated instead, the plateau is
+  the message — steer, cancel, or integrate around it, one line at a time.
+- **A voucher is trust plus budget** (`voucher: true` on a task): the cell
+  may sub-conduct its own subtree — same task_fanout, same laws, its own
+  budget vector as the slice. Etiquette for the vouchered: re-read your
+  VOUCHER block before fanning; fan late and narrow (your children's
+  budgets contract from yours, and renewals spend YOUR steps); the batch
+  report arrives IN your session when your children settle — read the
+  evidence files before integrating, exactly like a root conductor. Grant
+  vouchers downward only where a subtree genuinely needs its own mind.
+- **The FORGE pattern** (measure + barrier on one cell): lap → fan a small
+  ring with a join under yourself → integrate → measure → lap. It starts
+  working immediately (only pure gates hold at mint); its barrier timeout
+  disciplines the joins it runs. Use it for grind-down work with real
+  parallel width inside each pass — a test-failure burn-down where each
+  lap fans fixes and merges them, then re-counts.
 - **Before an 8-lane fan, audit the decomposition** (optional, earns its
   keep): architecture & invariants? docs & data grounding? breaking changes
   & migrations? cross-cutting refactors? dataflow & state? tests &

@@ -133,9 +133,11 @@ const TICK: Duration = Duration::from_secs(5);
 
 /// The worker's reported outcome for the in-flight step (via `worker_report`),
 /// applied on `TurnComplete` — `goal.rs`'s Verdict, worker vocabulary.
+/// M1c: verdicts may carry a MEASURE (an R-cell's lap reading — command-
+/// computed by the worker, recorded on the cell, judged by the driver).
 enum Verdict {
-    Continue(Option<String>), // optional steer for the next step
-    Done { summary: String, artifacts: Vec<String> }, // summary required; artifacts confined
+    Continue { steer: Option<String>, measure: Option<u64> },
+    Done { summary: String, artifacts: Vec<String>, measure: Option<u64> }, // summary required; artifacts confined
     Blocked(String),          // reason; sits awaiting input, slot-free
     Yield,                    // go Idle awaiting input, wake free
 }
@@ -170,6 +172,11 @@ struct Worker {
     /// a restart parks the gate, and a send to a parked or held gate is the
     /// human override: the join runs with whatever context the send carries.
     barrier_held: bool,
+    /// Per-worker step ceiling (M1c): a cell worker's budget.steps IS its
+    /// contract (renewals raise it); 0 = the env global (plain workers).
+    /// M1a/M1b admission-checked cell steps but never enforced them per lap
+    /// — this closes that gap.
+    step_ceiling: u32,
     /// When this worker is next reviewed (M1b). None = off the schedule
     /// (plain-Queued/Parked are inert; terminals are censused once, then
     /// reaped — the anti-zombie rule).
@@ -217,9 +224,24 @@ struct PersistedWorker {
     yolo: bool,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    step_ceiling: u32,
 }
 
 fn default_step() -> u32 { 1 }
+
+/// A worker's live step ceiling: its own (cell budget / renewals) or the
+/// env global when unset (the 0 sentinel — plain workers).
+fn effective_ceiling(w: &Worker, max_steps: u32) -> u32 {
+    if w.step_ceiling > 0 { w.step_ceiling } else { max_steps }
+}
+
+/// The mint hold rule (M1c refinement): pure-J cells (GATE/DIAMOND) barrier-
+/// hold until their subtree settles; an R+J cell (FORGE) starts lapping —
+/// its J guard governs the joins it runs, not its own admission.
+fn holds_at_mint(barrier: Option<u64>, measure: Option<&str>) -> bool {
+    barrier.is_some() && measure.is_none()
+}
 
 #[derive(Serialize, Deserialize)]
 struct PersistedBatch {
@@ -265,7 +287,9 @@ pub fn task_fanout_spec() -> ToolSpec {
                             { "type": "object",
                               "properties": {
                                   "prompt": { "type": "string", "description": "The task." },
-                                  "model":  { "type": "string", "description": "Model for this one worker (wins over the batch model)." }
+                                  "model":  { "type": "string", "description": "Model for this one worker (wins over the batch model)." },
+                                  "measure": { "type": "string", "description": "Mandala only — arms the R bit (SPIRAL; with a barrier, FORGE): a command computing a non-negative integer (failing tests, TODO count, |diff|…) the cell runs each lap and reports; it must strictly decrease or the ring breaks (K-stall). A progressing R-cell at its step ceiling RENEWS by spending the parent cell's steps." },
+                                  "voucher": { "type": "boolean", "description": "Mandala only — grants SUB-CONDUCTION: this cell's worker may task_fanout into its own subtree, funded by its own budget vector. Batch reports are delivered into its session." }
                               },
                               "required": ["prompt"] }
                         ]
@@ -332,7 +356,8 @@ pub fn worker_report_spec() -> ToolSpec {
                 "artifacts": { "type": "array", "items": { "type": "string" },
                              "description": "With done: workspace paths of files you produced (the evidence the conductor reads). Workspace-confined — outside paths are refused." },
                 "next":    { "type": "string", "description": "Optional steer for the next step (status=continue)." },
-                "reason":  { "type": "string", "description": "Why you're stuck (status=blocked)." }
+                "reason":  { "type": "string", "description": "Why you're stuck (status=blocked)." },
+                "measure": { "type": "integer", "description": "R-cells only: this lap's measure — the non-negative integer your declared measure command just produced. Must strictly decrease each lap; two non-decreasing laps break your ring." }
             },
             "required": ["status"]
         }),
@@ -430,7 +455,8 @@ pub fn worker_system(parent_agent: &str) -> String {
          truly stuck. Not reporting also completes the task, with your final text as the \
          deliverable. Skip orientation: no memory recall, inbox checks, or self-inspection unless \
          the task itself asks for them. Approval-gated tools still ask a human — prefer ungated \
-         paths. Do not spawn agents or fan out further work: workers are depth-1 by design."
+         paths. Do not spawn agents. Fan out further work ONLY if your work order carries a \
+         VOUCHER block granting sub-conduction — without one, workers are depth-1 by design."
     )
 }
 
@@ -517,16 +543,19 @@ fn max_steps_from_env() -> u32 {
 /// Map `worker_report` args to a verdict. Absent/unknown status = continue
 /// (the goal_step convention); `done`'s summary requirement and artifact
 /// confinement are enforced at record time so the model gets an actionable
-/// refusal, not a silent default.
+/// refusal, not a silent default. `measure` rides continue/done (lenient:
+/// non-integers read as absent — the ritual asks for a bare integer).
 fn parse_verdict(args: &serde_json::Value) -> Verdict {
+    let measure = args["measure"].as_u64();
     match args["status"].as_str() {
         Some("done") => Verdict::Done {
             summary: args["summary"].as_str().unwrap_or("").trim().to_string(),
             artifacts: artifact_strings(args),
+            measure,
         },
         Some("blocked") => Verdict::Blocked(args["reason"].as_str().unwrap_or("blocked").to_string()),
         Some("yield")   => Verdict::Yield,
-        _               => Verdict::Continue(args["next"].as_str().map(str::to_owned)),
+        _               => Verdict::Continue { steer: args["next"].as_str().map(str::to_owned), measure },
     }
 }
 
@@ -571,10 +600,22 @@ fn confine_artifacts(paths: &[String], workspace: &Path) -> Result<Vec<String>, 
     Ok(out)
 }
 
-/// Extract the tasks from `task_fanout` args — item = string | {prompt, model?}.
-/// The per-task model wins over the batch-level `model`. Errors are
-/// conductor-facing strings (the tool result), not panics.
-fn parse_tasks(args: &serde_json::Value) -> Result<Vec<(String, Option<String>)>, String> {
+/// One parsed task item: the prompt plus per-worker knobs. `measure` and
+/// `voucher` (M1c) are mandala-cell properties — refused on plain fans.
+#[derive(Clone)]
+struct TaskSpecItem {
+    prompt: String,
+    model: Option<String>,
+    /// The R guard: this cell's measure command (arms SPIRAL/FORGE).
+    measure: Option<String>,
+    /// Sub-conduction grant: this cell's worker may grow its own subtree.
+    voucher: bool,
+}
+
+/// Extract the tasks from `task_fanout` args — item = string | {prompt,
+/// model?, measure?, voucher?}. The per-task model wins over the batch-level
+/// `model`. Errors are conductor-facing strings (the tool result), not panics.
+fn parse_tasks(args: &serde_json::Value) -> Result<Vec<TaskSpecItem>, String> {
     let items = args["tasks"].as_array().ok_or("tasks must be an array of task strings or {prompt} objects")?;
     if items.is_empty() { return Err("tasks is empty — nothing to fan out".into()); }
     if items.len() > MAX_BATCH_TASKS {
@@ -588,7 +629,11 @@ fn parse_tasks(args: &serde_json::Value) -> Result<Vec<(String, Option<String>)>
         let model = item["model"].as_str().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 64)
             .or(batch_model)
             .map(str::to_owned);
-        tasks.push((prompt.to_string(), model));
+        let measure = item["measure"].as_str().map(str::trim)
+            .filter(|s| !s.is_empty() && s.len() <= 200)
+            .map(str::to_owned);
+        let voucher = item["voucher"].as_bool().unwrap_or(false);
+        tasks.push(TaskSpecItem { prompt: prompt.to_string(), model, measure, voucher });
     }
     Ok(tasks)
 }
@@ -648,7 +693,7 @@ fn save_workers(workers: &HashMap<u64, Worker>, path: &PathBuf) {
         id: *id, batch: w.batch, parent: w.parent, session: w.session,
         task: w.task.clone(), state: w.state, step: w.step, summary: w.summary.clone(),
         artifacts: w.artifacts.clone(), episode: w.episode.clone(),
-        yolo: w.yolo, model: w.model.clone(),
+        yolo: w.yolo, model: w.model.clone(), step_ceiling: w.step_ceiling,
     }).collect();
     snapshot.sort_by_key(|w| w.id); // deterministic file → readable diffs
     if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
@@ -871,7 +916,7 @@ pub fn spawn_worker_driver(
                             // Mandala-scoped fans validate FIRST (address, descent,
                             // geometry, ring widths, join layout) and mint from fully
                             // composed plans; a plain fan passes None straight through.
-                            if let Some((ctx, minted)) = fanout(&mut workers, &mut batches, &mandalas, &trees, &bus, cap, max_steps, &proxy, &yolo_set, &models, session, call_id, args,
+                            if let Some((ctx, minted)) = fanout(&mut workers, &mut batches, &mandalas, &trees, &cell_by_worker, &bus, cap, max_steps, &proxy, &yolo_set, &models, session, call_id, args,
                                    &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid).await {
                                 if let Some(ctx) = &ctx {
                                     bind_cells(&mut trees, &mut cell_by_worker, &worktrees_dir, ctx, &minted);
@@ -912,7 +957,7 @@ pub fn spawn_worker_driver(
                         // A worker's turn completed → apply its reported verdict
                         // (or the no-report fallback: Done, final text = deliverable).
                         Ok(Event::TurnComplete { session }) if apexos_core::is_worker_session(session.0) => {
-                            if advance(&mut workers, &bus, &proxy, &agents_dir, &yolo_set, &models, session.0, max_steps).await {
+                            if advance(&mut workers, &bus, &proxy, &agents_dir, &yolo_set, &models, &mut trees, &cell_by_worker, &worktrees_dir, session.0, max_steps).await {
                                 // Cells mirror BEFORE barriers read them; an opened
                                 // gate then joins the admission pass with everyone.
                                 sync_cells(&mut trees, &cell_by_worker, &workers, &worktrees_dir, &agents_dir);
@@ -1103,6 +1148,7 @@ async fn reload_workers(
             artifacts: pw.artifacts, episode: pw.episode,
             started: Instant::now(), pending: None, turn_inflight: false,
             yolo: pw.yolo, model: pw.model, errored: false,
+            step_ceiling: pw.step_ceiling,
             // Parked/terminal reloads are inert — the review schedule picks a
             // worker up again at wake/revive (never-auto-resume, M1b too).
             barrier_held: false, next_review: None,
@@ -1130,6 +1176,7 @@ async fn fanout(
     workers: &mut HashMap<u64, Worker>, batches: &mut HashMap<u64, BatchMeta>,
     mandalas: &HashMap<u64, MandalaRecord>,
     trees: &HashMap<u64, HashMap<String, CellRecord>>,
+    cell_by_worker: &HashMap<u64, (u64, Addr)>,
     bus: &BusHandle, cap: usize, max_steps: u32, proxy: &ToolProxy,
     yolo_set: &GoalYoloSessions, models: &WorkerModels,
     call_session: SessionId, call_id: ActionId, args: serde_json::Value,
@@ -1139,10 +1186,6 @@ async fn fanout(
         session: call_session, call: call_id,
         output: ToolOutput { ok: false, content: serde_json::json!(msg) },
     };
-    if apexos_core::is_worker_session(call_session.0) {
-        bus.emit(refuse("workers cannot fan out further work (depth-1 by design; sub-conducting arrives with M-tier vouchers)".into())).await;
-        return None;
-    }
     let inline = match args["mode"].as_str() {
         None | Some("async") => false,
         Some("inline") => true,
@@ -1160,9 +1203,35 @@ async fn fanout(
             "inline mode is short-batch-only ({} tasks > {INLINE_MAX_TASKS}) — use mode async; the batch report arrives via the AwaitingBatch loop", tasks.len()))).await;
         return None;
     }
+    // The voucher gate (M1c): a worker session fans ONLY as a vouchered cell
+    // sub-conducting its own subtree — async, same mandala, every law intact.
+    let caller_cell: Option<Addr> = if apexos_core::is_worker_session(call_session.0) {
+        let bound = workers.iter()
+            .find(|(_, w)| w.session == call_session.0)
+            .and_then(|(id, _)| cell_by_worker.get(id));
+        let Some((mid, addr)) = bound else {
+            bus.emit(refuse("workers cannot fan out work without a mandala-cell VOUCHER (depth-1 by design)".into())).await;
+            return None;
+        };
+        let vouchered = trees.get(mid).and_then(|t| t.get(&addr.0)).map(|c| c.voucher).unwrap_or(false);
+        if !vouchered {
+            bus.emit(refuse("your cell carries no VOUCHER — only vouchered cells sub-conduct".into())).await;
+            return None;
+        }
+        if args["mandala"].as_u64() != Some(*mid) {
+            bus.emit(refuse(format!(
+                "your voucher is for mandala {mid} — pass mandala: {mid} and grow your own subtree"))).await;
+            return None;
+        }
+        if inline {
+            bus.emit(refuse("sub-conductors fan async — an inline hold has no place inside the tree".into())).await;
+            return None;
+        }
+        Some(addr.clone())
+    } else { None };
     // Mandala validation (M1b): geometry, ring widths, descent, join layout —
     // refused early, plans composed with the invariant + rituals verbatim.
-    let ctx = match prepare_mandala_cells(mandalas, trees, bus, call_session, call_id, &args, &tasks, inline).await {
+    let ctx = match prepare_mandala_cells(mandalas, trees, bus, call_session, call_id, &args, &tasks, inline, caller_cell.as_ref()).await {
         Err(()) => return None, // honest refusal already emitted
         Ok(c) => c,
     };
@@ -1184,13 +1253,20 @@ async fn fanout(
         parent: call_session.0, created_epoch: epoch_now(), deadline_s, reported: false,
         inline_ack: if inline { Some((call_session.0, call_id.0)) } else { None },
     });
-    // One mint list for both paths: (task text, model pin, barrier guard).
-    let mint_list: Vec<(String, Option<String>, Option<u64>)> = match &ctx {
-        Some(c) => c.plans.iter().map(|p| (p.prompt.clone(), p.model.clone(), p.barrier_timeout_s)).collect(),
-        None => tasks.into_iter().map(|(t, m)| (t, m, None)).collect(),
+    // One mint list for both paths: (task text, model pin, barrier-held,
+    // step ceiling). The hold rule (M1c refinement): pure-J cells hold at
+    // mint; an R+J cell (FORGE) starts lapping immediately. Cell workers'
+    // ceilings come from their budget (the contract, finally enforced).
+    let mint_list: Vec<(String, Option<String>, bool, u32)> = match &ctx {
+        Some(c) => c.plans.iter().map(|p| (
+            p.prompt.clone(), p.model.clone(),
+            holds_at_mint(p.barrier_timeout_s, p.measure.as_deref()),
+            u32::from(p.budget.steps).clamp(1, 100),
+        )).collect(),
+        None => tasks.into_iter().map(|t| (t.prompt, t.model, false, 0)).collect(),
     };
     let mut minted: Vec<(u64, u64)> = Vec::with_capacity(mint_list.len()); // (worker_id, session)
-    for (task, model, barrier) in mint_list {
+    for (task, model, held, ceiling) in mint_list {
         let wid = *next_worker_id;  *next_worker_id  += 1;
         let sid = *next_worker_sid; *next_worker_sid += 1;
         workers.insert(wid, Worker {
@@ -1198,11 +1274,11 @@ async fn fanout(
             task, state: WorkerState::Queued, step: 1, summary: None,
             artifacts: Vec::new(), episode: None,
             started: Instant::now(), pending: None, turn_inflight: false,
-            yolo, model, errored: false,
-            barrier_held: barrier.is_some(),
+            yolo, model, errored: false, step_ceiling: ceiling,
+            barrier_held: held,
             // A held gate is reviewed (its timeout is a review clock); plain
             // Queued workers are inert until admission schedules them.
-            next_review: if barrier.is_some() {
+            next_review: if held {
                 Some(Instant::now() + review::golden_offset(wid, REVIEW_PERIOD))
             } else { None },
             last_review_key: None, review_attempt: 0,
@@ -1334,18 +1410,46 @@ async fn record_report(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, work
 /// continue (next step under the ceiling). No report = Done, the final text
 /// is the deliverable (the W1a single-turn rule, now the fallback).
 #[allow(clippy::too_many_arguments)]
-async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path, yolo_set: &GoalYoloSessions, models: &WorkerModels, session: u64, max_steps: u32) -> bool {
+async fn advance(
+    workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path,
+    yolo_set: &GoalYoloSessions, models: &WorkerModels,
+    trees: &mut HashMap<u64, HashMap<String, CellRecord>>,
+    cell_by_worker: &HashMap<u64, (u64, Addr)>,
+    worktrees_dir: &Path,
+    session: u64, max_steps: u32,
+) -> bool {
     let Some(id) = workers.iter()
         .find(|(_, w)| w.session == session && matches!(w.state, WorkerState::Running | WorkerState::Blocked))
         .map(|(id, _)| *id)
     else { return false };
+
+    // M1c pre-read: the cell's measure context and the renewal source (the
+    // effective parent's remaining steps — reparented cells spend their
+    // adoptive ancestor's vector). Read-only over the tree here; writes
+    // happen after the verdict lands.
+    let cell_ctx = cell_by_worker.get(&id).and_then(|(mid, addr)| {
+        trees.get(mid).and_then(|t| t.get(&addr.0)).map(|c| {
+            let parent_eff = c.reparented_to.clone().or_else(|| addr.parent());
+            let parent_steps = parent_eff.as_ref()
+                .and_then(|pa| trees.get(mid).and_then(|t| t.get(&pa.0)))
+                .map(|pc| pc.budget.steps);
+            (*mid, addr.clone(), c.measure.is_some(), c.measure_history.clone(), parent_eff, parent_steps)
+        })
+    });
+    let is_r_cell = cell_ctx.as_ref().map(|c| c.2).unwrap_or(false);
+    let cell_history: Vec<u64> = cell_ctx.as_ref().map(|c| c.3.clone()).unwrap_or_default();
+    let parent_steps: Option<u16> = cell_ctx.as_ref().and_then(|c| c.5);
+    let mut lap_measure: Option<u64> = None;
+    let mut kstall_broke = false;
+    let mut renew: Option<u16> = None;
 
     // Mutate first (plain owned map — no lock-release dance needed), emit after.
     let (detail, next_directive) = {
         let w = workers.get_mut(&id).unwrap();
         w.turn_inflight = false;
         match w.pending.take() {
-            Some(Verdict::Done { summary, artifacts }) => {
+            Some(Verdict::Done { summary, artifacts, measure }) => {
+                lap_measure = measure; // the final lap's reading joins the ledger
                 w.state = WorkerState::Done;
                 let detail: String = summary.chars().take(120).collect();
                 w.summary = Some(summary);
@@ -1362,15 +1466,48 @@ async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &To
                 w.started = Instant::now();
                 ("yielded — awaiting input".to_string(), None)
             }
-            Some(Verdict::Continue(steer)) => {
-                if w.step >= max_steps {
-                    w.state = WorkerState::Done; // budget reached — code disposes
-                    ("step budget reached".to_string(), None)
+            Some(Verdict::Continue { steer, measure }) => {
+                lap_measure = measure;
+                let ceiling = effective_ceiling(w, max_steps);
+                // The measure law is judged at the lap boundary, on the
+                // projected ledger (history + this lap's reading).
+                let mut projected = cell_history.clone();
+                if is_r_cell {
+                    if let Some(m) = measure { projected.push(m); }
+                }
+                if is_r_cell && mandala::k_stalled(&projected) {
+                    // K-STALL: the ring breaks — blocked (slot-free,
+                    // revivable, batch-deadline-bounded), history attached.
+                    w.state = WorkerState::Blocked;
+                    w.started = Instant::now();
+                    kstall_broke = true;
+                    let tail: Vec<u64> = projected.iter().rev().take(3).rev().copied().collect();
+                    (format!("K-stall: {} — ring broken, escalated",
+                             tail.iter().map(|m| m.to_string()).collect::<Vec<_>>().join("→")), None)
+                } else if w.step >= ceiling {
+                    // An R-cell still cutting its measure RENEWS — spending
+                    // the PARENT's vector (grow where progress is; budget
+                    // never from nowhere). Everything else: done at ceiling.
+                    if let Some(g) = (is_r_cell)
+                        .then(|| parent_steps.and_then(|ps| mandala::renewal_grant(ps, &projected)))
+                        .flatten()
+                    {
+                        renew = Some(g);
+                        w.step += 1;
+                        w.step_ceiling = ceiling + u32::from(g);
+                        w.started = Instant::now();
+                        w.turn_inflight = true;
+                        let d = directive_continue(id, w.batch, w.step, w.step_ceiling, &w.task, steer.as_deref());
+                        (format!("renewed +{g} steps (measure decreasing)"), Some((w.session, d)))
+                    } else {
+                        w.state = WorkerState::Done; // budget reached — code disposes
+                        ("step budget reached".to_string(), None)
+                    }
                 } else {
                     w.step += 1;
                     w.started = Instant::now();
                     w.turn_inflight = true;
-                    let d = directive_continue(id, w.batch, w.step, max_steps, &w.task, steer.as_deref());
+                    let d = directive_continue(id, w.batch, w.step, ceiling, &w.task, steer.as_deref());
                     (String::new(), Some((w.session, d)))
                 }
             }
@@ -1388,6 +1525,47 @@ async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &To
             }
         }
     };
+    // M1c post-verdict tree bookkeeping: record the lap, spend renewals,
+    // escalate breaks — the cell files tell the story before anyone reads it.
+    if let Some((mid, addr, is_r, _, parent_eff, _)) = &cell_ctx {
+        let tree_dir = worktrees_dir.join(mid.to_string());
+        if *is_r {
+            if let Some(m) = lap_measure {
+                if let Some(cell) = trees.get_mut(mid).and_then(|t| t.get_mut(&addr.0)) {
+                    cell.measure_history.push(m);
+                    let overflow = cell.measure_history.len().saturating_sub(mandala::MEASURE_HISTORY_CAP);
+                    if overflow > 0 { cell.measure_history.drain(..overflow); }
+                    mandala::save_cell(&tree_dir, cell);
+                }
+            }
+        }
+        if let (Some(g), Some(pa)) = (renew, parent_eff.as_ref()) {
+            if let Some(parent) = trees.get_mut(mid).and_then(|t| t.get_mut(&pa.0)) {
+                parent.budget.steps = parent.budget.steps.saturating_sub(g);
+                mandala::save_cell(&tree_dir, parent);
+            }
+            if let Some(cell) = trees.get_mut(mid).and_then(|t| t.get_mut(&addr.0)) {
+                cell.budget.steps = cell.budget.steps.saturating_add(g);
+                mandala::save_cell(&tree_dir, cell);
+            }
+            eprintln!("[mandala] {mid} cell {} renewed +{g} steps from {}", addr.0, pa.0);
+        }
+        if kstall_broke {
+            let parent_session = workers[&id].parent;
+            if apexos_core::is_worker_session(parent_session) {
+                let tail: Vec<u64> = trees.get(mid)
+                    .and_then(|t| t.get(&addr.0))
+                    .map(|c| c.measure_history.iter().rev().take(3).rev().copied().collect())
+                    .unwrap_or_default();
+                bus.emit(Event::UserPrompt {
+                    session: SessionId(parent_session),
+                    text: kstall_note(addr, &tail),
+                    images: vec![],
+                }).await;
+            }
+        }
+    }
+
     let w = &workers[&id];
     emit_state(bus, id, w, &detail).await;
     eprintln!("[worker] {id} → {:?} at step {}{}", w.state, w.step,
@@ -1521,6 +1699,17 @@ async fn check_batches(workers: &HashMap<u64, Worker>, batches: &mut HashMap<u64
         });
         eprintln!("[worker] batch {batch} reported: {done} done, {failed} failed, {cancelled} cancelled, {timed_out} timed out");
         bus.emit(Event::TaskBatchDone { batch, parent: SessionId(parent), rows: rows.clone() }).await;
+        // M1c — the sub-conductor return edge: a batch whose parent is a
+        // WORKER gets its report DELIVERED (the goal driver owns the goal-
+        // conductor edge and its pending set ignores worker parents). The
+        // send wakes an idle/parked parent through the one revive edge.
+        if apexos_core::is_worker_session(parent) {
+            bus.emit(Event::UserPrompt {
+                session: SessionId(parent),
+                text: subconductor_report(batch, &rows),
+                images: vec![],
+            }).await;
+        }
         // Inline: the report is the blocked task_fanout call's result — rows
         // plus each worker's summary (short batches want answers in hand; the
         // evidence paths still ride for the full trail).
@@ -1679,8 +1868,13 @@ async fn handle_list_workers(workers: &HashMap<u64, Worker>, bus: &BusHandle, ca
 pub(crate) struct CellPlan {
     addr: Addr,
     budget: BudgetVec,
-    /// Some = this cell is a GATE (J armed at mint); the clamped timeout.
+    /// Some = the J bit is armed; the clamped timeout. Pure-J cells (GATE/
+    /// DIAMOND) barrier-hold at mint; an R+J cell (FORGE) starts lapping.
     barrier_timeout_s: Option<u64>,
+    /// Some = the R bit is armed (M1c); the cell's measure command.
+    measure: Option<String>,
+    /// The sub-conduction grant (M1c).
+    voucher: bool,
     prompt: String,
     model: Option<String>,
 }
@@ -1724,6 +1918,71 @@ fn gate_note(timeout_s: u64) -> String {
     )
 }
 
+/// The measure ritual (M1c) — driver-injected verbatim into R-cells: the
+/// command is the instrument, the worker runs it through its own policied
+/// tools, the driver judges the trend. Two non-decreasing laps break the
+/// ring (K-stall); a loop at zero self-terminates as a stall, so report
+/// done at zero.
+fn measure_ritual(cmd: &str) -> String {
+    format!(
+        "\n\nMEASURE (your lap gate): at the END of every lap run `{cmd}` through your \
+         normal tools and report the resulting non-negative integer with \
+         worker_report{{status:\"continue\", measure: N}} — or status:\"done\" with the \
+         final measure on your last lap. The number must STRICTLY DECREASE every lap; two \
+         non-decreasing laps break your ring and escalate with the history attached. When \
+         it reaches 0, report done — looping at 0 counts as a stall."
+    )
+}
+
+/// The voucher block (M1c) — the sub-conduction grant, injected at mint.
+/// The cell's own budget vector is the slice; every law still applies.
+fn voucher_block(mandala: u64, addr: &Addr) -> String {
+    format!(
+        "\n\nVOUCHER — you may SUB-CONDUCT: grow your OWN subtree with \
+         task_fanout{{mandala: {mandala}, parent_cell: \"{}\" (or one of your descendants), \
+         tasks:[…], join?, measure?, voucher?}}. Your cell's budget vector is your slice — \
+         children contract from it and renewals spend YOUR steps, so fan late and fan \
+         narrow. When a batch of your children settles, its report is delivered into your \
+         session: read the evidence files, integrate, then continue your own task.",
+        addr.0
+    )
+}
+
+/// The K-stall escalation note delivered to a sub-conductor parent (goal
+/// conductors learn at the batch report — that edge belongs to the goal
+/// driver; interactive conductors read the board/status).
+fn kstall_note(addr: &Addr, tail: &[u64]) -> String {
+    format!(
+        "SUPERVISION — your child cell {} K-stalled: its measure stopped decreasing \
+         ({}). Its ring is broken and it sits blocked with the history attached. Steer it \
+         with a send, cancel it, or integrate around it — one line at a time.",
+        addr.0,
+        tail.iter().map(|m| m.to_string()).collect::<Vec<_>>().join("→"),
+    )
+}
+
+/// The batch report delivered INTO a sub-conductor's session (M1c). The
+/// goal driver owns the goal-conductor edge; this is the worker-parent
+/// twin — same paths-not-payloads law.
+fn subconductor_report(batch: u64, rows: &[BatchWorkerRow]) -> String {
+    let mut lines = String::new();
+    for r in rows {
+        lines.push_str(&format!(
+            "- worker {} [{:?}]{}: {}\n",
+            r.worker.0,
+            r.state,
+            if r.timed_out { " (timed_out — still revivable)" } else { "" },
+            if r.evidence.is_empty() { "no evidence file" } else { &r.evidence },
+        ));
+    }
+    format!(
+        "BATCH {batch} REPORT — your child workers have settled:\n{lines}\
+         Read each evidence file (and the artifacts it declares), integrate the results \
+         into YOUR OWN deliverable, then continue your task — report through worker_report \
+         as usual."
+    )
+}
+
 /// The merge ritual appended at barrier open for code mandalas — the
 /// J-barrier's declared work, concrete: merge, verify, commit. The artifacts
 /// line is mechanical on purpose: the first field gate (2026-07-31) legally
@@ -1757,8 +2016,9 @@ async fn prepare_mandala_cells(
     bus: &BusHandle,
     call_session: SessionId, call_id: ActionId,
     args: &serde_json::Value,
-    tasks: &[(String, Option<String>)],
+    tasks: &[TaskSpecItem],
     inline: bool,
+    caller_cell: Option<&Addr>,
 ) -> Result<Option<CellsCtx>, ()> {
     let refuse = |msg: String| Event::ToolResult {
         session: call_session, call: call_id,
@@ -1771,14 +2031,18 @@ async fn prepare_mandala_cells(
             bus.emit(refuse("join/barrier_timeout_s need a mandala — a plain batch already joins at TaskBatchDone".into())).await;
             return Err(());
         }
+        if tasks.iter().any(|t| t.measure.is_some() || t.voucher) {
+            bus.emit(refuse("measure/voucher are mandala-cell properties — open a mandala to use them".into())).await;
+            return Err(());
+        }
         return Ok(None);
     };
     let Some(m) = mandalas.get(&mid) else {
         bus.emit(refuse(format!("no mandala {mid} — mandala_create first, or mandala_status to list"))).await;
         return Err(());
     };
-    if m.conductor != call_session.0 {
-        bus.emit(refuse(format!("mandala {mid} belongs to session {} — only its conductor grows it (vouchers arrive in M1c)", m.conductor))).await;
+    if caller_cell.is_none() && m.conductor != call_session.0 {
+        bus.emit(refuse(format!("mandala {mid} belongs to session {} — only its conductor (or a vouchered cell inside it) grows it", m.conductor))).await;
         return Err(());
     }
     if m.state == "closed" {
@@ -1797,12 +2061,21 @@ async fn prepare_mandala_cells(
     let empty = HashMap::new();
     let tree = trees.get(&mid).unwrap_or(&empty);
     let parent_addr = match args["parent_cell"].as_str() {
-        None => Addr(Addr::ROOT.into()),
+        // A sub-conductor's default parent is ITSELF, not the root.
+        None => caller_cell.cloned().unwrap_or(Addr(Addr::ROOT.into())),
         Some(s) => match Addr::parse(s) {
             Some(a) => a,
             None => { bus.emit(refuse(format!("'{s}' is not a cell address (like 0 or 0.2.1)"))).await; return Err(()); }
         },
     };
+    if let Some(own) = caller_cell {
+        // Descendant-only conducting: a voucher covers the cell's own subtree.
+        if !mandala::voucher_scope_ok(own, &parent_addr) {
+            bus.emit(refuse(format!(
+                "your voucher covers your own subtree ({}) — cell {} is outside it", own.0, parent_addr.0))).await;
+            return Err(());
+        }
+    }
     let Some(parent) = tree.get(&parent_addr.0) else {
         bus.emit(refuse(format!("mandala {mid} has no cell {} — mandala_status shows the tree", parent_addr.0))).await;
         return Err(());
@@ -1812,8 +2085,8 @@ async fn prepare_mandala_cells(
     // one-call diamond takes the join from `join` and the ring from tasks.
     let bare_gate = join_task.is_none() && barrier_arg.is_some();
     let gate_task: Option<String> =
-        join_task.or_else(|| if bare_gate { Some(tasks[0].0.clone()) } else { None });
-    let ring_tasks: &[(String, Option<String>)] = if bare_gate { &[] } else { tasks };
+        join_task.or_else(|| if bare_gate { Some(tasks[0].prompt.clone()) } else { None });
+    let ring_tasks: &[TaskSpecItem] = if bare_gate { &[] } else { tasks };
     let needed = ring_tasks.len() + usize::from(gate_task.is_some());
 
     // Geometry: open cells vs the mandala's conserved budget — the whole fan
@@ -1876,28 +2149,41 @@ async fn prepare_mandala_cells(
                 return Err(());
             }
             let wide = ring_tasks.len() > 1;
-            for (i, (task, model)) in ring_tasks.iter().enumerate() {
+            for (i, t) in ring_tasks.iter().enumerate() {
                 let addr = gate_addr.child(i as u32);
-                let extra = match repo {
+                let mut extra = match repo {
                     Some(r) if wide => worktree_ritual(r, &addr.branch()),
                     _ => String::new(),
                 };
+                if let Some(m) = &t.measure { extra.push_str(&measure_ritual(m)); }
+                if t.voucher { extra.push_str(&voucher_block(mid, &addr)); }
                 plans.push(CellPlan {
-                    prompt: mk_prompt(&addr, task, &extra),
+                    prompt: mk_prompt(&addr, &t.prompt, &extra),
                     addr, budget: ring_budget,
-                    barrier_timeout_s: None, model: model.clone(),
+                    barrier_timeout_s: None,
+                    measure: t.measure.clone(), voucher: t.voucher,
+                    model: t.model.clone(),
                 });
             }
             arm_gate_branch = wide;
         }
         // Gate FIRST in mint order — lowest wid fronts the FIFO at open.
-        let gate_model = if bare_gate { tasks[0].1.clone() } else {
-            args["model"].as_str().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 64).map(str::to_owned)
+        // A bare gate carries its task item's knobs: measure makes it a
+        // FORGE (lap→verify→lap — it starts lapping, no mint hold), voucher
+        // lets it sub-conduct its own ring per lap.
+        let (gate_model, gate_measure, gate_voucher) = if bare_gate {
+            (tasks[0].model.clone(), tasks[0].measure.clone(), tasks[0].voucher)
+        } else {
+            (args["model"].as_str().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 64).map(str::to_owned), None, false)
         };
+        let mut gate_extra = gate_note(timeout);
+        if let Some(m) = &gate_measure { gate_extra.push_str(&measure_ritual(m)); }
+        if gate_voucher { gate_extra.push_str(&voucher_block(mid, &gate_addr)); }
         plans.insert(0, CellPlan {
-            prompt: mk_prompt(&gate_addr, &gtask, &gate_note(timeout)),
+            prompt: mk_prompt(&gate_addr, &gtask, &gate_extra),
             addr: gate_addr, budget: gate_budget,
             barrier_timeout_s: Some(timeout),
+            measure: gate_measure, voucher: gate_voucher,
             model: gate_model,
         });
     } else {
@@ -1921,16 +2207,20 @@ async fn prepare_mandala_cells(
         }
         deadline_cap_s = child_budget.deadline_s;
         let wide = ring_tasks.len() > 1;
-        for (i, (task, model)) in ring_tasks.iter().enumerate() {
+        for (i, t) in ring_tasks.iter().enumerate() {
             let addr = parent_addr.child(ordinal + i as u32);
-            let extra = match repo {
+            let mut extra = match repo {
                 Some(r) if wide => worktree_ritual(r, &addr.branch()),
                 _ => String::new(),
             };
+            if let Some(m) = &t.measure { extra.push_str(&measure_ritual(m)); }
+            if t.voucher { extra.push_str(&voucher_block(mid, &addr)); }
             plans.push(CellPlan {
-                prompt: mk_prompt(&addr, task, &extra),
+                prompt: mk_prompt(&addr, &t.prompt, &extra),
                 addr, budget: child_budget,
-                barrier_timeout_s: None, model: model.clone(),
+                barrier_timeout_s: None,
+                measure: t.measure.clone(), voucher: t.voucher,
+                model: t.model.clone(),
             });
         }
         arm_parent_branch = wide;
@@ -1964,6 +2254,9 @@ fn bind_cells(
             form = form.arm_join();
             if ctx.arm_gate_branch { form = form.arm_branch(); }
         }
+        if plan.measure.is_some() {
+            form = form.arm_recur(); // SPIRAL, or FORGE when J is also armed
+        }
         let cell = CellRecord {
             addr: plan.addr.clone(),
             form,
@@ -1977,6 +2270,9 @@ fn bind_cells(
             created_epoch: epoch_now(),
             barrier_timeout_s: plan.barrier_timeout_s,
             barrier_opened: false,
+            measure: plan.measure.clone(),
+            measure_history: Vec::new(),
+            voucher: plan.voucher,
         };
         mandala::save_cell(&tree_dir, &cell);
         cell_by_worker.insert(*wid, (ctx.mandala, plan.addr.clone()));
@@ -2372,6 +2668,9 @@ async fn create_mandala(
         created_epoch: epoch_now(),
         barrier_timeout_s: None,
         barrier_opened: false,
+        measure: None,
+        measure_history: Vec::new(),
+        voucher: false,
     };
     mandala::save_cell(&worktrees_dir.join(id.to_string()), &root);
     trees.entry(id).or_default().insert(root.addr.0.clone(), root);
@@ -2428,6 +2727,12 @@ async fn handle_mandala_status(
                     cell["barrier_timeout_s"] = serde_json::json!(t);
                     cell["barrier_opened"] = serde_json::json!(c.barrier_opened);
                 }
+                if let Some(m) = &c.measure {
+                    cell["measure"] = serde_json::json!(m);
+                    let tail: Vec<u64> = c.measure_history.iter().rev().take(6).rev().copied().collect();
+                    cell["measure_history"] = serde_json::json!(tail);
+                }
+                if c.voucher { cell["voucher"] = serde_json::json!(true); }
                 cell
             }).collect::<Vec<_>>(),
         });
@@ -2521,12 +2826,23 @@ mod tests {
             "model": "claude-sonnet-5"
         });
         let tasks = parse_tasks(&args).unwrap();
-        assert_eq!(tasks[0], ("write a haiku".to_string(), Some("claude-sonnet-5".to_string())));
+        assert_eq!(tasks[0].prompt, "write a haiku");
+        assert_eq!(tasks[0].model.as_deref(), Some("claude-sonnet-5"));
         // Per-task model wins over the batch default.
-        assert_eq!(tasks[1], ("count to three".to_string(), Some("claude-haiku-4-5".to_string())));
+        assert_eq!(tasks[1].prompt, "count to three");
+        assert_eq!(tasks[1].model.as_deref(), Some("claude-haiku-4-5"));
+        assert!(tasks[1].measure.is_none());
+        assert!(!tasks[1].voucher);
         // No models anywhere → node default (None).
         let bare = parse_tasks(&serde_json::json!({ "tasks": ["x"] })).unwrap();
-        assert_eq!(bare[0], ("x".to_string(), None));
+        assert_eq!(bare[0].prompt, "x");
+        assert!(bare[0].model.is_none());
+        // M1c knobs parse per task.
+        let r = parse_tasks(&serde_json::json!({ "tasks": [
+            { "prompt": "shrink the count", "measure": "grep -rc TODO src", "voucher": true }
+        ] })).unwrap();
+        assert_eq!(r[0].measure.as_deref(), Some("grep -rc TODO src"));
+        assert!(r[0].voucher);
     }
 
     #[test]
@@ -2557,7 +2873,7 @@ mod tests {
                  task: "t".into(), state, step: 1, summary: None,
                  artifacts: Vec::new(), episode: None,
                  started: Instant::now(), pending: None, turn_inflight: false,
-                 yolo: false, model: None, errored: false,
+                 yolo: false, model: None, errored: false, step_ceiling: 0,
                  barrier_held: false, next_review: None,
                  last_review_key: None, review_attempt: 0 }
     }
@@ -2595,7 +2911,7 @@ mod tests {
             task: "refactor the parser".into(), state: WorkerState::Running,
             step: 3, summary: Some("parser refactored".into()),
             artifacts: vec!["out/parser.rs".into()], episode: Some("ep_x".into()),
-            yolo: true, model: Some("claude-haiku-4-5".into()),
+            yolo: true, model: Some("claude-haiku-4-5".into()), step_ceiling: 8,
         };
         let back: PersistedWorker = serde_json::from_str(&serde_json::to_string(&pw).unwrap()).unwrap();
         assert_eq!(back.id, 7);
@@ -2607,6 +2923,7 @@ mod tests {
         assert_eq!(back.summary.as_deref(), Some("parser refactored"));
         assert_eq!(back.artifacts, vec!["out/parser.rs"]);
         assert_eq!(back.episode.as_deref(), Some("ep_x"));
+        assert_eq!(back.step_ceiling, 8);
     }
 
     #[test]
@@ -2624,6 +2941,7 @@ mod tests {
         assert!(pw.episode.is_none());
         assert!(!pw.yolo);
         assert!(pw.model.is_none());
+        assert_eq!(pw.step_ceiling, 0, "pre-M1c workers fall back to the env global");
     }
 
     #[test]
@@ -2631,6 +2949,7 @@ mod tests {
         let sys = worker_system("APEX");
         assert!(sys.contains("worker_report"), "the verdict tool must ride the charter");
         assert!(sys.contains("depth-1"), "the no-fanout law must ride the charter");
+        assert!(sys.contains("VOUCHER"), "the sub-conduction exception must be named (M1c)");
         assert!(sys.contains("Skip orientation"));
         assert!(sys.contains("final text"), "the no-report fallback must be named");
         let first = directive_first(3, 1, 12, "write the tests");
@@ -2644,16 +2963,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_verdict_maps_status() {
+    fn parse_verdict_maps_status_and_carries_measures() {
         assert!(matches!(parse_verdict(&serde_json::json!({"status":"done","summary":"shipped","artifacts":["a.md"]})),
-                         Verdict::Done { summary, artifacts } if summary == "shipped" && artifacts == vec!["a.md"]));
+                         Verdict::Done { summary, artifacts, measure: None } if summary == "shipped" && artifacts == vec!["a.md"]));
         assert!(matches!(parse_verdict(&serde_json::json!({"status":"blocked","reason":"no key"})),
                          Verdict::Blocked(r) if r == "no key"));
         assert!(matches!(parse_verdict(&serde_json::json!({"status":"yield"})), Verdict::Yield));
         assert!(matches!(parse_verdict(&serde_json::json!({"status":"continue","next":"tests"})),
-                         Verdict::Continue(Some(s)) if s == "tests"));
+                         Verdict::Continue { steer: Some(s), measure: None } if s == "tests"));
         // Absent/unknown status defaults to continue (the goal_step convention).
-        assert!(matches!(parse_verdict(&serde_json::json!({})), Verdict::Continue(None)));
+        assert!(matches!(parse_verdict(&serde_json::json!({})), Verdict::Continue { steer: None, measure: None }));
+        // The measure rides continue and done; junk reads as absent (lenient).
+        assert!(matches!(parse_verdict(&serde_json::json!({"status":"continue","measure": 7})),
+                         Verdict::Continue { measure: Some(7), .. }));
+        assert!(matches!(parse_verdict(&serde_json::json!({"status":"done","summary":"s","measure": 0})),
+                         Verdict::Done { measure: Some(0), .. }));
+        assert!(matches!(parse_verdict(&serde_json::json!({"status":"continue","measure": -3})),
+                         Verdict::Continue { measure: None, .. }));
+        assert!(matches!(parse_verdict(&serde_json::json!({"status":"continue","measure": "many"})),
+                         Verdict::Continue { measure: None, .. }));
     }
 
     #[test]
@@ -2837,6 +3165,7 @@ mod tests {
             invariant_hash: "h".into(), worker: None, state: state.into(),
             evidence: evidence.map(str::to_owned), reparented_to: None,
             created_epoch: 0, barrier_timeout_s: None, barrier_opened: false,
+            measure: None, measure_history: Vec::new(), voucher: false,
         }
     }
 
@@ -2890,6 +3219,58 @@ mod tests {
         assert!(mandala_closable(&tree), "root-open + all non-root terminal = closable");
         tree.insert("0.2".into(), cell("0.2", "open", None));
         assert!(!mandala_closable(&tree));
+    }
+
+    #[test]
+    fn forge_cells_start_lapping_while_pure_gates_hold() {
+        assert!(holds_at_mint(Some(900), None), "GATE/DIAMOND hold at mint");
+        assert!(!holds_at_mint(Some(900), Some("grep -c TODO")), "FORGE (R+J) laps immediately");
+        assert!(!holds_at_mint(None, Some("grep -c TODO")), "SPIRAL never holds");
+        assert!(!holds_at_mint(None, None), "SPINE never holds");
+    }
+
+    #[test]
+    fn step_ceiling_prefers_the_cell_budget_over_the_env_global() {
+        let plain = mk(WorkerState::Running); // step_ceiling 0 = the sentinel
+        assert_eq!(effective_ceiling(&plain, 12), 12);
+        let cellw = Worker { step_ceiling: 8, ..mk(WorkerState::Running) };
+        assert_eq!(effective_ceiling(&cellw, 12), 8, "the budget IS the contract");
+        let renewed = Worker { step_ceiling: 20, ..mk(WorkerState::Running) };
+        assert_eq!(effective_ceiling(&renewed, 12), 20, "renewals raise it past the global");
+    }
+
+    #[test]
+    fn m1c_rituals_and_notes_carry_the_contract() {
+        let mr = measure_ritual("cargo test 2>&1 | grep -c FAILED");
+        assert!(mr.contains("STRICTLY DECREASE"));
+        assert!(mr.contains("worker_report"));
+        assert!(mr.contains("measure: N"));
+        assert!(mr.contains("report done"), "the zero rule must be taught");
+        let vb = voucher_block(2, &Addr::parse("0.3").unwrap());
+        assert!(vb.contains("SUB-CONDUCT"));
+        assert!(vb.contains("mandala: 2"));
+        assert!(vb.contains("\"0.3\""));
+        assert!(vb.contains("fan late"), "the economy rides the grant");
+        let note = kstall_note(&Addr::parse("0.1.2").unwrap(), &[7, 7, 7]);
+        assert!(note.contains("0.1.2"));
+        assert!(note.contains("7→7→7"));
+        assert!(note.contains("one line at a time"), "the anti-thrash doctrine rides escalation");
+    }
+
+    #[test]
+    fn subconductor_report_hands_paths_not_payloads() {
+        let rows = vec![
+            BatchWorkerRow { worker: WorkerId(31), state: WorkerState::Done,
+                             evidence: "/var/lib/agentd/events/agents/31.json".into(), timed_out: false },
+            BatchWorkerRow { worker: WorkerId(32), state: WorkerState::Parked,
+                             evidence: String::new(), timed_out: true },
+        ];
+        let r = subconductor_report(9, &rows);
+        assert!(r.contains("BATCH 9 REPORT"));
+        assert!(r.contains("worker 31 [Done]: /var/lib/agentd/events/agents/31.json"));
+        assert!(r.contains("worker 32 [Parked] (timed_out — still revivable): no evidence file"));
+        assert!(r.contains("integrate"), "integration is the instruction, not delivery");
+        assert!(r.contains("worker_report"), "the sub-conductor still reports up its own chain");
     }
 
     #[test]

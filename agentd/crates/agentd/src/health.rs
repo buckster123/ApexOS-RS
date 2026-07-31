@@ -49,6 +49,12 @@ pub struct HealthChecks {
     pub listeners_bound: bool,
     pub plugins_loaded: usize,
     pub cognitive_ok: bool,
+    /// Dual-tree integrity (Fabrica M1c): the worker ledger and the mandala
+    /// trees agree — closed mandalas hold no open cells, open cells' workers
+    /// exist, terminal workers left no cell open (the reap rule as a boot
+    /// question). Informational like `cognitive_ok`: false until evaluated,
+    /// NEVER a gate — a violation is an operator flag, not a rollback.
+    pub mandala_coherent: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -132,6 +138,7 @@ pub fn spawn_health_marker(
     mut events: broadcast::Receiver<Event>,
     proxy: ToolProxy,
     agent_id: String,
+    log_dir: PathBuf,
 ) {
     let dir = update_dir();
     let commit = build_commit().to_string();
@@ -156,6 +163,7 @@ pub fn spawn_health_marker(
                     listeners_bound: false,
                     plugins_loaded: 0,
                     cognitive_ok: false,
+                    mandala_coherent: false,
                 },
             },
         );
@@ -191,6 +199,7 @@ pub fn spawn_health_marker(
                             listeners_bound,
                             plugins_loaded: up.len(),
                             cognitive_ok: false,
+                            mandala_coherent: false,
                         },
                     },
                 );
@@ -212,6 +221,15 @@ pub fn spawn_health_marker(
         //    for a brief memory blip; just record the flag).
         let cognitive_ok = probe_cognitive(&proxy, &agent_id).await;
 
+        // 3b. Dual-tree integrity (Fabrica M1c) — a file-based join over the
+        //     worker/mandala truth this boot just reloaded. Informational:
+        //     a cold boot with no trees is vacuously coherent, and a
+        //     violation flags the operator without touching `status`.
+        let (mandala_coherent, violations) = probe_mandala_coherence(&log_dir);
+        for v in violations.iter().take(8) {
+            eprintln!("[health] mandala integrity: {v}");
+        }
+
         // 4. Healthy.
         let plugins_loaded = up.len();
         write_marker(
@@ -225,14 +243,96 @@ pub fn spawn_health_marker(
                     listeners_bound: true,
                     plugins_loaded,
                     cognitive_ok,
+                    mandala_coherent,
                 },
             },
         );
         eprintln!(
-            "[health] healthy (commit={}, plugins={plugins_loaded}, cognitive_ok={cognitive_ok})",
+            "[health] healthy (commit={}, plugins={plugins_loaded}, cognitive_ok={cognitive_ok}, mandala_coherent={mandala_coherent})",
             build_commit()
         );
     });
+}
+
+/// Dual-tree integrity (Fabrica M1c) — a pure join over the driver's on-disk
+/// truth: mandalas.json × worktrees/<id>/*.json × workers.json. Returns the
+/// violations (empty = coherent). Three laws checked:
+///   1. a CLOSED mandala holds no open cells;
+///   2. an open non-root cell's bound worker EXISTS in the ledger;
+///   3. a terminal worker leaves no cell open (reap lag — a crash between a
+///      worker's terminal transition and its cell sync).
+pub fn mandala_violations(
+    mandalas: &[serde_json::Value],
+    trees: &[(u64, Vec<serde_json::Value>)],
+    workers: &[serde_json::Value],
+) -> Vec<String> {
+    let worker_state: std::collections::HashMap<u64, String> = workers
+        .iter()
+        .filter_map(|w| Some((w["id"].as_u64()?, w["state"].as_str()?.to_string())))
+        .collect();
+    let open = |st: &str| !matches!(st, "done" | "failed" | "cancelled");
+    let mut out = Vec::new();
+    for m in mandalas {
+        let (Some(id), Some(mstate)) = (m["id"].as_u64(), m["state"].as_str()) else { continue };
+        let Some((_, cells)) = trees.iter().find(|(tid, _)| *tid == id) else { continue };
+        for c in cells {
+            let addr = c["addr"].as_str().unwrap_or("?");
+            let cstate = c["state"].as_str().unwrap_or("open");
+            if mstate == "closed" && open(cstate) {
+                out.push(format!("mandala {id} is closed but cell {addr} is {cstate}"));
+            }
+            if addr == "0" {
+                continue; // the root is the conductor's own cell — no worker binds it
+            }
+            if open(cstate) {
+                match c["worker"].as_u64() {
+                    None => out.push(format!("mandala {id} cell {addr} is open with no worker bound")),
+                    Some(w) => match worker_state.get(&w).map(String::as_str) {
+                        None => out.push(format!("mandala {id} cell {addr} is open but worker {w} is gone from the ledger")),
+                        Some(ws) if !open(ws) => out.push(format!(
+                            "mandala {id} cell {addr} is open but worker {w} is {ws} (reap lag)")),
+                        _ => {}
+                    },
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Load the driver's files and run the join. Missing/unparseable files read
+/// as empty — a cold boot is vacuously coherent (the normal case is green).
+pub fn probe_mandala_coherence(log_dir: &Path) -> (bool, Vec<String>) {
+    let read_list = |p: PathBuf| -> Vec<serde_json::Value> {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+    };
+    let mandalas = read_list(log_dir.join("mandalas.json"));
+    let workers = read_list(log_dir.join("workers.json"));
+    let mut trees = Vec::new();
+    for m in &mandalas {
+        let Some(id) = m["id"].as_u64() else { continue };
+        let dir = log_dir.join("worktrees").join(id.to_string());
+        let mut cells = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                if e.path().extension().and_then(|x| x.to_str()) == Some("json") {
+                    if let Some(v) = std::fs::read_to_string(e.path())
+                        .ok()
+                        .and_then(|t| serde_json::from_str(&t).ok())
+                    {
+                        cells.push(v);
+                    }
+                }
+            }
+        }
+        trees.push((id, cells));
+    }
+    let violations = mandala_violations(&mandalas, &trees, &workers);
+    (violations.is_empty(), violations)
 }
 
 #[cfg(test)]
@@ -272,6 +372,7 @@ mod tests {
                 listeners_bound: true,
                 plugins_loaded: 3,
                 cognitive_ok: true,
+                mandala_coherent: true,
             },
         };
         let v: serde_json::Value = serde_json::to_value(&m).unwrap();
@@ -282,6 +383,43 @@ mod tests {
         assert_eq!(v["checks"]["listeners_bound"], true);
         assert_eq!(v["checks"]["plugins_loaded"], 3);
         assert_eq!(v["checks"]["cognitive_ok"], true);
+        assert_eq!(v["checks"]["mandala_coherent"], true);
+    }
+
+    #[test]
+    fn mandala_violations_catch_the_three_laws() {
+        let mandalas = vec![
+            serde_json::json!({ "id": 1, "state": "closed" }),
+            serde_json::json!({ "id": 2, "state": "open" }),
+        ];
+        let trees = vec![
+            (1u64, vec![
+                serde_json::json!({ "addr": "0", "state": "open" }),          // closed mandala, open ROOT
+                serde_json::json!({ "addr": "0.0", "state": "done", "worker": 5 }),
+            ]),
+            (2u64, vec![
+                serde_json::json!({ "addr": "0", "state": "open" }),          // open mandala root — fine
+                serde_json::json!({ "addr": "0.1", "state": "open", "worker": 9 }),   // worker gone
+                serde_json::json!({ "addr": "0.2", "state": "open", "worker": 6 }),   // reap lag
+                serde_json::json!({ "addr": "0.3", "state": "open" }),                // no worker bound
+                serde_json::json!({ "addr": "0.4", "state": "open", "worker": 7 }),   // healthy
+            ]),
+        ];
+        let workers = vec![
+            serde_json::json!({ "id": 5, "state": "done" }),
+            serde_json::json!({ "id": 6, "state": "done" }),    // terminal, cell 0.2 open
+            serde_json::json!({ "id": 7, "state": "running" }),
+        ];
+        let v = mandala_violations(&mandalas, &trees, &workers);
+        assert_eq!(v.len(), 4, "{v:?}");
+        assert!(v.iter().any(|s| s.contains("mandala 1 is closed but cell 0")));
+        assert!(v.iter().any(|s| s.contains("cell 0.1 is open but worker 9 is gone")));
+        assert!(v.iter().any(|s| s.contains("cell 0.2 is open but worker 6 is done (reap lag)")));
+        assert!(v.iter().any(|s| s.contains("cell 0.3 is open with no worker bound")));
+        // A coherent world — and the cold-boot vacuum — are both green.
+        assert!(mandala_violations(&[], &[], &[]).is_empty());
+        let (ok, list) = probe_mandala_coherence(Path::new("/nonexistent/apexos-health-xyz"));
+        assert!(ok && list.is_empty(), "a cold boot is vacuously coherent");
     }
 
     #[test]
@@ -297,6 +435,7 @@ mod tests {
                 listeners_bound: false,
                 plugins_loaded: 0,
                 cognitive_ok: false,
+                mandala_coherent: false,
             },
         };
         write_marker(&dir, &m);

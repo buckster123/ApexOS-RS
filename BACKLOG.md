@@ -29,8 +29,11 @@ charter as north star. *Progress: W1a `#306` · W1b `#307` · W1c `#308`+`#309`
 `#313` (gates/rings/diamonds, review procedure, git worktrees, closure)
 merged + field-proven 2026-08-01 — the restart composition ran live (two
 diamonds, mid-barrier restart, revival, inline-fix integration, closure).
+M1c (R bit: measures + K-stall + renewal, vouchers/sub-conductors, health
+dual-tree join) shipped 2026-08-01 — sequencing ruling: M1c before W2, so
+the wire crossing distributes a finished single-node supervision machine.
 Next: W2 mesh workers (remote parked-state ownership is its own design),
-then M1c (R bit, measures, vouchers).*
+then M1d (64-table, epochs, census→Cerebro, board tree view).*
 
 - **[UI · MEDIUM] Approvals lane must rebuild from supervisor state, not
   only live events.** `board_turn_done` (ui-slint `main.rs`) clears the

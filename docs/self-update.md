@@ -149,7 +149,7 @@ after a staged set of checks pass**, on every boot:
 ```jsonc
 { "commit": "<GIT_COMMIT embedded at build via build.rs>",
   "status": "healthy", "booted_at": <unix>, "pid": <pid>,
-  "checks": { "listeners_bound": true, "plugins_loaded": 3, "cognitive_ok": true } }
+  "checks": { "listeners_bound": true, "plugins_loaded": 3, "cognitive_ok": true, "mandala_coherent": true } }
 ```
 
 Health gate (both **hard** gates must pass before writing `healthy`):
@@ -161,6 +161,13 @@ Health gate (both **hard** gates must pass before writing `healthy`):
    `cognitive_bootstrap` re-run — the first turn already does that). **soft**: if
    Cerebro is down we still write `healthy` but flag `cognitive_ok:false` (don't
    roll back a good daemon just because memory was briefly unreachable).
+4. Mandala dual-tree integrity (Fabrica M1c) — a file join over `workers.json` ×
+   `mandalas.json` × the cell trees: closed mandalas hold no open cells, open
+   cells' workers exist, terminal workers left no cell open (reap lag). **soft
+   and informational** like the Cerebro probe: `mandala_coherent:false` flags the
+   operator (violations logged), never blocks `healthy` — a cold boot with no
+   trees is vacuously coherent. The watchdog itself reads only
+   `status`/`commit`/`booted_at`, never the `checks` block.
 
 The marker is written `status:"booting"` the instant the task starts (fresh
 `booted_at` + the correct embedded commit, so a stale `healthy` from the previous

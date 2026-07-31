@@ -107,7 +107,7 @@ reset; printf 'GOOD:newcommit' > "$ROOT/bin/agentd"; printf 'GOOD:oldcommit' > "
 echo SWAPPED > "$ROOT/update/state"
 cat > "$ROOT/update/health.json" <<EOF
 { "commit": "newcommit", "status": "healthy", "booted_at": 2000, "pid": 1,
-  "checks": { "listeners_bound": true, "plugins_loaded": 1, "cognitive_ok": true } }
+  "checks": { "listeners_bound": true, "plugins_loaded": 1, "cognitive_ok": true, "mandala_coherent": true } }
 EOF
 mkreq "GOOD:newcommit" newcommit "" 5; run_wd
 check "confirmed.json written"   "$(exists "$ROOT/update/confirmed.json")" yes
