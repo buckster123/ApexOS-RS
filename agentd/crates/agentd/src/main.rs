@@ -807,17 +807,20 @@ async fn main() -> anyhow::Result<()> {
     apexos_gateway::spawn_beacon_loop(Arc::clone(&peer_registry), handle.clone(), Arc::clone(&mesh_liveness));
 
     // Event log
+    let health_log_dir = log_dir.clone();
     tokio::spawn(run_log_writer(log_dir, bcast.subscribe()));
 
     // Boot-health marker — spawned LAST so the gates it polls (gateway listener,
     // restart=always plugins) are already coming up. Writes <update_dir>/health.json
     // once healthy; the root self-update watchdog reads it. (docs/self-update.md slice 1)
+    // M1c: carries log_dir for the dual-tree integrity join (worker/mandala files).
     health::spawn_health_marker(
         gw_addr,
         expected_up_plugins,
         health_rx,
         health_proxy,
         apexos_core::node_agent_id(),
+        health_log_dir,
     );
 
     eprintln!("[agentd] ready — gateway ws://{gw_bind}/ws");

@@ -67,9 +67,13 @@ impl CellForm {
 
     /// Arm the J bit (a barrier landed on this cell) — one bit at a time,
     /// the changing-line rule: every mutation is a single-bit step between
-    /// named forms. There is deliberately NO arm for R until M1c ships
-    /// measures — recurrence without a measure is the classic livelock.
+    /// named forms.
     pub fn arm_join(self) -> Self { CellForm(self.0 | 0b001) }
+
+    /// Arm the R bit (M1c — a MEASURE landed on this cell). Never armed
+    /// without one: recurrence without a measure is the classic livelock,
+    /// which is why this arm waited for the measure machinery to exist.
+    pub fn arm_recur(self) -> Self { CellForm(self.0 | 0b010) }
 
     /// Arm the B bit (a >1 fan landed under this cell).
     pub fn arm_branch(self) -> Self { CellForm(self.0 | 0b100) }
@@ -336,6 +340,22 @@ pub struct CellRecord {
     /// released to admission. Recorded so the tree tells the whole story.
     #[serde(default)]
     pub barrier_opened: bool,
+    /// The R guard (M1c): a command computing this cell's non-negative
+    /// integer measure — declared once, run by the WORKER through its own
+    /// policied tools each lap, reported via worker_report{measure}.
+    /// Present exactly when the R bit is armed.
+    #[serde(default)]
+    pub measure: Option<String>,
+    /// The lap ledger: reported measures in order (capped — the tree tells
+    /// the trend, the evidence file holds the full story). Strict decrease
+    /// is the law; two consecutive non-decreasing laps = K-stall.
+    #[serde(default)]
+    pub measure_history: Vec<u64>,
+    /// The voucher (M1c): this cell's worker may SUB-CONDUCT — grow its own
+    /// subtree via task_fanout, spending its own budget vector. Granted at
+    /// mint by the parent conductor, enforced in the worker driver.
+    #[serde(default)]
+    pub voucher: bool,
 }
 
 fn default_open() -> String { "open".into() }
@@ -485,6 +505,50 @@ pub fn descendants(cells: &HashMap<String, CellRecord>, addr: &Addr) -> Vec<Addr
     out
 }
 
+// ── The measure law (M1c) ───────────────────────────────────────────────────
+
+/// Consecutive non-decreasing laps that break the ring. Two is the charter
+/// default: one flat lap is a wobble, two is a plateau.
+pub const K_STALL: usize = 2;
+
+/// Cap on the per-cell lap ledger (the evidence file keeps everything).
+pub const MEASURE_HISTORY_CAP: usize = 64;
+
+/// K-stall, derived purely from the ledger: the last `K_STALL` laps were
+/// each non-decreasing (m[i] >= m[i-1]). Needs K_STALL+1 entries to fire —
+/// a single measurement can't stall, and an empty ledger never stalls.
+pub fn k_stalled(history: &[u64]) -> bool {
+    if history.len() < K_STALL + 1 {
+        return false;
+    }
+    history
+        .windows(2)
+        .rev()
+        .take(K_STALL)
+        .all(|w| w[1] >= w[0])
+}
+
+/// The renewal law (grow where progress is): an R-cell at its step ceiling
+/// whose LAST lap strictly decreased may spend the PARENT's vector — half
+/// the parent's remaining steps (floor 1), never from nowhere. Returns the
+/// grant, or None when the parent can't fund one (< 2 steps) or progress
+/// stalled. Terminates by construction: the parent vector decays
+/// geometrically.
+pub fn renewal_grant(parent_steps: u16, history: &[u64]) -> Option<u16> {
+    let progressing = history.len() >= 2 && history[history.len() - 1] < history[history.len() - 2];
+    if !progressing || parent_steps < 2 {
+        return None;
+    }
+    Some((parent_steps / 2).max(1))
+}
+
+/// May a vouchered cell at `own` conduct a fan under `parent`? Its own
+/// subtree only — itself or a strict descendant (segment-aware). The
+/// descendant-only law, sub-conductor edition.
+pub fn voucher_scope_ok(own: &Addr, parent: &Addr) -> bool {
+    own == parent || own.is_ancestor_of(parent)
+}
+
 // ── mandalas.json ────────────────────────────────────────────────────────────
 
 pub fn save_mandalas(mandalas: &HashMap<u64, MandalaRecord>, path: &Path) {
@@ -616,6 +680,7 @@ mod tests {
             invariant_hash: "abc".into(),
             worker: None, state: "open".into(), evidence: None, reparented_to: None,
             created_epoch: 0, barrier_timeout_s: None, barrier_opened: false,
+            measure: None, measure_history: Vec::new(), voucher: false,
         };
         for a in ["0", "0.0", "0.0.0", "0.1", "0.1.2"] {
             save_cell(&dir, &mk(a));
@@ -647,6 +712,7 @@ mod tests {
             invariant_hash: "x".into(), worker: None, state: "open".into(),
             evidence: None, reparented_to: None,
             created_epoch: 0, barrier_timeout_s: None, barrier_opened: false,
+            measure: None, measure_history: Vec::new(), voucher: false,
         };
         std::fs::write(dir.join("0.9.json"), serde_json::to_string(&cell).unwrap()).unwrap();
         assert!(load_tree(&dir).is_empty());
@@ -699,6 +765,7 @@ mod tests {
             invariant_hash: "h".into(), worker: None, state: state.into(),
             evidence: None, reparented_to: None,
             created_epoch: 0, barrier_timeout_s: None, barrier_opened: false,
+            measure: None, measure_history: Vec::new(), voucher: false,
         };
         for (a, s) in [("0", "open"), ("0.1", "open"), ("0.1.0", "done"),
                        ("0.1.1", "open"), ("0.1.1.0", "failed"), ("0.10", "open")] {
@@ -716,6 +783,82 @@ mod tests {
         // An empty subtree waits on nothing — but the GATE rule (worker.rs)
         // still holds it: zero descendants means the fan hasn't landed yet.
         assert!(open_descendants(&cells, &Addr::parse("0.10").unwrap()).is_empty());
+    }
+
+    #[test]
+    fn k_stall_is_a_plateau_detector_not_a_wobble_trigger() {
+        // Empty / short ledgers never stall — a single measurement can't.
+        assert!(!k_stalled(&[]));
+        assert!(!k_stalled(&[5]));
+        assert!(!k_stalled(&[5, 5]));
+        // Strict decrease is health.
+        assert!(!k_stalled(&[9, 7, 4, 1]));
+        // One flat lap is a wobble…
+        assert!(!k_stalled(&[9, 7, 7]));
+        // …a recovery resets it…
+        assert!(!k_stalled(&[9, 7, 7, 3]));
+        // …two consecutive non-decreasing laps are a plateau: break.
+        assert!(k_stalled(&[9, 7, 7, 7]));
+        assert!(k_stalled(&[9, 7, 7, 8]));
+        assert!(k_stalled(&[3, 4, 5]), "an INCREASING measure is the worst plateau");
+        // A zero-loop self-terminates: 0→0→0 stalls (report done at 0 instead).
+        assert!(k_stalled(&[2, 0, 0, 0]));
+    }
+
+    #[test]
+    fn renewal_spends_the_parent_and_requires_progress() {
+        // Progressing + funded parent → half the remaining steps, floor 1.
+        assert_eq!(renewal_grant(8, &[9, 4]), Some(4));
+        assert_eq!(renewal_grant(3, &[9, 4]), Some(1));
+        assert_eq!(renewal_grant(2, &[9, 4]), Some(1));
+        // A broke parent funds nothing (budget never from nowhere).
+        assert_eq!(renewal_grant(1, &[9, 4]), None);
+        assert_eq!(renewal_grant(0, &[9, 4]), None);
+        // No progress, no renewal — flat or rising laps don't get more rope.
+        assert_eq!(renewal_grant(8, &[4, 4]), None);
+        assert_eq!(renewal_grant(8, &[4, 5]), None);
+        // No ledger = no evidence of progress = no renewal.
+        assert_eq!(renewal_grant(8, &[]), None);
+        assert_eq!(renewal_grant(8, &[4]), None);
+        // Geometric decay terminates: repeated renewals exhaust any vector.
+        let mut parent: u16 = 32;
+        let mut grants = 0;
+        while let Some(g) = renewal_grant(parent, &[9, 4]) {
+            parent -= g;
+            grants += 1;
+            assert!(grants < 40, "renewal must terminate");
+        }
+        assert!(parent <= 1);
+    }
+
+    #[test]
+    fn voucher_scope_is_own_subtree_only() {
+        let own = Addr::parse("0.2").unwrap();
+        assert!(voucher_scope_ok(&own, &own), "a sub-conductor may fan under itself");
+        assert!(voucher_scope_ok(&own, &Addr::parse("0.2.1").unwrap()));
+        assert!(voucher_scope_ok(&own, &Addr::parse("0.2.1.0").unwrap()));
+        // Never a sibling, an ancestor, or a segment-prefix lookalike.
+        assert!(!voucher_scope_ok(&own, &Addr::parse("0.3").unwrap()));
+        assert!(!voucher_scope_ok(&own, &Addr::parse("0").unwrap()));
+        assert!(!voucher_scope_ok(&own, &Addr::parse("0.21").unwrap()));
+    }
+
+    #[test]
+    fn m1b_cell_json_loads_with_r_defaults_and_r_guards_check() {
+        // An M1b cell file lacks measure/measure_history/voucher — serde
+        // defaults carry it.
+        let legacy = r#"{"addr":"0.1","form":1,"task":"t","budget":{"depth":3,"cells":1,"steps":4,"deadline_s":600},"invariant_hash":"abc","created_epoch":9,"barrier_timeout_s":900}"#;
+        let cell: CellRecord = serde_json::from_str(legacy).unwrap();
+        assert!(cell.measure.is_none());
+        assert!(cell.measure_history.is_empty());
+        assert!(!cell.voucher);
+        // The R forms' guard law: SPIRAL needs a measure, FORGE needs both.
+        assert!(!CellForm::SPIRAL.guards_armed(None, None, None));
+        assert!(CellForm::SPIRAL.guards_armed(None, Some("grep -c TODO"), None));
+        assert!(!CellForm::FORGE_FORM.guards_armed(None, Some("m"), None));
+        assert!(CellForm::FORGE_FORM.guards_armed(None, Some("m"), Some(600)));
+        assert_eq!(CellForm::SPIRAL.name(), "spiral");
+        assert_eq!(CellForm::FORGE_FORM.name(), "forge");
     }
 
     #[test]
