@@ -22,6 +22,8 @@
 | `GOAL_STEP_TIMEOUT_SECS` | `900` | agentd: per-step stall window for the autonomous goal driver — an Acting goal whose step produces no `TurnComplete` within this window Fails (instead of hanging). Clamped to a 30s floor; lower it (e.g. `120`) for live goal testing |
 | `AGENTD_WORKER_CAP` | tier default | agentd: worker admission cap (Fabrica W tier) — how many fanned-out workers hold a thermal slot (Running/Blocked) at once; the rest queue FIFO. Default from the hardware tier: nano/unknown 1 · micro 2 · standard 4 · pro 8. Floor 1; keep ≤ the turn-engine semaphore (16) — the cap is residency, not a provider-call guarantee |
 | `WORKER_STEP_TIMEOUT_SECS` | `900` | agentd: per-worker stall window — a Running worker whose turn produces no `TurnComplete` within this window Fails. 30s floor; Blocked (awaiting approval) is exempt — that wait runs on the human's clock |
+| `WORKER_IDLE_TTL_SECS` | `1800` | agentd: how long a yielded (Idle) or verdict-blocked worker sits before parking — RAM history evicted, `sessions/<id>.jsonl` stays truth, a send revives it. 60s floor |
+| `WORKER_MAX_STEPS` | `12` | agentd: step ceiling for `worker_report{continue}` loops — at the ceiling the worker goes Done ("step budget reached"). Clamped 1–100 |
 | `AGENTD_WAKEUP` | `1` | agentd: `0`/`false`/`off` disables `schedule_wakeup` (the agent's one-shot self-continuity alarm; pending ones stop firing too) |
 | `AGENTD_WAKEUP_MAX_PENDING` | `16` | agentd: max un-fired wakeups the agent may hold at once |
 | `AGENTD_WAKEUP_DAILY_CAP` | `24` | agentd: max wakeup fires per UTC day, enforced at *schedule* time — bounds a schedule-on-every-wake chain to this many turns/day |
