@@ -3285,13 +3285,19 @@ mod tests {
     #[test]
     fn worker_evidence_dir_is_a_read_root() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("AGENTD_WORKSPACE", "/tmp");
-        // The integrate step reads <AGENTD_LOG>/agents/<id>.json (Fabrica W1c,
-        // the evidence rule) — first live fire proved no session could. Point
-        // AGENTD_LOG at a temp dir: the evidence path must read, never write.
-        let log_dir = std::env::temp_dir().join(format!("apexos-evidence-test-{}", std::process::id()));
+        // Workspace and log dir must be DISJOINT here — with the workspace at
+        // /tmp wholesale, a /tmp-based log dir reads as workspace and the
+        // write-refusal assertion tests nothing (the first run's mistake).
+        let base = std::env::temp_dir().join(format!("apexos-evidence-test-{}", std::process::id()));
+        let ws = base.join("ws");
+        let log_dir = base.join("log");
+        std::fs::create_dir_all(&ws).unwrap();
         std::fs::create_dir_all(log_dir.join("agents")).unwrap();
+        std::env::set_var("AGENTD_WORKSPACE", &ws);
         std::env::set_var("AGENTD_LOG", &log_dir);
+        // The integrate step reads <AGENTD_LOG>/agents/<id>.json (Fabrica W1c,
+        // the evidence rule) — first live fire proved no session could. The
+        // evidence path must read, never write.
         let evidence = log_dir.join("agents/1.json");
         assert!(confine(evidence.to_str().unwrap(), false).is_ok(), "evidence must be readable");
         assert!(confine(evidence.to_str().unwrap(), true).is_err(), "but never writable");
@@ -3300,7 +3306,8 @@ mod tests {
         let transcript = log_dir.join("sessions/5.jsonl");
         assert!(confine(transcript.to_str().unwrap(), false).is_err(), "transcripts are not evidence");
         std::env::remove_var("AGENTD_LOG");
-        let _ = std::fs::remove_dir_all(&log_dir);
+        std::env::set_var("AGENTD_WORKSPACE", "/tmp"); // restore the suite's ambient default
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
