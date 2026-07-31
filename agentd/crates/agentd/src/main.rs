@@ -12,6 +12,7 @@ mod dream_digest;
 mod rehearse;
 mod evolution;
 mod goal;
+mod mandala;
 mod worker;
 mod sensor_config;
 
@@ -262,6 +263,8 @@ async fn main() -> anyhow::Result<()> {
     let workers_path = log_dir.join("workers.json"); // restart: Running→Parked, never lost
     let batches_path = log_dir.join("batches.json"); // batch deadlines survive restarts
     let agents_dir   = log_dir.join("agents");       // terminal evidence files (the evidence rule)
+    let mandalas_path = log_dir.join("mandalas.json"); // M1a: mandala records
+    let worktrees_dir = log_dir.join("worktrees");     // M1a: THE FILESYSTEM IS THE TREE
 
     // Peer registry — /etc/agentd/peers.toml (created empty if missing)
     let peers_path = PathBuf::from(
@@ -651,7 +654,8 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("[agentd] worker cap: {worker_cap} (tier {hw_tier}; AGENTD_WORKER_CAP overrides)");
     worker::spawn_worker_driver(
         handle.clone(), bcast.subscribe(), worker_rx,
-        workers_path, batches_path, agents_dir, worker_cap, worker_proxy,
+        workers_path, batches_path, agents_dir, mandalas_path, worktrees_dir,
+        worker_cap, worker_proxy,
         goal_yolo.clone(), worker_models.clone(),
     );
 
@@ -2416,6 +2420,8 @@ async fn gather_tools(
     tools.push(worker::worker_report_spec());
     tools.push(worker::worker_cancel_spec());
     tools.push(worker::list_workers_spec());
+    tools.push(worker::mandala_create_spec());
+    tools.push(worker::mandala_status_spec());
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());
     tools.push(mesh_memory_send_spec());
