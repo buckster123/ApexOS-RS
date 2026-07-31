@@ -106,6 +106,23 @@ sustained research. What it adds over a batch is an **axis** and a **tree**.
   them, but a parked GATE revived by send runs its join with only your send
   for context — hand it the evidence paths yourself (the batch report has
   them). A send to a still-held gate is likewise the override: it runs NOW.
+- **After ANY interruption, re-orient from the tree — never from memory.**
+  A turn cut by a restart leaves no trace in your own transcript: what you
+  did mid-turn is gone from memory while its effects (cells, workers) are
+  fully real. From inside this doesn't feel like a gap — it feels like
+  certainty that you hadn't acted yet. So the rule is mechanical:
+  `mandala_status` + `list_workers` FIRST, act second. The address law makes
+  the failure survivable (a re-fan can't re-mint addresses), but only
+  re-orientation makes it clean. (Field-learned 2026-08-01: the conductor
+  re-fanned a whole diamond it had no memory of creating.)
+- **A blocked worker with zero activity after a nudge = suspect a stuck
+  approval.** An approval-suspended worker looks "blocked" with no reason
+  you can read, and the board may not be showing the card. If a revival
+  send produces no tool activity at all (not even a failed attempt), the
+  turn is almost certainly suspended on an approval — get the card granted,
+  or `worker_cancel` the cell and let the gate fix-inline (a cancelled cell
+  is integration data; state the substitution's provenance in the commit
+  and the summary).
 - **Read the census** (`mandala_status.census`): keys are
   `<posture>:<PBVDCH bits>` — L=live, W=waiting, B=barrier, T=terminal;
   bits are child Progress/Budget/Verified · parent Demand/Capacity/Horizon.
