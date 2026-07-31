@@ -287,6 +287,29 @@ pub fn is_spawn_session(session_id: u64) -> bool {
     session_id >= SPAWN_SESSION_BASE
 }
 
+// ── Persistent worker sessions (Fabrica W tier) ──────────────────────────────
+
+/// Session ids in `[WORKER_SESSION_BASE, SPAWN_SESSION_BASE)` are WORKER
+/// sessions — `task_fanout` children (docs/fabrica.md). Unlike spawns they ARE
+/// persisted (`sessions/<id>.jsonl` is the parked worker's truth, the W1b
+/// revive substrate), so the id space is a strict three-way partition:
+///
+///   normal < 1<<62 ≤ worker < 1<<63 ≤ spawn
+///
+/// Two laws hang off this range and live at the named sites — don't loosen
+/// either: (1) `SessionStore::load_all` must NOT hydrate worker files at boot
+/// (Parked = not memory-resident); (2) `main.rs`'s `next_session_id` boot seed
+/// must exclude this range, or the first persisted worker drags the ordinary
+/// session counter into worker territory forever.
+pub const WORKER_SESSION_BASE: u64 = 1 << 62;
+
+/// Whether `session_id` is a persistent worker session — a BOUNDED range check,
+/// deliberately not `>=`: the spawn range sits above and must stay disjoint
+/// (`is_worker_session` and `is_spawn_session` are never both true).
+pub fn is_worker_session(session_id: u64) -> bool {
+    (WORKER_SESSION_BASE..SPAWN_SESSION_BASE).contains(&session_id)
+}
+
 // ── Per-session goal autonomy (goal-scoped yolo) ────────────────────────────
 
 /// Process-wide set of goal session ids running with **goal-scoped yolo**
@@ -315,6 +338,28 @@ mod tests {
 
     // AGENTD_AGENT_ID is process-global; serialize the env-mutating tests.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn session_id_space_is_a_three_way_partition() {
+        // normal < 1<<62 ≤ worker < 1<<63 ≤ spawn — the ranges never overlap.
+        // Ordinary/goal/mesh sessions:
+        for id in [0u64, 1, 42, WORKER_SESSION_BASE - 1] {
+            assert!(!is_worker_session(id), "{id} must be normal");
+            assert!(!is_spawn_session(id), "{id} must be normal");
+        }
+        // Worker range: persisted, NOT spawn (a worker id that also read as spawn
+        // would silently skip JSONL persistence — the exact trap the bounded
+        // range check exists to prevent).
+        for id in [WORKER_SESSION_BASE, WORKER_SESSION_BASE + 1, SPAWN_SESSION_BASE - 1] {
+            assert!(is_worker_session(id), "{id} must be worker");
+            assert!(!is_spawn_session(id), "{id} must not be spawn");
+        }
+        // Spawn range: ephemeral, NOT worker.
+        for id in [SPAWN_SESSION_BASE, SPAWN_SESSION_BASE + 1, u64::MAX] {
+            assert!(is_spawn_session(id), "{id} must be spawn");
+            assert!(!is_worker_session(id), "{id} must not be worker");
+        }
+    }
 
     #[test]
     fn defaults_to_apex_when_unset() {

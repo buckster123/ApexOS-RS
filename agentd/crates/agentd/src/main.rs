@@ -12,6 +12,7 @@ mod dream_digest;
 mod rehearse;
 mod evolution;
 mod goal;
+mod worker;
 mod sensor_config;
 
 use apexos_core::{
@@ -202,8 +203,13 @@ async fn main() -> anyhow::Result<()> {
     let fed_stats = Arc::new(std::sync::Mutex::new(fed_stats));
 
     // Server-issued session IDs — start above any IDs already loaded from disk
-    // (history JSONL *and* the mesh per-peer map).
-    let max_loaded_sid = initial_histories.keys().map(|s| s.0).max().unwrap_or(0)
+    // (history JSONL *and* the mesh per-peer map). Worker-range ids are EXCLUDED
+    // from the seed (belt to load_all's braces): the ordinary counter must never
+    // be dragged into `[WORKER_SESSION_BASE, …)` by a persisted worker file, or
+    // the three-way id partition (normal/worker/spawn) collapses forever.
+    let max_loaded_sid = initial_histories.keys().map(|s| s.0)
+        .filter(|&id| id < apexos_core::WORKER_SESSION_BASE)
+        .max().unwrap_or(0)
         .max(max_mesh_sid);
     let next_session_id = Arc::new(AtomicU64::new(max_loaded_sid + 1));
     let mesh_sessions = Arc::new(std::sync::Mutex::new(mesh_sessions));
@@ -245,6 +251,11 @@ async fn main() -> anyhow::Result<()> {
     // approval gate auto-approves a trusted goal's OWN ask tools (scoped to that session).
     let goal_yolo: apexos_core::GoalYoloSessions =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+
+    // Worker driver (Fabrica W1a, docs/fabrica.md): task_fanout/list_workers forward
+    // here; the driver owns the worker map, counters, and workers.json.
+    let (worker_tx, worker_rx) = mpsc::channel::<(SessionId, ActionId, String, serde_json::Value)>(8);
+    let workers_path = log_dir.join("workers.json"); // restart: Running→Parked, never lost
 
     // Peer registry — /etc/agentd/peers.toml (created empty if missing)
     let peers_path = PathBuf::from(
@@ -439,6 +450,7 @@ async fn main() -> anyhow::Result<()> {
     let (rehearse_tx, mut rehearse_rx) = mpsc::channel::<(SessionId, ActionId, serde_json::Value)>(4);
     supervisor.set_rehearse_tx(rehearse_tx);
     supervisor.set_goal_tx(goal_tx);
+    supervisor.set_worker_tx(worker_tx);
     supervisor.set_goal_yolo_sessions(goal_yolo.clone());
     supervisor.set_events_dir(log_dir.clone());
     supervisor.set_vast_state(vast_state.clone());
@@ -605,6 +617,13 @@ async fn main() -> anyhow::Result<()> {
         handle.clone(), bcast.subscribe(), goal_rx,
         Arc::clone(&next_session_id), Arc::clone(&next_goal_id), goals_path, goal_proxy, goal_yolo,
     );
+
+    // Worker driver (Fabrica W1a) — the goal driver's twin for fanned-out batches.
+    // Cap resolved once at boot: env wins, else the hardware tier's default.
+    let hw_tier = tier_from_ram(read_ram_mb());
+    let worker_cap = worker::worker_cap_from_env(std::env::var("AGENTD_WORKER_CAP").ok().as_deref(), hw_tier);
+    eprintln!("[agentd] worker cap: {worker_cap} (tier {hw_tier}; AGENTD_WORKER_CAP overrides)");
+    worker::spawn_worker_driver(handle.clone(), bcast.subscribe(), worker_rx, workers_path, worker_cap);
 
     // Council handler — wire supervisor channel and spawn handler.
     if sv_cmd_tx.send(SupervisorCmd::SetCouncilTx { tx: council_tx }).await.is_err() {
@@ -1606,9 +1625,24 @@ fn spawn_agent_router(
                 ev = rx.recv() => match ev {
                 // ── new root turn (serialized per session) ───────────────────
                 Ok(Event::UserPrompt { session, text, images }) => {
-                    // Run now if the session's slot is free, else queue FIFO behind
-                    // the in-flight turn (runs when it frees the slot via turn_done).
-                    if let Some((text, images)) = gate.admit(session, text, images) {
+                    // Parked-worker guard (Fabrica W1a): a worker session with JSONL
+                    // truth on disk but no memory residency is Parked. Running this
+                    // prompt would fabricate a blank history and append over the real
+                    // one — silent corruption of the revive substrate. Refuse honestly
+                    // BEFORE the gate takes a slot; W1b's revive-on-send replaces this
+                    // refusal with the reload edge (load + repair_history) right here.
+                    if apexos_core::is_worker_session(session.0)
+                        && !histories.lock().await.contains_key(&session)
+                        && session_store.exists(session)
+                    {
+                        eprintln!("[worker] session {} is parked — prompt dropped (revive-on-send lands in W1b)", session.0);
+                        bus.emit(Event::Error {
+                            session: None,
+                            message: format!("worker session {} is parked; revive-on-send lands in W1b", session.0),
+                        }).await;
+                    } else if let Some((text, images)) = gate.admit(session, text, images) {
+                        // Run now if the session's slot is free, else queue FIFO behind
+                        // the in-flight turn (runs when it frees the slot via turn_done).
                         to_run = Some((session, text, images));
                     }
                 }
@@ -2169,27 +2203,43 @@ async fn root_turn(
     // Resolve the session's identity (3b): bound agent, else the node default.
     let agent_id = apexos_core::resolve_agent_id(&session_bindings, session);
 
+    // Worker sessions (Fabrica W1a) run on the minimal task charter instead of the
+    // soul, with CCBS priming and persona style deliberately skipped: a worker is a
+    // task-scoped mind, and the small byte-stable system prefix is what lets one
+    // prompt-cache entry serve the whole batch (the cache law, one level down).
+    let is_worker = apexos_core::is_worker_session(session.0);
+
     // Per-agent SOUL (3b-2): a bound non-default agent runs on its own soul_file;
     // APEX / unbound / unreadable → the global (hot-reloadable) soul untouched.
-    let agent_soul = agent_soul_for(&identities, &agent_id).await;
+    let agent_soul = if is_worker {
+        Some(worker::worker_system(&agent_id))
+    } else {
+        agent_soul_for(&identities, &agent_id).await
+    };
 
     // CCBS (slice 2): prime the system prompt with the agent's live memory state
     // (where it left off, intentions, skills) on the first turn — daemon-driven,
     // cached per session, scoped to the resolved agent.
-    let priming = boot_priming_for(&tool_proxy, &boot_primings, session, &agent_id, &history).await;
+    let priming = if is_worker {
+        None
+    } else {
+        boot_priming_for(&tool_proxy, &boot_primings, session, &agent_id, &history).await
+    };
 
     // Persona style (G5 tier-2): the session's explicit persona (the UI's `set_persona`
     // / `hello{persona}`), else the bound agent's own `default_skin` — so a bound agent
     // speaks in its skin even with no UI frame (the multi-agent angle). Resolves to a
     // response-style fragment; the default/unknown persona → None (common path unchanged).
-    let style = match apexos_core::resolve_persona_style(&persona_sessions, session) {
-        Some(s) => Some(s),
-        None => {
-            let ids = identities.read().await;
-            ids.agent(&agent_id)
-                .and_then(|a| a.default_skin.as_deref())
-                .and_then(apexos_core::persona_style)
-                .map(str::to_owned)
+    let style = if is_worker { None } else {
+        match apexos_core::resolve_persona_style(&persona_sessions, session) {
+            Some(s) => Some(s),
+            None => {
+                let ids = identities.read().await;
+                ids.agent(&agent_id)
+                    .and_then(|a| a.default_skin.as_deref())
+                    .and_then(apexos_core::persona_style)
+                    .map(str::to_owned)
+            }
         }
     };
 
@@ -2291,6 +2341,8 @@ async fn gather_tools(
     tools.push(goal::list_goals_spec());
     tools.push(goal::goal_resume_spec());
     tools.push(goal::goal_cancel_spec());
+    tools.push(worker::task_fanout_spec());
+    tools.push(worker::list_workers_spec());
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());
     tools.push(mesh_memory_send_spec());

@@ -119,6 +119,10 @@ impl SystemState {
             // Goal driver: state lives in the driver task; the event log is the audit.
             Event::GoalStateChanged { .. } => {}
 
+            // Worker driver (Fabrica W tier): same posture as goals — the driver
+            // task owns worker state, workers.json persists it, the event log audits.
+            Event::WorkerStateChanged { .. } => {}
+
             // A2A: routing handled by the agent router; state is a no-op.
             Event::AgentMessage    { .. } => {}
             Event::AgentMessageAck { .. } => {}

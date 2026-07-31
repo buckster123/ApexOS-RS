@@ -130,6 +130,7 @@ export component AppWindowFrame inherits Rectangle {
     in property <int>            council-scroll-tick;
     // Work Board (🗂) — live columns from the WS event stream.
     in property <[BoardCard]> board-goals;
+    in property <[BoardCard]> board-workers;
     in property <[BoardCard]> board-active;
     in property <[BoardCard]> board-blocked;
     in property <[BoardCard]> board-subagents;
@@ -641,6 +642,7 @@ export component AppWindowFrame inherits Rectangle {
         if root.kind == AppKind.board: WorkBoard {
             vertical-stretch: 1;
             goals: root.board-goals;
+            workers: root.board-workers;
             active: root.board-active;
             blocked: root.board-blocked;
             subagents: root.board-subagents;

@@ -47,6 +47,9 @@ pub struct ActionId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct GoalId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct WorkerId(pub u64);
+
 /// Lifecycle state of an autonomous Goal run (docs/ideas/goal-driver-design.md).
 /// P2a uses Acting / Done / Failed; the rest are reserved for later slices.
 /// `Cancelled` is terminal-by-operator (goal_cancel) — distinct from Failed (a
@@ -58,6 +61,25 @@ pub enum GoalState {
     Acting,
     Blocked,
     Reflecting,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+/// Lifecycle state of a fanned-out Worker (docs/fabrica.md, W tier). The full
+/// vocabulary ships at once so `workers.json` never needs a schema migration;
+/// W1a activates Queued / Running / Blocked / Parked / Done / Failed — `Idle`
+/// (the `yield` verdict) and `Cancelled` (cancel cascade) arm in W1b/W1d.
+/// `Parked` = evicted from memory, `sessions/<id>.jsonl` is truth (revive-on-send
+/// is the only Parked→Running edge, PB-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerState {
+    Queued,
+    Running,
+    Idle,
+    Parked,
+    Blocked,
     Done,
     Failed,
     Cancelled,
@@ -398,6 +420,26 @@ pub enum Event {
         #[serde(default)]
         yolo:      bool,
     },
+
+    // worker tier (docs/fabrica.md, W1a)
+    /// A fanned-out Worker changed state. `GoalStateChanged`'s twin: GLOBAL
+    /// (session-less in `event_session`) so every client's board sees the worker
+    /// lane, even though each worker's own turns run session-scoped.
+    WorkerStateChanged {
+        worker:  WorkerId,
+        /// The batch this worker belongs to (one `task_fanout` call = one batch).
+        batch:   u64,
+        /// The conductor session that fanned this worker out.
+        parent:  SessionId,
+        /// The worker's own dedicated session (WORKER_SESSION_BASE range, persisted).
+        session: SessionId,
+        /// The task, truncated for card rendering — never the full carry.
+        task:    String,
+        state:   WorkerState,
+        /// Short context for the current state — queue position, block reason,
+        /// stall note, "" otherwise.
+        detail:  String,
+    },
 }
 
 // ── Tool call / result ────────────────────────────────────────────────────
@@ -498,6 +540,33 @@ mod tests {
         // `{"0": n}` or strings — the UI must read them as numbers.
         assert_eq!(serde_json::to_string(&SessionId(42)).unwrap(), "42");
         assert_eq!(serde_json::to_string(&ActionId(5)).unwrap(), "5");
+        assert_eq!(serde_json::to_string(&WorkerId(9)).unwrap(), "9");
+    }
+
+    #[test]
+    fn worker_state_changed_round_trips_snake_case() {
+        // The worker lane's wire contract (W1a): snake_case tag + states, bare ids.
+        let j = r#"{"type":"worker_state_changed","worker":3,"batch":1,"parent":7,
+            "session":4611686018427387904,"task":"write the tests","state":"running","detail":""}"#;
+        match serde_json::from_str::<Event>(j).unwrap() {
+            Event::WorkerStateChanged { worker, batch, parent, session, task, state, detail } => {
+                assert_eq!(worker, WorkerId(3));
+                assert_eq!(batch, 1);
+                assert_eq!(parent, SessionId(7));
+                assert_eq!(session, SessionId(1 << 62));
+                assert_eq!(task, "write the tests");
+                assert_eq!(state, WorkerState::Running);
+                assert_eq!(detail, "");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        // Every WorkerState variant survives a round trip as snake_case.
+        for s in [WorkerState::Queued, WorkerState::Running, WorkerState::Idle, WorkerState::Parked,
+                  WorkerState::Blocked, WorkerState::Done, WorkerState::Failed, WorkerState::Cancelled] {
+            let enc = serde_json::to_string(&s).unwrap();
+            assert_eq!(enc, enc.to_lowercase(), "snake_case wire form: {enc}");
+            assert_eq!(serde_json::from_str::<WorkerState>(&enc).unwrap(), s);
+        }
     }
 
     #[test]

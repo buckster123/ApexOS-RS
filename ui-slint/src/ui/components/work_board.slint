@@ -137,6 +137,7 @@ export component WorkBoard {
     min-height: 0px;
 
     in property <[BoardCard]> goals;
+    in property <[BoardCard]> workers;
     in property <[BoardCard]> active;
     in property <[BoardCard]> blocked;
     in property <[BoardCard]> subagents;
@@ -174,6 +175,14 @@ export component WorkBoard {
                 accent: #34d399;
                 cards: root.goals;
                 empty-hint: "no goals running";
+                horizontal-stretch: 1;
+            }
+            Rectangle { width: 1px; background: Palette.border; }
+            BoardColumn {
+                label: "WORKERS";
+                accent: #22d3ee;
+                cards: root.workers;
+                empty-hint: "no batch fanned";
                 horizontal-stretch: 1;
             }
             Rectangle { width: 1px; background: Palette.border; }

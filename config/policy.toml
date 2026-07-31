@@ -113,6 +113,14 @@ mode = "suggest"
 # strictly de-escalating: it only halts one of the agent's own goals, never acts outward.
 "goal_cancel"      = "allow"
 
+# Worker tier (Fabrica W1a, docs/fabrica.md): task_fanout fans a bounded batch
+# (≤32 tasks, tier-aware admission cap) to worker sessions running the minimal
+# task charter — every tool a worker then calls stays individually policy-gated,
+# and workers cannot fan out further (depth-1). allow, the goal_create rationale:
+# the fan itself is just gated turns. list_workers is read-only.
+"task_fanout"      = "allow"
+"list_workers"     = "allow"
+
 # Scheduler — two families on one engine. schedule_wakeup is the agent's CONTINUITY
 # tool (one-shot note-to-future-self into its own root thread): allow, because a
 # self-wakeup that needs human approval defeats its purpose — safety is the built-in
