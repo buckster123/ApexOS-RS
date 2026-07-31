@@ -13,6 +13,7 @@ mod rehearse;
 mod evolution;
 mod goal;
 mod mandala;
+mod review;
 mod worker;
 mod sensor_config;
 
@@ -2422,6 +2423,7 @@ async fn gather_tools(
     tools.push(worker::list_workers_spec());
     tools.push(worker::mandala_create_spec());
     tools.push(worker::mandala_status_spec());
+    tools.push(worker::mandala_close_spec());
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());
     tools.push(mesh_memory_send_spec());

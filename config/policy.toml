@@ -131,6 +131,9 @@ mode = "suggest"
 # is a read. allow, the goal_create rationale.
 "mandala_create"   = "allow"
 "mandala_status"   = "allow"
+# mandala_close (M1b): bookkeeping of finished work — refuses while any cell
+# is open, so it can never kill anything. allow, the goal_cancel rationale.
+"mandala_close"    = "allow"
 
 # Scheduler — two families on one engine. schedule_wakeup is the agent's CONTINUITY
 # tool (one-shot note-to-future-self into its own root thread): allow, because a
@@ -161,6 +164,11 @@ mode = "suggest"
 "git_checkout" = "ask"
 "git_reset"    = "ask"
 "git_merge"    = "ask"
+# git_worktree (M1b): parallel checkouts for the Fabrica cell pattern. The
+# worktree DIR is workspace-confined by the tool; `remove` never forces, so a
+# dirty tree refuses and committed work always survives in the repo — the
+# commit rationale, not the reset one. allow.
+"git_worktree" = "allow"
 
 # Occipital (web cortex) plugin tools ------------------------------------------
 # Reading the web is the plugin's whole purpose and it is polite by construction
