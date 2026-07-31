@@ -2,7 +2,7 @@
 
 > Moved verbatim from CLAUDE.md (2026-07-21 docs refactor). This is the contract between
 > agentd's gateway and every frontend (ui-slint, `web/` PWA, scripts). Both sides share types
-> via the `apexos-protocol` crate; full event list: `agentd/crates/core/src/types.rs` — `Event` enum.
+> via the `apexos-protocol` crate; full event list: `apexos-protocol/src/lib.rs` — `Event` enum.
 > ApexOS-RV (bare-metal RISC-V) pins this same crate — see the protocol gotcha in `docs/gotchas.md`.
 
 
@@ -71,7 +71,13 @@ to every client. So a frontend receives **only its own session's stream + global
 — clients don't (and shouldn't) filter outbound frames themselves. The supervisor
 subscribes to the bus separately, so this never affects routing.
 
-Full event list: `agentd/crates/core/src/types.rs` — `Event` enum.
+Global/status events include `goal_state_changed` (the Work Board's goal lane) and
+its twin `worker_state_changed` (Fabrica W1a — the WORKERS lane: `{worker, batch,
+parent, session, task, state queued|running|idle|parked|blocked|done|failed|cancelled,
+detail}`, ids as bare numbers). Both are deliberately session-less so every client's
+board sees them.
+
+Full event list: `apexos-protocol/src/lib.rs` — `Event` enum.
 
 ---
 

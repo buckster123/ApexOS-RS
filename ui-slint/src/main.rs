@@ -18,7 +18,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 // Selective import (NOT a glob): apexos_protocol::Message would collide with
 // tokio_tungstenite's Message used below.
-use apexos_protocol::{Event, GoalState, SensorReading};
+use apexos_protocol::{Event, GoalState, SensorReading, WorkerState};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -431,6 +431,7 @@ fn notify_action(kind: ToastKind, text: impl Into<String>, action_session: i32) 
 // thread-local BOARD is race-free, like MESSAGES / EVENTS.
 struct BoardModels {
     goals:     Rc<slint::VecModel<BoardCard>>,   // autonomous goals, keyed by "goal<id>"
+    workers:   Rc<slint::VecModel<BoardCard>>,   // fanned-out workers, keyed by "worker<id>" (Fabrica W1a)
     active:    Rc<slint::VecModel<BoardCard>>,   // the current turn (one card)
     blocked:   Rc<slint::VecModel<BoardCard>>,   // pending approvals, keyed by call id
     subagents: Rc<slint::VecModel<BoardCard>>,   // live sub-agents, keyed by "sub<session>"
@@ -498,6 +499,12 @@ fn board_push_recent(title: String, subtitle: String, badge: &str, c: slint::Col
 /// card updates in place through Acting → Done/Failed).
 fn board_goal(id: u64, title: String, subtitle: String, badge: &str, c: slint::Color) {
     board_with(|bm| board_upsert(&bm.goals, board_card(&format!("goal{id}"), title, subtitle, badge, c)));
+}
+
+/// Upsert a fanned-out worker's card in the WORKERS column (keyed by worker id,
+/// so the card updates in place through Queued → Running → Done/Parked/Failed).
+fn board_worker(id: u64, title: String, subtitle: String, badge: &str, c: slint::Color) {
+    board_with(|bm| board_upsert(&bm.workers, board_card(&format!("worker{id}"), title, subtitle, badge, c)));
 }
 
 /// The (main-session) turn finished: drop the Active card + any stale approvals,
@@ -1205,7 +1212,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Calculator => (300.0, 440.0),
         AppKind::Explorer => (680.0, 520.0),
         AppKind::Occipital => (720.0, 620.0),
-        AppKind::Board => (880.0, 600.0),
+        AppKind::Board => (1040.0, 600.0), // 6 columns since the WORKERS lane (W1a)
         AppKind::Imagine => (900.0, 640.0),
     };
     let step = (n % 6) as f32 * 30.0;
@@ -6624,12 +6631,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Work Board (🗂) — four live column models driven off the WS event stream.
     let board = BoardModels {
         goals:     Rc::new(slint::VecModel::default()),
+        workers:   Rc::new(slint::VecModel::default()),
         active:    Rc::new(slint::VecModel::default()),
         blocked:   Rc::new(slint::VecModel::default()),
         subagents: Rc::new(slint::VecModel::default()),
         recent:    Rc::new(slint::VecModel::default()),
     };
     ui.set_board_goals(slint::ModelRc::from(board.goals.clone()));
+    ui.set_board_workers(slint::ModelRc::from(board.workers.clone()));
     ui.set_board_active(slint::ModelRc::from(board.active.clone()));
     ui.set_board_blocked(slint::ModelRc::from(board.blocked.clone()));
     ui.set_board_subagents(slint::ModelRc::from(board.subagents.clone()));
@@ -10896,6 +10905,31 @@ fn dispatch_event(
             // the kiosk, so the word carries it if the emoji tofus). (#3)
             let subtitle = if yolo { format!("⚡ AUTO · {base}") } else { base };
             slint::invoke_from_event_loop(move || board_goal(gid, title, subtitle, badge, c)).ok();
+        }
+
+        // Work Board: a fanned-out worker changed state → upsert its card in the
+        // WORKERS lane (Fabrica W1a). Typed arm ONLY — never add a string-keyed
+        // "worker_state_changed" shortcut in the early dispatch, or whichever arm
+        // lands second goes silently dead (the mesh_message lesson).
+        Event::WorkerStateChanged { worker, batch, state, task, detail, .. } => {
+            let (badge, c) = match state {
+                WorkerState::Queued    => ("QUEUE", board_color(148, 163, 184)),
+                WorkerState::Running   => ("RUN",   board_color(34, 211, 238)),
+                WorkerState::Blocked   => ("BLOCK", board_color(251, 191, 36)),
+                WorkerState::Parked    => ("PARK",  board_color(125, 145, 175)),
+                WorkerState::Idle      => ("IDLE",  board_color(148, 163, 184)),
+                WorkerState::Done      => ("DONE",  board_color(52, 211, 153)),
+                WorkerState::Failed    => ("FAIL",  board_color(239, 68, 68)),
+                WorkerState::Cancelled => ("STOP",  board_color(148, 163, 184)),
+            };
+            let wid = worker.0;
+            let title: String = task.chars().take(60).collect();
+            let subtitle = if detail.is_empty() {
+                format!("batch {batch}")
+            } else {
+                format!("batch {batch} · {detail}")
+            };
+            slint::invoke_from_event_loop(move || board_worker(wid, title, subtitle, badge, c)).ok();
         }
 
         _ => {}

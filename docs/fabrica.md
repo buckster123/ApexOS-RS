@@ -57,7 +57,9 @@ The code regime rides on all three; Fabrica the app surfaces all of it.
   embodiment hardware tier (micro 2 · standard 4 · gpu 8), env-overridable,
   floor 1. FIFO overflow queue; freed slots pull from it. The turn-engine
   `Semaphore(16)` still gates provider calls underneath — document cap ≤
-  turn-sem as the sane config.
+  turn-sem as the sane config. *(W1a mapping note: the code's tier strings are
+  `nano/micro/standard/pro` — "gpu" is the `pro` tier, a RAM≥8GB threshold with
+  no GPU probe; `nano`/`unknown` floor to 1.)*
 - **Idle/Parked = memory residency.** Idle: yielded, history in RAM, wake
   free. Parked: TTL-evicted, `sessions/<id>.jsonl` is truth; revive reloads
   through `repair_history` (the boot path's code). **A parked worker releases

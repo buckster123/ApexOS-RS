@@ -220,6 +220,9 @@ pub struct Supervisor {
     /// Set by main.rs so convene_council routes to the council handler.
     council_tx:        Option<mpsc::Sender<(SessionId, ActionId, serde_json::Value)>>,
     goal_tx:           Option<mpsc::Sender<(SessionId, ActionId, String, serde_json::Value)>>,
+    /// Set by main.rs so task_fanout / list_workers route to the worker driver
+    /// (Fabrica W tier — the goal_tx pattern exactly).
+    worker_tx:         Option<mpsc::Sender<(SessionId, ActionId, String, serde_json::Value)>>,
     /// Sessions of goals running with goal-scoped yolo (`goal_create{yolo:true}`).
     /// Shared with the goal driver, which arms/disarms a session. The approval gate
     /// auto-approves an `ask` tool whose session is in this set — scoped strictly to
@@ -276,6 +279,7 @@ impl Supervisor {
             schedule_tx:       None,
             council_tx:        None,
             goal_tx:           None,
+            worker_tx:         None,
             goal_yolo:         None,
             events_dir:        None,
             vast_state:        None,
@@ -326,6 +330,12 @@ impl Supervisor {
 
     pub fn set_goal_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, String, serde_json::Value)>) {
         self.goal_tx = Some(tx);
+    }
+
+    /// Wires the worker channel so task_fanout / list_workers route to the
+    /// worker driver (Fabrica W tier).
+    pub fn set_worker_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, String, serde_json::Value)>) {
+        self.worker_tx = Some(tx);
     }
 
     /// Shares the goal-scoped-yolo session set so the approval gate can auto-approve
@@ -762,6 +772,37 @@ impl Supervisor {
                             session,
                             call: call_id,
                             output: ToolOutput { ok: false, content: serde_json::json!("scheduler not initialized") },
+                        }).await;
+                    });
+                }
+            }
+            return;
+        }
+
+        // Virtual tools: task_fanout / list_workers — route to the worker driver
+        // (deferred ack, the goal_tx shape; Fabrica W tier).
+        if matches!(call.tool.as_str(), "task_fanout" | "list_workers") {
+            let call_id = call.id;
+            let tool    = call.tool.clone();
+            let args    = call.args.clone();
+            let bus     = self.bus.clone();
+            match &self.worker_tx {
+                Some(tx) => {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        if tx.send((session, call_id, tool, args)).await.is_err() {
+                            bus.emit(Event::ToolResult {
+                                session, call: call_id,
+                                output: ToolOutput { ok: false, content: serde_json::json!("worker driver not available") },
+                            }).await;
+                        }
+                    });
+                }
+                None => {
+                    tokio::spawn(async move {
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput { ok: false, content: serde_json::json!("worker driver not initialized") },
                         }).await;
                     });
                 }
