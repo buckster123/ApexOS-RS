@@ -130,6 +130,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "apexos-agent",
+ "apexos-confine",
  "apexos-core",
  "apexos-gateway",
  "apexos-plugins",

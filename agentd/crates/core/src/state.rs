@@ -122,6 +122,7 @@ impl SystemState {
             // Worker driver (Fabrica W tier): same posture as goals — the driver
             // task owns worker state, workers.json persists it, the event log audits.
             Event::WorkerStateChanged { .. } => {}
+            Event::TaskBatchDone { .. } => {}
 
             // A2A: routing handled by the agent router; state is a no-op.
             Event::AgentMessage    { .. } => {}

@@ -85,6 +85,22 @@ pub enum WorkerState {
     Cancelled,
 }
 
+/// One worker's line in a batch report (`TaskBatchDone`) — a POINTER to
+/// evidence, never the payload: the conductor reads the file, the summary
+/// string is not the deliverable (the evidence rule, docs/fabrica.md W1c).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchWorkerRow {
+    pub worker: WorkerId,
+    pub state:  WorkerState,
+    /// Evidence file path (`<log_dir>/agents/<worker_id>.json`); "" for a
+    /// straggler that never reached a terminal state.
+    pub evidence: String,
+    /// True when the batch deadline fired before this worker went terminal —
+    /// it is still revivable; a later revive finishes it outside the report.
+    #[serde(default)]
+    pub timed_out: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PluginId(pub String);
 
@@ -422,6 +438,18 @@ pub enum Event {
     },
 
     // worker tier (docs/fabrica.md, W1a)
+    /// A batch reached its report point: every worker terminal, or the batch
+    /// deadline fired with stragglers marked `timed_out` (still revivable).
+    /// Rows are POINTERS — evidence paths, never payloads (the evidence rule):
+    /// integration must actually read the artifacts. GLOBAL, like the worker
+    /// lane. (W1c)
+    TaskBatchDone {
+        batch:  u64,
+        /// The conductor session that fanned the batch out.
+        parent: SessionId,
+        rows:   Vec<BatchWorkerRow>,
+    },
+
     /// A fanned-out Worker changed state. `GoalStateChanged`'s twin: GLOBAL
     /// (session-less in `event_session`) so every client's board sees the worker
     /// lane, even though each worker's own turns run session-scoped.
@@ -566,6 +594,29 @@ mod tests {
             let enc = serde_json::to_string(&s).unwrap();
             assert_eq!(enc, enc.to_lowercase(), "snake_case wire form: {enc}");
             assert_eq!(serde_json::from_str::<WorkerState>(&enc).unwrap(), s);
+        }
+    }
+
+    #[test]
+    fn task_batch_done_rows_are_pointers() {
+        // Rows carry evidence PATHS, and a missing timed_out reads false
+        // (forward-compat: a W1c-era consumer of a straggler-free report).
+        let j = r#"{"type":"task_batch_done","batch":2,"parent":7,"rows":[
+            {"worker":3,"state":"done","evidence":"events/agents/3.json"},
+            {"worker":4,"state":"parked","evidence":"","timed_out":true}]}"#;
+        match serde_json::from_str::<Event>(j).unwrap() {
+            Event::TaskBatchDone { batch, parent, rows } => {
+                assert_eq!(batch, 2);
+                assert_eq!(parent, SessionId(7));
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0].worker, WorkerId(3));
+                assert_eq!(rows[0].state, WorkerState::Done);
+                assert_eq!(rows[0].evidence, "events/agents/3.json");
+                assert!(!rows[0].timed_out);
+                assert!(rows[1].timed_out);
+                assert!(rows[1].evidence.is_empty());
+            }
+            other => panic!("wrong variant: {other:?}"),
         }
     }
 

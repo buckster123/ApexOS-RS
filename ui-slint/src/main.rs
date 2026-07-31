@@ -10932,6 +10932,22 @@ fn dispatch_event(
             slint::invoke_from_event_loop(move || board_worker(wid, title, subtitle, badge, c)).ok();
         }
 
+        // Work Board: a batch reported (all-terminal or deadline) → drop a card
+        // into RECENT with the outcome mix. Typed arm only (the mesh_message
+        // dead-handler lesson).
+        Event::TaskBatchDone { batch, rows, .. } => {
+            let (done, failed, timed_out) = rows.iter().fold((0, 0, 0), |(d, f, t), r| {
+                if r.timed_out { (d, f, t + 1) }
+                else if r.state == WorkerState::Done { (d + 1, f, t) }
+                else { (d, f + 1, t) }
+            });
+            let title = format!("Batch {batch} reported");
+            let subtitle = format!("{done} done · {failed} failed · {timed_out} timed out");
+            slint::invoke_from_event_loop(move || {
+                board_push_recent(title, subtitle, "BATCH", board_color(34, 211, 238));
+            }).ok();
+        }
+
         _ => {}
     }
 }
