@@ -876,6 +876,16 @@ fn read_roots() -> Vec<PathBuf> {
         PathBuf::from("/proc/meminfo"),     // memory diagnostics
         PathBuf::from("/var/lib/agentd/update"), // self-update outcome markers (confirmed/rolled-back.json)
     ];
+    // Worker evidence files (Fabrica W1c): a batch report hands the conductor
+    // evidence PATHS — reading them IS the integrate step, and monitors review
+    // the same files. First live fire (apex1 goal 8, 2026-07-31, APEX's find)
+    // proved no session could read them without this root. AGENTD_LOG is the
+    // canonical log_dir (plugins inherit agentd's env); the literal fallback
+    // matches the shipped systemd unit.
+    roots.push(
+        PathBuf::from(std::env::var("AGENTD_LOG").unwrap_or_else(|_| "/var/lib/agentd/events".into()))
+            .join("agents"),
+    );
     if let Ok(extra) = std::env::var("AGENTD_READ_ROOTS") {
         roots.extend(extra.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
     }
@@ -3270,6 +3280,34 @@ mod tests {
         assert_eq!(res2["isError"], json!(true));
 
         std::env::remove_var("AGENTD_WORKSPACE");
+    }
+
+    #[test]
+    fn worker_evidence_dir_is_a_read_root() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Workspace and log dir must be DISJOINT here — with the workspace at
+        // /tmp wholesale, a /tmp-based log dir reads as workspace and the
+        // write-refusal assertion tests nothing (the first run's mistake).
+        let base = std::env::temp_dir().join(format!("apexos-evidence-test-{}", std::process::id()));
+        let ws = base.join("ws");
+        let log_dir = base.join("log");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(log_dir.join("agents")).unwrap();
+        std::env::set_var("AGENTD_WORKSPACE", &ws);
+        std::env::set_var("AGENTD_LOG", &log_dir);
+        // The integrate step reads <AGENTD_LOG>/agents/<id>.json (Fabrica W1c,
+        // the evidence rule) — first live fire proved no session could. The
+        // evidence path must read, never write.
+        let evidence = log_dir.join("agents/1.json");
+        assert!(confine(evidence.to_str().unwrap(), false).is_ok(), "evidence must be readable");
+        assert!(confine(evidence.to_str().unwrap(), true).is_err(), "but never writable");
+        // The root is agents/ ONLY — session transcripts next door in the same
+        // log dir stay outside the allowlist.
+        let transcript = log_dir.join("sessions/5.jsonl");
+        assert!(confine(transcript.to_str().unwrap(), false).is_err(), "transcripts are not evidence");
+        std::env::remove_var("AGENTD_LOG");
+        std::env::set_var("AGENTD_WORKSPACE", "/tmp"); // restore the suite's ambient default
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
