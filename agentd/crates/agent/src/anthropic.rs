@@ -87,6 +87,15 @@ fn build_http_client() -> reqwest::Client {
 
 // ── request body ─────────────────────────────────────────────────────────────
 
+/// Which models take `thinking: {type: adaptive}` — the Claude 5 family, by
+/// prefix (covers dated ids). Everything else (Haiku 4.5, 3.x, third-party ids
+/// routed here by mistake) gets NO thinking field. Pure; unit-tested.
+fn supports_adaptive_thinking(model: &str) -> bool {
+    ["claude-fable-5", "claude-opus-5", "claude-sonnet-5"]
+        .iter()
+        .any(|p| model.starts_with(p))
+}
+
 fn build_body(
     model:   &str,
     history: &[Message],
@@ -109,8 +118,16 @@ fn build_body(
         "max_tokens": 16000,
         "messages":   messages,
         "stream":     true,
-        "thinking":   { "type": "adaptive" },
     });
+    // Adaptive thinking is a Claude 5-family capability — sending it to any
+    // other model 400s the WHOLE request ("adaptive thinking is not supported
+    // on this model"; found live by a Haiku-pinned worker, apex1 goal 9,
+    // 2026-07-31). Allowlist by prefix, fail-safe in the omission direction:
+    // an unlisted model simply runs without a thinking field (its default) —
+    // never a hard 400. The node-default spine models keep adaptive.
+    if supports_adaptive_thinking(model) {
+        body["thinking"] = serde_json::json!({ "type": "adaptive" });
+    }
 
     if let Some(sys) = system {
         if cache.enabled {
@@ -418,6 +435,23 @@ mod tests {
     use super::*;
     use crate::cache::{CacheConfig, CacheTtl};
     use futures_util::StreamExt;
+
+    #[test]
+    fn thinking_is_model_gated() {
+        // The Claude 5 family gets adaptive thinking; anything else gets NO
+        // thinking field — a wrong guess here is a hard 400 on every turn of a
+        // pinned worker (the apex1 goal-9 field find, 2026-07-31).
+        for m in ["claude-fable-5", "claude-opus-5", "claude-opus-5-20260115", "claude-sonnet-5"] {
+            assert!(supports_adaptive_thinking(m), "{m}");
+            let body = build_body(m, &[], &[], None, &CacheConfig::default());
+            assert_eq!(body["thinking"]["type"], "adaptive", "{m}");
+        }
+        for m in ["claude-haiku-4-5-20251001", "claude-3-5-sonnet-20241022", "llama3", ""] {
+            assert!(!supports_adaptive_thinking(m), "{m}");
+            let body = build_body(m, &[], &[], None, &CacheConfig::default());
+            assert!(body.get("thinking").is_none(), "{m} must carry no thinking field");
+        }
+    }
 
     fn user(text: &str) -> Message {
         Message::User { content: vec![ContentBlock::Text { text: text.into() }] }
