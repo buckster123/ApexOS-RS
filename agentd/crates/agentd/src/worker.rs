@@ -44,7 +44,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use apexos_core::{ActionId, BatchWorkerRow, BusHandle, Event, SessionId, ToolOutput, ToolSpec, WorkerId, WorkerState};
+use apexos_core::{ActionId, BatchWorkerRow, BusHandle, Event, GoalState, GoalYoloSessions, SessionId, ToolOutput, ToolSpec, WorkerId, WorkerModels, WorkerState};
 use apexos_plugins::ToolProxy;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
@@ -72,6 +72,17 @@ const DEFAULT_MAX_STEPS: u32 = 12;
 /// Per-call override via `task_fanout{batch_deadline_s}`, clamped 60s–24h.
 const DEFAULT_BATCH_DEADLINE_S: u64 = 3600;
 
+/// Inline mode (W1d) is short-batch-only by charter: the conductor's turn
+/// BLOCKS on the fan, so both the width and the wait are hard-bounded.
+const INLINE_MAX_TASKS: usize = 4;
+const INLINE_DEADLINE_CEIL_S: u64 = 240;
+
+/// PB-1 soft breaker: ≥ this many local agent_spawns from one session inside
+/// the window earns a nudge — parallel work goes through ONE task_fanout
+/// batch, never a spawn-then-wait chain.
+const PB1_SPAWN_THRESHOLD: usize = 3;
+const PB1_WINDOW: Duration = Duration::from_secs(600);
+
 /// The worker's reported outcome for the in-flight step (via `worker_report`),
 /// applied on `TurnComplete` — `goal.rs`'s Verdict, worker vocabulary.
 enum Verdict {
@@ -97,6 +108,15 @@ struct Worker {
     /// Blocked flavors: an approval-suspended turn (inflight — holds a slot, the
     /// human's clock) vs a verdict-blocked worker (no turn — slot-free, TTL clock).
     turn_inflight: bool,
+    /// Batch-inherited yolo (W1d): armed in the shared auto-approve set while
+    /// live; disarmed at terminal AND at park (a revived worker re-asks —
+    /// the parent's grant does not outlive the residency it was given to).
+    yolo: bool,
+    /// Pinned model (`task_fanout{model?}`, W1d) — None = the node default.
+    model: Option<String>,
+    /// The last turn errored (root_turn's Err arm emits Error+TurnComplete):
+    /// a no-report completion after an error is Failed, not Done. Transient.
+    errored: bool,
 }
 
 /// One batch's report bookkeeping. Persisted (batches.json) so the deadline
@@ -107,6 +127,10 @@ struct BatchMeta {
     created_epoch: u64, // unix seconds (Instant doesn't survive restarts)
     deadline_s:    u64,
     reported:      bool,
+    /// Inline mode (W1d): the blocked task_fanout call awaiting the report as
+    /// its ToolResult. Transient — a restart demotes the batch to async (the
+    /// caller's turn died with the daemon; there is no one left to unblock).
+    inline_ack:    Option<(u64, u64)>, // (session, action id)
 }
 
 /// The on-disk form (transient `started`/`pending`/`turn_inflight` dropped).
@@ -128,6 +152,10 @@ struct PersistedWorker {
     artifacts: Vec<String>,
     #[serde(default)]
     episode: Option<String>,
+    #[serde(default)]
+    yolo: bool,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 fn default_step() -> u32 { 1 }
@@ -169,13 +197,20 @@ pub fn task_fanout_spec() -> ToolSpec {
                         "anyOf": [
                             { "type": "string" },
                             { "type": "object",
-                              "properties": { "prompt": { "type": "string", "description": "The task." } },
+                              "properties": {
+                                  "prompt": { "type": "string", "description": "The task." },
+                                  "model":  { "type": "string", "description": "Model for this one worker (wins over the batch model)." }
+                              },
                               "required": ["prompt"] }
                         ]
                     }
                 },
-                "mode": { "type": "string", "enum": ["async"],
-                          "description": "Batch mode. async (the default) is the only mode in this slice; inline lands later." },
+                "mode": { "type": "string", "enum": ["async", "inline"],
+                          "description": "async (the default): fan and return immediately — the coding path. inline: BLOCK until the batch reports and return the rows as this call's result — short batches only (max 4 tasks, deadline capped at 240s)." },
+                "model": { "type": "string",
+                          "description": "Model for every worker in the batch (per-task model overrides this). Omit for the node default. The colony-model-mix lever: think on the big model, hammer on the small." },
+                "yolo": { "type": "string", "enum": ["inherit"],
+                          "description": "inherit: workers auto-approve their OWN ask tools IF AND ONLY IF this calling session is itself yolo-armed (a yolo:true goal) — never more than the parent has. Default off." },
                 "batch_deadline_s": { "type": "integer",
                           "description": "Report bound in seconds (default 3600, clamped 60-86400): at the deadline the batch reports with unfinished workers marked timed_out (still revivable) instead of waiting forever." }
             },
@@ -218,6 +253,24 @@ pub fn list_workers_spec() -> ToolSpec {
                       queued/running/blocked/parked/done/failed, task) plus the admission cap — \
                       check on a batch from anywhere, without the Work Board open.".into(),
         input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+    }
+}
+
+pub fn worker_cancel_spec() -> ToolSpec {
+    ToolSpec {
+        name: "worker_cancel".into(),
+        description: "Cancel a fanned-out worker by id, or a whole batch — terminal, not \
+                      revivable. Aborts any in-flight turn, frees the slot, and leaves the \
+                      normal terminal trail (evidence file + episode) so the batch report \
+                      stays honest. The kill switch for a runaway or no-longer-wanted fan; \
+                      cancelling a conductor GOAL cascades to its batch automatically.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "worker": { "type": "integer", "description": "One worker id (from task_fanout's ack or list_workers)." },
+                "batch":  { "type": "integer", "description": "A whole batch id — cancels every non-terminal worker in it." }
+            }
+        }),
     }
 }
 
@@ -379,19 +432,24 @@ fn confine_artifacts(paths: &[String], workspace: &Path) -> Result<Vec<String>, 
     Ok(out)
 }
 
-/// Extract the task prompts from `task_fanout` args — item = string | {prompt}.
-/// Errors are conductor-facing strings (the tool result), not panics.
-fn parse_tasks(args: &serde_json::Value) -> Result<Vec<String>, String> {
+/// Extract the tasks from `task_fanout` args — item = string | {prompt, model?}.
+/// The per-task model wins over the batch-level `model`. Errors are
+/// conductor-facing strings (the tool result), not panics.
+fn parse_tasks(args: &serde_json::Value) -> Result<Vec<(String, Option<String>)>, String> {
     let items = args["tasks"].as_array().ok_or("tasks must be an array of task strings or {prompt} objects")?;
     if items.is_empty() { return Err("tasks is empty — nothing to fan out".into()); }
     if items.len() > MAX_BATCH_TASKS {
         return Err(format!("{} tasks exceeds the {MAX_BATCH_TASKS}-per-batch ceiling — split into sequential batches", items.len()));
     }
+    let batch_model = args["model"].as_str().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 64);
     let mut tasks = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let prompt = item.as_str().or_else(|| item["prompt"].as_str()).unwrap_or("").trim();
         if prompt.is_empty() { return Err(format!("task {} has no prompt", i + 1)); }
-        tasks.push(prompt.to_string());
+        let model = item["model"].as_str().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 64)
+            .or(batch_model)
+            .map(str::to_owned);
+        tasks.push((prompt.to_string(), model));
     }
     Ok(tasks)
 }
@@ -432,6 +490,7 @@ fn save_workers(workers: &HashMap<u64, Worker>, path: &PathBuf) {
         id: *id, batch: w.batch, parent: w.parent, session: w.session,
         task: w.task.clone(), state: w.state, step: w.step, summary: w.summary.clone(),
         artifacts: w.artifacts.clone(), episode: w.episode.clone(),
+        yolo: w.yolo, model: w.model.clone(),
     }).collect();
     snapshot.sort_by_key(|w| w.id); // deterministic file → readable diffs
     if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
@@ -564,7 +623,26 @@ async fn emit_state(bus: &BusHandle, id: u64, w: &Worker, detail: &str) {
         task:    w.task.chars().take(80).collect(),
         state:   w.state,
         detail:  detail.into(),
+        yolo:    w.yolo,
     }).await;
+}
+
+/// Arm/disarm helpers for the shared per-session state a live worker holds:
+/// the auto-approve set (batch-inherited yolo) and the model-pin map. One
+/// call each on the way in (admission/wake) and out (terminal/park) keeps
+/// the invariant auditable: shared state exactly mirrors live residency.
+fn arm_worker(yolo_set: &GoalYoloSessions, models: &WorkerModels, w: &Worker) {
+    if w.yolo {
+        if let Ok(mut s) = yolo_set.lock() { s.insert(w.session); }
+    }
+    if let Some(m) = &w.model {
+        if let Ok(mut mm) = models.lock() { mm.insert(w.session, m.clone()); }
+    }
+}
+
+fn disarm_worker(yolo_set: &GoalYoloSessions, models: &WorkerModels, session: u64) {
+    if let Ok(mut s) = yolo_set.lock() { s.remove(&session); }
+    if let Ok(mut mm) = models.lock() { mm.remove(&session); }
 }
 
 // ── The driver ───────────────────────────────────────────────────────────────
@@ -584,6 +662,8 @@ pub fn spawn_worker_driver(
     agents_dir:   PathBuf,
     cap:          usize,
     proxy:        ToolProxy,
+    yolo_set:     GoalYoloSessions,
+    models:       WorkerModels,
 ) {
     tokio::spawn(async move {
         let mut workers: HashMap<u64, Worker>   = HashMap::new();
@@ -607,18 +687,29 @@ pub fn spawn_worker_driver(
         let step_timeout = step_timeout_from_env();
         let idle_ttl     = idle_ttl_from_env();
         let max_steps    = max_steps_from_env();
+        // PB-1 tracking: recent local agent_spawn timestamps per parent session.
+        let mut spawn_log: HashMap<u64, Vec<Instant>> = HashMap::new();
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
                 Some((session, call_id, tool, args)) = req_rx.recv() => {
                     match tool.as_str() {
                         "task_fanout" => {
-                            fanout(&mut workers, &mut batches, &bus, cap, max_steps, &proxy, session, call_id, args,
+                            fanout(&mut workers, &mut batches, &bus, cap, max_steps, &proxy, &yolo_set, &models, session, call_id, args,
                                    &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid).await;
                             save_workers(&workers, &workers_path);
                             save_batches(&batches, &batches_path);
                         }
                         "worker_report" => record_report(&mut workers, &bus, &workspace, session, call_id, args).await,
+                        "worker_cancel" => {
+                            if cancel_request(&mut workers, &bus, &proxy, &agents_dir, &yolo_set, &models, session, call_id, args).await {
+                                admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
+                                if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
+                                    save_batches(&batches, &batches_path);
+                                }
+                                save_workers(&workers, &workers_path);
+                            }
+                        }
                         "list_workers" => handle_list_workers(&workers, &bus, cap, &agents_dir, session, call_id).await,
                         _ => {}
                     }
@@ -628,8 +719,8 @@ pub fn spawn_worker_driver(
                         // A worker's turn completed → apply its reported verdict
                         // (or the no-report fallback: Done, final text = deliverable).
                         Ok(Event::TurnComplete { session }) if apexos_core::is_worker_session(session.0) => {
-                            if advance(&mut workers, &bus, &proxy, &agents_dir, session.0, max_steps).await {
-                                admit_queued(&mut workers, &bus, &proxy, cap, max_steps).await;
+                            if advance(&mut workers, &bus, &proxy, &agents_dir, &yolo_set, &models, session.0, max_steps).await {
+                                admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
                                 if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
                                     save_batches(&batches, &batches_path);
                                 }
@@ -655,16 +746,45 @@ pub fn spawn_worker_driver(
                         // (PB-3). The router hydrates a parked worker's history off
                         // this same event; here the state flips and the clocks re-arm.
                         Ok(Event::UserPrompt { session, .. }) if apexos_core::is_worker_session(session.0) => {
-                            let woke = wake_on_send(&mut workers, &bus, session.0).await;
+                            let woke = wake_on_send(&mut workers, &bus, &models, session.0).await;
                             if woke { save_workers(&workers, &workers_path); }
+                        }
+                        // A worker turn errored (Error precedes the synthetic
+                        // TurnComplete on the same session): remember, so the
+                        // no-report completion lands Failed, never a hollow Done.
+                        Ok(Event::Error { session: Some(session), .. }) if apexos_core::is_worker_session(session.0) => {
+                            if let Some((_, w)) = workers.iter_mut().find(|(_, w)| w.session == session.0) {
+                                w.errored = true;
+                            }
+                        }
+                        // Cancel cascade (W1d): a conductor GOAL was cancelled →
+                        // its whole batch goes with it. Session rides the event.
+                        Ok(Event::GoalStateChanged { state: GoalState::Cancelled, session: Some(parent), .. }) => {
+                            let ids: Vec<u64> = workers.iter()
+                                .filter(|(_, w)| w.parent == parent.0 && !is_terminal(w.state))
+                                .map(|(id, _)| *id).collect();
+                            if !ids.is_empty() {
+                                eprintln!("[worker] cascade: conductor session {} cancelled → {} worker(s)", parent.0, ids.len());
+                                cancel_workers(&mut workers, &bus, &proxy, &agents_dir, &yolo_set, &models, &ids).await;
+                                admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
+                                if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
+                                    save_batches(&batches, &batches_path);
+                                }
+                                save_workers(&workers, &workers_path);
+                            }
+                        }
+                        // PB-1 soft breaker: sequential local spawns from one
+                        // session — nudge toward ONE task_fanout batch.
+                        Ok(Event::SubAgentStarted { parent, .. }) => {
+                            pb1_track(&mut spawn_log, &bus, parent.0).await;
                         }
                         _ => {}
                     }
                 }
                 _ = tick.tick() => {
-                    let stalled = fail_stalled(&mut workers, &bus, &proxy, &agents_dir, step_timeout).await;
-                    let parked  = park_idle(&mut workers, &bus, idle_ttl).await;
-                    if stalled { admit_queued(&mut workers, &bus, &proxy, cap, max_steps).await; }
+                    let stalled = fail_stalled(&mut workers, &bus, &proxy, &agents_dir, &yolo_set, &models, step_timeout).await;
+                    let parked  = park_idle(&mut workers, &bus, &yolo_set, &models, idle_ttl).await;
+                    if stalled { admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await; }
                     if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
                         save_batches(&batches, &batches_path);
                     }
@@ -684,6 +804,7 @@ fn reload_batches(batches: &mut HashMap<u64, BatchMeta>, path: &PathBuf, next_ba
         batches.insert(pb.batch, BatchMeta {
             parent: pb.parent, created_epoch: pb.created_epoch,
             deadline_s: pb.deadline_s, reported: pb.reported,
+            inline_ack: None, // the blocked caller died with the old process
         });
     }
 }
@@ -707,6 +828,7 @@ async fn reload_workers(
             task: pw.task, state, step: pw.step, summary: pw.summary,
             artifacts: pw.artifacts, episode: pw.episode,
             started: Instant::now(), pending: None, turn_inflight: false,
+            yolo: pw.yolo, model: pw.model, errored: false,
         });
     }
     let mut ids: Vec<u64> = workers.keys().copied().collect();
@@ -726,6 +848,7 @@ async fn reload_workers(
 async fn fanout(
     workers: &mut HashMap<u64, Worker>, batches: &mut HashMap<u64, BatchMeta>,
     bus: &BusHandle, cap: usize, max_steps: u32, proxy: &ToolProxy,
+    yolo_set: &GoalYoloSessions, models: &WorkerModels,
     call_session: SessionId, call_id: ActionId, args: serde_json::Value,
     next_worker_id: &mut u64, next_batch_id: &mut u64, next_worker_sid: &mut u64,
 ) {
@@ -737,26 +860,42 @@ async fn fanout(
         bus.emit(refuse("workers cannot fan out further work (depth-1 by design; sub-conducting arrives with M-tier vouchers)".into())).await;
         return;
     }
-    match args["mode"].as_str() {
-        None | Some("async") => {}
+    let inline = match args["mode"].as_str() {
+        None | Some("async") => false,
+        Some("inline") => true,
         Some(other) => {
-            bus.emit(refuse(format!("mode \"{other}\" is not available in this slice — only \"async\" (inline lands in W1d)"))).await;
+            bus.emit(refuse(format!("unknown mode \"{other}\" — async (default) or inline"))).await;
             return;
         }
-    }
+    };
     let tasks = match parse_tasks(&args) {
         Ok(t) => t,
         Err(e) => { bus.emit(refuse(e)).await; return; }
     };
+    if inline && tasks.len() > INLINE_MAX_TASKS {
+        bus.emit(refuse(format!(
+            "inline mode is short-batch-only ({} tasks > {INLINE_MAX_TASKS}) — use mode async; the batch report arrives via the AwaitingBatch loop", tasks.len()))).await;
+        return;
+    }
+
+    // Batch-inherited yolo: workers get the PARENT's auto-approve bit and never
+    // more — explicit opt-in, and only if the calling session is itself armed.
+    let inherit_requested = args["yolo"].as_str() == Some("inherit");
+    let yolo = inherit_requested && apexos_core::goal_session_is_yolo(yolo_set, call_session.0);
+    if inherit_requested && !yolo {
+        eprintln!("[worker] yolo:inherit requested by session {} which is not yolo-armed — workers stay gated", call_session.0);
+    }
 
     let batch = *next_batch_id;
     *next_batch_id += 1;
-    let deadline_s = parse_batch_deadline(&args);
+    let mut deadline_s = parse_batch_deadline(&args);
+    if inline { deadline_s = deadline_s.min(INLINE_DEADLINE_CEIL_S); }
     batches.insert(batch, BatchMeta {
         parent: call_session.0, created_epoch: epoch_now(), deadline_s, reported: false,
+        inline_ack: if inline { Some((call_session.0, call_id.0)) } else { None },
     });
     let mut minted: Vec<(u64, u64)> = Vec::with_capacity(tasks.len()); // (worker_id, session)
-    for task in tasks {
+    for (task, model) in tasks {
         let wid = *next_worker_id;  *next_worker_id  += 1;
         let sid = *next_worker_sid; *next_worker_sid += 1;
         workers.insert(wid, Worker {
@@ -764,6 +903,7 @@ async fn fanout(
             task, state: WorkerState::Queued, step: 1, summary: None,
             artifacts: Vec::new(), episode: None,
             started: Instant::now(), pending: None, turn_inflight: false,
+            yolo, model, errored: false,
         });
         minted.push((wid, sid));
     }
@@ -778,26 +918,34 @@ async fn fanout(
 
     let n = minted.len();
     let admitted_now = (cap.saturating_sub(slots_used(workers))).min(n);
-    bus.emit(Event::ToolResult {
-        session: call_session, call: call_id,
-        output: ToolOutput { ok: true, content: serde_json::json!({
-            "batch": batch,
-            "workers": minted.iter().map(|(w, s)| serde_json::json!({ "worker": w, "session": s })).collect::<Vec<_>>(),
-            "count": n, "cap": cap,
-            "admitted": admitted_now, "queued": n - admitted_now,
-            "batch_deadline_s": deadline_s,
-            "status": "fanned",
-        }) },
-    }).await;
+    if !inline {
+        // Async: ack now, work proceeds in background. Inline holds the ack —
+        // the batch report IS this call's result (emitted by check_batches).
+        bus.emit(Event::ToolResult {
+            session: call_session, call: call_id,
+            output: ToolOutput { ok: true, content: serde_json::json!({
+                "batch": batch,
+                "workers": minted.iter().map(|(w, s)| serde_json::json!({ "worker": w, "session": s })).collect::<Vec<_>>(),
+                "count": n, "cap": cap,
+                "admitted": admitted_now, "queued": n - admitted_now,
+                "batch_deadline_s": deadline_s,
+                "yolo_inherited": yolo,
+                "status": "fanned",
+            }) },
+        }).await;
+    }
 
-    admit_queued(workers, bus, proxy, cap, max_steps).await;
-    eprintln!("[worker] batch {batch} fanned: {n} tasks from session {} (cap {cap}, deadline {deadline_s}s)", call_session.0);
+    admit_queued(workers, bus, proxy, yolo_set, models, cap, max_steps).await;
+    eprintln!("[worker] batch {batch} fanned: {n} tasks from session {} (cap {cap}, deadline {deadline_s}s{}{})",
+              call_session.0,
+              if inline { ", inline" } else { "" },
+              if yolo { ", yolo:inherit" } else { "" });
 }
 
 /// Admit Queued workers (FIFO by id) while slots remain: Queued → Running,
 /// stall clock armed, the work order goes out as an ordinary gated UserPrompt
 /// on the worker's own session.
-async fn admit_queued(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, cap: usize, max_steps: u32) {
+async fn admit_queued(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, yolo_set: &GoalYoloSessions, models: &WorkerModels, cap: usize, max_steps: u32) {
     while slots_used(workers) < cap {
         let Some(id) = next_queued(workers) else { break };
         // Open the Cerebro episode at first admission — work actually begins
@@ -812,9 +960,11 @@ async fn admit_queued(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy
             w.state = WorkerState::Running;
             w.started = Instant::now();
             w.turn_inflight = true;
+            w.errored = false;
             (w.session, directive_first(id, w.batch, max_steps, &w.task))
         };
         let w = &workers[&id];
+        arm_worker(yolo_set, models, w); // inherit-yolo + model pin follow residency
         emit_state(bus, id, w, "").await;
         bus.emit(Event::UserPrompt { session: SessionId(session), text, images: vec![] }).await;
         eprintln!("[worker] {id} admitted → session {session}");
@@ -864,7 +1014,8 @@ async fn record_report(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, work
 /// its summary), blocked (park awaiting input, slot-free), yield (Idle), or
 /// continue (next step under the ceiling). No report = Done, the final text
 /// is the deliverable (the W1a single-turn rule, now the fallback).
-async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path, session: u64, max_steps: u32) -> bool {
+#[allow(clippy::too_many_arguments)]
+async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path, yolo_set: &GoalYoloSessions, models: &WorkerModels, session: u64, max_steps: u32) -> bool {
     let Some(id) = workers.iter()
         .find(|(_, w)| w.session == session && matches!(w.state, WorkerState::Running | WorkerState::Blocked))
         .map(|(id, _)| *id)
@@ -905,8 +1056,16 @@ async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &To
                 }
             }
             None => {
-                w.state = WorkerState::Done;
-                ("final text is the deliverable".to_string(), None)
+                // No report: Done with the final text as deliverable — UNLESS the
+                // turn errored (Error+synthetic TurnComplete): that is a Failed
+                // worker, never a hollow Done (a mistyped model lands here).
+                if w.errored {
+                    w.state = WorkerState::Failed;
+                    ("turn error — no deliverable".to_string(), None)
+                } else {
+                    w.state = WorkerState::Done;
+                    ("final text is the deliverable".to_string(), None)
+                }
             }
         }
     };
@@ -914,8 +1073,10 @@ async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &To
     emit_state(bus, id, w, &detail).await;
     eprintln!("[worker] {id} → {:?} at step {}{}", w.state, w.step,
               if detail.is_empty() { String::new() } else { format!(" ({detail})") });
-    // The evidence rule: every path into a terminal state leaves the trail.
+    // The evidence rule: every path into a terminal state leaves the trail —
+    // and terminal residency ends: shared yolo/model arming goes with it.
     if matches!(w.state, WorkerState::Done | WorkerState::Failed) {
+        disarm_worker(yolo_set, models, w.session);
         finalize_terminal(proxy, agents_dir, id, w).await;
     }
     if let Some((sid, directive)) = next_directive {
@@ -931,7 +1092,7 @@ async fn advance(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &To
 /// the emergency entrance; Queued workers just wait a little longer. Running /
 /// approval-Blocked sends simply queue in the TurnGate (no state change);
 /// Queued and terminal workers are left untouched.
-async fn wake_on_send(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, session: u64) -> bool {
+async fn wake_on_send(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, models: &WorkerModels, session: u64) -> bool {
     let hit = workers.iter_mut()
         .find(|(_, w)| w.session == session
             && (matches!(w.state, WorkerState::Parked | WorkerState::Idle)
@@ -941,10 +1102,16 @@ async fn wake_on_send(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, sessi
             w.state = WorkerState::Running;
             w.started = Instant::now();
             w.turn_inflight = true;
+            w.errored = false;
             (*id, from)
         });
     if let Some((id, from)) = hit {
         let w = &workers[&id];
+        // Re-arm the model pin (it follows residency); NEVER re-arm inherited
+        // yolo on revive — the parent's grant does not outlive the park.
+        if let Some(m) = &w.model {
+            if let Ok(mut mm) = models.lock() { mm.insert(w.session, m.clone()); }
+        }
         let detail = match from {
             WorkerState::Parked => "revived by send",
             WorkerState::Idle   => "woken by send",
@@ -960,7 +1127,7 @@ async fn wake_on_send(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, sessi
 /// state event carries the eviction (the router drops the RAM history);
 /// `sessions/<id>.jsonl` stays truth and a send revives. No slot changes —
 /// these states hold none.
-async fn park_idle(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, idle_ttl: Duration) -> bool {
+async fn park_idle(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, yolo_set: &GoalYoloSessions, models: &WorkerModels, idle_ttl: Duration) -> bool {
     let parked: Vec<u64> = workers.iter_mut()
         .filter(|(_, w)| matches!(w.state, WorkerState::Idle)
             || (w.state == WorkerState::Blocked && !w.turn_inflight))
@@ -970,6 +1137,7 @@ async fn park_idle(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, idle_ttl
     let changed = !parked.is_empty();
     for id in parked {
         let w = &workers[&id];
+        disarm_worker(yolo_set, models, w.session); // arming follows residency
         emit_state(bus, id, w, "idle TTL — parked (a send revives)").await;
         eprintln!("[worker] {id} parked (idle TTL)");
     }
@@ -1006,7 +1174,7 @@ async fn resume_from_approval(workers: &mut HashMap<u64, Worker>, bus: &BusHandl
 /// Fail any Running worker whose turn has stalled past the timeout (errored/
 /// aborted turns emit no TurnComplete). Blocked is exempt — an approval wait
 /// runs on the human's clock, not the stall clock.
-async fn fail_stalled(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path, step_timeout: Duration) -> bool {
+async fn fail_stalled(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path, yolo_set: &GoalYoloSessions, models: &WorkerModels, step_timeout: Duration) -> bool {
     let stalled: Vec<u64> = workers.iter_mut()
         .filter(|(_, w)| w.state == WorkerState::Running && w.started.elapsed() > step_timeout)
         .map(|(id, w)| { w.state = WorkerState::Failed; w.turn_inflight = false; *id })
@@ -1014,6 +1182,7 @@ async fn fail_stalled(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy
     let changed = !stalled.is_empty();
     for id in stalled {
         let w = &workers[&id];
+        disarm_worker(yolo_set, models, w.session);
         emit_state(bus, id, w, "step stalled — no completion").await;
         eprintln!("[worker] {id} failed (stalled > {}s)", step_timeout.as_secs());
         finalize_terminal(proxy, agents_dir, id, w).await;
@@ -1026,6 +1195,9 @@ async fn fail_stalled(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy
 /// `timed_out` (still revivable; a later revive finishes them outside it).
 /// Rows carry evidence PATHS, never payloads. One report per batch.
 async fn check_batches(workers: &HashMap<u64, Worker>, batches: &mut HashMap<u64, BatchMeta>, bus: &BusHandle, agents_dir: &Path) -> bool {
+    // (inline note: the held task_fanout ack is emitted AFTER TaskBatchDone —
+    // bus order guarantees the goal driver's pending-batch set clears before
+    // the blocked conductor turn can complete.)
     let now = epoch_now();
     let due: Vec<u64> = batches.iter()
         .filter(|(_, b)| !b.reported)
@@ -1042,6 +1214,7 @@ async fn check_batches(workers: &HashMap<u64, Worker>, batches: &mut HashMap<u64
         let meta = batches.get_mut(&batch).unwrap();
         meta.reported = true;
         let parent = meta.parent;
+        let inline_ack = meta.inline_ack.take();
         let rows = batch_rows(workers, batch, agents_dir);
         let (done, failed, timed_out) = rows.iter().fold((0, 0, 0), |(d, f, t), r| match () {
             _ if r.timed_out => (d, f, t + 1),
@@ -1049,7 +1222,29 @@ async fn check_batches(workers: &HashMap<u64, Worker>, batches: &mut HashMap<u64
             _ => (d, f + 1, t),
         });
         eprintln!("[worker] batch {batch} reported: {done} done, {failed} failed, {timed_out} timed out");
-        bus.emit(Event::TaskBatchDone { batch, parent: SessionId(parent), rows }).await;
+        bus.emit(Event::TaskBatchDone { batch, parent: SessionId(parent), rows: rows.clone() }).await;
+        // Inline: the report is the blocked task_fanout call's result — rows
+        // plus each worker's summary (short batches want answers in hand; the
+        // evidence paths still ride for the full trail).
+        if let Some((ack_session, ack_action)) = inline_ack {
+            let by_id: HashMap<u64, &Worker> = workers.iter()
+                .filter(|(_, w)| w.batch == batch).map(|(id, w)| (*id, w)).collect();
+            let inline_rows: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::json!({
+                "worker": r.worker.0,
+                "state": format!("{:?}", r.state).to_lowercase(),
+                "timed_out": r.timed_out,
+                "summary": by_id.get(&r.worker.0).and_then(|w| w.summary.clone()),
+                "evidence": r.evidence,
+            })).collect();
+            bus.emit(Event::ToolResult {
+                session: SessionId(ack_session), call: ActionId(ack_action),
+                output: ToolOutput { ok: true, content: serde_json::json!({
+                    "batch": batch, "mode": "inline",
+                    "done": done, "failed": failed, "timed_out": timed_out,
+                    "workers": inline_rows,
+                }) },
+            }).await;
+        }
     }
     changed
 }
@@ -1076,6 +1271,78 @@ fn batch_rows(workers: &HashMap<u64, Worker>, batch: u64, agents_dir: &Path) -> 
         .collect();
     rows.sort_by_key(|(id, _)| *id);
     rows.into_iter().map(|(_, r)| r).collect()
+}
+
+/// Cancel a set of workers — terminal, not revivable, full trail. An in-flight
+/// turn is aborted (UserCancel emits no TurnComplete, so advance() never fires
+/// for a dead worker — the goal_cancel precedent), the slot frees, shared
+/// arming clears, and evidence + episode land like any terminal path so batch
+/// reports stay honest.
+#[allow(clippy::too_many_arguments)]
+async fn cancel_workers(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path, yolo_set: &GoalYoloSessions, models: &WorkerModels, ids: &[u64]) {
+    for id in ids {
+        let Some(w) = workers.get_mut(id) else { continue };
+        if is_terminal(w.state) { continue; }
+        let had_turn = w.turn_inflight;
+        w.state = WorkerState::Cancelled;
+        w.turn_inflight = false;
+        w.pending = None;
+        let session = w.session;
+        if had_turn {
+            bus.emit(Event::UserCancel { session: SessionId(session) }).await;
+        }
+        disarm_worker(yolo_set, models, session);
+        let w = &workers[id];
+        emit_state(bus, *id, w, "cancelled").await;
+        eprintln!("[worker] {id} cancelled");
+        finalize_terminal(proxy, agents_dir, *id, w).await;
+    }
+}
+
+/// worker_cancel{worker?|batch?}: the fan's kill switch. Exactly one selector.
+#[allow(clippy::too_many_arguments)]
+async fn cancel_request(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path, yolo_set: &GoalYoloSessions, models: &WorkerModels, call_session: SessionId, call_id: ActionId, args: serde_json::Value) -> bool {
+    let ids: Vec<u64> = match (args["worker"].as_u64(), args["batch"].as_u64()) {
+        (Some(w), None) => workers.get(&w).filter(|wk| !is_terminal(wk.state)).map(|_| vec![w]).unwrap_or_default(),
+        (None, Some(b)) => workers.iter().filter(|(_, wk)| wk.batch == b && !is_terminal(wk.state)).map(|(id, _)| *id).collect(),
+        _ => {
+            bus.emit(Event::ToolResult { session: call_session, call: call_id,
+                output: ToolOutput { ok: false, content: serde_json::json!(
+                    "pass exactly one of worker (an id) or batch (cancels every non-terminal worker in it)") } }).await;
+            return false;
+        }
+    };
+    if ids.is_empty() {
+        bus.emit(Event::ToolResult { session: call_session, call: call_id,
+            output: ToolOutput { ok: false, content: serde_json::json!("no matching non-terminal worker(s)") } }).await;
+        return false;
+    }
+    cancel_workers(workers, bus, proxy, agents_dir, yolo_set, models, &ids).await;
+    bus.emit(Event::ToolResult { session: call_session, call: call_id,
+        output: ToolOutput { ok: true, content: serde_json::json!({ "cancelled": ids, "count": ids.len() }) } }).await;
+    true
+}
+
+/// PB-1 soft breaker: a session firing sequential local spawns gets ONE nudge
+/// per window — parallel work goes through a single task_fanout batch. Soft by
+/// design: an Error line in the spawner's own stream, never a refusal.
+async fn pb1_track(spawn_log: &mut HashMap<u64, Vec<Instant>>, bus: &BusHandle, parent: u64) {
+    if apexos_core::is_worker_session(parent) || apexos_core::is_spawn_session(parent) {
+        return; // depth guards own those layers
+    }
+    let now = Instant::now();
+    let log = spawn_log.entry(parent).or_default();
+    log.retain(|t| now.duration_since(*t) < PB1_WINDOW);
+    log.push(now);
+    if log.len() == PB1_SPAWN_THRESHOLD {
+        eprintln!("[worker] PB-1: session {parent} fired {PB1_SPAWN_THRESHOLD} agent_spawns in {}s — nudging toward task_fanout", PB1_WINDOW.as_secs());
+        bus.emit(Event::Error {
+            session: Some(SessionId(parent)),
+            message: format!(
+                "PB-1: {PB1_SPAWN_THRESHOLD} sequential agent_spawns in this session — parallel work goes through ONE task_fanout batch (persistent, parkable, evidence-leaving workers), never a spawn-then-wait chain."),
+        }).await;
+        log.clear(); // one nudge per burst
+    }
 }
 
 /// Conductor visibility: a snapshot of all workers plus the admission picture.
@@ -1132,9 +1399,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_tasks_accepts_strings_and_objects() {
-        let args = serde_json::json!({ "tasks": ["write a haiku", { "prompt": "count to three" }] });
-        assert_eq!(parse_tasks(&args).unwrap(), vec!["write a haiku", "count to three"]);
+    fn parse_tasks_accepts_strings_and_objects_with_model_precedence() {
+        let args = serde_json::json!({
+            "tasks": ["write a haiku", { "prompt": "count to three", "model": "claude-haiku-4-5" }],
+            "model": "claude-sonnet-5"
+        });
+        let tasks = parse_tasks(&args).unwrap();
+        assert_eq!(tasks[0], ("write a haiku".to_string(), Some("claude-sonnet-5".to_string())));
+        // Per-task model wins over the batch default.
+        assert_eq!(tasks[1], ("count to three".to_string(), Some("claude-haiku-4-5".to_string())));
+        // No models anywhere → node default (None).
+        let bare = parse_tasks(&serde_json::json!({ "tasks": ["x"] })).unwrap();
+        assert_eq!(bare[0], ("x".to_string(), None));
     }
 
     #[test]
@@ -1164,7 +1440,8 @@ mod tests {
         Worker { batch: 1, parent: 0, session: apexos_core::WORKER_SESSION_BASE,
                  task: "t".into(), state, step: 1, summary: None,
                  artifacts: Vec::new(), episode: None,
-                 started: Instant::now(), pending: None, turn_inflight: false }
+                 started: Instant::now(), pending: None, turn_inflight: false,
+                 yolo: false, model: None, errored: false }
     }
 
     #[test]
@@ -1200,6 +1477,7 @@ mod tests {
             task: "refactor the parser".into(), state: WorkerState::Running,
             step: 3, summary: Some("parser refactored".into()),
             artifacts: vec!["out/parser.rs".into()], episode: Some("ep_x".into()),
+            yolo: true, model: Some("claude-haiku-4-5".into()),
         };
         let back: PersistedWorker = serde_json::from_str(&serde_json::to_string(&pw).unwrap()).unwrap();
         assert_eq!(back.id, 7);
@@ -1226,6 +1504,8 @@ mod tests {
         assert!(pw.summary.is_none());
         assert!(pw.artifacts.is_empty());
         assert!(pw.episode.is_none());
+        assert!(!pw.yolo);
+        assert!(pw.model.is_none());
     }
 
     #[test]
@@ -1256,6 +1536,21 @@ mod tests {
                          Verdict::Continue(Some(s)) if s == "tests"));
         // Absent/unknown status defaults to continue (the goal_step convention).
         assert!(matches!(parse_verdict(&serde_json::json!({})), Verdict::Continue(None)));
+    }
+
+    #[test]
+    fn approval_detail_prefix_is_the_ui_digest_contract() {
+        // ui-slint's per-batch approval digest keys off this exact prefix in
+        // WorkerStateChanged.detail — change it there and here TOGETHER.
+        let detail = format!("awaiting approval — {}", "run_command");
+        assert!(detail.starts_with("awaiting approval"));
+    }
+
+    #[test]
+    fn inline_bounds_are_hard() {
+        assert!(INLINE_MAX_TASKS <= 4);
+        assert!(INLINE_DEADLINE_CEIL_S <= 240);
+        assert!(PB1_SPAWN_THRESHOLD >= 3, "the breaker is soft and late, never eager");
     }
 
     #[test]
@@ -1297,6 +1592,27 @@ mod tests {
         assert!(rows[1].evidence.ends_with("agents/2.json"));
         assert!(rows[2].timed_out, "non-terminal at report time = timed_out");
         assert!(rows[2].evidence.is_empty(), "no evidence file for a straggler");
+    }
+
+    #[test]
+    fn arm_disarm_mirror_residency() {
+        use std::collections::HashSet;
+        let yolo_set: GoalYoloSessions = std::sync::Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let models: WorkerModels = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let sid = apexos_core::WORKER_SESSION_BASE + 9;
+        let w = Worker { yolo: true, model: Some("claude-haiku-4-5".into()),
+                         session: sid, ..mk(WorkerState::Running) };
+        arm_worker(&yolo_set, &models, &w);
+        assert!(apexos_core::goal_session_is_yolo(&yolo_set, sid));
+        assert_eq!(apexos_core::worker_model_for(&models, sid).as_deref(), Some("claude-haiku-4-5"));
+        disarm_worker(&yolo_set, &models, sid);
+        assert!(!apexos_core::goal_session_is_yolo(&yolo_set, sid));
+        assert!(apexos_core::worker_model_for(&models, sid).is_none());
+        // A non-yolo, unpinned worker arms nothing.
+        let plain = Worker { session: sid + 1, ..mk(WorkerState::Running) };
+        arm_worker(&yolo_set, &models, &plain);
+        assert!(!apexos_core::goal_session_is_yolo(&yolo_set, sid + 1));
+        assert!(apexos_core::worker_model_for(&models, sid + 1).is_none());
     }
 
     #[test]

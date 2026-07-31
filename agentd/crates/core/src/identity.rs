@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Default agent identity when `AGENTD_AGENT_ID` is unset or blank.
@@ -271,43 +272,27 @@ pub fn resolve_agent_id(
         .unwrap_or_else(node_agent_id)
 }
 
-// ── Ephemeral spawn sessions ─────────────────────────────────────────────────
+// ── Session-id classes ───────────────────────────────────────────────────────
+// SPAWN_SESSION_BASE / WORKER_SESSION_BASE / is_spawn_session / is_worker_session
+// live in `apexos-protocol` (wire-relevant — frontends class sessions too) and
+// re-export from this crate's root unchanged. The agentd-side laws that hang
+// off the partition (spawn persist-skip + provenance stamping; worker boot-seed
+// filter + no-hydration + counter reload discipline) are documented in
+// docs/gotchas.md and enforced at their named sites.
 
-/// Session ids at/above this base are EPHEMERAL SPAWN sessions — local
-/// sub-agents (`SpawnAgent`→`child_turn`) and cross-node `/api/spawn` children
-/// draw from one counter seeded here. The range is load-bearing twice: the
-/// session store skips persisting them (no JSONL), and the supervisor stamps
-/// spawn provenance onto their Cerebro mint calls (H6 residual — a memory
-/// written by an ephemeral spawn is distinguishable at retrieval from one
-/// written by the continuous self).
-pub const SPAWN_SESSION_BASE: u64 = 1 << 63;
+// ── Per-worker model pins (Fabrica W1d) ──────────────────────────────────────
 
-/// Whether `session_id` is an ephemeral spawn session (see [`SPAWN_SESSION_BASE`]).
-pub fn is_spawn_session(session_id: u64) -> bool {
-    session_id >= SPAWN_SESSION_BASE
-}
+/// Sessions of workers fanned with an explicit `model` (`task_fanout{model?}`),
+/// mapped to the pinned model string. Shared worker-driver↔`root_turn` (the
+/// GoalYoloSessions pattern): the driver arms a session at admission/wake and
+/// disarms at terminal/park; `root_turn` builds a pinned sibling provider for
+/// armed sessions. std Mutex — lock, clone, drop; never held across an await.
+pub type WorkerModels = std::sync::Arc<std::sync::Mutex<HashMap<u64, String>>>;
 
-// ── Persistent worker sessions (Fabrica W tier) ──────────────────────────────
-
-/// Session ids in `[WORKER_SESSION_BASE, SPAWN_SESSION_BASE)` are WORKER
-/// sessions — `task_fanout` children (docs/fabrica.md). Unlike spawns they ARE
-/// persisted (`sessions/<id>.jsonl` is the parked worker's truth, the W1b
-/// revive substrate), so the id space is a strict three-way partition:
-///
-///   normal < 1<<62 ≤ worker < 1<<63 ≤ spawn
-///
-/// Two laws hang off this range and live at the named sites — don't loosen
-/// either: (1) `SessionStore::load_all` must NOT hydrate worker files at boot
-/// (Parked = not memory-resident); (2) `main.rs`'s `next_session_id` boot seed
-/// must exclude this range, or the first persisted worker drags the ordinary
-/// session counter into worker territory forever.
-pub const WORKER_SESSION_BASE: u64 = 1 << 62;
-
-/// Whether `session_id` is a persistent worker session — a BOUNDED range check,
-/// deliberately not `>=`: the spawn range sits above and must stay disjoint
-/// (`is_worker_session` and `is_spawn_session` are never both true).
-pub fn is_worker_session(session_id: u64) -> bool {
-    (WORKER_SESSION_BASE..SPAWN_SESSION_BASE).contains(&session_id)
+/// The pinned model for a worker session, if any. Poisoned lock → None (the
+/// node default model — fails safe, never fails the turn).
+pub fn worker_model_for(models: &WorkerModels, session_id: u64) -> Option<String> {
+    models.lock().ok().and_then(|m| m.get(&session_id).cloned())
 }
 
 // ── Per-session goal autonomy (goal-scoped yolo) ────────────────────────────
@@ -339,26 +324,16 @@ mod tests {
     // AGENTD_AGENT_ID is process-global; serialize the env-mutating tests.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    // (The session-id partition test moved to apexos-protocol with the
+    // constants — the wire crate owns the class definitions now.)
+
     #[test]
-    fn session_id_space_is_a_three_way_partition() {
-        // normal < 1<<62 ≤ worker < 1<<63 ≤ spawn — the ranges never overlap.
-        // Ordinary/goal/mesh sessions:
-        for id in [0u64, 1, 42, WORKER_SESSION_BASE - 1] {
-            assert!(!is_worker_session(id), "{id} must be normal");
-            assert!(!is_spawn_session(id), "{id} must be normal");
-        }
-        // Worker range: persisted, NOT spawn (a worker id that also read as spawn
-        // would silently skip JSONL persistence — the exact trap the bounded
-        // range check exists to prevent).
-        for id in [WORKER_SESSION_BASE, WORKER_SESSION_BASE + 1, SPAWN_SESSION_BASE - 1] {
-            assert!(is_worker_session(id), "{id} must be worker");
-            assert!(!is_spawn_session(id), "{id} must not be spawn");
-        }
-        // Spawn range: ephemeral, NOT worker.
-        for id in [SPAWN_SESSION_BASE, SPAWN_SESSION_BASE + 1, u64::MAX] {
-            assert!(is_spawn_session(id), "{id} must be spawn");
-            assert!(!is_worker_session(id), "{id} must not be worker");
-        }
+    fn worker_model_pin_round_trips_and_fails_safe() {
+        let models: WorkerModels = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        assert_eq!(worker_model_for(&models, 7), None); // unpinned → node default
+        models.lock().unwrap().insert(7, "claude-haiku-4-5".into());
+        assert_eq!(worker_model_for(&models, 7).as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(worker_model_for(&models, 8), None); // strictly per-session
     }
 
     #[test]

@@ -242,9 +242,10 @@ fn parse_verdict(args: &serde_json::Value) -> Verdict {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn emit_state(bus: &BusHandle, id: u64, objective: &str, state: GoalState, step: u32, max_steps: u32, detail: &str, yolo: bool) {
+async fn emit_state(bus: &BusHandle, id: u64, objective: &str, state: GoalState, step: u32, max_steps: u32, detail: &str, yolo: bool, session: u64) {
     bus.emit(Event::GoalStateChanged {
         goal: GoalId(id), objective: objective.into(), state, step, max_steps, detail: detail.into(), yolo,
+        session: Some(SessionId(session)),
     }).await;
 }
 
@@ -353,7 +354,7 @@ async fn reload_goals(goals: &Goals, bus: &BusHandle, next_goal_id: &Arc<AtomicU
     let loaded = load_goals(path);
     if loaded.is_empty() { return; }
     let mut max_id = 0u64;
-    let mut announce: Vec<(u64, String, GoalState, u32, u32, bool)> = Vec::new();
+    let mut announce: Vec<(u64, String, GoalState, u32, u32, bool, u64)> = Vec::new();
     {
         let mut g = goals.lock().await;
         for pg in loaded {
@@ -370,13 +371,13 @@ async fn reload_goals(goals: &Goals, bus: &BusHandle, next_goal_id: &Arc<AtomicU
                 pending: None, episode: pg.episode.clone(), yolo: pg.yolo,
                 awaiting_batch: false,
             });
-            announce.push((pg.id, pg.objective, state, pg.step, pg.max_steps, pg.yolo));
+            announce.push((pg.id, pg.objective, state, pg.step, pg.max_steps, pg.yolo, pg.session));
         }
     }
     next_goal_id.fetch_max(max_id + 1, Ordering::SeqCst);
-    for (id, objective, state, step, max_steps, yolo) in announce {
+    for (id, objective, state, step, max_steps, yolo, session) in announce {
         let detail = if state == GoalState::Blocked { "interrupted by daemon restart — goal_resume to continue" } else { "" };
-        emit_state(bus, id, &objective, state, step, max_steps, detail, yolo).await;
+        emit_state(bus, id, &objective, state, step, max_steps, detail, yolo, session).await;
     }
     eprintln!("[goal] reloaded goals from {} (in-flight ones marked blocked)", path.display());
 }
@@ -400,7 +401,7 @@ async fn resume_goal(goals: &Goals, bus: &BusHandle, goal_yolo: &GoalYoloSession
         Some((id, objective, session, step, max_steps, yolo)) => {
             // Re-arm goal-scoped yolo (defensive — a Failed→resume path may have dropped it).
             if yolo { yolo_insert(goal_yolo, session); }
-            emit_state(bus, id, &objective, GoalState::Acting, step, max_steps, "resumed", yolo).await;
+            emit_state(bus, id, &objective, GoalState::Acting, step, max_steps, "resumed", yolo, session).await;
             bus.emit(Event::UserPrompt {
                 session: SessionId(session),
                 text: directive_continue(&objective, step, max_steps, None),
@@ -438,7 +439,7 @@ async fn cancel_goal(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, goal_yol
             // aborts it and emits no TurnComplete, so advance() won't fire for a dead goal.
             yolo_remove(goal_yolo, session);
             bus.emit(Event::UserCancel { session: SessionId(session) }).await;
-            emit_state(bus, id, &objective, GoalState::Cancelled, step, max_steps, "cancelled", yolo).await;
+            emit_state(bus, id, &objective, GoalState::Cancelled, step, max_steps, "cancelled", yolo, session).await;
             if let Some(ep) = episode { episode_end_goal(proxy, &ep, GoalState::Cancelled, step, max_steps, &objective).await; }
             bus.emit(Event::ToolResult { session: call_session, call: call_id,
                 output: ToolOutput { ok: true, content: serde_json::json!({ "goal_id": id, "status": "cancelled", "step": step }) } }).await;
@@ -490,7 +491,7 @@ async fn create_goal(
             "goal_id": gid, "session": sid, "max_steps": max_steps, "yolo": yolo, "status": "started",
         }) } }).await;
 
-    emit_state(bus, gid, &objective, GoalState::Acting, 1, max_steps, "", yolo).await;
+    emit_state(bus, gid, &objective, GoalState::Acting, 1, max_steps, "", yolo, sid).await;
     bus.emit(Event::UserPrompt {
         session: SessionId(sid), text: directive_first(&objective, max_steps), images: vec![],
     }).await;
@@ -574,7 +575,7 @@ async fn advance(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, goal_yolo: &
     let changed = outcome.is_some();
     match outcome {
         Some(Outcome::Finished { gid, objective, state, step, max_steps, detail, episode, yolo }) => {
-            emit_state(bus, gid, &objective, state, step, max_steps, &detail, yolo).await;
+            emit_state(bus, gid, &objective, state, step, max_steps, &detail, yolo, session).await;
             eprintln!("[goal] {gid} {state:?} at step {step}/{max_steps}");
             // Terminal (Done/Failed): close the episode + disarm goal-scoped yolo. Blocked
             // stays open AND keeps its yolo arming (it's resumable — see reload/resume).
@@ -584,7 +585,7 @@ async fn advance(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, goal_yolo: &
             }
         }
         Some(Outcome::Next { gid, objective, step, max_steps, directive, yolo }) => {
-            emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps, "", yolo).await;
+            emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps, "", yolo, session).await;
             bus.emit(Event::UserPrompt { session: SessionId(session), text: directive, images: vec![] }).await;
         }
         None => {}
@@ -627,7 +628,7 @@ async fn fail_stalled(goals: &Goals, bus: &BusHandle, proxy: &ToolProxy, goal_yo
     let changed = !failed.is_empty();
     for (gid, session, objective, step, max_steps, episode, yolo) in failed {
         yolo_remove(goal_yolo, session);
-        emit_state(bus, gid, &objective, GoalState::Failed, step, max_steps, "step stalled — no completion", yolo).await;
+        emit_state(bus, gid, &objective, GoalState::Failed, step, max_steps, "step stalled — no completion", yolo, session).await;
         eprintln!("[goal] {gid} failed (step {step} stalled > {}s)", step_timeout.as_secs());
         if let Some(ep) = episode { episode_end_goal(proxy, &ep, GoalState::Failed, step, max_steps, &objective).await; }
     }
@@ -679,7 +680,7 @@ async fn hold_awaiting_batch(goals: &Goals, bus: &BusHandle, session: u64) -> bo
         }
     };
     if let Some((gid, objective, step, max_steps, yolo)) = held {
-        emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps, "awaiting batch", yolo).await;
+        emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps, "awaiting batch", yolo, session).await;
         eprintln!("[goal] {gid} awaiting batch (stall clock paused)");
         true
     } else { false }
@@ -705,7 +706,7 @@ async fn resume_after_batch(goals: &Goals, bus: &BusHandle, session: u64, batch:
         }
     };
     if let Some((gid, objective, step, max_steps, yolo)) = resumed {
-        emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps, &format!("batch {batch} reported — integrating"), yolo).await;
+        emit_state(bus, gid, &objective, GoalState::Acting, step, max_steps, &format!("batch {batch} reported — integrating"), yolo, session).await;
         bus.emit(Event::UserPrompt {
             session: SessionId(session),
             text: directive_integrate(&objective, step, max_steps, batch, rows),
@@ -755,7 +756,7 @@ async fn block_on_approval(goals: &Goals, bus: &BusHandle, session: u64, tool: &
         // Free the suspended turn (it's waiting on an approval that won't come) so the
         // goal's session isn't left pinned. goal_resume re-runs the step from scratch.
         bus.emit(Event::UserCancel { session: SessionId(session) }).await;
-        emit_state(bus, gid, &objective, GoalState::Blocked, step, max_steps, &format!("awaiting approval — {tool}"), yolo).await;
+        emit_state(bus, gid, &objective, GoalState::Blocked, step, max_steps, &format!("awaiting approval — {tool}"), yolo, session).await;
         eprintln!("[goal] {gid} blocked on approval for '{tool}' at step {step}");
         true
     } else { false }

@@ -29,6 +29,10 @@ use apexos_store::run_log_writer;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Builds a RoutingProvider pinned to one model, sharing every other live arc
+/// (backend routing, keys, cache) — the task_fanout{model?} seam (W1d).
+type PinnedProviderFn = Arc<dyn Fn(String) -> RoutingProvider + Send + Sync>;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tokio::task::AbortHandle;
@@ -321,6 +325,25 @@ async fn main() -> anyhow::Result<()> {
     // reviewer all share the one arc. See apexos_agent::cache.
     let cache_arc = Arc::new(RwLock::new(apexos_agent::CacheConfig::from_env()));
     eprintln!("[agentd] prompt cache: {}", cache_arc.try_read().map(|c| c.summary()).unwrap_or_default());
+
+    // Per-task model pins (Fabrica W1d): task_fanout{model?} runs a worker on a
+    // sibling provider sharing every live arc except a PINNED model — same
+    // backend routing, same keys, same prompt cache; a vast hot-swap of the
+    // node model never touches a pin, and a pin never outlives its worker's
+    // residency (the driver arms/disarms the map).
+    let worker_models: apexos_core::WorkerModels =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mk_pinned: PinnedProviderFn = {
+        let b = backend_arc.clone();
+        let u = oai_base_url_arc.clone();
+        let k = api_key_arc.clone();
+        let ok = oai_api_key_arc.clone();
+        let c = cache_arc.clone();
+        Arc::new(move |model: String| RoutingProvider::new(
+            b.clone(), u.clone(), k.clone(), ok.clone(),
+            Arc::new(RwLock::new(model)), c.clone(),
+        ))
+    };
 
     // Session-consolidation channel: the gateway handler sends a request, an
     // agentd worker (spawned below, once the engine + ToolProxy exist) does the
@@ -618,7 +641,7 @@ async fn main() -> anyhow::Result<()> {
     // Autonomous goal driver — subscribes to the bus for goal sessions' TurnComplete.
     goal::spawn_goal_driver(
         handle.clone(), bcast.subscribe(), goal_rx,
-        Arc::clone(&next_session_id), Arc::clone(&next_goal_id), goals_path, goal_proxy, goal_yolo,
+        Arc::clone(&next_session_id), Arc::clone(&next_goal_id), goals_path, goal_proxy, goal_yolo.clone(),
     );
 
     // Worker driver (Fabrica W1a) — the goal driver's twin for fanned-out batches.
@@ -629,6 +652,7 @@ async fn main() -> anyhow::Result<()> {
     worker::spawn_worker_driver(
         handle.clone(), bcast.subscribe(), worker_rx,
         workers_path, batches_path, agents_dir, worker_cap, worker_proxy,
+        goal_yolo.clone(), worker_models.clone(),
     );
 
     // Council handler — wire supervisor channel and spawn handler.
@@ -709,7 +733,8 @@ async fn main() -> anyhow::Result<()> {
                        tool_reg, histories, engine, max_depth, session_store, router_proxy,
                        Arc::clone(&session_bindings), Arc::clone(&persona_sessions),
                        Arc::clone(&identities), spawn_rx,
-                       Arc::clone(&sensor_presence), Arc::clone(&sensor_profile));
+                       Arc::clone(&sensor_presence), Arc::clone(&sensor_profile),
+                       worker_models.clone(), mk_pinned.clone());
 
     // Vast.ai backend hot-swap — on VastInstanceReady swap BOTH the endpoint AND the
     // served model id; on VastInstanceDestroyed OR VastTunnelLost revert to the boot
@@ -1515,6 +1540,8 @@ fn spawn_agent_router(
     spawn_rx:      tokio::sync::mpsc::Receiver<SpawnReq>,
     sensor_presence: SensorPresence,
     sensor_profile: Arc<std::sync::RwLock<String>>,
+    worker_models: apexos_core::WorkerModels,
+    mk_pinned:     PinnedProviderFn,
 ) {
     // Per-session abort handles and parent-child tree for cascade cancellation.
     // Handles carry a generation so a turn that finishes late doesn't evict the
@@ -1907,6 +1934,7 @@ fn spawn_agent_router(
                     tool_proxy.clone(), boot_primings.clone(),
                     Arc::clone(&session_bindings), Arc::clone(&persona_sessions),
                     Arc::clone(&identities),
+                    worker_models.clone(), mk_pinned.clone(),
                 );
                 let handle = tokio::spawn(async move {
                     let _slot = slot;
@@ -2231,6 +2259,8 @@ async fn root_turn(
     session_bindings: apexos_core::SessionBindings,
     persona_sessions: apexos_core::PersonaSessions,
     identities:    Arc<RwLock<apexos_core::Identities>>,
+    worker_models: apexos_core::WorkerModels,
+    mk_pinned:     PinnedProviderFn,
 ) {
     // Resolve the session's identity (3b): bound agent, else the node default.
     let agent_id = apexos_core::resolve_agent_id(&session_bindings, session);
@@ -2289,6 +2319,15 @@ async fn root_turn(
         Some(s) => Arc::new(engine.with_style(s)),
         None    => engine,
     };
+    // Per-task model pin (W1d): an armed worker session runs on a sibling
+    // provider with the pinned model — same keys/backend/cache, and the SAME
+    // semaphore (the global provider-call cap is a law the pin never escapes).
+    let engine = if is_worker {
+        match apexos_core::worker_model_for(&worker_models, session.0) {
+            Some(m) => Arc::new(engine.with_provider(mk_pinned(m))),
+            None    => engine,
+        }
+    } else { engine };
 
     match run_turn(session, history, bus.clone(), bcast, tools, engine).await {
         Ok(updated) => {
@@ -2375,6 +2414,7 @@ async fn gather_tools(
     tools.push(goal::goal_cancel_spec());
     tools.push(worker::task_fanout_spec());
     tools.push(worker::worker_report_spec());
+    tools.push(worker::worker_cancel_spec());
     tools.push(worker::list_workers_spec());
     tools.push(send_to_agent_spec());
     tools.push(mesh_file_send_spec());

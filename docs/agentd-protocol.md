@@ -71,13 +71,16 @@ to every client. So a frontend receives **only its own session's stream + global
 — clients don't (and shouldn't) filter outbound frames themselves. The supervisor
 subscribes to the bus separately, so this never affects routing.
 
-Global/status events include `goal_state_changed` (the Work Board's goal lane) and
-its twin `worker_state_changed` (Fabrica W1a — the WORKERS lane: `{worker, batch,
-parent, session, task, state queued|running|idle|parked|blocked|done|failed|cancelled,
-detail}`, ids as bare numbers), plus `task_batch_done` (W1c — a batch reported:
-`{batch, parent, rows:[{worker, state, evidence, timed_out?}]}` where `evidence` is
-the worker's terminal evidence-file path — pointers, never payloads). All deliberately
-session-less so every client's board sees them.
+Global/status events include `goal_state_changed` (the Work Board's goal lane —
+carries `session?` since W1d, the goal's own session, so the worker driver can
+cascade-cancel a cancelled conductor's batch) and its twin `worker_state_changed`
+(Fabrica W1a — the WORKERS lane: `{worker, batch, parent, session, task, state
+queued|running|idle|parked|blocked|done|failed|cancelled, detail, yolo?}`, ids as
+bare numbers; `yolo` = batch-inherited auto-approve, W1d), plus `task_batch_done`
+(W1c — a batch reported: `{batch, parent, rows:[{worker, state, evidence,
+timed_out?}]}` where `evidence` is the worker's terminal evidence-file path —
+pointers, never payloads). All deliberately session-less so every client's board
+sees them.
 
 Full event list: `apexos-protocol/src/lib.rs` — `Event` enum.
 

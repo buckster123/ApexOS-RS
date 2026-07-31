@@ -122,6 +122,9 @@ mode = "suggest"
 "task_fanout"      = "allow"
 "worker_report"    = "allow"
 "list_workers"     = "allow"
+# worker_cancel: stop one worker or a whole batch (terminal, evidence still
+# lands). allow — the goal_cancel rationale: strictly de-escalating.
+"worker_cancel"    = "allow"
 
 # Scheduler — two families on one engine. schedule_wakeup is the agent's CONTINUITY
 # tool (one-shot note-to-future-self into its own root thread): allow, because a

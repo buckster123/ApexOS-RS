@@ -507,6 +507,36 @@ fn board_worker(id: u64, title: String, subtitle: String, badge: &str, c: slint:
     board_with(|bm| board_upsert(&bm.workers, board_card(&format!("worker{id}"), title, subtitle, badge, c)));
 }
 
+// Per-batch approval digests (W1d, the digest principle): N workers awaiting
+// approvals collapse to ONE card per batch in NEEDS APPROVAL with a count —
+// never N cards. Driven off WorkerStateChanged (Blocked + the driver's
+// "awaiting approval — " detail prefix, a pinned contract); the underlying
+// per-call approval mechanics are untouched. Slint-thread-only, like BOARD.
+thread_local! {
+    static WORKER_APPR: RefCell<std::collections::HashMap<u64, std::collections::HashSet<u64>>> = RefCell::new(std::collections::HashMap::new());
+}
+
+fn board_worker_approval(batch: u64, worker: u64, awaiting: bool) {
+    WORKER_APPR.with(|m| {
+        let mut m = m.borrow_mut();
+        let set = m.entry(batch).or_default();
+        if awaiting { set.insert(worker); } else { set.remove(&worker); }
+        let n = set.len();
+        if n == 0 { m.remove(&batch); }
+        board_with(|bm| {
+            let key = format!("batchappr{batch}");
+            if n == 0 {
+                board_remove(&bm.blocked, &key);
+            } else {
+                board_upsert(&bm.blocked, board_card(&key,
+                    format!("Batch {batch} workers"),
+                    format!("{n} approval{} pending", if n == 1 { "" } else { "s" }),
+                    "BATCH", board_color(251, 191, 36)));
+            }
+        });
+    });
+}
+
 /// The (main-session) turn finished: drop the Active card + any stale approvals,
 /// and drop a "done" card into Recent.
 fn board_turn_done() {
@@ -10885,7 +10915,7 @@ fn dispatch_event(
         }
 
         // Work Board: an autonomous goal advanced → upsert its card in the GOALS lane.
-        Event::GoalStateChanged { goal, objective, state, step, max_steps, detail, yolo } => {
+        Event::GoalStateChanged { goal, objective, state, step, max_steps, detail, yolo, .. } => {
             let (badge, c) = match state {
                 GoalState::Acting    => ("RUN",   board_color(96, 165, 250)),
                 GoalState::Done      => ("DONE",  board_color(52, 211, 153)),
@@ -10911,7 +10941,7 @@ fn dispatch_event(
         // WORKERS lane (Fabrica W1a). Typed arm ONLY — never add a string-keyed
         // "worker_state_changed" shortcut in the early dispatch, or whichever arm
         // lands second goes silently dead (the mesh_message lesson).
-        Event::WorkerStateChanged { worker, batch, state, task, detail, .. } => {
+        Event::WorkerStateChanged { worker, batch, state, task, detail, yolo, .. } => {
             let (badge, c) = match state {
                 WorkerState::Queued    => ("QUEUE", board_color(148, 163, 184)),
                 WorkerState::Running   => ("RUN",   board_color(34, 211, 238)),
@@ -10924,12 +10954,19 @@ fn dispatch_event(
             };
             let wid = worker.0;
             let title: String = task.chars().take(60).collect();
-            let subtitle = if detail.is_empty() {
+            let base = if detail.is_empty() {
                 format!("batch {batch}")
             } else {
                 format!("batch {batch} · {detail}")
             };
-            slint::invoke_from_event_loop(move || board_worker(wid, title, subtitle, badge, c)).ok();
+            // Batch-inherited yolo renders AUTO like goals (word carries if ⚡ tofus).
+            let subtitle = if yolo { format!("⚡ AUTO · {base}") } else { base };
+            // Approval digest bookkeeping: one card per batch with a count.
+            let awaiting = state == WorkerState::Blocked && detail.starts_with("awaiting approval");
+            slint::invoke_from_event_loop(move || {
+                board_worker(wid, title, subtitle, badge, c);
+                board_worker_approval(batch, wid, awaiting);
+            }).ok();
         }
 
         // Work Board: a batch reported (all-terminal or deadline) → drop a card
