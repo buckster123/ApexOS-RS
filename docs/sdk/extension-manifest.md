@@ -178,7 +178,7 @@ error, aborts the call.
 
 ### apexos-tools — existing tool names (global; don't collide)
 
-50 tools, advertised by `list()` and dispatched by `call()` (both in
+51 tools, advertised by `list()` and dispatched by `call()` (both in
 `tools/crates/apexos-tools/src/tools.rs`):
 
 `run_command read_file write_file list_dir create_dir delete_path notes_list
@@ -188,7 +188,7 @@ http_fetch cpu_temp disk_usage memory_info uptime notify audio_analyze
 audio_trim_silence audio_normalize audio_peak_limit audio_trim audio_clean
 gpio_info gpio_read gpio_write gpio_pulse gpio_pwm gpio_servo display_face
 git_status git_diff git_log git_branch git_init git_commit git_push
-git_checkout git_reset git_merge eject_media`
+git_checkout git_reset git_merge git_worktree eject_media`
 
 `sketch_draw`, the `ui_*` family (adaptive UI, docs/adaptive-ui.md) and
 `display_face` are validate+echo handlers: ui-slint intercepts the

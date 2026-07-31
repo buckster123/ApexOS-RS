@@ -23,8 +23,11 @@ accepted a "done" without reading anything, you didn't integrate — you hoped.
 - **Size the fan to the seams, not the cap.** The admission cap queues the
   overflow FIFO — fan 12 if the work is 12 independent pieces; don't shrink
   the decomposition to fit the hardware. But keep pieces truly independent:
-  two workers editing the same file WILL collide until git worktrees arrive
-  (M1b). Until then, give code workers disjoint file scopes, explicitly.
+  in a PLAIN batch, two workers editing the same file WILL collide — give
+  code workers disjoint file scopes, explicitly. Parallel edits to one repo
+  belong in a code MANDALA (`repo` on `mandala_create`): each wide-fan cell
+  then gets its own branch + git worktree, mechanically, and collision
+  becomes impossible rather than discouraged.
 - **Write tasks like charters, not like chat.** Each worker is born with only
   your prompt: name the deliverable, the exact output path, and "report done
   with a summary and the file as an artifact." A worker that must guess its
@@ -69,11 +72,53 @@ sustained research. What it adds over a batch is an **axis** and a **tree**.
   evidence path rides its record. A `reparented_to` mark means an ancestor
   vanished; the cell's contract (the invariant) is intact — decide whether
   its work still has a consumer, and cancel it honestly if not.
-- **Lattice choice** (widths arm fully in M1b; the names already matter):
-  *spine* to bisect and narrow · *quad* for balanced 4-way decomposition
-  (siblings cross-check at integration) · *fan* for embarrassingly parallel
-  sweeps · *spiral* when the decomposition is unknown — grow toward
-  progress · *funnel* to synthesize many sources into one.
+- **Lattice choice** (widths are LIVE — a fan must fit its ring):
+  *spine* to bisect and narrow (rings of 2) · *quad* for balanced 4-way
+  decomposition (siblings cross-check at integration) · *fan* for
+  embarrassingly parallel sweeps (rings of 8) · *spiral* when the
+  decomposition is unknown — grow toward progress · *funnel* to synthesize
+  many sources into one (9→4→1).
+- **The diamond is one call.** `task_fanout{mandala, parent_cell,
+  tasks:[the ring], join:"integrate: merge, run verify, commit"}` mints a
+  GATE above the ring: the ring runs in parallel, the gate's worker is held
+  by a barrier until the ring settles, then wakes with every descendant's
+  state and evidence path appended to its work order. Write the join task
+  like an integrator's charter — what to read, what "merged" means, what to
+  do about a failed cell. One call = one batch = one report to integrate.
+  (A bare gate — `tasks:[one join]` + `barrier_timeout_s`, fan under it
+  later — works too, but only drive it from a chat session: a goal
+  conductor holds on ANY pending batch and would wedge until the gate's
+  deadline.)
+- **The barrier timeout is the join's seatbelt**, like the batch deadline is
+  the conductor's: at the guard, the gate opens anyway with stragglers
+  listed as `OPEN — not delivered`. A failed cell does NOT hold the gate —
+  failure is integration data; the join reads what exists and says what's
+  missing.
+- **Code mandalas: declare the repo once.** `mandala_create{repo:
+  "code/myproject"}` — wide-fan cells then receive the worktree ritual
+  (their own `apex/w/<addr>` branch, `git_worktree` add, commit before
+  done) and gates receive the merge ritual with the delivered branches
+  listed. You never relay any of it; the driver injects it verbatim, like
+  the invariant. Uncommitted work is invisible to the join — the ritual
+  says so, believe it.
+- **A parked gate lost its auto-open.** After a restart, everything parks
+  (nothing auto-runs — the house law). Reviving ring cells by send finishes
+  them, but a parked GATE revived by send runs its join with only your send
+  for context — hand it the evidence paths yourself (the batch report has
+  them). A send to a still-held gate is likewise the override: it runs NOW.
+- **Read the census** (`mandala_status.census`): keys are
+  `<posture>:<PBVDCH bits>` — L=live, W=waiting, B=barrier, T=terminal;
+  bits are child Progress/Budget/Verified · parent Demand/Capacity/Horizon.
+  A healthy run is mostly `L:111111` with a tail of `T:…` reaps. Piles of
+  `W:011111` mean workers sitting idle past their TTL (parked — revive or
+  cancel); a long-lived `B:111111` is a gate honestly waiting on a slow
+  ring; `…0…` in the horizon bit means work outliving its batch deadline —
+  the report already fired, decide who integrates the stragglers.
+- **Close what you finish** (`mandala_close`): a settled mandala left open
+  is the canonical rot — completion is unstable. Goal conductors get
+  closure automatically when the goal ends; from a chat session, close it
+  yourself once every cell is terminal (it refuses otherwise, on purpose —
+  `worker_cancel{batch}` is the kill switch, closing is bookkeeping).
 - **Before an 8-lane fan, audit the decomposition** (optional, earns its
   keep): architecture & invariants? docs & data grounding? breaking changes
   & migrations? cross-cutting refactors? dataflow & state? tests &

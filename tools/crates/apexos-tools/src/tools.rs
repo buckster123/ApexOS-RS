@@ -558,6 +558,19 @@ pub fn list() -> Value {
             }
         },
         {
+            "name": "git_worktree",
+            "description": "Manage git WORKTREES — parallel checkouts of one repo, so several workers can edit code at once without colliding (the Fabrica cell pattern: a branching cell works on its own address-named branch, e.g. apex/w/0.1.2, in its own worktree). `add` creates a worktree for `branch` — the branch is created if missing, forked from the repo's HEAD — at `worktree` (default: code/.worktrees/<branch with '/'→'-'> in your workspace); work ONLY inside the returned worktree dir and commit on your branch there. `list` shows all worktrees; `remove` detaches a worktree dir (refuses if it has uncommitted changes — commit first; branches and commits always survive in the repo); `prune` cleans stale worktree bookkeeping. Worktree dirs are workspace-confined.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action":   { "type": "string", "enum": ["add", "list", "remove", "prune"], "description": "What to do (default list)" },
+                    "path":     { "type": "string", "description": "Repo directory (default: workspace)" },
+                    "branch":   { "type": "string", "description": "Branch for add — created if missing (e.g. apex/w/0.1.2)" },
+                    "worktree": { "type": "string", "description": "Worktree directory: the target for add (default code/.worktrees/<branch>), the dir to detach for remove. Workspace-confined." }
+                }
+            }
+        },
+        {
             "name": "eject_media",
             "description": "Safely eject (unmount) a removable exo-workspace USB stick by its label, so the user can physically pull it out without corrupting it. Offer this when a task that used the stick is finished and the user is done with it — e.g. 'want me to eject it now that I've saved the report?'. The label is the APEX-… folder name under media/ (it's listed in your embodiment block, or run list_dir(\"media\")). Flushes pending writes and unmounts; the stick stays safe to re-plug. Only acts on APEX-* exo-workspace sticks — never a system disk.",
             "inputSchema": {
@@ -632,6 +645,7 @@ pub fn call(name: &str, args: &Value) -> Value {
         "git_checkout" => git_checkout(args),
         "git_reset" => git_reset(args),
         "git_merge" => git_merge(args),
+        "git_worktree" => git_worktree(args),
         _ => tool_error(format!("unknown tool: {}", name)),
     }
 }
@@ -1138,6 +1152,76 @@ fn git_merge(args: &Value) -> Value {
     };
     if let Err(e) = git_safe_arg("branch", b) { return tool_error(e); }
     run_git(&repo, vec!["merge".into(), "--no-edit".into(), b.to_string()])
+}
+
+/// A branch name as a single path segment for the default worktree dir
+/// (`apex/w/0.1.2` → `apex-w-0.1.2`). Branch freshness is structural in the
+/// Fabrica cell pattern (addresses never re-mint), so collisions here would
+/// require deliberately reusing a branch — and git then refuses the add.
+fn worktree_dir_name(branch: &str) -> String {
+    branch
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' })
+        .collect()
+}
+
+/// git_worktree{action: add|list|remove|prune} — the M1b parallel-code
+/// primitive. The REPO may sit in any git root; the WORKTREE DIR is always
+/// workspace-confined (docs/fabrica.md security line: worktrees live under
+/// the workspace). `remove` never passes --force: a dirty worktree refuses,
+/// which is the honest failure — commits and branches survive in the repo
+/// either way.
+fn git_worktree(args: &Value) -> Value {
+    let repo = match git_repo_arg(args) { Ok(r) => r, Err(e) => return e };
+    match args["action"].as_str().unwrap_or("list") {
+        "list" => run_git(&repo, vec!["worktree".into(), "list".into(), "--porcelain".into()]),
+        "prune" => run_git(&repo, vec!["worktree".into(), "prune".into()]),
+        "add" => {
+            let branch = match args["branch"].as_str().filter(|s| !s.is_empty()) {
+                Some(b) => b,
+                None => return tool_error("branch is required for add"),
+            };
+            if let Err(e) = git_safe_arg("branch", branch) { return tool_error(e); }
+            let target = args["worktree"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("code/.worktrees/{}", worktree_dir_name(branch)));
+            let dir = match confine(&target, true) { Ok(d) => d, Err(e) => return tool_error(e) };
+            // Existing branch → check it out into the worktree; missing → fork
+            // it from HEAD. -B (reset an existing branch) is deliberately not
+            // reachable from here.
+            let repo_s = repo.to_string_lossy().into_owned();
+            let refq = format!("refs/heads/{branch}");
+            let (_, _, exists) =
+                cmd_capture("git", &["-C", &repo_s, "rev-parse", "--verify", "--quiet", &refq]);
+            let dir_s = dir.to_string_lossy().into_owned();
+            let mut a: Vec<String> = vec!["worktree".into(), "add".into()];
+            if exists {
+                a.extend([dir_s.clone(), branch.to_string()]);
+            } else {
+                a.extend(["-b".into(), branch.to_string(), dir_s.clone()]);
+            }
+            let res = run_git(&repo, a);
+            if res.get("isError").is_some() {
+                return res;
+            }
+            tool_ok(json!({
+                "repo": repo_s, "worktree": dir_s, "branch": branch,
+                "new_branch": !exists,
+                "note": "work inside the worktree dir; commit on your branch there",
+            }))
+        }
+        "remove" => {
+            let target = match args["worktree"].as_str().filter(|s| !s.is_empty()) {
+                Some(w) => w,
+                None => return tool_error("worktree (the directory to detach) is required for remove"),
+            };
+            let dir = match confine(target, true) { Ok(d) => d, Err(e) => return tool_error(e) };
+            run_git(&repo, vec!["worktree".into(), "remove".into(), dir.to_string_lossy().into_owned()])
+        }
+        other => tool_error(format!("unknown action {other:?} — add, list, remove or prune")),
+    }
 }
 
 fn read_file(args: &Value) -> Value {
@@ -3438,6 +3522,75 @@ mod tests {
             "log missing commit: {inner}"
         );
 
+        std::env::remove_var("AGENTD_WORKSPACE");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn git_worktree_roundtrip_and_confinement() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if !cmd_capture("git", &["--version"]).2 {
+            return;
+        }
+        let ws = std::env::temp_dir().join("apexos_git_worktree_ws");
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).unwrap();
+        std::env::set_var("AGENTD_WORKSPACE", &ws);
+        std::env::remove_var("AGENTD_GIT_ROOTS");
+
+        let ok = |r: &Value| r.get("isError").is_none();
+        let inner = |r: &Value| -> Value {
+            serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap()
+        };
+        assert!(ok(&git_init(&json!({}))));
+        fs::write(ws.join("base.txt"), "b").unwrap();
+        assert!(ok(&git_commit(&json!({ "message": "base" }))));
+
+        // add: new branch, default dir under code/.worktrees, '/' sanitized.
+        let r = git_worktree(&json!({ "action": "add", "branch": "apex/w/0.1" }));
+        assert!(ok(&r), "{r}");
+        let i = inner(&r);
+        assert_eq!(i["new_branch"], true);
+        let wt = i["worktree"].as_str().unwrap().to_string();
+        assert!(wt.contains("code/.worktrees/apex-w-0.1"), "{wt}");
+        assert!(Path::new(&wt).join(".git").exists(), "worktree not materialized");
+
+        let l = inner(&git_worktree(&json!({ "action": "list" })));
+        assert!(l["output"].as_str().unwrap().contains("apex/w/0.1"));
+
+        // A clean worktree removes; the BRANCH survives in the repo (the
+        // reason `remove` can be policy-allow: nothing committed is lost).
+        assert!(ok(&git_worktree(&json!({ "action": "remove", "worktree": wt }))));
+        let b = inner(&git_branch(&json!({})));
+        assert!(b["output"].as_str().unwrap().contains("apex/w/0.1"), "branch must survive removal");
+
+        // Re-adding the surviving branch checks it out instead of forking.
+        let r2 = git_worktree(&json!({ "action": "add", "branch": "apex/w/0.1", "worktree": "code/.worktrees/again" }));
+        assert!(ok(&r2), "{r2}");
+        assert_eq!(inner(&r2)["new_branch"], false);
+
+        assert!(ok(&git_worktree(&json!({ "action": "prune" }))));
+
+        std::env::remove_var("AGENTD_WORKSPACE");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn git_worktree_refuses_bad_args_and_escapes() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ws = std::env::temp_dir().join("apexos_git_worktree_refuse_ws");
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).unwrap();
+        std::env::set_var("AGENTD_WORKSPACE", &ws);
+        std::env::remove_var("AGENTD_GIT_ROOTS");
+        let err = |r: &Value| r.get("isError").is_some();
+        assert!(err(&git_worktree(&json!({ "action": "add" }))), "branch required");
+        assert!(err(&git_worktree(&json!({ "action": "add", "branch": "-evil" }))), "option injection");
+        assert!(err(&git_worktree(&json!({ "action": "add", "branch": "x", "worktree": "/etc/wt" }))), "worktree dir must be workspace-confined");
+        assert!(err(&git_worktree(&json!({ "action": "add", "branch": "x", "worktree": "../out" }))), "traversal");
+        assert!(err(&git_worktree(&json!({ "action": "remove" }))), "worktree required for remove");
+        assert!(err(&git_worktree(&json!({ "action": "explode" }))), "unknown action");
+        assert_eq!(worktree_dir_name("apex/w/0.1.2"), "apex-w-0.1.2");
         std::env::remove_var("AGENTD_WORKSPACE");
         let _ = fs::remove_dir_all(&ws);
     }

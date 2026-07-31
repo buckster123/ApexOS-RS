@@ -44,9 +44,9 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellForm(pub u8);
 
-// The full form vocabulary ships at M1a so later slices arm bits instead of
-// rewriting — only SPINE is constructed at runtime until M1b (dead_code is
-// the point, not an oversight).
+// The full form vocabulary ships whole so later slices arm bits instead of
+// rewriting — M1b constructs SPINE/GATE/FAN/DIAMOND at runtime; the R-bit
+// forms stay dormant until M1c (dead_code on the impl is the point).
 #[allow(dead_code)]
 impl CellForm {
     pub const SPINE: Self = CellForm(0b000);
@@ -64,6 +64,29 @@ impl CellForm {
 
     /// Hamming weight = armed-guard count = risk order = ship order.
     pub fn weight(self) -> u32 { (self.0 & 0b111).count_ones() }
+
+    /// Arm the J bit (a barrier landed on this cell) — one bit at a time,
+    /// the changing-line rule: every mutation is a single-bit step between
+    /// named forms. There is deliberately NO arm for R until M1c ships
+    /// measures — recurrence without a measure is the classic livelock.
+    pub fn arm_join(self) -> Self { CellForm(self.0 | 0b001) }
+
+    /// Arm the B bit (a >1 fan landed under this cell).
+    pub fn arm_branch(self) -> Self { CellForm(self.0 | 0b100) }
+
+    /// Engineering name for status output — no numerology in logs.
+    pub fn name(self) -> &'static str {
+        match self.0 & 0b111 {
+            0b000 => "spine",
+            0b001 => "gate",
+            0b010 => "spiral",
+            0b011 => "forge",
+            0b100 => "fan",
+            0b101 => "diamond",
+            0b110 => "swarm",
+            _ => "mandala",
+        }
+    }
 
     /// Well-formedness is total: every set bit's guard is configured. At M1a
     /// only weight-0 forms are admitted at runtime, so all three guards may
@@ -119,9 +142,9 @@ impl Addr {
             && other.0.as_bytes()[self.0.len()] == b'.'
     }
 
-    /// The git branch a B-cell child will own (M1b) — named here so the
-    /// address stays the single identity from day one.
-    #[allow(dead_code)]
+    /// The git branch a B-cell child owns — the address stays the single
+    /// identity: cell file, branch, ancestry, all from one string. Addresses
+    /// never re-mint, so cell branches are fresh by construction.
     pub fn branch(&self) -> String {
         format!("apex/w/{}", self.0)
     }
@@ -301,6 +324,18 @@ pub struct CellRecord {
     /// with the root's invariant, so reparenting is safe by construction.
     #[serde(default)]
     pub reparented_to: Option<Addr>,
+    /// Unix seconds at mint — the J-guard timeout's clock (Instant doesn't
+    /// survive restarts; M1a files default to 0 = no clock).
+    #[serde(default)]
+    pub created_epoch: u64,
+    /// The J guard: a GATE/DIAMOND cell's barrier timeout. Present exactly
+    /// when the J bit is armed (guards_armed stays a total check).
+    #[serde(default)]
+    pub barrier_timeout_s: Option<u64>,
+    /// The barrier fired (subtree closed or timeout) and the join was
+    /// released to admission. Recorded so the tree tells the whole story.
+    #[serde(default)]
+    pub barrier_opened: bool,
 }
 
 fn default_open() -> String { "open".into() }
@@ -315,6 +350,15 @@ pub struct MandalaRecord {
     pub invariant: Invariant,
     #[serde(default)]
     pub state: String, // "open" | "parked" | "closed"
+    /// The code regime hook (M1b): a workspace-confined repo path declared
+    /// once at creation. When set, B-cell children receive the worktree
+    /// ritual (their address-named branch) and gates receive the merge
+    /// ritual at open — driver-injected verbatim, like the invariant.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Unix seconds at creation (M1a files default 0 = horizon unknown).
+    #[serde(default)]
+    pub created_epoch: u64,
 }
 
 /// A cell is OPEN while its worker hasn't reached a terminal state — open
@@ -413,6 +457,32 @@ pub fn next_child_ordinal(cells: &HashMap<String, CellRecord>, parent: &Addr) ->
 
 pub fn open_cells(cells: &HashMap<String, CellRecord>) -> usize {
     cells.values().filter(|c| is_open_state(&c.state)).count()
+}
+
+/// The barrier wait-set: addresses of OPEN cells strictly below `addr` — a
+/// gate can only ever wait on its own subtree (descendant-only barriers are
+/// a property of this derivation, not a rule anyone follows). Sorted for
+/// stable directive text.
+pub fn open_descendants(cells: &HashMap<String, CellRecord>, addr: &Addr) -> Vec<Addr> {
+    let mut out: Vec<Addr> = cells
+        .values()
+        .filter(|c| addr.is_ancestor_of(&c.addr) && is_open_state(&c.state))
+        .map(|c| c.addr.clone())
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// All descendants of `addr` (any state), sorted — the gate's full
+/// integration picture at open time.
+pub fn descendants(cells: &HashMap<String, CellRecord>, addr: &Addr) -> Vec<Addr> {
+    let mut out: Vec<Addr> = cells
+        .values()
+        .filter(|c| addr.is_ancestor_of(&c.addr))
+        .map(|c| c.addr.clone())
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 // ── mandalas.json ────────────────────────────────────────────────────────────
@@ -545,6 +615,7 @@ mod tests {
             budget: BudgetVec { depth: 3, cells: 1, steps: 4, deadline_s: 600 },
             invariant_hash: "abc".into(),
             worker: None, state: "open".into(), evidence: None, reparented_to: None,
+            created_epoch: 0, barrier_timeout_s: None, barrier_opened: false,
         };
         for a in ["0", "0.0", "0.0.0", "0.1", "0.1.2"] {
             save_cell(&dir, &mk(a));
@@ -575,10 +646,76 @@ mod tests {
             budget: BudgetVec { depth: 1, cells: 1, steps: 1, deadline_s: 60 },
             invariant_hash: "x".into(), worker: None, state: "open".into(),
             evidence: None, reparented_to: None,
+            created_epoch: 0, barrier_timeout_s: None, barrier_opened: false,
         };
         std::fs::write(dir.join("0.9.json"), serde_json::to_string(&cell).unwrap()).unwrap();
         assert!(load_tree(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forms_arm_one_bit_at_a_time() {
+        // The changing-line rule: each arm is a single-bit step between
+        // named forms; the M1b runtime path is exactly these two arms.
+        assert_eq!(CellForm::SPINE.arm_join(), CellForm::GATE);
+        assert_eq!(CellForm::SPINE.arm_branch(), CellForm::FAN);
+        assert_eq!(CellForm::GATE.arm_branch(), CellForm::DIAMOND);
+        assert_eq!(CellForm::FAN.arm_join(), CellForm::DIAMOND);
+        // Idempotent — re-arming an armed bit is not a mutation.
+        assert_eq!(CellForm::DIAMOND.arm_join().arm_branch(), CellForm::DIAMOND);
+        // Weight tracks the arms (guards owed).
+        assert_eq!(CellForm::SPINE.arm_join().weight(), 1);
+        assert_eq!(CellForm::SPINE.arm_join().arm_branch().weight(), 2);
+        // Names speak engineering.
+        assert_eq!(CellForm::GATE.name(), "gate");
+        assert_eq!(CellForm::FAN.name(), "fan");
+        assert_eq!(CellForm::DIAMOND.name(), "diamond");
+        assert_eq!(CellForm::SPINE.name(), "spine");
+    }
+
+    #[test]
+    fn m1a_cell_json_loads_with_barrier_defaults() {
+        // A cell file written by M1a lacks created_epoch/barrier fields —
+        // serde defaults must carry it (the PersistedWorker discipline).
+        let legacy = r#"{"addr":"0.1","form":0,"task":"t","budget":{"depth":3,"cells":1,"steps":4,"deadline_s":600},"invariant_hash":"abc"}"#;
+        let cell: CellRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(cell.created_epoch, 0);
+        assert!(cell.barrier_timeout_s.is_none());
+        assert!(!cell.barrier_opened);
+        assert_eq!(cell.state, "open");
+        // And an M1a mandalas.json entry lacks repo/created_epoch.
+        let m = r#"{"id":1,"conductor":9,"lattice":"spine","budget":{"depth":6,"cells":64,"steps":32,"deadline_s":86400},"invariant":{"objective":"o","done_when":"d","verify":"v","hash":"h"},"state":"open"}"#;
+        let rec: MandalaRecord = serde_json::from_str(m).unwrap();
+        assert!(rec.repo.is_none());
+        assert_eq!(rec.created_epoch, 0);
+    }
+
+    #[test]
+    fn descendant_sets_are_segment_aware_and_sorted() {
+        let mut cells = HashMap::new();
+        let mk = |addr: &str, state: &str| CellRecord {
+            addr: Addr::parse(addr).unwrap(), form: CellForm::SPINE, task: "t".into(),
+            budget: BudgetVec { depth: 3, cells: 1, steps: 4, deadline_s: 600 },
+            invariant_hash: "h".into(), worker: None, state: state.into(),
+            evidence: None, reparented_to: None,
+            created_epoch: 0, barrier_timeout_s: None, barrier_opened: false,
+        };
+        for (a, s) in [("0", "open"), ("0.1", "open"), ("0.1.0", "done"),
+                       ("0.1.1", "open"), ("0.1.1.0", "failed"), ("0.10", "open")] {
+            cells.insert(a.to_string(), mk(a, s));
+        }
+        let gate = Addr::parse("0.1").unwrap();
+        // "0.10" is NOT under "0.1" (segment-aware); terminal states drop out
+        // of the wait-set (Failed counts as closed — integration data opens
+        // the gate, honesty rides the evidence list).
+        let waiting = open_descendants(&cells, &gate);
+        assert_eq!(waiting.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), vec!["0.1.1"]);
+        let all = descendants(&cells, &gate);
+        assert_eq!(all.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(),
+                   vec!["0.1.0", "0.1.1", "0.1.1.0"]);
+        // An empty subtree waits on nothing — but the GATE rule (worker.rs)
+        // still holds it: zero descendants means the fan hasn't landed yet.
+        assert!(open_descendants(&cells, &Addr::parse("0.10").unwrap()).is_empty());
     }
 
     #[test]
@@ -592,7 +729,7 @@ mod tests {
             id: 1, conductor: 84, lattice: Lattice::Spine,
             budget: BudgetVec { depth: 6, cells: 64, steps: 32, deadline_s: 86_400 },
             invariant: Invariant::new("o", "d", "v"),
-            state: "open".into(),
+            state: "open".into(), repo: None, created_epoch: 0,
         });
         save_mandalas(&m, &path);
         let back = load_mandalas(&path);
