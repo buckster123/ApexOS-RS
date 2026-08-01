@@ -56,6 +56,13 @@ accepted a "done" without reading anything, you didn't integrate — you hoped.
   your turn. Every inline poll is a paid turn — and a conductor spinning
   in yolo is nearly impossible to steer, because the wakeup gap is exactly
   where incoming messages land.
+- **Wakeup turns land in the root thread — tell your observers.** A
+  `schedule_wakeup` fires into session 0 by design, which is a DIFFERENT
+  session from wherever a human may be watching your conducting (first W2
+  smoke: the operator's window went quiet mid-exhibit and read as a bug
+  while everything ran fine in root). When a human is following live, say
+  which session your wakeups will act in — silence in their window is not
+  silence in the run.
 - **Steers are turns, and turns are laps.** A send to a stepping worker
   runs as its own turn: it consumes a lap of the worker's budget, and it
   leaves one surplus driver directive queued behind it. On measured cells
@@ -85,7 +92,10 @@ colleague's hands, not teleporting your own.
   evidence doc mirrors into YOUR `agents/<worker>.json` — read it exactly
   like a local row's. The artifacts it names live on the peer; when you need
   one in hand, have the task `mesh_file_send` its deliverable home as its
-  last act, or pull it yourself afterward.
+  last act, or pull it yourself afterward. An EMPTY artifacts array is not
+  proof of missing work — workers sometimes skip the declaration even when
+  asked (first W2 smoke): check the summary, then the peer workspace, before
+  ruling a row hollow.
 - **The deadline is still the net.** Peer restarts park its workers (its
   law); a dark peer just stops answering polls. Either way your batch
   reports at its deadline with those rows `timed_out` — still revivable:
