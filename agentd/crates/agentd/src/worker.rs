@@ -345,6 +345,18 @@ fn holds_at_mint(barrier: Option<u64>, measure: Option<&str>) -> bool {
     barrier.is_some() && measure.is_none()
 }
 
+/// M2 smoke find — was this cell's barrier passed by OVERRIDE? A pure-J
+/// (GATE/DIAMOND) cell whose worker wakes by send while the cell has never
+/// recorded an open is running its join on the send's context (the human
+/// override / parked-gate revival) — the open must be recorded HERE, because
+/// check_barriers only ever sees barrier-held workers and a revived gate is
+/// not held. Without this, a done gate reads `barrier_opened:false` forever
+/// (the 2026-08-02 smoke's mandala 7). FORGE (R+J) is excluded: it laps from
+/// mint and its J guard governs the joins it runs, not its own admission.
+fn overridden_gate_open(cell: &CellRecord) -> bool {
+    cell.barrier_timeout_s.is_some() && cell.measure.is_none() && !cell.barrier_opened
+}
+
 /// M2 — why a planned cell may not take a `node` (None = it may). Pure; the
 /// text names the law so the conductor learns at plan time. Only plain
 /// ring/leaf cells of repo-less mandalas ship out: the tree, its barriers
@@ -1246,7 +1258,39 @@ pub fn spawn_worker_driver(
                         // this same event; here the state flips and the clocks re-arm.
                         Ok(Event::UserPrompt { session, .. }) if apexos_core::is_worker_session(session.0) => {
                             let woke = wake_on_send(&mut workers, &bus, &models, session.0).await;
-                            if woke { save_workers(&workers, &workers_path); }
+                            if woke {
+                                let wid = workers.iter().find(|(_, w)| w.session == session.0).map(|(id, _)| *id);
+                                if let Some(wid) = wid {
+                                    // M2 smoke find (mandala 7): a gate revived or
+                                    // overridden by send runs its join on the send's
+                                    // context — the TREE must still record the open,
+                                    // or a done gate reads barrier_opened:false
+                                    // forever (check_barriers never sees it).
+                                    if let Some((mid, addr)) = cell_by_worker.get(&wid) {
+                                        if let Some(cell) = trees.get_mut(mid).and_then(|t| t.get_mut(&addr.0)) {
+                                            if overridden_gate_open(cell) {
+                                                cell.barrier_opened = true;
+                                                mandala::save_cell(&worktrees_dir.join(mid.to_string()), cell);
+                                                eprintln!("[mandala] {mid} cell {} barrier recorded open (revived/overridden by send)", addr.0);
+                                            }
+                                        }
+                                    }
+                                    // M2 smoke find: a parked-never-admitted worker
+                                    // revived by send skipped episode_start (episodes
+                                    // open at ADMISSION; revival bypasses the cap and
+                                    // with it the episode) — its run left no trail in
+                                    // Cerebro. Open one on the wake, best-effort.
+                                    if workers[&wid].episode.is_none() {
+                                        let (batch, task) = {
+                                            let w = &workers[&wid];
+                                            (w.batch, w.task.clone())
+                                        };
+                                        let ep = episode_start_worker(&proxy, wid, batch, &task).await;
+                                        if ep.is_some() { workers.get_mut(&wid).unwrap().episode = ep; }
+                                    }
+                                }
+                                save_workers(&workers, &workers_path);
+                            }
                         }
                         // A worker turn errored (Error precedes the synthetic
                         // TurnComplete on the same session): remember, so the
@@ -4664,6 +4708,27 @@ mod tests {
         assert!(remote_cell_veto(true, false, false, false).unwrap().contains("gate"));
         assert!(remote_cell_veto(false, true, false, false).unwrap().contains("lap boundary"));
         assert!(remote_cell_veto(false, false, true, false).unwrap().contains("sub-conduction"));
+    }
+
+    #[test]
+    fn overridden_gate_open_targets_unopened_pure_j_only() {
+        // The M2 smoke find (mandala 7): a revived gate's open must be
+        // recorded at the wake edge — but ONLY for unopened pure-J cells.
+        let mut gate = cell("0.0", "open", None);
+        gate.barrier_timeout_s = Some(900);
+        assert!(overridden_gate_open(&gate), "an unopened pure-J gate woken by send records the open");
+        // Already-opened gates (the auto path, or a prior override) don't re-record.
+        let mut opened = cell("0.1", "open", None);
+        opened.barrier_timeout_s = Some(900);
+        opened.barrier_opened = true;
+        assert!(!overridden_gate_open(&opened));
+        // FORGE (R+J) laps from mint — its guard governs its own joins.
+        let mut forge = cell("0.2", "open", None);
+        forge.barrier_timeout_s = Some(900);
+        forge.measure = Some("grep -c TODO".into());
+        assert!(!overridden_gate_open(&forge));
+        // Plain cells have no barrier to record.
+        assert!(!overridden_gate_open(&cell("0.3", "open", None)));
     }
 
     #[test]

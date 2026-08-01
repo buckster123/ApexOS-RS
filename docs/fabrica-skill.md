@@ -131,6 +131,26 @@ colleague's hands, not teleporting your own.
   Sub-conductors still cannot fan outward from a peer; cross-node depth
   stays 1 by construction (a hosted worker has no cell binding there, so
   its fan refuses structurally).
+  Field-ruled craft (the 2026-08-02 smoke, four exhibits green):
+  - *Watch with elapsed time, not poll-spam* — a remote mirror updates on
+    the poll cadence (~30s); asking harder returns the same stale state.
+    Parked bodies cross in about one cycle; real waits between looks are
+    what surface transitions.
+  - *A dark peer fails your ring in microseconds* — the beacon
+    short-circuits at fanout, faster than a live peer even queues; the
+    failed cells' mirrors name the cause and your gate opens over them.
+    Failure is integration data: the join documents it and the conductor
+    decides (refan when the peer recovers, or refan locally) — never treat
+    a dark ring as a stuck ring.
+  - *Before narrating a restart, check the boot clock* — wake-amnesia and
+    daemon-cut amnesia feel identical from inside; `plugin_up` markers /
+    health `booted_at` discriminate (the `uptime` tool measures the OS,
+    not the daemon). Corollary: wakeups currently fire into session 0 —
+    from there you can watch and revive, but fanning and closing need the
+    conducting session.
+  - *Size barrier_timeout_s for the integration, not the children* — gate
+    settle time is dominated by the join's own reading-and-writing
+    (~20-30s even over a trivial or failed ring), not the wait.
 
 ## Conducting a mandala (the M tier, growing)
 
