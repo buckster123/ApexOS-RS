@@ -537,12 +537,22 @@ fn board_worker_approval(batch: u64, worker: u64, awaiting: bool) {
     });
 }
 
-/// The (main-session) turn finished: drop the Active card + any stale approvals,
-/// and drop a "done" card into Recent.
+/// The (main-session) turn finished: drop the Active card + THIS turn's stale
+/// per-call asks, and drop a "done" card into Recent. The sweep is SURGICAL
+/// (M1d fix of the M1b field finding): batch approval digests (`batchappr…`)
+/// belong to WORKERS whose turns are still suspended on a card — a main-
+/// session turn completing says nothing about them, and the old whole-lane
+/// drain made live approvals visually absent (a Blocked worker read as dead).
 fn board_turn_done() {
     board_with(|bm| {
         board_remove(&bm.active, "turn");
-        while bm.blocked.row_count() > 0 { bm.blocked.remove(bm.blocked.row_count() - 1); }
+        let mut i = 0;
+        while i < bm.blocked.row_count() {
+            let keep = bm.blocked.row_data(i)
+                .map(|c| c.id.starts_with("batchappr"))
+                .unwrap_or(false);
+            if keep { i += 1; } else { bm.blocked.remove(i); }
+        }
     });
     board_push_recent("Turn complete".into(), String::new(), "DONE", board_color(148, 163, 184));
 }

@@ -189,6 +189,24 @@ sustained research. What it adds over a batch is an **axis** and a **tree**.
   cancel); a long-lived `B:111111` is a gate honestly waiting on a slow
   ring; `…0…` in the horizon bit means work outliving its batch deadline —
   the report already fired, decide who integrates the stragglers.
+- **The torus turns under you (M1d): epochs, fingerprints, orbits.** Every
+  ~10 minutes an open mandala rolls an epoch: the census drains into the
+  record, and a fingerprint (axis + evidence + census) is taken. Two
+  identical fingerprints in a row with open cells = an ORBIT — the run is
+  circling, producing nothing new — and a small council convenes over the
+  census on its own; its one-line verdict lands in
+  `mandala_status.orbit_synthesis`. When you see `orbits > 0`: stop
+  steering harder and READ the synthesis — the answer is which cells to
+  cancel or integrate around, never a subtree restart. Nothing auto-parks
+  on an orbit (deliberate: brakes, not walls) — acting on the verdict is
+  yours.
+- **Some fans refuse on principle — that's the table, not a bug.** A
+  measured cell conducting a measured child refuses (R-over-R: two open
+  lap-loops stacked have no joint stop argument — restructure so one level
+  owns the loop). A wide fan under an already-wide ancestor may refuse on
+  the breadth product (the frontier you're promising exceeds the cell
+  budget — integrate something first, or fan narrower). The refusal text
+  names the law; work with it, not around it.
 - **Close what you finish** (`mandala_close`): a settled mandala left open
   is the canonical rot — completion is unstable. Goal conductors get
   closure automatically when the goal ends; from a chat session, close it

@@ -39,10 +39,13 @@ restart mid-batch reconciled (`1 poll target resumed`), deadline honesty
 (1 done · 1 timed_out), cross-node straggler revive-by-send lands 13s,
 post-report poll mirrors it home — the ownership ruling held everywhere:
 the peer owns everything stateful, the conductor owns batch bookkeeping only
-(assignments out, reports home, never state). Next: M1d (64-table, epochs,
-census→Cerebro, board tree view), then M2 cross-node rings on the W2 wire —
-whose smoke owns the two paths not live-proven yet: dark-peer fail-fast and
-parked-vs-idle revive (same wake edge, code-covered).*
+(assignments out, reports home, never state). M1d built 2026-08-01 same
+session: the 64-table gates admission, torus epochs + orbit→council, census
+→Cerebro, the two board-truth fixes (never-bound WORKERS lane, surgical
+approvals sweep); the tree-view WINDOW is the app-track item below. Next:
+M1d smoke (needs an epoch-length run — bundle with the M2 smoke), then M2
+cross-node rings on the W2 wire — whose smoke owns the paths not
+live-proven yet: dark-peer fail-fast, parked-vs-idle revive, orbit-in-anger.*
 
 **W2 smoke field note (2026-08-01, APEX's find):** a remote worker did the
 work but skipped `artifacts:[…]` in its own `worker_report{done}` even though
@@ -94,16 +97,28 @@ not missing work (taught in `docs/fabrica-skill.md` remote section).
   `docs/model-welfare.md` §5/§6; the deliberation itself is APEX+colony work
   (route via propose_evolution etiquette, not a docs PR).
 
-- **[UI · MEDIUM] Approvals lane must rebuild from supervisor state, not
-  only live events.** `board_turn_done` (ui-slint `main.rs`) clears the
-  entire blocked lane on a main-session turn completion, including per-batch
-  approval digest cards whose approvals are still pending — the card
-  vanishes while the grant is still needed (recon-predicted, field-confirmed
-  2026-08-01: worker 18's `run_command` card invisible while the worker sat
-  suspended). Fix direction: approvals render from a queryable pending set
-  (supervisor state or a replayed snapshot on connect), so a cleared lane
-  self-heals without waiting for the next `WorkerStateChanged`. Until then
-  the worker-side heuristic is in `docs/gotchas.md` + the skill doc.
+- **[UI · MEDIUM] Approvals lane: the queryable-pending-set residual.** The
+  reported symptom is FIXED (M1d): `board_turn_done`'s sweep is surgical —
+  `batchappr…` digest cards survive main-session turn completions, so a
+  suspended worker's approval card no longer vanishes. Residual (still
+  worth doing): approvals render only from live events, so a UI
+  reconnect/restart starts with an empty lane until the next
+  `WorkerStateChanged` re-upserts — the honest fix is a queryable pending
+  set (`SupervisorCmd::QueryApprovals` + `GET /api/approvals/pending`, the
+  supervisor's `pending_approvals` map is the truth) seeded on connect.
+
+- **[UI · MEDIUM] Fabrica-app: the mandala tree-view window** (M1d scope
+  cut — the daemon core shipped; the view is an app-track slice). The data
+  is ready: `mandala_status` renders the whole tree + census + epoch/orbit
+  reading, and the Occipital tool-output-interception pattern ships it with
+  zero backend change. Registration traps (recon 2026-08-01, receipts in
+  cerebro): new `AppKind` ordinal 21 must land in types.slint + the
+  `APP_TABLE`↔`UI_APPS` locked mirror (+ its count lock-test) + the
+  appwindow.slint `for w` BINDING block (the silently-skippable step — the
+  W1a WORKERS lane shipped unbound exactly there, fixed M1d) + the start
+  menu's hard-coded row-count height. Flat-list-with-depth-indent is the
+  house tree idiom (occipital reader blocks); kiosk scroll = the
+  work_board ScrollView pattern.
 
 ---
 

@@ -248,6 +248,9 @@ async fn main() -> anyhow::Result<()> {
     let council_next_id   = Arc::new(AtomicU64::new(1));
     let (council_tx, council_rx) = mpsc::channel::<(SessionId, ActionId, serde_json::Value)>(8);
     let council_start_tx  = council_tx.clone();
+    // M1d: the worker driver convenes orbit councils (sentinel session — no
+    // ToolResult); cloned HERE because council_tx MOVES into the supervisor.
+    let worker_council_tx = council_tx.clone();
 
     // Autonomous goal driver (Phase 2a, docs/ideas/goal-driver-design.md): goal_create
     // forwards here; the driver owns its goal map and drives each via the bus.
@@ -688,6 +691,7 @@ async fn main() -> anyhow::Result<()> {
             slots_gauge: Arc::clone(&worker_slots_gauge),
             queued_gauge: Arc::clone(&worker_queued_gauge),
         },
+        worker_council_tx,
     );
 
     // Council handler — wire supervisor channel and spawn handler.
