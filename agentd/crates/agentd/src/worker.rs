@@ -64,6 +64,21 @@
 //! explicit `mandala_close` for interactive conductors) → root marked done,
 //! mandala closed — `open_cells` stays honest.
 //!
+//! M2 — cross-node rings: a mandala ring cell may carry `node` and run its
+//! execution BODY on a mesh peer while the CELL — geometry, budget, barrier
+//! membership, closure — never leaves this node. The remote cell is a W2
+//! mirror row bound to a tree record (same worker-id counter, so binding is
+//! by position like every cell); the fully-composed cell directive (axis
+//! verbatim) crosses as the task text, the budget's step ceiling crosses as
+//! the `steps` assignment field, and the evidence MIRROR closes the loop:
+//! `sync_remote_cells` mirrors terminal wire states into the cell files so
+//! a gate over a remote ring opens the tick its last mirror lands. Only
+//! plain ring cells of repo-less mandalas ship out (`remote_cell_veto`):
+//! gates are bindu machinery, measures need the local lap boundary, vouchers
+//! need the tree, and repos don't teleport. The peer stays 100%
+//! mandala-free — it hosts ordinary depth-1 workers and cannot tell a ring
+//! cell from a plain task.
+//!
 //! Deliberate departure from goal.rs: the worker map is a PLAIN `HashMap`
 //! owned by the driver task — no `Arc<Mutex<…>>`. Every access is serialized
 //! through the one select loop (true for goals too — their Mutex is never
@@ -330,6 +345,45 @@ fn holds_at_mint(barrier: Option<u64>, measure: Option<&str>) -> bool {
     barrier.is_some() && measure.is_none()
 }
 
+/// M2 — why a planned cell may not take a `node` (None = it may). Pure; the
+/// text names the law so the conductor learns at plan time. Only plain
+/// ring/leaf cells of repo-less mandalas ship out: the tree, its barriers
+/// and its measures are bindu machinery.
+fn remote_cell_veto(
+    is_gate: bool,
+    has_measure: bool,
+    has_voucher: bool,
+    repo_mandala: bool,
+) -> Option<&'static str> {
+    if repo_mandala {
+        // Mandala-level: worktrees/repos don't teleport — a code cell works
+        // a repo on THIS node's disk; the peer has no such path.
+        Some("code mandalas keep every cell local — the repo lives on this node's disk and \
+              worktrees don't teleport; run code rings here, or open a repo-less mandala for \
+              remote work")
+    } else if is_gate {
+        // Barriers are conductor machinery (barrier_held, open_descendants,
+        // check_barriers all read the local tree) — the bindu on the spine.
+        Some("the join/gate stays on this node — barriers are conductor machinery (the bindu \
+              on the spine); give node to ring cells, never the gate")
+    } else if has_measure {
+        // The measure law fires at the lap boundary in advance() — the lap
+        // boundary lives where turns complete, and remote turns complete on
+        // the peer. Relaying laps by poll would make the wire carry state.
+        Some("a measured (R) cell cannot go remote — the lap boundary lives where turns \
+              complete, and the wire never carries state; measure on this node or drop the \
+              measure")
+    } else if has_voucher {
+        // Structurally impossible peer-side anyway (a hosted worker has no
+        // cell binding, so its task_fanout refuses) — refuse HERE so the
+        // conductor learns before minting, not from a stuck sub-conductor.
+        Some("a vouchered cell cannot go remote — sub-conduction needs the tree, and the \
+              tree stays on this node")
+    } else {
+        None
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct PersistedBatch {
     batch:         u64,
@@ -371,7 +425,10 @@ pub fn task_fanout_spec() -> ToolSpec {
                       and it runs on that node's own worker tier — its cap, its policy \
                       (approvals land THERE, yolo never crosses), its evidence; the small \
                       evidence doc mirrors back here when it settles, artifacts stay on the \
-                      peer. mesh_capabilities shows each peer's worker load.".into(),
+                      peer. Mandala rings ship out the same way (M2): the ring cells' BODIES \
+                      run on the peer while the tree, the gate and its barrier stay here — \
+                      the gate reads the evidence mirrors when the ring settles. \
+                      mesh_capabilities shows each peer's worker load.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -385,7 +442,7 @@ pub fn task_fanout_spec() -> ToolSpec {
                               "properties": {
                                   "prompt": { "type": "string", "description": "The task." },
                                   "model":  { "type": "string", "description": "Model for this one worker (wins over the batch model)." },
-                                  "node":   { "type": "string", "description": "Run this task on a MESH PEER's worker tier (wins over the batch node). Plain tasks only — not with mandala/inline. The peer's cap, policy and evidence apply; its report mirrors back here." },
+                                  "node":   { "type": "string", "description": "Run this task on a MESH PEER's worker tier (wins over the batch node). Plain tasks and mandala RING cells (M2: the cell stays in this tree, its execution body runs there) — never the join/gate, a measured or vouchered cell, or any cell of a code mandala; not with inline. The peer's cap, policy and evidence apply; its report mirrors back here." },
                                   "measure": { "type": "string", "description": "Mandala only — arms the R bit (SPIRAL; with a barrier, FORGE): a command computing a non-negative integer (failing tests, TODO count, |diff|…) the cell runs each lap and reports; it must strictly decrease or the ring breaks (K-stall). A progressing R-cell at its step ceiling RENEWS by spending the parent cell's steps." },
                                   "voucher": { "type": "boolean", "description": "Mandala only — grants SUB-CONDUCTION: this cell's worker may task_fanout into its own subtree, funded by its own budget vector. Batch reports are delivered into its session." }
                               },
@@ -398,7 +455,7 @@ pub fn task_fanout_spec() -> ToolSpec {
                 "model": { "type": "string",
                           "description": "Model for every worker in the batch (per-task model overrides this). Omit for the node default. The colony-model-mix lever: think on the big model, hammer on the small." },
                 "node": { "type": "string",
-                          "description": "Host every task in this batch on a MESH PEER's worker tier (per-task node overrides this). Omit for local workers. Not with mandala (cross-node rings are M2) or inline mode." },
+                          "description": "Host every task in this batch on a MESH PEER's worker tier (per-task node overrides this). Omit for local workers. Under a mandala this ships the RING out while the tree, the gate and its barrier stay here — the cross-node ring (M2); measured/vouchered cells and code mandalas refuse. Not with inline mode." },
                 "yolo": { "type": "string", "enum": ["inherit"],
                           "description": "inherit: workers auto-approve their OWN ask tools IF AND ONLY IF this calling session is itself yolo-armed (a yolo:true goal) — never more than the parent has. Default off." },
                 "batch_deadline_s": { "type": "integer",
@@ -515,7 +572,7 @@ pub fn mandala_create_spec() -> ToolSpec {
                 "verify":     { "type": "string", "description": "THE verify command (e.g. 'cargo test -p x') — every cell at every depth checks against this exact command, run through normal policied tools." },
                 "lattice":    { "type": "string", "enum": ["spine", "quad", "fan", "spiral", "funnel"],
                                 "description": "The geometry preset (default spine — bisection, ring width 2). quad = 4-way rings (balanced decomposition), fan = 8-wide (parallel sweeps), spiral = fibonacci growth, funnel = 9→4→1 synthesis. Ring widths are LIVE: a wide fan must fit its ring." },
-                "repo":       { "type": "string", "description": "Code regime: a git repo directory inside your workspace (e.g. code/myproject). When set, wide-fan cells each get their own address-named branch + git worktree (collision-free parallel edits) and gates get the merge ritual — all injected mechanically." },
+                "repo":       { "type": "string", "description": "Code regime: a git repo directory inside your workspace (e.g. code/myproject). When set, wide-fan cells each get their own address-named branch + git worktree (collision-free parallel edits) and gates get the merge ritual — all injected mechanically. Code mandalas keep every cell LOCAL (the repo lives on this node's disk — no node tasks)." },
                 "depth":      { "type": "integer", "description": "Depth budget (default 6, max 6)." },
                 "steps":      { "type": "integer", "description": "Root step budget, contracts 0.5× per level (default 32)." },
                 "deadline_s": { "type": "integer", "description": "Horizon for the whole mandala in seconds (default 86400)." }
@@ -1070,7 +1127,7 @@ pub fn spawn_worker_driver(
                             create_mandala(&mut mandalas, &mut trees, &bus, &worktrees_dir, &workspace, &mut next_mandala_id, session, call_id, args).await;
                             mandala::save_mandalas(&mandalas, &mandalas_path);
                         }
-                        "mandala_status" => handle_mandala_status(&mandalas, &trees, &censuses, &bus, session, call_id).await,
+                        "mandala_status" => handle_mandala_status(&mandalas, &trees, &remotes, &censuses, &bus, session, call_id).await,
                         "worker_report" => record_report(&mut workers, &bus, &workspace, session, call_id, args).await,
                         "worker_cancel" => {
                             if cancel_request(&mut workers, &mut remotes, &bus, &proxy, &agents_dir, &yolo_set, &models, &mesh, session, call_id, args).await {
@@ -1099,6 +1156,13 @@ pub fn spawn_worker_driver(
                         req,
                     ).await;
                     if saved {
+                        // M2: remote terminals (a report-home push) mirror into
+                        // their cells BEFORE barriers read them — a gate over a
+                        // remote ring opens the tick its last mirror lands.
+                        sync_remote_cells(&mut trees, &cell_by_worker, &remotes, &worktrees_dir);
+                        if check_barriers(&mut workers, &mut trees, &cell_by_worker, &mandalas, &bus, &worktrees_dir).await {
+                            admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
+                        }
                         save_workers(&workers, &workers_path);
                         save_batches(&batches, &batches_path);
                         remote::save_remotes(&remotes, &mesh.remotes_path);
@@ -1113,6 +1177,14 @@ pub fn spawn_worker_driver(
                     match out {
                         MeshOutcome::Assign { batch, node, wids, result } => {
                             handle_assign_outcome(&mut remotes, &mut polls, &bus, &agents_dir, batch, &node, wids, result).await;
+                            // M2: a refused/dead assign fails its rows terminal —
+                            // the cells mirror the honest failure and a gate over
+                            // them can open on integration data (dark-peer path).
+                            sync_remote_cells(&mut trees, &cell_by_worker, &remotes, &worktrees_dir);
+                            if check_barriers(&mut workers, &mut trees, &cell_by_worker, &mandalas, &bus, &worktrees_dir).await {
+                                admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
+                                save_workers(&workers, &workers_path);
+                            }
                             let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
                             if chg { save_batches(&batches, &batches_path); }
                             spawn_report_home(&mesh, reports).await;
@@ -1121,6 +1193,13 @@ pub fn spawn_worker_driver(
                         MeshOutcome::Poll { batch, node, result } => {
                             let changed = handle_poll_outcome(&mut remotes, &mut polls, &bus, &agents_dir, batch, &node, result).await;
                             if changed {
+                                // M2: poll-observed remote terminals close their
+                                // cells before barriers read the tree.
+                                sync_remote_cells(&mut trees, &cell_by_worker, &remotes, &worktrees_dir);
+                                if check_barriers(&mut workers, &mut trees, &cell_by_worker, &mandalas, &bus, &worktrees_dir).await {
+                                    admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
+                                    save_workers(&workers, &workers_path);
+                                }
                                 let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
                                 if chg { save_batches(&batches, &batches_path); }
                                 spawn_report_home(&mesh, reports).await;
@@ -1322,7 +1401,7 @@ pub fn spawn_worker_driver(
                     // M1d: torus epochs — census/fingerprint rollovers, the
                     // orbit detector, the reading to Cerebro. Settled trees
                     // rest; an orbit convenes a council, never a restart.
-                    if roll_due_epochs(&mut mandalas, &trees, &mut censuses, &mut next_epoch,
+                    if roll_due_epochs(&mut mandalas, &trees, &remotes, &mut censuses, &mut next_epoch,
                                        &proxy, &council_tx) {
                         mandala::save_mandalas(&mandalas, &mandalas_path);
                     }
@@ -1738,7 +1817,7 @@ async fn handle_mesh_req(
                 let _ = reply.send(serde_json::json!({ "ok": false, "error": format!("tasks must be 1..={MAX_BATCH_TASKS}") }));
                 return false;
             }
-            let mut tasks: Vec<(String, Option<String>)> = Vec::with_capacity(items.len());
+            let mut tasks: Vec<(String, Option<String>, u32)> = Vec::with_capacity(items.len());
             for it in &items {
                 let prompt = it["prompt"].as_str().map(str::trim).unwrap_or("");
                 if prompt.is_empty() {
@@ -1746,7 +1825,11 @@ async fn handle_mesh_req(
                     return false;
                 }
                 let model = it["model"].as_str().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 64).map(str::to_owned);
-                tasks.push((remote::provenance_prefix(&from, origin_batch, prompt), model));
+                // M2: an assignment may carry a step ceiling (a remote CELL's
+                // budget — the contract crosses as assignment data). Absent =
+                // 0, the env-global sentinel: exactly a W2 plain task.
+                let ceiling = remote::hosted_step_ceiling(it["steps"].as_u64());
+                tasks.push((remote::provenance_prefix(&from, origin_batch, prompt), model, ceiling));
             }
             let deadline_s = body["deadline_s"].as_u64().map(|n| n.clamp(60, 86_400)).unwrap_or(DEFAULT_BATCH_DEADLINE_S);
             let batch = *next_batch_id; *next_batch_id += 1;
@@ -1757,20 +1840,11 @@ async fn handle_mesh_req(
             });
             let mut minted_rows: Vec<serde_json::Value> = Vec::with_capacity(tasks.len());
             let mut minted_ids: Vec<u64> = Vec::with_capacity(tasks.len());
-            for (i, (task, model)) in tasks.into_iter().enumerate() {
-                let wid = *next_worker_id;  *next_worker_id  += 1;
-                let sid = *next_worker_sid; *next_worker_sid += 1;
+            for (i, (task, model, ceiling)) in tasks.into_iter().enumerate() {
                 // Ordinary local workers: this node's cap/FIFO/policy/review
                 // all apply. yolo is ALWAYS false — it never crosses the wire.
-                workers.insert(wid, Worker {
-                    batch, parent: parent.0, session: sid,
-                    task, state: WorkerState::Queued, step: 1, summary: None,
-                    artifacts: Vec::new(), episode: None,
-                    started: Instant::now(), pending: None, turn_inflight: false,
-                    yolo: false, model, errored: false, step_ceiling: 0,
-                    barrier_held: false, next_review: None,
-                    last_review_key: None, review_attempt: 0,
-                });
+                let (wid, sid) = mint_local_worker(workers, next_worker_id, next_worker_sid,
+                    batch, parent.0, task, model, false, false, ceiling);
                 minted_rows.push(serde_json::json!({ "index": i, "worker": wid, "session": sid }));
                 minted_ids.push(wid);
             }
@@ -1881,6 +1955,63 @@ fn wire_rows_for_batch(workers: &HashMap<u64, Worker>, batch: u64, agents_dir: &
     rows.into_iter().map(|(_, r)| r).collect()
 }
 
+/// Mint one local worker (Queued; a held gate enters the review schedule at
+/// a golden offset — its barrier timeout is a review clock). Returns
+/// (worker id, session id). The one Worker literal both fan paths share.
+#[allow(clippy::too_many_arguments)]
+fn mint_local_worker(
+    workers: &mut HashMap<u64, Worker>,
+    next_worker_id: &mut u64, next_worker_sid: &mut u64,
+    batch: u64, parent: u64,
+    task: String, model: Option<String>, yolo: bool, held: bool, ceiling: u32,
+) -> (u64, u64) {
+    let wid = *next_worker_id;  *next_worker_id  += 1;
+    let sid = *next_worker_sid; *next_worker_sid += 1;
+    workers.insert(wid, Worker {
+        batch, parent, session: sid,
+        task, state: WorkerState::Queued, step: 1, summary: None,
+        artifacts: Vec::new(), episode: None,
+        started: Instant::now(), pending: None, turn_inflight: false,
+        yolo, model, errored: false, step_ceiling: ceiling,
+        barrier_held: held,
+        // A held gate is reviewed (its timeout is a review clock); plain
+        // Queued workers are inert until admission schedules them.
+        next_review: if held {
+            Some(Instant::now() + review::golden_offset(wid, REVIEW_PERIOD))
+        } else { None },
+        last_review_key: None, review_attempt: 0,
+    });
+    (wid, sid)
+}
+
+/// Mint one remote mirror row (W2/M2) and join its per-node assign group in
+/// request order (the accept joins peer ids back by index). Spends the SAME
+/// worker-id counter as local workers — batch rows, evidence mirrors and
+/// mandala cell bindings stay uniform. `steps` is the M2 assignment field
+/// (a cell's budget crossing the wire); plain W2 tasks pass None.
+#[allow(clippy::too_many_arguments)]
+fn mint_remote_row(
+    remotes: &mut HashMap<u64, RemoteWorker>,
+    remote_groups: &mut Vec<(String, Vec<u64>, Vec<remote::RemoteTaskItem>)>,
+    next_worker_id: &mut u64,
+    batch: u64, parent: u64,
+    node: String, prompt: String, model: Option<String>, steps: Option<u16>,
+) -> u64 {
+    let wid = *next_worker_id; *next_worker_id += 1;
+    remotes.insert(wid, RemoteWorker {
+        batch, parent, node: node.clone(), task: prompt.clone(),
+        model: model.clone(), remote_batch: None, remote_worker: None,
+        remote_session: None, state_raw: remote::STATE_ASSIGNING.into(),
+        summary: None, evidence: None, assigned_epoch: epoch_now(),
+    });
+    let item = remote::RemoteTaskItem { prompt, model, steps };
+    match remote_groups.iter_mut().find(|(n, _, _)| n == &node) {
+        Some((_, wids, items)) => { wids.push(wid); items.push(item); }
+        None => remote_groups.push((node, vec![wid], vec![item])),
+    }
+    wid
+}
+
 /// task_fanout: mint the batch, ack the conductor with the ids, then admit up
 /// to the cap. Refused from a worker session — workers are depth-1 (vouchers
 /// are the M-tier mechanism; there is no partial fan below the conductor).
@@ -1899,7 +2030,7 @@ async fn fanout(
     next_worker_id: &mut u64, next_batch_id: &mut u64, next_worker_sid: &mut u64,
     mesh: &MeshDeps, mesh_out_tx: &mpsc::Sender<MeshOutcome>,
     remotes: &mut HashMap<u64, RemoteWorker>,
-) -> Option<(Option<CellsCtx>, Vec<(u64, u64)>)> {
+) -> Option<(Option<CellsCtx>, Vec<u64>)> {
     let refuse = |msg: String| Event::ToolResult {
         session: call_session, call: call_id,
         output: ToolOutput { ok: false, content: serde_json::json!(msg) },
@@ -1947,10 +2078,12 @@ async fn fanout(
         }
         Some(addr.clone())
     } else { None };
-    // W2 remote validation, refused EARLY (nothing minted): `node` tasks are
-    // plain workers on a peer — no mandala cells (cross-node rings are M2),
-    // no inline holds (remote latency has no place in a 240s block), and the
-    // kill switch + registry gate the whole fan before any row exists.
+    // W2 remote validation, refused EARLY (nothing minted): the kill switch,
+    // the inline bound and the registry gate the whole fan before any row
+    // exists. M2 lifted the old node+mandala refusal — cross-node RINGS are
+    // legal now; which CELLS may carry a node is vetted per-plan inside
+    // prepare_mandala_cells (`remote_cell_veto`: never the gate, a measured
+    // or vouchered cell, or any cell of a code mandala).
     let remote_nodes: Vec<String> = {
         let mut ns: Vec<String> = tasks.iter().filter_map(|t| t.node.clone()).collect();
         ns.sort(); ns.dedup(); ns
@@ -1958,10 +2091,6 @@ async fn fanout(
     if !remote_nodes.is_empty() {
         if !mesh.enabled {
             bus.emit(refuse("mesh workers are disabled on this node (AGENTD_MESH_WORKERS=0)".into())).await;
-            return None;
-        }
-        if args["mandala"].as_u64().is_some() {
-            bus.emit(refuse("node + mandala don't compose yet — cross-node rings are M2; mandala cells stay on this node".into())).await;
             return None;
         }
         if inline {
@@ -2001,66 +2130,55 @@ async fn fanout(
         inline_ack: if inline { Some((call_session.0, call_id.0)) } else { None },
         origin: None, // this node conducts; hosted batches mint in handle_mesh_req
     });
-    // W2: split the plain fan into local and remote tasks (a mandala fan has
-    // no remotes — refused above). Remote tasks become mirror rows spending
-    // the SAME worker-id counter, grouped per node for one assign POST each.
+    // W2: split the plain fan into local and remote tasks. Remote tasks
+    // become mirror rows spending the SAME worker-id counter, grouped per
+    // node for one assign POST each. Mandala fans mint from plans below —
+    // in PLAN ORDER, local or remote per plan (M2), so `cell_wids` lines up
+    // with ctx.plans and cells bind by position whatever bodies them.
     let (local_tasks, remote_tasks): (Vec<TaskSpecItem>, Vec<TaskSpecItem>) = match &ctx {
         Some(_) => (Vec::new(), Vec::new()), // mandala path mints from plans below
         None => tasks.into_iter().partition(|t| t.node.is_none()),
     };
-    // One mint list for both paths: (task text, model pin, barrier-held,
-    // step ceiling). The hold rule (M1c refinement): pure-J cells hold at
-    // mint; an R+J cell (FORGE) starts lapping immediately. Cell workers'
-    // ceilings come from their budget (the contract, finally enforced).
-    let mint_list: Vec<(String, Option<String>, bool, u32)> = match &ctx {
-        Some(c) => c.plans.iter().map(|p| (
-            p.prompt.clone(), p.model.clone(),
-            holds_at_mint(p.barrier_timeout_s, p.measure.as_deref()),
-            u32::from(p.budget.steps).clamp(1, 100),
-        )).collect(),
-        None => local_tasks.into_iter().map(|t| (t.prompt, t.model, false, 0)).collect(),
-    };
-    let mut minted: Vec<(u64, u64)> = Vec::with_capacity(mint_list.len()); // (worker_id, session)
-    for (task, model, held, ceiling) in mint_list {
-        let wid = *next_worker_id;  *next_worker_id  += 1;
-        let sid = *next_worker_sid; *next_worker_sid += 1;
-        workers.insert(wid, Worker {
-            batch, parent: call_session.0, session: sid,
-            task, state: WorkerState::Queued, step: 1, summary: None,
-            artifacts: Vec::new(), episode: None,
-            started: Instant::now(), pending: None, turn_inflight: false,
-            yolo, model, errored: false, step_ceiling: ceiling,
-            barrier_held: held,
-            // A held gate is reviewed (its timeout is a review clock); plain
-            // Queued workers are inert until admission schedules them.
-            next_review: if held {
-                Some(Instant::now() + review::golden_offset(wid, REVIEW_PERIOD))
-            } else { None },
-            last_review_key: None, review_attempt: 0,
-        });
-        minted.push((wid, sid));
-    }
-
-    // W2: mint the remote mirror rows — grouped per node, request order kept
-    // (the accept joins peer ids back by index). yolo NEVER rides a remote
-    // row (the peer's policy is sovereign); the model pin does.
+    // The hold rule (M1c refinement): pure-J cells hold at mint; an R+J cell
+    // (FORGE) starts lapping immediately. Cell workers' ceilings come from
+    // their budget (the contract, finally enforced) — and cross the wire as
+    // the M2 `steps` assignment field when the body is remote. yolo NEVER
+    // rides a remote row (the peer's policy is sovereign); model pins do.
+    let mut minted: Vec<(u64, u64)> = Vec::new();      // local (worker_id, session)
+    let mut cell_wids: Vec<u64> = Vec::new();          // plan-order wids (mandala fans)
     let mut remote_groups: Vec<(String, Vec<u64>, Vec<remote::RemoteTaskItem>)> = Vec::new();
-    for t in &remote_tasks {
-        let node = t.node.clone().unwrap_or_default();
-        let wid = *next_worker_id; *next_worker_id += 1;
-        remotes.insert(wid, RemoteWorker {
-            batch, parent: call_session.0, node: node.clone(), task: t.prompt.clone(),
-            model: t.model.clone(), remote_batch: None, remote_worker: None,
-            remote_session: None, state_raw: remote::STATE_ASSIGNING.into(),
-            summary: None, evidence: None, assigned_epoch: epoch_now(),
-        });
-        match remote_groups.iter_mut().find(|(n, _, _)| n == &node) {
-            Some((_, wids, items)) => {
-                wids.push(wid);
-                items.push(remote::RemoteTaskItem { prompt: t.prompt.clone(), model: t.model.clone() });
+    match &ctx {
+        Some(c) => {
+            for p in &c.plans {
+                match &p.node {
+                    Some(node) => {
+                        let wid = mint_remote_row(remotes, &mut remote_groups, next_worker_id,
+                            batch, call_session.0, node.clone(), p.prompt.clone(),
+                            p.model.clone(), Some(p.budget.steps));
+                        cell_wids.push(wid);
+                    }
+                    None => {
+                        let held = holds_at_mint(p.barrier_timeout_s, p.measure.as_deref());
+                        let ceiling = u32::from(p.budget.steps).clamp(1, 100);
+                        let (wid, sid) = mint_local_worker(workers, next_worker_id, next_worker_sid,
+                            batch, call_session.0, p.prompt.clone(), p.model.clone(), yolo, held, ceiling);
+                        minted.push((wid, sid));
+                        cell_wids.push(wid);
+                    }
+                }
             }
-            None => remote_groups.push((node, vec![wid],
-                vec![remote::RemoteTaskItem { prompt: t.prompt.clone(), model: t.model.clone() }])),
+        }
+        None => {
+            for t in local_tasks {
+                let (wid, sid) = mint_local_worker(workers, next_worker_id, next_worker_sid,
+                    batch, call_session.0, t.prompt, t.model, yolo, false, 0);
+                minted.push((wid, sid));
+            }
+            for t in &remote_tasks {
+                mint_remote_row(remotes, &mut remote_groups, next_worker_id,
+                    batch, call_session.0, t.node.clone().unwrap_or_default(),
+                    t.prompt.clone(), t.model.clone(), None);
+            }
         }
     }
 
@@ -2079,7 +2197,8 @@ async fn fanout(
         }
     }
 
-    let n = minted.len() + remote_tasks.len();
+    let remote_count: usize = remote_groups.iter().map(|(_, wids, _)| wids.len()).sum();
+    let n = minted.len() + remote_count;
     let admitted_now = (cap.saturating_sub(slots_used(workers))).min(minted.len());
     if !inline {
         // Async: ack now, work proceeds in background. Inline holds the ack —
@@ -2149,7 +2268,7 @@ async fn fanout(
               if inline { ", inline" } else { "" },
               if yolo { ", yolo:inherit" } else { "" },
               if let Some(c) = &ctx { format!(", cells under {}", c.parent.0) } else { String::new() });
-    Some((ctx, minted))
+    Some((ctx, cell_wids))
 }
 
 /// Admit Queued workers (FIFO by id) while slots remain: Queued → Running,
@@ -2754,6 +2873,10 @@ pub(crate) struct CellPlan {
     measure: Option<String>,
     /// The sub-conduction grant (M1c).
     voucher: bool,
+    /// M2: the mesh peer hosting this cell's execution body (None = local).
+    /// Vetted by `remote_cell_veto` — only plain ring cells of repo-less
+    /// mandalas carry one; the gate never does.
+    node: Option<String>,
     prompt: String,
     model: Option<String>,
 }
@@ -3024,6 +3147,27 @@ async fn prepare_mandala_cells(
     let gate_task: Option<String> =
         join_task.or_else(|| if bare_gate { Some(tasks[0].prompt.clone()) } else { None });
     let ring_tasks: &[TaskSpecItem] = if bare_gate { &[] } else { tasks };
+
+    // M2 — remote-body vetting, before any layout math (nothing minted on
+    // refusal): only plain ring cells of repo-less mandalas ship out. The
+    // diamond's join comes from `join` (never a task item), so the gate can
+    // only meet a node through the bare-gate form — checked first.
+    {
+        let repo_mandala = m.repo.is_some();
+        if bare_gate && tasks[0].node.is_some() {
+            if let Some(msg) = remote_cell_veto(true, tasks[0].measure.is_some(), tasks[0].voucher, repo_mandala) {
+                bus.emit(refuse(msg.into())).await;
+                return Err(());
+            }
+        }
+        for t in ring_tasks.iter().filter(|t| t.node.is_some()) {
+            if let Some(msg) = remote_cell_veto(false, t.measure.is_some(), t.voucher, repo_mandala) {
+                bus.emit(refuse(msg.into())).await;
+                return Err(());
+            }
+        }
+    }
+
     let needed = ring_tasks.len() + usize::from(gate_task.is_some());
 
     // Geometry: open cells vs the mandala's conserved budget — the whole fan
@@ -3099,6 +3243,7 @@ async fn prepare_mandala_cells(
                     addr, budget: ring_budget,
                     barrier_timeout_s: None,
                     measure: t.measure.clone(), voucher: t.voucher,
+                    node: t.node.clone(),
                     model: t.model.clone(),
                 });
             }
@@ -3121,6 +3266,7 @@ async fn prepare_mandala_cells(
             addr: gate_addr, budget: gate_budget,
             barrier_timeout_s: Some(timeout),
             measure: gate_measure, voucher: gate_voucher,
+            node: None, // the bindu on the spine — vetted above
             model: gate_model,
         });
     } else {
@@ -3157,6 +3303,7 @@ async fn prepare_mandala_cells(
                 addr, budget: child_budget,
                 barrier_timeout_s: None,
                 measure: t.measure.clone(), voucher: t.voucher,
+                node: t.node.clone(),
                 model: t.model.clone(),
             });
         }
@@ -3177,15 +3324,17 @@ async fn prepare_mandala_cells(
 /// Bind minted workers to their cells: records land in the tree (position IS
 /// identity), the runtime index follows, and forms arm one bit at a time —
 /// the gate is born GATE (+B when its own ring is wide → DIAMOND), a wide
-/// fan arms the PARENT's B.
+/// fan arms the PARENT's B. `wids` is in PLAN ORDER — local workers and M2
+/// remote mirror rows spend the same counter, so a cell binds by position
+/// whatever bodies it; the `node` stamp says where that body lives.
 fn bind_cells(
     trees: &mut HashMap<u64, HashMap<String, CellRecord>>,
     cell_by_worker: &mut HashMap<u64, (u64, Addr)>,
     worktrees_dir: &Path,
-    ctx: &CellsCtx, minted: &[(u64, u64)],
+    ctx: &CellsCtx, wids: &[u64],
 ) {
     let tree_dir = worktrees_dir.join(ctx.mandala.to_string());
-    for (plan, (wid, _sid)) in ctx.plans.iter().zip(minted) {
+    for (plan, wid) in ctx.plans.iter().zip(wids) {
         let mut form = CellForm::SPINE;
         if plan.barrier_timeout_s.is_some() {
             form = form.arm_join();
@@ -3210,12 +3359,14 @@ fn bind_cells(
             measure: plan.measure.clone(),
             measure_history: Vec::new(),
             voucher: plan.voucher,
+            node: plan.node.clone(),
         };
         mandala::save_cell(&tree_dir, &cell);
         cell_by_worker.insert(*wid, (ctx.mandala, plan.addr.clone()));
         trees.entry(ctx.mandala).or_default().insert(cell.addr.0.clone(), cell);
-        eprintln!("[mandala] {} grew cell {} ({}, worker {wid})",
-                  ctx.mandala, plan.addr.0, if plan.barrier_timeout_s.is_some() { "gate" } else { "cell" });
+        eprintln!("[mandala] {} grew cell {} ({}, worker {wid}{})",
+                  ctx.mandala, plan.addr.0, if plan.barrier_timeout_s.is_some() { "gate" } else { "cell" },
+                  plan.node.as_deref().map(|n| format!(" @ {n}")).unwrap_or_default());
     }
     if ctx.arm_parent_branch {
         if let Some(parent) = trees.get_mut(&ctx.mandala).and_then(|t| t.get_mut(&ctx.parent.0)) {
@@ -3249,6 +3400,29 @@ fn sync_cells(
     }
 }
 
+/// sync_cells' remote twin (M2): mirror TERMINAL remote-row states into
+/// their cell files — the wire string plus the local MIRROR evidence path
+/// (reading the mirror IS integration, the gate's law too). Open rows leave
+/// the tree untouched: the tree mirrors outcomes, not heartbeats — live
+/// remote states are read from the remotes map where needed. Unknown wire
+/// states are non-terminal by the skew law, so they can never close a cell.
+fn sync_remote_cells(
+    trees: &mut HashMap<u64, HashMap<String, CellRecord>>,
+    cell_by_worker: &HashMap<u64, (u64, Addr)>,
+    remotes: &HashMap<u64, RemoteWorker>,
+    worktrees_dir: &Path,
+) {
+    for (wid, (mid, addr)) in cell_by_worker {
+        let Some(r) = remotes.get(wid) else { continue };
+        if !r.is_terminal() { continue; }
+        let Some(cell) = trees.get_mut(mid).and_then(|t| t.get_mut(&addr.0)) else { continue };
+        if cell.state == r.state_raw && cell.evidence == r.evidence { continue; }
+        cell.state = r.state_raw.clone();
+        cell.evidence = r.evidence.clone();
+        mandala::save_cell(&worktrees_dir.join(mid.to_string()), cell);
+    }
+}
+
 // ── Torus epochs + the orbit detector (M1d) ─────────────────────────────────
 
 /// Roll due epochs: per open mandala on the golden-offset EPOCH_PERIOD clock,
@@ -3265,6 +3439,7 @@ fn sync_cells(
 fn roll_due_epochs(
     mandalas: &mut HashMap<u64, MandalaRecord>,
     trees: &HashMap<u64, HashMap<String, CellRecord>>,
+    remotes: &HashMap<u64, RemoteWorker>,
     censuses: &mut HashMap<u64, HashMap<String, u64>>,
     next_epoch: &mut HashMap<u64, Instant>,
     proxy: &ToolProxy,
@@ -3296,8 +3471,20 @@ fn roll_due_epochs(
                 .map(|b| mandala::hex_digest(&b))
                 .collect()
         }).unwrap_or_default();
+        // M2: open remote-bodied cells fold their live wire state into the
+        // fingerprint — remote work is invisible to the local review census,
+        // and without this a hard-working remote ring would read as
+        // sameness. Truth-as-last-observed (the polls keep it honest).
+        let remote_states: std::collections::BTreeMap<String, String> = trees.get(&mid).map(|t| {
+            t.values()
+                .filter(|c| c.node.is_some() && mandala::is_open_state(&c.state))
+                .filter_map(|c| c.worker
+                    .and_then(|w| remotes.get(&w))
+                    .map(|r| (c.addr.0.clone(), r.state_raw.clone())))
+                .collect()
+        }).unwrap_or_default();
         let m = mandalas.get_mut(&mid).unwrap();
-        let fp = mandala::epoch_fingerprint(&m.invariant.hash, &mut ev_digests, &census);
+        let fp = mandala::epoch_fingerprint(&m.invariant.hash, &mut ev_digests, &census, &remote_states);
         let orbit = mandala::is_orbit(m.last_fingerprint.as_deref(), &fp, open)
             && m.orbit_fingerprint.as_deref() != Some(fp.as_str());
         m.epoch += 1;
@@ -3307,12 +3494,15 @@ fn roll_due_epochs(
                   m.epoch, &fp[..12], open, if orbit { " — ORBIT" } else { "" });
         // The run's reading → Cerebro (the council-handler idiom: best-effort,
         // spawned — a slow or absent Cerebro never stalls the driver tick).
-        let reading = serde_json::json!({
+        let mut reading = serde_json::json!({
             "mandala": mid, "epoch": m.epoch, "fingerprint": fp,
             "open_cells": open, "census": census,
             "orbit": orbit, "orbits_total": m.orbits + u64::from(orbit),
             "objective": m.invariant.objective.chars().take(120).collect::<String>(),
         });
+        if !remote_states.is_empty() {
+            reading["remote"] = serde_json::json!(remote_states);
+        }
         let content = format!("mandala {mid} epoch {} reading: {reading}", m.epoch);
         let p2 = proxy.clone();
         tokio::spawn(async move {
@@ -3713,6 +3903,7 @@ async fn create_mandala(
         measure: None,
         measure_history: Vec::new(),
         voucher: false,
+        node: None,
     };
     mandala::save_cell(&worktrees_dir.join(id.to_string()), &root);
     trees.entry(id).or_default().insert(root.addr.0.clone(), root);
@@ -3741,9 +3932,12 @@ async fn create_mandala(
 
 /// mandala_status: the tree as data — addresses, forms, states, workers,
 /// evidence, barriers, and (M1b) the review census: the run's live reading.
+/// M2: remote-bodied cells additionally show their hosting `node` and the
+/// body's live wire state (truth-as-last-observed — polls keep it honest).
 async fn handle_mandala_status(
     mandalas: &HashMap<u64, MandalaRecord>,
     trees: &HashMap<u64, HashMap<String, CellRecord>>,
+    remotes: &HashMap<u64, RemoteWorker>,
     censuses: &HashMap<u64, HashMap<String, u64>>,
     bus: &BusHandle, call_session: SessionId, call_id: ActionId,
 ) {
@@ -3778,6 +3972,12 @@ async fn handle_mandala_status(
                     cell["measure_history"] = serde_json::json!(tail);
                 }
                 if c.voucher { cell["voucher"] = serde_json::json!(true); }
+                if let Some(n) = &c.node {
+                    cell["node"] = serde_json::json!(n);
+                    if let Some(r) = c.worker.and_then(|w| remotes.get(&w)) {
+                        cell["body"] = serde_json::json!(r.state_raw);
+                    }
+                }
                 cell
             }).collect::<Vec<_>>(),
         });
@@ -4299,7 +4499,7 @@ mod tests {
             invariant_hash: "h".into(), worker: None, state: state.into(),
             evidence: evidence.map(str::to_owned), reparented_to: None,
             created_epoch: 0, barrier_timeout_s: None, barrier_opened: false,
-            measure: None, measure_history: Vec::new(), voucher: false,
+            measure: None, measure_history: Vec::new(), voucher: false, node: None,
         }
     }
 
@@ -4436,5 +4636,82 @@ mod tests {
         assert!(done.next_review.is_some(), "fresh terminal → one Terminal review");
         schedule_next_review(&mut done, Posture::Terminal, &word2, step_timeout, idle_ttl, None);
         assert!(done.next_review.is_none(), "reviewed terminal is reaped — anti-zombie");
+    }
+
+    // ── M2: cross-node rings ────────────────────────────────────────────────
+
+    #[test]
+    fn remote_cell_veto_truth_table() {
+        // All 16 combinations — only a plain ring cell of a repo-less
+        // mandala ships out; everything else refuses with its law named.
+        for is_gate in [false, true] {
+            for measure in [false, true] {
+                for voucher in [false, true] {
+                    for repo in [false, true] {
+                        let v = remote_cell_veto(is_gate, measure, voucher, repo);
+                        if !is_gate && !measure && !voucher && !repo {
+                            assert!(v.is_none(), "a plain ring cell may go remote");
+                        } else {
+                            assert!(v.is_some(),
+                                "gate={is_gate} measure={measure} voucher={voucher} repo={repo} must refuse");
+                        }
+                    }
+                }
+            }
+        }
+        // The named laws, and repo (the mandala-level law) trumping the rest.
+        assert!(remote_cell_veto(true, true, true, true).unwrap().contains("code mandalas"));
+        assert!(remote_cell_veto(true, false, false, false).unwrap().contains("gate"));
+        assert!(remote_cell_veto(false, true, false, false).unwrap().contains("lap boundary"));
+        assert!(remote_cell_veto(false, false, true, false).unwrap().contains("sub-conduction"));
+    }
+
+    #[test]
+    fn sync_remote_cells_mirrors_terminals_only() {
+        let dir = std::env::temp_dir().join(format!("apexos-m2-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mid = 3u64;
+        let tree_dir = dir.join(mid.to_string());
+        let mut mk_bound = |addr: &str, node: &str, wid: u64| {
+            let mut c = cell(addr, "open", None);
+            c.node = Some(node.into());
+            c.worker = Some(wid);
+            mandala::save_cell(&tree_dir, &c);
+            c
+        };
+        let mut tree = HashMap::new();
+        for (addr, node, wid) in [("0.0", "apex-3", 31u64), ("0.1", "apex-3", 32), ("0.2", "tvpi", 33)] {
+            tree.insert(addr.to_string(), mk_bound(addr, node, wid));
+        }
+        let mut trees: HashMap<u64, HashMap<String, CellRecord>> = HashMap::new();
+        trees.insert(mid, tree);
+        let cbw: HashMap<u64, (u64, Addr)> = [
+            (31u64, (mid, Addr::parse("0.0").unwrap())),
+            (32u64, (mid, Addr::parse("0.1").unwrap())),
+            (33u64, (mid, Addr::parse("0.2").unwrap())),
+        ].into();
+        let mut remotes = HashMap::new();
+        remotes.insert(31, RemoteWorker {
+            evidence: Some("/var/lib/agentd/events/agents/31.json".into()),
+            ..mk_remote(7, "apex-3", "done")
+        });
+        remotes.insert(32, mk_remote(7, "apex-3", "running"));
+        remotes.insert(33, mk_remote(7, "tvpi", "hibernating")); // unknown state, newer peer
+        sync_remote_cells(&mut trees, &cbw, &remotes, &dir);
+        let t = &trees[&mid];
+        assert_eq!(t["0.0"].state, "done");
+        assert_eq!(t["0.0"].evidence.as_deref(), Some("/var/lib/agentd/events/agents/31.json"),
+                   "the MIRROR path rides the cell — reading it IS integration");
+        assert_eq!(t["0.1"].state, "open", "live rows leave the tree untouched");
+        assert_eq!(t["0.2"].state, "open",
+                   "unknown wire states are non-terminal (skew law) — they can never close a cell");
+        // The barrier derivation sees the settled cell drop out of the wait-set.
+        let waiting = mandala::open_descendants(t, &Addr::parse("0").unwrap());
+        assert_eq!(waiting.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), vec!["0.1", "0.2"]);
+        // The on-disk record followed (the filesystem is the tree).
+        let back = mandala::load_tree(&tree_dir);
+        assert_eq!(back["0.0"].state, "done");
+        assert_eq!(back["0.0"].node.as_deref(), Some("apex-3"), "the body's address survives the round trip");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

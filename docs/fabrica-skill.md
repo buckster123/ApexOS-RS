@@ -105,9 +105,32 @@ colleague's hands, not teleporting your own.
 - **Cancel is a relay.** `worker_cancel` on a remote row asks its host to
   cancel and holds the row `cancel requested` until the peer confirms —
   a silent peer is bounded by the deadline, so the kill switch can't wedge.
-- **Mandalas stay home (for now).** `node` + `mandala` refuses — cross-node
-  rings are M2. Sub-conductors likewise cannot fan outward; the colony's
-  depth stays 1 by construction.
+- **Cross-node rings (M2) — the cell stays, the body travels.** A mandala
+  RING cell may carry `node`: the cell — its address, budget, barrier
+  membership, closure — never leaves your tree; only its execution body runs
+  on the peer, as an ordinary remote row. The invariant reaches it verbatim
+  (it rides inside the task text), its step budget crosses with the
+  assignment, and when it settles its evidence MIRROR lands here — your
+  gate reads mirrors exactly like local evidence files. Craft:
+  - *Ship out what is leaf-shaped*: wide, plain, self-contained ring work —
+    research sweeps, doc ports, analyses. The one-call diamond composes:
+    `join` stays home, `tasks:[…]` each carry `node`.
+  - *Four things never travel*, each for a law: the **join/gate** (barriers
+    are conductor machinery — the bindu on the spine), a **measured cell**
+    (the lap boundary lives where turns complete), a **vouchered cell**
+    (sub-conduction needs the tree), and **any cell of a code mandala**
+    (repos and worktrees don't teleport). The refusal names the law.
+  - *Steering costs sends, not laps*: a remote cell is steered and revived
+    through `send_to_agent(node, session)` like any remote worker; watch it
+    through `mandala_status` (remote cells show their `node` and live
+    `body` state) on the wakeup cadence, never a busy loop.
+  - *Artifacts stay on the peer* — the mirror carries the summary and the
+    peer's evidence doc; `mesh_file_send` brings a file home when the join
+    actually needs its bytes. And mind the colony ledger: remote cells
+    spend the peer's inference budget.
+  Sub-conductors still cannot fan outward from a peer; cross-node depth
+  stays 1 by construction (a hosted worker has no cell binding there, so
+  its fan refuses structurally).
 
 ## Conducting a mandala (the M tier, growing)
 
