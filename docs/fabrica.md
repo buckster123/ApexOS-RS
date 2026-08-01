@@ -311,9 +311,16 @@ class):
   finds fixed same day: remote-aware health probe, override-open recording,
   wake-edge episodes.
 
-Fabrica-app slices (parallel track): board rename; worker lane; tree/census
-views; per-cell intervention controls. `docs/fabrica-skill.md` lands with
-M1a.
+Fabrica-app slices (parallel track): board rename; worker lane ✅ (W1a, lane
+bound at M1d); **tree/census view ✅ `#324`** — the Mandalas window (AppKind
+ordinal 21, slug `mandala`): a flat depth-indented mirror of every mandala's
+cells — form, state, worker, remote body (`@ node (state)`), measure tails,
+barrier/voucher/reparent marks — plus census, epoch/fingerprint, orbit count
+and council synthesis. Data rides the occipital follow-along idiom: a
+successful `mandala_status` anywhere is shape-sniffed off the ToolResult
+stream (`mandalas` array = the signature, no tool name on the wire) and
+mirrored in, with latch-aware auto-reveal. Remaining: per-cell intervention
+controls. `docs/fabrica-skill.md` landed with M1a.
 
 ## Deferred — reopened only by field data
 

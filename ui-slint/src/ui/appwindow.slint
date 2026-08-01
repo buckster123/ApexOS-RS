@@ -1,7 +1,7 @@
 import { Palette, Theme } from "palette.slint";
 import { Personas } from "personas.slint";
 import { Win98 } from "components/win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, WmState, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, UsbCandidate, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, ImagineJobItem, CutSegItem, BoardCard } from "types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, WmState, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ImageItem, ExplorerEntry, UsbCandidate, FaceGl, UserDef, AgentDef, ReaderBlock, ReaderLink, ImagineJobItem, CutSegItem, BoardCard, MandalaRow } from "types.slint";
 import { PersonaPicker, FirstBootWizard } from "components/persona_picker.slint";
 import { IdentityWizard } from "components/identity_wizard.slint";
 import { ImagePicker } from "components/image_picker.slint";
@@ -17,7 +17,7 @@ import { StartMenu, Win98StartMenu } from "components/start_menu.slint";
 import { NotifCenter } from "components/notif_center.slint";
 import { AppWindowFrame } from "components/app_window_frame.slint";
 
-export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, WmState, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, FaceGl, ReaderBlock, ReaderLink, BoardCard }
+export { Palette, Theme, Personas, MessageItem, SysStats, SessionItem, ModelItem, Usage, ToastItem, ToastKind, ShellMode, AppKind, WindowDesc, WmState, Notifications, AgentBridge, CouncilAgent, Persona, PersonaDef, ChromeKind, Clock, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, FaceGl, ReaderBlock, ReaderLink, BoardCard, MandalaRow }
 
 export component AppWindow inherits Window {
     title: "ApexOS";
@@ -134,6 +134,11 @@ export component AppWindow inherits Window {
     in-out property <[ReaderLink]>   occipital-links;
     in-out property <[ReaderLink]>   occipital-trail;
     in-out property <string>         occipital-url-input: "";
+    // Mandala (☸) — the Fabrica tree window (rows built in Rust from
+    // intercepted mandala_status output; this is a mirror, not a control).
+    in-out property <[MandalaRow]>   mandala-rows;
+    in-out property <string>         mandala-meta: "";
+    in-out property <int>            mandala-scroll-tick: 0;
 
     // ── Explorer (📁 Files) ─────────────────────────────────────────────
     in-out property <[ExplorerEntry]> explorer-entries;
@@ -879,6 +884,9 @@ export component AppWindow inherits Window {
                         occipital-links: root.occipital-links;
                         occipital-trail: root.occipital-trail;
                         occipital-url-input <=> root.occipital-url-input;
+                        mandala-rows: root.mandala-rows;
+                        mandala-meta: root.mandala-meta;
+                        mandala-scroll-tick: root.mandala-scroll-tick;
                         staged-image-name: root.staged-image-name;
                         explorer-entries: root.explorer-entries;
                         explorer-current-path: root.explorer-current-path;

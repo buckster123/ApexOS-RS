@@ -579,6 +579,7 @@ fn kind_from_ordinal(o: i32) -> AppKind {
         18 => AppKind::Occipital,
         19 => AppKind::Board,
         20 => AppKind::Imagine,
+        21 => AppKind::Mandala,
         _ => AppKind::Chat,
     }
 }
@@ -611,6 +612,7 @@ const APP_TABLE: &[(AppKind, &str)] = &[
     (AppKind::Occipital, "occipital"),
     (AppKind::Board, "board"),
     (AppKind::Imagine, "imagine"),
+    (AppKind::Mandala, "mandala"),
 ];
 
 fn kind_ordinal(k: AppKind) -> i32 {
@@ -1226,6 +1228,7 @@ fn kind_title(k: AppKind) -> &'static str {
         AppKind::Occipital => "Occipital",
         AppKind::Board => "Work Board",
         AppKind::Imagine => "Imagine",
+        AppKind::Mandala => "Mandalas",
     }
 }
 
@@ -1254,6 +1257,7 @@ fn default_geom(kind: AppKind, n: i32) -> (f32, f32, f32, f32) {
         AppKind::Occipital => (720.0, 620.0),
         AppKind::Board => (1040.0, 600.0), // 6 columns since the WORKERS lane (W1a)
         AppKind::Imagine => (900.0, 640.0),
+        AppKind::Mandala => (640.0, 620.0),
     };
     let step = (n % 6) as f32 * 30.0;
     (72.0 + step, 32.0 + step, w, h)
@@ -1321,6 +1325,156 @@ fn occipital_payload(content: &Value) -> Option<Value> {
         }
     }
     None
+}
+
+/// Recover a mandala_status payload (an object carrying a `mandalas` array)
+/// from the same three transport shapes as `occipital_payload`: direct object,
+/// string-encoded JSON, or an MCP content array. Shape-sniffed — ToolResult
+/// carries no tool name (the occipital follow-along idiom).
+fn mandala_payload(content: &Value) -> Option<Value> {
+    fn is_mandala(v: &Value) -> bool {
+        v.get("mandalas").map(|m| m.is_array()).unwrap_or(false)
+    }
+    if is_mandala(content) {
+        return Some(content.clone());
+    }
+    if let Some(s) = content.as_str() {
+        if let Ok(v) = serde_json::from_str::<Value>(s) {
+            if is_mandala(&v) {
+                return Some(v);
+            }
+        }
+    }
+    if let Some(arr) = content.as_array() {
+        for item in arr {
+            if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(s) = item.get("text").and_then(|t| t.as_str()) {
+                    if let Ok(v) = serde_json::from_str::<Value>(s) {
+                        if is_mandala(&v) {
+                            return Some(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Build the Mandala window's rows from a mandala_status payload — pure and
+/// Send (plain tuples cross to the Slint thread). One flat list, the
+/// occipital-block idiom: each mandala contributes a header row, note rows
+/// (objective / census / council synthesis), then its cells indented by
+/// address depth. Returns (meta line, rows as (text, depth, state, kind)).
+fn build_mandala_rows(p: &Value) -> (String, Vec<(String, i32, String, String)>) {
+    let empty = vec![];
+    let mandalas = p["mandalas"].as_array().unwrap_or(&empty);
+    let mut rows: Vec<(String, i32, String, String)> = Vec::new();
+    let mut open_total = 0u64;
+    for m in mandalas {
+        let id = m["mandala"].as_u64().unwrap_or(0);
+        let state = m["state"].as_str().unwrap_or("open").to_string();
+        let open = m["open_cells"].as_u64().unwrap_or(0);
+        open_total += open;
+        let mut head = format!(
+            "☸ mandala {id} · {} · {} · {open}/{} open",
+            m["lattice"].as_str().unwrap_or("?"),
+            state,
+            m["cells_budget"].as_u64().unwrap_or(64),
+        );
+        if let Some(e) = m["epoch"].as_u64() {
+            head.push_str(&format!(" · epoch {e}"));
+        }
+        if let Some(fp) = m["fingerprint"].as_str() {
+            head.push_str(&format!(" ({fp})"));
+        }
+        if let Some(o) = m["orbits"].as_u64().filter(|o| *o > 0) {
+            head.push_str(&format!(" · ⚠ {o} orbit(s)"));
+        }
+        if m["repo"].as_str().is_some() {
+            head.push_str(" · code");
+        }
+        rows.push((head, 0, state, "mandala".into()));
+        if let Some(obj) = m["objective"].as_str() {
+            rows.push((format!("◦ {}", obj.chars().take(110).collect::<String>()), 1, String::new(), "note".into()));
+        }
+        if let Some(census) = m["census"].as_object() {
+            if !census.is_empty() {
+                let line = census.iter().map(|(k, v)| format!("{k}×{v}")).collect::<Vec<_>>().join("  ");
+                rows.push((format!("census {line}"), 1, String::new(), "note".into()));
+            }
+        }
+        if let Some(s) = m["orbit_synthesis"].as_str() {
+            rows.push((format!("council: {}", s.chars().take(140).collect::<String>()), 1, "orbit".into(), "note".into()));
+        }
+        for c in m["cells"].as_array().unwrap_or(&empty) {
+            let addr = c["addr"].as_str().unwrap_or("?");
+            let depth = addr.matches('.').count() as i32 + 1;
+            let cstate = c["state"].as_str().unwrap_or("open").to_string();
+            let form = c["form"].as_str().unwrap_or("cell");
+            let mut line = format!("{addr} · {form} · {cstate}");
+            if let Some(w) = c["worker"].as_u64() {
+                line.push_str(&format!(" · w{w}"));
+            }
+            if let Some(n) = c["node"].as_str() {
+                line.push_str(&format!(" @ {n}"));
+                if let Some(b) = c["body"].as_str() {
+                    line.push_str(&format!(" ({b})"));
+                }
+            }
+            if let Some(hist) = c["measure_history"].as_array() {
+                if !hist.is_empty() {
+                    let tail: Vec<String> = hist.iter().filter_map(|v| v.as_u64()).map(|n| n.to_string()).collect();
+                    line.push_str(&format!(" · m {}", tail.join("→")));
+                }
+            }
+            if c["voucher"].as_bool() == Some(true) {
+                line.push_str(" · voucher");
+            }
+            if c["barrier_opened"].as_bool() == Some(true) {
+                line.push_str(" · barrier open");
+            } else if c["barrier_timeout_s"].as_u64().is_some() && cstate == "open" {
+                line.push_str(" · holding");
+            }
+            if let Some(rp) = c["reparented_to"].as_str() {
+                line.push_str(&format!(" · ⤴ {rp}"));
+            }
+            let kind = if matches!(form, "gate" | "diamond" | "forge" | "mandala") { "gate" } else { "cell" };
+            rows.push((line, depth, cstate, kind.into()));
+        }
+    }
+    let meta = if mandalas.is_empty() {
+        String::new()
+    } else {
+        format!("{} mandala(s) · {} open cell(s)", mandalas.len(), open_total)
+    };
+    (meta, rows)
+}
+
+/// Apply a built mandala reading to the tree window (Slint thread only) and
+/// reveal it the first time a reading lands — through the SAME latch-aware
+/// agent path as the occipital reader: a user-closed window stays closed
+/// until the user re-invites it from the menu. Quiet, never toasted.
+fn apply_mandala_render(ui: &AppWindow, meta: String, rows: Vec<(String, i32, String, String)>) {
+    let rows: Vec<MandalaRow> = rows
+        .into_iter()
+        .map(|(text, depth, state, kind)| MandalaRow {
+            text: text.into(),
+            depth,
+            state: state.into(),
+            kind: kind.into(),
+        })
+        .collect();
+    ui.set_mandala_meta(meta.into());
+    ui.set_mandala_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
+    ui.set_mandala_scroll_tick(ui.get_mandala_scroll_tick() + 1);
+    WINDOWS.with(|w| {
+        if let Some(model) = w.borrow().as_ref() {
+            if wm_index_by_kind(model, AppKind::Mandala).is_none() {
+                agent_open_window(ui, model, AppKind::Mandala, false);
+            }
+        }
+    });
 }
 
 /// Strip inline markdown to clean reading text: `[t](u)`→t, `![a](u)`→"🖼 a",
@@ -3588,7 +3742,7 @@ mod tests {
             assert_eq!(kind_from_slug(slug), Some(*kind));
             assert_eq!(kind_slug(*kind), *slug);
         }
-        assert_eq!(APP_TABLE.len(), 21);
+        assert_eq!(APP_TABLE.len(), 22);
         // Slugs fit the u32 latch bitmasks and stay unique.
         assert!(APP_TABLE.len() <= 32);
         let mut slugs: Vec<_> = APP_TABLE.iter().map(|(_, s)| *s).collect();
@@ -4020,6 +4174,65 @@ mod tests {
         // Non-occipital tool output is ignored.
         assert!(occipital_payload(&json!({"ok": true, "content": "hello"})).is_none());
         assert!(occipital_payload(&json!([{ "type": "text", "text": "{\"foo\":1}" }])).is_none());
+    }
+
+    // ── Mandala tree window (Fabrica app track) ─────────────────────────────
+
+    #[test]
+    fn mandala_payload_recovers_from_every_transport_shape() {
+        use super::mandala_payload;
+        let obj = json!({"mandalas": [], "count": 0});
+        assert!(mandala_payload(&obj).is_some());
+        assert!(mandala_payload(&json!(obj.to_string())).is_some());
+        let mcp = json!([{ "type": "text", "text": obj.to_string() }]);
+        assert!(mandala_payload(&mcp).is_some());
+        // The signature is the ARRAY — anything else is ignored.
+        assert!(mandala_payload(&json!({"ok": true, "content": "hello"})).is_none());
+        assert!(mandala_payload(&json!({"mandalas": "not-an-array"})).is_none());
+    }
+
+    #[test]
+    fn mandala_rows_flatten_the_tree_with_depth_and_body_tags() {
+        use super::build_mandala_rows;
+        let p = json!({"mandalas": [{
+            "mandala": 5, "lattice": "quad", "state": "open",
+            "open_cells": 2, "cells_budget": 64, "epoch": 3, "fingerprint": "abc123def456",
+            "orbits": 1, "orbit_synthesis": "steer 0.0.1, cancel nothing",
+            "objective": "first light",
+            "census": {"L:111111": 2},
+            "cells": [
+                {"addr": "0", "form": "spine", "state": "open"},
+                {"addr": "0.0", "form": "diamond", "state": "open", "worker": 36, "barrier_timeout_s": 900},
+                {"addr": "0.0.1", "form": "spine", "state": "done", "worker": 38,
+                 "node": "andre-laptop", "body": "done", "measure_history": [8, 5, 2]}
+            ]
+        }], "count": 1});
+        let (meta, rows) = build_mandala_rows(&p);
+        assert_eq!(meta, "1 mandala(s) · 2 open cell(s)");
+        // The header carries the whole reading; the orbit warning rides it.
+        assert!(rows[0].0.contains("mandala 5"));
+        assert!(rows[0].0.contains("epoch 3"));
+        assert!(rows[0].0.contains("⚠ 1 orbit(s)"));
+        assert_eq!(rows[0].3, "mandala");
+        // Notes: objective, census, council synthesis (orbit-colored).
+        assert!(rows[1].0.contains("first light"));
+        assert!(rows[2].0.contains("L:111111×2"));
+        assert!(rows[3].0.contains("council: steer 0.0.1"));
+        assert_eq!(rows[3].2, "orbit");
+        // Cells: depth = addr depth + 1 (the mandala header is depth 0); the
+        // diamond styles as a gate and shows "holding" while open; the
+        // remote-bodied cell carries node, live body and the measure tail.
+        assert_eq!(rows[4].1, 1);
+        assert_eq!(rows[5].1, 2);
+        assert_eq!(rows[5].3, "gate");
+        assert!(rows[5].0.contains("holding"));
+        assert_eq!(rows[6].1, 3);
+        assert!(rows[6].0.contains("@ andre-laptop (done)"));
+        assert!(rows[6].0.contains("m 8→5→2"));
+        assert_eq!(rows[6].2, "done");
+        // An empty reading renders the empty hint upstream: no rows, no meta.
+        let (m2, r2) = build_mandala_rows(&json!({"mandalas": [], "count": 0}));
+        assert!(m2.is_empty() && r2.is_empty());
     }
 
     #[test]
@@ -10662,6 +10875,13 @@ fn dispatch_event(
             } else {
                 None
             };
+            // Mandala tree window: a successful mandala_status mirrors into it
+            // (same shape-sniffed idiom — a `mandalas` array is the signature).
+            let mnd = if ok {
+                mandala_payload(&out.content).map(|p| build_mandala_rows(&p))
+            } else {
+                None
+            };
             let w = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(row) = find_tool_row(&call_id) {
@@ -10674,6 +10894,9 @@ fn dispatch_event(
                 if let Some(ui) = w.upgrade() {
                     if let Some(r) = occ {
                         apply_occipital_render(&ui, r);
+                    }
+                    if let Some((meta, rows)) = mnd {
+                        apply_mandala_render(&ui, meta, rows);
                     }
                     bump_scroll(&ui);
                 }

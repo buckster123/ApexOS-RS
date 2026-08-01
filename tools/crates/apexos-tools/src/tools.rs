@@ -2996,6 +2996,7 @@ const UI_APPS: &[&str] = &[
     "chat", "system", "sensor", "sessions", "settings", "terminal", "council",
     "event-log", "mesh", "inference", "audio-editor", "sonus", "notes", "face",
     "sketchpad", "web", "calculator", "explorer", "occipital", "board", "imagine",
+    "mandala",
 ];
 
 fn ui_app_arg(args: &Value) -> Result<&str, Value> {

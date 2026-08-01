@@ -10,7 +10,7 @@ export enum ShellMode { desktop, focus }
 // Every app is a window. Rust owns the set (which windows exist, z-order =
 // model order with the last element on top); Slint owns live-drag geometry
 // for smoothness and commits back to Rust on release.
-export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer, occipital, board, imagine }
+export enum AppKind { chat, system, sensor, sessions, settings, terminal, council, event-log, mesh, inference, audio-editor, sonus, notes, face, sketchpad, web, calculator, explorer, occipital, board, imagine, mandala }
 
 // ── Persona system (glowup G4) ───────────────────────────────────────────
 // A persona is a named bundle: theme + chrome + wallpaper + default shell mode
@@ -76,6 +76,18 @@ export struct WindowDesc {
     h:         length,
     minimized: bool,
     maximized: bool,
+}
+
+// One row of the Mandala tree view (Fabrica app track): a flattened tree —
+// depth carries the indent (the occipital-reader block idiom), kind picks the
+// styling ("mandala" header | "gate" | "cell" | "note"), state colors it.
+// Rows are BUILT in Rust from intercepted mandala_status output; the UI only
+// renders.
+export struct MandalaRow {
+    text:  string,
+    depth: int,
+    state: string,   // open|done|failed|cancelled|parked|closed|orbit|""
+    kind:  string,   // mandala|gate|cell|note
 }
 
 // ── WmState global (adaptive UI A3) ─────────────────────────────────────
