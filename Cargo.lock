@@ -138,6 +138,7 @@ dependencies = [
  "chrono",
  "cron",
  "futures-util",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",

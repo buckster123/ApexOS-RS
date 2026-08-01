@@ -798,9 +798,9 @@ mod tests {
         use apexos_core::{BatchWorkerRow, WorkerId, WorkerState};
         let rows = vec![
             BatchWorkerRow { worker: WorkerId(3), state: WorkerState::Done,
-                             evidence: "events/agents/3.json".into(), timed_out: false },
+                             evidence: "events/agents/3.json".into(), timed_out: false, node: None },
             BatchWorkerRow { worker: WorkerId(4), state: WorkerState::Parked,
-                             evidence: String::new(), timed_out: true },
+                             evidence: String::new(), timed_out: true, node: None },
         ];
         let d = directive_integrate("ship the parser", 4, 12, 9, &rows);
         assert!(d.contains("step 4/12"));

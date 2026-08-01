@@ -78,6 +78,25 @@ pub struct SpawnReq {
     pub reply:     tokio::sync::oneshot::Sender<serde_json::Value>,
 }
 
+/// W2 mesh workers: a peer-originated worker-tier request. `Fanout`/`Query`/
+/// `Cancel` arrive on the HOSTING side (this node mints/serves/cancels real
+/// local workers for a remote conductor); `Report` arrives on the CONDUCTING
+/// side (a peer pushing its settled batch home). The handlers validate `from`
+/// against the peer registry (the mesh/memory pattern — never token-only),
+/// resolve the sender's a2a landing session for fanouts (the minted batch's
+/// parent), and forward here; `reply` carries the JSON returned verbatim.
+pub struct WorkerMeshReq {
+    pub kind:   WorkerMeshKind,
+    pub from:   String,
+    pub body:   serde_json::Value,
+    /// Fanout only: the sender-peer's a2a landing session on THIS node.
+    pub parent: Option<SessionId>,
+    pub reply:  tokio::sync::oneshot::Sender<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerMeshKind { Fanout, Query, Cancel, Report }
+
 #[derive(Clone)]
 pub struct GatewayState {
     pub bus:                   BusHandle,
@@ -163,6 +182,14 @@ pub struct GatewayState {
     /// turn engine). The `/api/spawn` handler sends a `SpawnReq` and awaits its
     /// oneshot reply. See `spawn_handler` + the worker in `spawn_agent_router`.
     pub spawn_tx:           tokio::sync::mpsc::Sender<SpawnReq>,
+    /// W2 mesh workers: peer worker-tier requests → the agentd worker driver's
+    /// mesh arm (fanout/query/cancel on the hosting side, report-home on the
+    /// conducting side). See `worker_fanout_handler` and friends.
+    pub worker_mesh_tx:     tokio::sync::mpsc::Sender<WorkerMeshReq>,
+    /// W2 kill switch (`AGENTD_MESH_WORKERS`, boot-read; default on): when off,
+    /// every `/api/worker/*` mesh endpoint refuses — and the driver refuses
+    /// `task_fanout{node}` symmetrically.
+    pub mesh_workers_enabled: bool,
     /// Federated memory imports → the agentd-side worker owning the Cerebro
     /// ToolProxy (colony-federation Slice 1). See `mesh_memory_handler`.
     pub mesh_memory_tx:     tokio::sync::mpsc::Sender<MeshMemoryReq>,
@@ -351,6 +378,10 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/voice",              get(get_voice_handler).post(set_voice_handler))
         .route("/api/imaginarium",        get(imaginarium_reach_handler))
         .route("/api/spawn",              post(spawn_handler))
+        .route("/api/worker/fanout",      post(worker_fanout_handler))
+        .route("/api/worker/query",       post(worker_query_handler))
+        .route("/api/worker/cancel",      post(worker_cancel_mesh_handler))
+        .route("/api/worker/report",      post(worker_report_mesh_handler).layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)))
         .route("/api/mesh/file",          post(mesh_file_handler).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/api/mesh/memory",        post(mesh_memory_handler).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
         .route("/api/mesh/recall",        post(mesh_recall_handler))
@@ -3582,6 +3613,95 @@ async fn spawn_handler(
         Ok(Err(_)) => Json(serde_json::json!({ "ok": false, "error": "spawn worker dropped the request" })),
         Err(_)     => Json(serde_json::json!({ "ok": false, "error": "spawn timed out" })),
     }
+}
+
+/// Shared body of the four `/api/worker/*` mesh endpoints (W2). Validates the
+/// kill switch and `from` ∈ peer registry (the mesh/memory pattern — a bearer
+/// token alone never authorizes worker-tier traffic), resolves the sender's
+/// a2a landing session for fanouts, forwards to the worker driver's mesh arm,
+/// and returns its JSON verbatim. All error shapes are HTTP 200 `{ok:false}`
+/// (the `/api/spawn` idiom — the mesh client triages by body, not status).
+async fn worker_mesh_request(
+    state: GatewayState,
+    kind: WorkerMeshKind,
+    body: serde_json::Value,
+) -> Json<serde_json::Value> {
+    if !state.mesh_workers_enabled {
+        return Json(serde_json::json!({ "ok": false, "error": "mesh workers disabled on this node (AGENTD_MESH_WORKERS=0)" }));
+    }
+    let from = match body["from"].as_str().filter(|s| !s.trim().is_empty()) {
+        Some(f) => f.to_string(),
+        None => return Json(serde_json::json!({ "ok": false, "error": "missing from" })),
+    };
+    if !state.peer_registry.read().await.contains(&from) {
+        return Json(serde_json::json!({ "ok": false, "error": format!("'{from}' is not a registered peer on this node") }));
+    }
+    let parent = if kind == WorkerMeshKind::Fanout {
+        Some(mesh_session_for(&state, &from))
+    } else { None };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let req = WorkerMeshReq { kind, from, body, parent, reply: reply_tx };
+    if state.worker_mesh_tx.send(req).await.is_err() {
+        return Json(serde_json::json!({ "ok": false, "error": "worker driver unavailable" }));
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(15), reply_rx).await {
+        Ok(Ok(v))  => Json(v),
+        Ok(Err(_)) => Json(serde_json::json!({ "ok": false, "error": "worker driver dropped the request" })),
+        Err(_)     => Json(serde_json::json!({ "ok": false, "error": "worker driver timed out" })),
+    }
+}
+
+/// POST /api/worker/fanout — host a batch of workers for a remote conductor
+/// (W2). Body `{from, origin_batch, deadline_s?, tasks:[{prompt, model?}]}`.
+/// The minted workers are ORDINARY local workers: this node's cap, FIFO,
+/// policy gates (yolo never crosses the wire), review procedure, evidence dir
+/// and episodes all apply — the wire distributes a finished machine. Their
+/// batch's parent is the sender's a2a landing session, and the batch carries
+/// its origin so the report POSTs home when it settles.
+async fn worker_fanout_handler(
+    State(state): State<GatewayState>,
+    headers:      axum::http::HeaderMap,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let hops = headers.get("x-mesh-hops").and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    if hops >= 3 {
+        return Json(serde_json::json!({ "ok": false, "error": "mesh hop limit reached (loop guard)" }));
+    }
+    worker_mesh_request(state, WorkerMeshKind::Fanout, body).await
+}
+
+/// POST /api/worker/query — a remote conductor polling one of its hosted
+/// batches: `{from, batch}` → the rows (evidence docs inline for terminals).
+/// The reconcile path after a conductor restart, and the poll half of the
+/// push/poll supervision pair.
+async fn worker_query_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    worker_mesh_request(state, WorkerMeshKind::Query, body).await
+}
+
+/// POST /api/worker/cancel — a remote conductor cancelling its hosted batch
+/// (or specific workers in it): `{from, batch, workers?}`. Only the batch's
+/// origin conductor is honored; the normal cancel path runs (full terminal
+/// trail, honest report rows).
+async fn worker_cancel_mesh_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    worker_mesh_request(state, WorkerMeshKind::Cancel, body).await
+}
+
+/// POST /api/worker/report — a hosting peer pushing a settled batch home to
+/// THIS conducting node: `{from, origin_batch, batch, rows:[…]}` with the
+/// small evidence docs inline (one hop; artifacts stay on the peer). The
+/// driver mirrors evidence locally and the normal batch machinery reports.
+async fn worker_report_mesh_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    worker_mesh_request(state, WorkerMeshKind::Report, body).await
 }
 
 /// GET /api/capabilities — this node's structured capability snapshot (senses,

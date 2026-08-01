@@ -127,6 +127,11 @@ pub struct BatchWorkerRow {
     /// it is still revivable; a later revive finishes it outside the report.
     #[serde(default)]
     pub timed_out: bool,
+    /// The peer node hosting this worker (W2 mesh workers); `None` = local.
+    /// For a remote row, `evidence` is the conductor-side MIRROR file and the
+    /// worker id is the conductor's local row id, not the peer's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -503,6 +508,12 @@ pub enum Event {
         /// auto-approves its own ask tools. AUTO marker on the board card.
         #[serde(default)]
         yolo:    bool,
+        /// The peer node hosting this worker (W2 mesh workers); `None` = local.
+        /// Remote rows carry `session: SessionId(0)` as a sentinel — the worker's
+        /// real session lives on the peer, and nothing on this node may key
+        /// residency off it (the router's eviction guard checks the range).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node:    Option<String>,
     },
 }
 
@@ -613,7 +624,7 @@ mod tests {
         let j = r#"{"type":"worker_state_changed","worker":3,"batch":1,"parent":7,
             "session":4611686018427387904,"task":"write the tests","state":"running","detail":""}"#;
         match serde_json::from_str::<Event>(j).unwrap() {
-            Event::WorkerStateChanged { worker, batch, parent, session, task, state, detail, yolo } => {
+            Event::WorkerStateChanged { worker, batch, parent, session, task, state, detail, yolo, node } => {
                 assert_eq!(worker, WorkerId(3));
                 assert_eq!(batch, 1);
                 assert_eq!(parent, SessionId(7));
@@ -622,6 +633,7 @@ mod tests {
                 assert_eq!(state, WorkerState::Running);
                 assert_eq!(detail, "");
                 assert!(!yolo, "missing yolo reads false (W1a-era frame)");
+                assert!(node.is_none(), "missing node reads None (pre-W2 frame)");
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -631,6 +643,45 @@ mod tests {
             let enc = serde_json::to_string(&s).unwrap();
             assert_eq!(enc, enc.to_lowercase(), "snake_case wire form: {enc}");
             assert_eq!(serde_json::from_str::<WorkerState>(&enc).unwrap(), s);
+        }
+    }
+
+    #[test]
+    fn worker_node_fields_are_additive_and_absent_when_local(){
+        // W2 mesh workers: `node` is #[serde(default)] + skip-when-None, so a
+        // local row's wire bytes are IDENTICAL to the pre-W2 shape (no `node`
+        // key at all), and a pre-W2 decoder reading a remote frame just sees an
+        // extra field it ignores (deny_unknown_fields is deliberately absent).
+        let local = BatchWorkerRow {
+            worker: WorkerId(1), state: WorkerState::Done,
+            evidence: "e".into(), timed_out: false, node: None,
+        };
+        let enc = serde_json::to_string(&local).unwrap();
+        assert!(!enc.contains("node"), "local rows must not grow a node key: {enc}");
+        // A pre-W2 row (no node key) decodes with node = None.
+        let old: BatchWorkerRow =
+            serde_json::from_str(r#"{"worker":2,"state":"failed","evidence":""}"#).unwrap();
+        assert!(old.node.is_none());
+        assert!(!old.timed_out);
+        // A remote row round-trips its node.
+        let remote = BatchWorkerRow { node: Some("apex-3".into()), ..local };
+        let back: BatchWorkerRow = serde_json::from_str(&serde_json::to_string(&remote).unwrap()).unwrap();
+        assert_eq!(back.node.as_deref(), Some("apex-3"));
+        // WorkerStateChanged: a remote card carries node + the session-0 sentinel;
+        // local emissions stay byte-free of the node key.
+        let ev = Event::WorkerStateChanged {
+            worker: WorkerId(9), batch: 2, parent: SessionId(7), session: SessionId(0),
+            task: "t".into(), state: WorkerState::Running, detail: "".into(),
+            yolo: false, node: Some("apex-3".into()),
+        };
+        let enc = serde_json::to_string(&ev).unwrap();
+        assert!(enc.contains(r#""node":"apex-3""#));
+        match serde_json::from_str::<Event>(&enc).unwrap() {
+            Event::WorkerStateChanged { node, session, .. } => {
+                assert_eq!(node.as_deref(), Some("apex-3"));
+                assert_eq!(session, SessionId(0), "remote rows ride the sentinel session");
+            }
+            other => panic!("wrong variant: {other:?}"),
         }
     }
 

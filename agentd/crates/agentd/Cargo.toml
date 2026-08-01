@@ -16,6 +16,7 @@ apexos-plugins = { path = "../plugins" }
 apexos-agent   = { path = "../agent" }
 apexos-store   = { path = "../store" }
 tokio          = { workspace = true }
+reqwest        = { workspace = true }   # W2 mesh workers: assign/poll/report POSTs to peers
 anyhow         = { workspace = true }
 serde_json     = { workspace = true }
 serde          = { workspace = true }

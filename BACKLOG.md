@@ -33,8 +33,10 @@ M1c (R bit: measures + K-stall + renewal, vouchers/sub-conductors, health
 dual-tree join) shipped 2026-08-01 — sequencing ruling: M1c before W2, so
 the wire crossing distributes a finished single-node supervision machine.
 Both field-proven on apex1 same day (restart composition; renewal/K-stall/
-voucher exhibits). Next: W2 mesh workers (remote parked-state ownership is
-its own design), then M1d (64-table, epochs, census→Cerebro, board tree view).*
+voucher exhibits). W2 mesh workers built 2026-08-01 — the ownership ruling:
+the peer owns everything stateful, the conductor owns batch bookkeeping only
+(assignments out, reports home, never state). Next: M1d (64-table, epochs,
+census→Cerebro, board tree view), then M2 cross-node rings on the W2 wire.*
 
 ## Docs-hygiene audit 2026-08-01 — deferred apply items
 

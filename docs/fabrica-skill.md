@@ -64,6 +64,41 @@ accepted a "done" without reading anything, you didn't integrate — you hoped.
   cells at verdict boundaries when you can, and when you need a hold that
   nothing outruns: `worker_cancel`.
 
+## Conducting across the colony (W2 — the mesh as the worker pool)
+
+Any task in a plain batch can name a peer: `{prompt, node:"apex-3"}` (or set
+`node` batch-wide). The task then runs on that node's OWN worker tier — its
+admission cap, its policy, its evidence, its memory. You are borrowing a
+colleague's hands, not teleporting your own.
+
+- **Route by load and capability, not habit.** `mesh_capabilities` now shows
+  each peer's `worker: {cap, slots_used, queued}` beside its senses, model
+  and tier. Send heavy fans where slots are free; keep latency-sensitive
+  work local. A beacon-dark peer fails your rows fast — re-fan elsewhere.
+- **Approvals land THERE.** A remote worker's ask-gated tool raises its card
+  on the HOSTING node's board, under the hosting node's policy — your yolo
+  never crosses the wire. So remote tasks should ride allow-path tools
+  (write_file / read_file / git_log …) unless someone is watching that
+  node's board. Model pins DO cross — think-big / hammer-small still works
+  per task.
+- **Evidence mirrors; artifacts stay.** When a remote row settles, its small
+  evidence doc mirrors into YOUR `agents/<worker>.json` — read it exactly
+  like a local row's. The artifacts it names live on the peer; when you need
+  one in hand, have the task `mesh_file_send` its deliverable home as its
+  last act, or pull it yourself afterward.
+- **The deadline is still the net.** Peer restarts park its workers (its
+  law); a dark peer just stops answering polls. Either way your batch
+  reports at its deadline with those rows `timed_out` — still revivable:
+  `send_to_agent(node, session_id: <remote_session>)` is the cross-node
+  revive, the same one edge as ever. `list_workers` shows each remote row's
+  node, peer ids and last-observed state.
+- **Cancel is a relay.** `worker_cancel` on a remote row asks its host to
+  cancel and holds the row `cancel requested` until the peer confirms —
+  a silent peer is bounded by the deadline, so the kill switch can't wedge.
+- **Mandalas stay home (for now).** `node` + `mandala` refuses — cross-node
+  rings are M2. Sub-conductors likewise cannot fan outward; the colony's
+  depth stays 1 by construction.
+
 ## Conducting a mandala (the M tier, growing)
 
 A mandala is for work too large for one fan: multi-day refactors, ports,

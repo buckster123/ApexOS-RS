@@ -27,7 +27,7 @@ complementary designs, not redundant ones.
 | Tier | What it is | Status |
 |---|---|---|
 | **Goal driver** | One session, deterministic serial loop (`goal.rs`) | Shipped |
-| **Worker tier** (W) | One conductor goal fans a batch to N persistent, parkable, evidence-leaving child sessions | W1 shipped (`#306`–`#311`); W2 mesh open |
+| **Worker tier** (W) | One conductor goal fans a batch to N persistent, parkable, evidence-leaving child sessions | W1 shipped (`#306`–`#311`); W2 mesh shipped (`#318`) |
 | **Mandala Mode** (M) | Workers that may themselves conduct — depth-N recursion under conservation laws | M1a–M1c shipped (`#312`–`#315`); M1d/M2 open |
 
 The code regime rides on all three; Fabrica the app surfaces all of it.
@@ -252,8 +252,18 @@ W-tier (each = one PR, house style):
 - **W1d** ✅ `#310`+`#311` — batch yolo inherit + batched approval cards +
   cancel cascade + bounded inline mode + PB-1 soft breaker +
   `task_fanout{model?}`.
-- **W2** — mesh workers (`node` per task): the colony as the worker pool
-  (remote parked-state ownership is its own design — do not improvise it).
+- **W2** ✅ `#318` — mesh workers (`node` per task): the colony as the worker
+  pool. THE OWNERSHIP RULING: the peer owns everything stateful (worker record,
+  session JSONL, cap/FIFO, policy — yolo never crosses the wire — review
+  procedure, evidence, episode); the conductor owns batch bookkeeping only
+  (`remote_workers.json` mirror rows + the deadline as the unbreakable net).
+  Wire carries assignments out + reports home, never state — one writing
+  daemon per file. Report push (3 retries) + review-cadence polls (golden
+  offsets, fib backoff, beacon-dark skip) reconcile both restart directions;
+  evidence DOCS mirror to `agents/<local_wid>.json` (artifacts stay on the
+  peer); cross-node revive = the ordinary `send_to_agent(node, session_id)`.
+  `/api/worker/{fanout,query,cancel,report}`, from-validated + token-gated;
+  capabilities gains `worker:{cap,slots_used,queued}` for routing.
 
 M-tier (Hamming-weight order — each slice adds one bit, one guard, one test
 class):
