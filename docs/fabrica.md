@@ -28,7 +28,7 @@ complementary designs, not redundant ones.
 |---|---|---|
 | **Goal driver** | One session, deterministic serial loop (`goal.rs`) | Shipped |
 | **Worker tier** (W) | One conductor goal fans a batch to N persistent, parkable, evidence-leaving child sessions | W1 shipped (`#306`–`#311`); W2 mesh shipped (`#318`) |
-| **Mandala Mode** (M) | Workers that may themselves conduct — depth-N recursion under conservation laws | M1a–M1d shipped (`#312`–`#320`); M2 open |
+| **Mandala Mode** (M) | Workers that may themselves conduct — depth-N recursion under conservation laws | M1a–M2 shipped (`#312`–`#321`) — the ladder is complete |
 
 The code regime rides on all three; Fabrica the app surfaces all of it.
 
@@ -291,8 +291,18 @@ class):
   census reading → Cerebro per epoch. Plus two board-truth fixes: the
   never-bound WORKERS lane, and the surgical approvals sweep. The tree-view
   WINDOW moved to the Fabrica-app track (recipe in BACKLOG).
-- **M2** — cross-node rings (wide rings on the GPU peer, the bindu on the
-  spine); golden-offset heartbeats; remote-cell revive semantics.
+- **M2** ✅ `#321` — cross-node rings: a ring cell may carry `node` — the
+  CELL (geometry, budget, barrier membership, closure) stays on the bindu,
+  its execution BODY is a W2 remote row on the peer; the composed cell
+  directive (axis verbatim) crosses as task text, the budget's step ceiling
+  as the `steps` assignment field, and the evidence mirror closes the loop
+  (`sync_remote_cells` — a gate over a remote ring opens the tick its last
+  mirror lands). Gates, measured cells, vouchered cells and code mandalas
+  stay local (`remote_cell_veto`, the four named laws). Heartbeats = the W2
+  golden-offset polls; remote-cell revive = the ordinary
+  `send_to_agent(node, session)`. Epoch fingerprints refined: census word-SET
+  (count jitter under-detected orbits on busy trees) + open remote-cell
+  state lines (a working remote ring is never invisible sameness).
 
 Fabrica-app slices (parallel track): board rename; worker lane; tree/census
 views; per-cell intervention controls. `docs/fabrica-skill.md` lands with

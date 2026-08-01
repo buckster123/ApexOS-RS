@@ -46,11 +46,19 @@ pub const STATE_CANCEL_REQUESTED: &str = "cancel requested";
 /// One remote task in an assignment: the prompt plus the optional model pin.
 /// Model pins cross the wire (identity, not trust — the W1d distinction);
 /// yolo NEVER crosses (it is not a field — the peer's policy is sovereign).
+///
+/// M2: `steps` is a remote CELL's step ceiling riding as ASSIGNMENT data
+/// (the cell budget is the contract — the M1c law, now across the wire).
+/// Assignments may be enriched; STATE never crosses. An older peer ignores
+/// the unknown field and the cell degrades to that peer's env step global —
+/// never worse than a W2 plain task (documented version skew).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteTaskItem {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u16>,
 }
 
 /// Build the `POST /api/worker/fanout` body (conductor → peer).
@@ -166,6 +174,17 @@ pub fn parse_state_tolerant(s: &str) -> Option<WorkerState> {
 /// The typed state for a report row — parsed, else the bounded fallback.
 pub fn row_state(raw: &str) -> WorkerState {
     parse_state_tolerant(raw).unwrap_or(WorkerState::Queued)
+}
+
+/// The peer-side reading of an assignment's `steps` (M2): absent = 0, the
+/// env-global sentinel (exactly a W2 plain task); present clamps 1..=100 —
+/// the same clamp the local cell mint applies to its budget steps, so a
+/// cell's ceiling means the same thing on either side of the wire.
+pub fn hosted_step_ceiling(steps: Option<u64>) -> u32 {
+    match steps {
+        None => 0,
+        Some(n) => (n as u32).clamp(1, 100),
+    }
 }
 
 // ── The conductor's mirror row ───────────────────────────────────────────────
@@ -324,16 +343,20 @@ pub fn provenance_prefix(from: &str, origin_batch: u64, prompt: &str) -> String 
 mod tests {
     use super::*;
 
-    fn item(p: &str) -> RemoteTaskItem { RemoteTaskItem { prompt: p.into(), model: None } }
+    fn item(p: &str) -> RemoteTaskItem { RemoteTaskItem { prompt: p.into(), model: None, steps: None } }
 
     #[test]
     fn fanout_body_and_accept_round_trip() {
-        let body = build_fanout_body("apex1", 7, 1800, &[item("write tests"), RemoteTaskItem { prompt: "port docs".into(), model: Some("claude-haiku-4-5".into()) }]);
+        let body = build_fanout_body("apex1", 7, 1800, &[item("write tests"), RemoteTaskItem { prompt: "port docs".into(), model: Some("claude-haiku-4-5".into()), steps: Some(6) }]);
         assert_eq!(body["from"], "apex1");
         assert_eq!(body["origin_batch"], 7);
         assert_eq!(body["deadline_s"], 1800);
         assert_eq!(body["tasks"][1]["model"], "claude-haiku-4-5");
         assert!(body["tasks"][0].get("model").is_none(), "None model must not serialize");
+        // M2: a cell's step ceiling rides as assignment data; a plain task
+        // carries no such key (an old peer sees exactly the W2 body).
+        assert_eq!(body["tasks"][1]["steps"], 6);
+        assert!(body["tasks"][0].get("steps").is_none(), "None steps must not serialize");
         // yolo NEVER crosses the wire — the body has no such key, structurally.
         assert!(body.get("yolo").is_none());
 
@@ -438,6 +461,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         // Missing file loads empty, never fatal.
         assert!(load_remotes(std::path::Path::new("/nonexistent/apexos-remotes-x.json")).is_empty());
+    }
+
+    #[test]
+    fn hosted_step_ceiling_clamps_with_the_absent_sentinel() {
+        // Absent = 0, the env-global sentinel — exactly a W2 plain task.
+        assert_eq!(hosted_step_ceiling(None), 0);
+        // Present clamps 1..=100, the local cell mint's clamp.
+        assert_eq!(hosted_step_ceiling(Some(0)), 1);
+        assert_eq!(hosted_step_ceiling(Some(8)), 8);
+        assert_eq!(hosted_step_ceiling(Some(500)), 100);
+        // A legacy body without the key round-trips through serde as None.
+        let legacy: RemoteTaskItem = serde_json::from_str(r#"{"prompt":"x"}"#).unwrap();
+        assert!(legacy.steps.is_none());
+        assert_eq!(hosted_step_ceiling(legacy.steps.map(u64::from)), 0);
+        let with: RemoteTaskItem = serde_json::from_str(r#"{"prompt":"x","steps":6}"#).unwrap();
+        assert_eq!(with.steps, Some(6));
     }
 
     #[test]

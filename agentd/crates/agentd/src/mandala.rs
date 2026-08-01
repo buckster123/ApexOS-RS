@@ -164,14 +164,27 @@ pub fn breadth_product_ok(
 // ── Epochs + the orbit detector (M1d) ───────────────────────────────────────
 
 /// A mandala's epoch fingerprint: hash(invariant, sorted evidence digests,
-/// census). Two CONSECUTIVE equal fingerprints = a true orbit — the run
-/// produced nothing new across two whole epochs while claiming activity
-/// (the A→B→A re-planning loop) — which convenes a council over the census
-/// rather than grinding a third lap.
+/// census WORD-SET, remote-body states). Two CONSECUTIVE equal fingerprints
+/// = a true orbit — the run produced nothing new across two whole epochs
+/// while claiming activity (the A→B→A re-planning loop) — which convenes a
+/// council over the census rather than grinding a third lap.
+///
+/// M2 refinements, both aimed at honest orbit detection:
+/// - The census folds as a WORD-SET (keys only, counts dropped): per-epoch
+///   review COUNTS jitter on busy trees (golden offsets + tick granularity
+///   wobble how many reviews land inside one epoch), so exact counts made
+///   consecutive fingerprints unequal and orbits under-detect. Which KINDS
+///   of states exist is the stable signature; the evidence digests still
+///   carry "something new landed".
+/// - Each open remote-bodied cell folds an `addr=state` line: remote work is
+///   invisible to the local review census, so without this a hard-working
+///   remote ring would read as sameness. State transitions move the
+///   fingerprint; the mirror files join the evidence axis at terminal.
 pub fn epoch_fingerprint(
     invariant_hash: &str,
     evidence_digests: &mut [String],
     census: &std::collections::BTreeMap<String, u64>,
+    remote_states: &std::collections::BTreeMap<String, String>,
 ) -> String {
     evidence_digests.sort();
     let mut canonical = format!("axis:{invariant_hash}\n");
@@ -180,8 +193,11 @@ pub fn epoch_fingerprint(
         canonical.push_str(d);
         canonical.push('\n');
     }
-    for (word, n) in census {
-        canonical.push_str(&format!("census:{word}={n}\n"));
+    for word in census.keys() {
+        canonical.push_str(&format!("census:{word}\n"));
+    }
+    for (addr, state) in remote_states {
+        canonical.push_str(&format!("remote:{addr}={state}\n"));
     }
     hex_digest(canonical.as_bytes())
 }
@@ -447,6 +463,12 @@ pub struct CellRecord {
     /// mint by the parent conductor, enforced in the worker driver.
     #[serde(default)]
     pub voucher: bool,
+    /// M2: the mesh peer hosting this cell's execution BODY (None = local).
+    /// Static structure, stamped at mint — the tree says where the body
+    /// lives without joining remote_workers.json. The cell itself (geometry,
+    /// barriers, budget) never leaves this node.
+    #[serde(default)]
+    pub node: Option<String>,
 }
 
 fn default_open() -> String { "open".into() }
@@ -749,7 +771,7 @@ mod tests {
             invariant_hash: "h".into(), worker: None, state: "open".into(),
             evidence: None, reparented_to: None, created_epoch: 0,
             barrier_timeout_s: None, barrier_opened: false,
-            measure: None, measure_history: Vec::new(), voucher: false,
+            measure: None, measure_history: Vec::new(), voucher: false, node: None,
         };
         // Root with 4 children; 0.1 with 3 children.
         for a in ["0", "0.0", "0.1", "0.2", "0.3", "0.1.0", "0.1.1", "0.1.2"] {
@@ -769,25 +791,41 @@ mod tests {
 
     #[test]
     fn epoch_fingerprint_is_order_stable_and_orbit_needs_open_cells() {
-        let census: std::collections::BTreeMap<String, u64> =
+        use std::collections::BTreeMap;
+        let census: BTreeMap<String, u64> =
             [("live:PBV".to_string(), 4u64), ("waiting:P".to_string(), 2)].into();
+        let no_remote: BTreeMap<String, String> = BTreeMap::new();
         let mut ev1 = vec!["bbb".to_string(), "aaa".to_string()];
         let mut ev2 = vec!["aaa".to_string(), "bbb".to_string()];
-        let f1 = epoch_fingerprint("axis1", &mut ev1, &census);
-        let f2 = epoch_fingerprint("axis1", &mut ev2, &census);
+        let f1 = epoch_fingerprint("axis1", &mut ev1, &census, &no_remote);
+        let f2 = epoch_fingerprint("axis1", &mut ev2, &census, &no_remote);
         assert_eq!(f1, f2, "evidence order must not perturb the fingerprint");
-        // Any real change moves it: new evidence, different census, other axis.
+        // THE WORD-SET LAW (M2): review counts jitter on busy trees, so the
+        // census folds keys-only — a count-only wobble must NOT move it…
+        let jittered: BTreeMap<String, u64> =
+            [("live:PBV".to_string(), 9u64), ("waiting:P".to_string(), 1)].into();
+        assert_eq!(epoch_fingerprint("axis1", &mut ev1.clone(), &jittered, &no_remote), f1,
+                   "count jitter must not perturb the fingerprint");
+        // …while any real change moves it: new evidence, a different word
+        // SET, another axis.
         let mut ev3 = vec!["aaa".to_string(), "bbb".to_string(), "ccc".to_string()];
-        assert_ne!(epoch_fingerprint("axis1", &mut ev3, &census), f1);
-        let census2: std::collections::BTreeMap<String, u64> =
-            [("live:PBV".to_string(), 5u64)].into();
-        assert_ne!(epoch_fingerprint("axis1", &mut ev1.clone(), &census2), f1);
-        assert_ne!(epoch_fingerprint("axis2", &mut ev1.clone(), &census), f1);
+        assert_ne!(epoch_fingerprint("axis1", &mut ev3, &census, &no_remote), f1);
+        let census2: BTreeMap<String, u64> = [("live:PBV".to_string(), 5u64)].into();
+        assert_ne!(epoch_fingerprint("axis1", &mut ev1.clone(), &census2, &no_remote), f1);
+        assert_ne!(epoch_fingerprint("axis2", &mut ev1.clone(), &census, &no_remote), f1);
+        // Remote-body states join the signature (M2): a working remote ring
+        // is never invisible sameness — presence and transitions both move it.
+        let r1: BTreeMap<String, String> = [("0.1.0".to_string(), "running".to_string())].into();
+        let r2: BTreeMap<String, String> = [("0.1.0".to_string(), "done".to_string())].into();
+        let fr1 = epoch_fingerprint("axis1", &mut ev1.clone(), &census, &r1);
+        assert_ne!(fr1, f1, "a remote body appearing moves the fingerprint");
+        assert_ne!(epoch_fingerprint("axis1", &mut ev1.clone(), &census, &r2), fr1,
+                   "a remote state transition moves the fingerprint");
         // The orbit rule: equal-consecutive AND open cells; rest is rest.
         assert!(is_orbit(Some(&f1), &f2, 3));
         assert!(!is_orbit(Some(&f1), &f2, 0), "a settled tree repeating is rest, not an orbit");
         assert!(!is_orbit(None, &f1, 3), "the first epoch can never orbit");
-        let other = epoch_fingerprint("axis1", &mut ev3, &census);
+        let other = epoch_fingerprint("axis1", &mut ev3, &census, &no_remote);
         assert!(!is_orbit(Some(&f1), &other, 3));
     }
 
@@ -882,7 +920,7 @@ mod tests {
             invariant_hash: "abc".into(),
             worker: None, state: "open".into(), evidence: None, reparented_to: None,
             created_epoch: 0, barrier_timeout_s: None, barrier_opened: false,
-            measure: None, measure_history: Vec::new(), voucher: false,
+            measure: None, measure_history: Vec::new(), voucher: false, node: None,
         };
         for a in ["0", "0.0", "0.0.0", "0.1", "0.1.2"] {
             save_cell(&dir, &mk(a));
@@ -914,7 +952,7 @@ mod tests {
             invariant_hash: "x".into(), worker: None, state: "open".into(),
             evidence: None, reparented_to: None,
             created_epoch: 0, barrier_timeout_s: None, barrier_opened: false,
-            measure: None, measure_history: Vec::new(), voucher: false,
+            measure: None, measure_history: Vec::new(), voucher: false, node: None,
         };
         std::fs::write(dir.join("0.9.json"), serde_json::to_string(&cell).unwrap()).unwrap();
         assert!(load_tree(&dir).is_empty());
@@ -972,7 +1010,7 @@ mod tests {
             invariant_hash: "h".into(), worker: None, state: state.into(),
             evidence: None, reparented_to: None,
             created_epoch: 0, barrier_timeout_s: None, barrier_opened: false,
-            measure: None, measure_history: Vec::new(), voucher: false,
+            measure: None, measure_history: Vec::new(), voucher: false, node: None,
         };
         for (a, s) in [("0", "open"), ("0.1", "open"), ("0.1.0", "done"),
                        ("0.1.1", "open"), ("0.1.1.0", "failed"), ("0.10", "open")] {
@@ -1059,6 +1097,7 @@ mod tests {
         assert!(cell.measure.is_none());
         assert!(cell.measure_history.is_empty());
         assert!(!cell.voucher);
+        assert!(cell.node.is_none(), "pre-M2 cells are local-bodied by default");
         // The R forms' guard law: SPIRAL needs a measure, FORGE needs both.
         assert!(!CellForm::SPIRAL.guards_armed(None, None, None));
         assert!(CellForm::SPIRAL.guards_armed(None, Some("grep -c TODO"), None));

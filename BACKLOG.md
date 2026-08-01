@@ -42,10 +42,19 @@ the peer owns everything stateful, the conductor owns batch bookkeeping only
 (assignments out, reports home, never state). M1d built 2026-08-01 same
 session: the 64-table gates admission, torus epochs + orbit→council, census
 →Cerebro, the two board-truth fixes (never-bound WORKERS lane, surgical
-approvals sweep); the tree-view WINDOW is the app-track item below. Next:
-M1d smoke (needs an epoch-length run — bundle with the M2 smoke), then M2
-cross-node rings on the W2 wire — whose smoke owns the paths not
-live-proven yet: dark-peer fail-fast, parked-vs-idle revive, orbit-in-anger.*
+approvals sweep); the tree-view WINDOW is the app-track item below. M1d
+field-proven same day via the orbit exhibit (epoch determinism, one council
+per stuck-state, dedup live). M2 cross-node rings `#321` built 2026-08-01:
+ring cells carry `node` — cell geometry stays on the bindu, the body is a W2
+remote row, the mirror closes the gate's loop; `remote_cell_veto` keeps
+gates/measures/vouchers/code-mandalas home; epoch fingerprints refined
+(census word-set + remote state lines). The M2 smoke owns the paths not
+live-proven yet: the colony diamond end-to-end, dark-peer fail-fast rings,
+cross-node cell revive, bindu restart mid-remote-ring, orbit-in-anger.
+Deferred-with-conditions (field data reopens): **peer-clone ritual** (code
+mandalas with remote cells — needs a repo-on-both-ends story, refused
+mandala-level today) · **remote measures** (would need lap boundaries at the
+peer or laps-by-poll = the wire carrying state; refused by law today).*
 
 **W2 smoke field note (2026-08-01, APEX's find):** a remote worker did the
 work but skipped `artifacts:[…]` in its own `worker_report{done}` even though
