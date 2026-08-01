@@ -33,10 +33,26 @@ M1c (R bit: measures + K-stall + renewal, vouchers/sub-conductors, health
 dual-tree join) shipped 2026-08-01 — sequencing ruling: M1c before W2, so
 the wire crossing distributes a finished single-node supervision machine.
 Both field-proven on apex1 same day (restart composition; renewal/K-stall/
-voucher exhibits). W2 mesh workers built 2026-08-01 — the ownership ruling:
+voucher exhibits). W2 mesh workers `#318` merged + FIELD-PROVEN 2026-08-01
+(apex1 conducts, andre-laptop hosts): round trip 7s fan→report, conductor
+restart mid-batch reconciled (`1 poll target resumed`), deadline honesty
+(1 done · 1 timed_out), cross-node straggler revive-by-send lands 13s,
+post-report poll mirrors it home — the ownership ruling held everywhere:
 the peer owns everything stateful, the conductor owns batch bookkeeping only
 (assignments out, reports home, never state). Next: M1d (64-table, epochs,
-census→Cerebro, board tree view), then M2 cross-node rings on the W2 wire.*
+census→Cerebro, board tree view), then M2 cross-node rings on the W2 wire —
+whose smoke owns the two paths not live-proven yet: dark-peer fail-fast and
+parked-vs-idle revive (same wake edge, code-covered).*
+
+**W2 smoke field note (2026-08-01, APEX's find):** a remote worker did the
+work but skipped `artifacts:[…]` in its own `worker_report{done}` even though
+the task text asked — the mirror honestly carried `[]` (the sibling worker's
+artifacts flowed perfectly, so the pipe is fine). Same class as the M1b
+field-gate lesson: rituals must DEMAND mechanically, asking isn't enough.
+Candidate: `directive_first`/`worker_system` gains a mechanical "declare
+every file you produced in artifacts" line (W-tier-wide, not W2-specific).
+Conductor craft until then: missing artifacts ⇒ check summary + workspace,
+not missing work (taught in `docs/fabrica-skill.md` remote section).
 
 ## Docs-hygiene audit 2026-08-01 — deferred apply items
 
