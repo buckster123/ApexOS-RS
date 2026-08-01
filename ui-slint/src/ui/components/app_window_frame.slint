@@ -12,7 +12,7 @@
 import { Palette } from "../palette.slint";
 import { Personas } from "../personas.slint";
 import { Win98, BevelEdges, Win98Button } from "win98.slint";
-import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, ImagineJobItem, CutSegItem, ImageItem, BoardCard, WmState } from "../types.slint";
+import { MessageItem, SysStats, SessionItem, ModelItem, EndpointItem, Usage, AppKind, CouncilAgent, ChromeKind, EventLogItem, MeshNode, InboxThread, AudioFileItem, SonusFileItem, NoteItem, SketchStroke, ExplorerEntry, UsbCandidate, ReaderBlock, ReaderLink, ImagineJobItem, CutSegItem, ImageItem, BoardCard, MandalaRow, WmState } from "../types.slint";
 import { ChatView } from "chat_view.slint";
 import { InputBar } from "input_bar.slint";
 import { Dashboard } from "dashboard.slint";
@@ -34,6 +34,7 @@ import { WebView } from "web_view.slint";
 import { CalculatorView } from "calculator_view.slint";
 import { ExplorerView } from "explorer_view.slint";
 import { OccipitalView } from "occipital_view.slint";
+import { MandalaView } from "mandala_view.slint";
 import { ImagineView } from "imagine_view.slint";
 
 component CaptionButton inherits Rectangle {
@@ -182,6 +183,10 @@ export component AppWindowFrame inherits Rectangle {
     in property <[ReaderLink]>   occipital-links;
     in property <[ReaderLink]>   occipital-trail;
     in-out property <string>     occipital-url-input;
+    // Mandala (☸) — the Fabrica tree window
+    in property <[MandalaRow]>   mandala-rows;
+    in property <string>         mandala-meta;
+    in property <int>            mandala-scroll-tick;
     // Explorer (📁 Files)
     in property <[ExplorerEntry]> explorer-entries;
     in property <string>         explorer-current-path;
@@ -840,6 +845,13 @@ export component AppWindowFrame inherits Rectangle {
             cut-score-compose => { root.imagine-cut-score-compose(); }
             edit-add(id) => { root.imagine-edit-add(id); }
             edit-remove(id) => { root.imagine-edit-remove(id); }
+        }
+
+        if root.kind == AppKind.mandala: MandalaView {
+            vertical-stretch: 1;
+            rows: root.mandala-rows;
+            meta: root.mandala-meta;
+            scroll-tick: root.mandala-scroll-tick;
         }
     }
 

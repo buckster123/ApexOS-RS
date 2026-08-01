@@ -124,18 +124,14 @@ not missing work (taught in `docs/fabrica-skill.md` remote section).
   set (`SupervisorCmd::QueryApprovals` + `GET /api/approvals/pending`, the
   supervisor's `pending_approvals` map is the truth) seeded on connect.
 
-- **[UI · MEDIUM] Fabrica-app: the mandala tree-view window** (M1d scope
-  cut — the daemon core shipped; the view is an app-track slice). The data
-  is ready: `mandala_status` renders the whole tree + census + epoch/orbit
-  reading, and the Occipital tool-output-interception pattern ships it with
-  zero backend change. Registration traps (recon 2026-08-01, receipts in
-  cerebro): new `AppKind` ordinal 21 must land in types.slint + the
-  `APP_TABLE`↔`UI_APPS` locked mirror (+ its count lock-test) + the
-  appwindow.slint `for w` BINDING block (the silently-skippable step — the
-  W1a WORKERS lane shipped unbound exactly there, fixed M1d) + the start
-  menu's hard-coded row-count height. Flat-list-with-depth-indent is the
-  house tree idiom (occipital reader blocks); kiosk scroll = the
-  work_board ScrollView pattern.
+- ~~[UI · MEDIUM] Fabrica-app: the mandala tree-view window~~ **SHIPPED
+  `#324` (2026-08-02)** — the Mandalas window, AppKind ordinal 21, all four
+  recon'd traps honored (types.slint enum + APP_TABLE↔UI_APPS mirror +
+  count lock 22 + the appwindow `for w` binding threaded); the start-menu
+  height trap turned out already-fixed (the two-column refactor made it
+  `preferred-height`). Data = the occipital interception idiom over
+  `mandala_status` output. Remaining app-track slice: per-cell intervention
+  controls (revive/cancel buttons → the existing tools).
 
 ---
 
