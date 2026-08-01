@@ -167,7 +167,7 @@ As built (`agentd/crates/agentd/src/dream_digest.rs`):
   every registered peer through the Slice-1 relay (`mesh_memory_send` reused with a
   `dream-digest` extra tag on top of the receiver's usual provenance stamp).
 - **Two invariants (the pure, unit-tested `digest_candidates`):**
-  - **The echo-guard** — memories tagged `colony` / `from:*` / `dream-digest` (federated
+  - **The echo-guard** — memories tagged `colony` / `from:*` / `dream-digest` / `dream-journal` (the node’s own journal stays home, `#248`) (federated
     imports) are NEVER candidates, so knowledge propagates one hop per genuine
     consolidation and the colony can't ping-pong an item into amplification.
   - **The window is the dedup** — only this dream's creations qualify; a night's digest

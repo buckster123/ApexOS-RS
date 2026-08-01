@@ -93,5 +93,10 @@ video, SFX all spend) can't inherit silent spend.
 - [ ] The all-Rust finale: compose → SCORE → the Cutting Room renders a
       scored cut end-to-end with no Python anywhere in the chain.
 
+*Field result (2026-07-30, `#304`): the cutover field poke ran on apex-3 —
+APEX composed, downloaded, and the track surfaced in the 🎵 app ("Same Voice,
+New Bones" is the fixture truth); media-UX findings shipped same day. The
+all-Rust SCORE finale remains the open box.*
+
 Deep details (wire contract, divergences from hermes, slice ledger) live in
 the Sonus-RS repo: `docs/hermes-parity.md`, `BACKLOG.md`, `CLAUDE.md`.

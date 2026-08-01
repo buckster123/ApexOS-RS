@@ -27,8 +27,8 @@ complementary designs, not redundant ones.
 | Tier | What it is | Status |
 |---|---|---|
 | **Goal driver** | One session, deterministic serial loop (`goal.rs`) | Shipped |
-| **Worker tier** (W) | One conductor goal fans a batch to N persistent, parkable, evidence-leaving child sessions | This charter |
-| **Mandala Mode** (M) | Workers that may themselves conduct — depth-N recursion under conservation laws | This charter |
+| **Worker tier** (W) | One conductor goal fans a batch to N persistent, parkable, evidence-leaving child sessions | W1 shipped (`#306`–`#311`); W2 mesh open |
+| **Mandala Mode** (M) | Workers that may themselves conduct — depth-N recursion under conservation laws | M1a–M1c shipped (`#312`–`#315`); M1d/M2 open |
 
 The code regime rides on all three; Fabrica the app surfaces all of it.
 
@@ -52,7 +52,9 @@ The code regime rides on all three; Fabrica the app surfaces all of it.
   `{prompt, system?, files, plan_ref, skills}` — `skills` = Cerebro procedure
   ids, `plan_ref` = a Cerebro intention/episode id. No parent history, ever.
   Default system = the H6 minimal task charter; `inherit_soul:true` stays the
-  explicit widening.
+  explicit widening. *(As-shipped: task items carry `{prompt, model, measure,
+  voucher}`; the `system`/`files`/`plan_ref`/`skills` carry is still open —
+  the no-parent-history law is what's structural.)*
 - **Admission is tier-aware**: `AGENTD_WORKER_CAP`, defaults from the
   embodiment hardware tier (micro 2 · standard 4 · gpu 8), env-overridable,
   floor 1. FIFO overflow queue; freed slots pull from it. The turn-engine
@@ -65,14 +67,15 @@ The code regime rides on all three; Fabrica the app surfaces all of it.
   through `repair_history` (the boot path's code). **A parked worker releases
   its thermal slot.** Restart → Running workers go Parked, never lost.
 - **Revive-on-send is the only Parked→Running edge** (PB-3, structural): the
-  one code path fires off `send_to_agent → AgentMessage → UserPrompt`;
-  `worker_resume` is sugar that sends.
+  one code path fires off `send_to_agent → AgentMessage → UserPrompt`.
+  *(A `worker_resume` sugar tool was sketched but never built — sends are
+  the whole interface.)*
 - **Worker verdicts**: `worker_report{status: continue|done|blocked|yield,
   summary?, artifacts?[]}` — `goal_step`'s mirror; `yield` = go Idle awaiting
   input; `done` requires a summary and may declare workspace-confined
   artifact paths.
 - **The evidence rule** (the PRD's best idea, kept whole): every terminal
-  worker writes `logs/agents/<worker_id>.json` + a Cerebro episode. Batch
+  worker writes `<log dir>/agents/<worker_id>.json` (default `events/`) + a Cerebro episode. Batch
   reports hand the conductor **paths, not payloads** — integration and verify
   must actually read the artifacts. Trusting a summary string is a hinge;
   hinges fold (the verification triangle: artifact + mechanical gate +
@@ -160,7 +163,7 @@ because they answer different questions — one static, one runtime.
   restart — including the nightly self-update swap — reloads it Parked,
   revivable ring by ring.
 - **Address space: position IS identity** (Opus): `0.3.1.2` → the disk file
-  (`logs/worktrees/<root>/<addr>.json`), the branch name (`apex/w/0.3.1.2`),
+  (`<log dir>/worktrees/<root>/<addr>.json`), the branch name (`apex/w/0.3.1.2`),
   ancestry by string prefix. **The filesystem is the tree** — the only
   authoritative structure, which is the only posture compatible with a daemon
   that swaps its own binary mid-run. Reparent-by-prefix on reload; a node
@@ -192,7 +195,9 @@ because they answer different questions — one static, one runtime.
 - **No separate chat app, no soul churn, no system-prompt fork.** The mode is
   a regime on goals: `goal_create{mode:"code"}` injects one **stable, cached**
   engineering-discipline block into the conductor's layer (byte-stable ⇒
-  prefix-cache-safe). Workers get H6 charters regardless of mode.
+  prefix-cache-safe). Workers get H6 charters regardless of mode. *(Not yet
+  built — the shipped code-regime entry point is `mandala_create{repo}`,
+  which injects the worktree/merge rituals per cell.)*
 - **Specialization lives where the evolutionary layer says competence lives**:
   Cerebro procedures + `docs/fabrica-skill.md` (the imagine-craft-skill
   pattern — seed doc, `store_procedure` invitation, agents evolve it).
@@ -236,30 +241,34 @@ because they answer different questions — one static, one runtime.
 
 W-tier (each = one PR, house style):
 
-- **W1a** — session class + `WorkerState` + driver skeleton +
+- **W1a** ✅ `#306` — session class + `WorkerState` + driver skeleton +
   `task_fanout{mode:"async"}` + events + `workers.json` (restart:
   Running→Parked) + board twin lane. Depth-1, env cap.
-- **W1b** — `worker_report` verdicts incl. `yield` + TTL eviction +
+- **W1b** ✅ `#307` — `worker_report` verdicts incl. `yield` + TTL eviction +
   revive-on-send (`repair_history` reload) + slot release on park.
-- **W1c** — output artifacts + Cerebro episodes + `TaskBatchDone` **with
-  `batch_deadline_s`** + `AwaitingBatch` posture + the integrate/verify
-  directive (paths, not payloads).
-- **W1d** — batch yolo inherit + batched approval cards + cancel cascade +
-  bounded inline mode + PB-1 soft breaker + `task_fanout{model?}`.
+- **W1c** ✅ `#308`+`#309` — output artifacts + Cerebro episodes +
+  `TaskBatchDone` **with `batch_deadline_s`** + `AwaitingBatch` posture +
+  the integrate/verify directive (paths, not payloads).
+- **W1d** ✅ `#310`+`#311` — batch yolo inherit + batched approval cards +
+  cancel cascade + bounded inline mode + PB-1 soft breaker +
+  `task_fanout{model?}`.
 - **W2** — mesh workers (`node` per task): the colony as the worker pool
   (remote parked-state ownership is its own design — do not improvise it).
 
 M-tier (Hamming-weight order — each slice adds one bit, one guard, one test
 class):
 
-- **M1a** — `CellForm`, `Addr`, `BudgetVec`, `admissible`, `ring_width`
-  (pure, tested); the on-disk tree + reconstruction + reparenting; the
-  invariant file; SPINE/LEAF only — depth with zero new concurrency.
-- **M1b** — J and B: GATE/FAN/DIAMOND; `git_worktree` tool + address-named
-  branches; descendant-only barriers with timeouts; the review procedure
-  replaces ad-hoc stall/TTL checks; golden offsets + Fibonacci backoff.
-- **M1c** — R: SPIRAL/FORGE-form; measures + K-stall ring-breaking; vouchers
-  (sub-conductors live); reap rule + dual-tree integrity in the health probe.
+- **M1a** ✅ `#312` — `CellForm`, `Addr`, `BudgetVec`, `admissible`,
+  `ring_width` (pure, tested); the on-disk tree + reconstruction +
+  reparenting; the invariant file; SPINE/LEAF only — depth with zero new
+  concurrency.
+- **M1b** ✅ `#313`+`#314` — J and B: GATE/FAN/DIAMOND; `git_worktree` tool +
+  address-named branches; descendant-only barriers with timeouts; the review
+  procedure replaces ad-hoc stall/TTL checks; golden offsets + Fibonacci
+  backoff. Field-proven incl. the restart composition.
+- **M1c** ✅ `#315` — R: SPIRAL/FORGE-form; measures + K-stall ring-breaking;
+  vouchers (sub-conductors live); reap rule + dual-tree integrity in the
+  health probe. Field-proven incl. renewal + the brake-not-wall law.
 - **M1d** — full lattices + the 64-cell table + its exhaustive test +
   changing-line adaptation; torus epochs + orbit→council; census → Cerebro;
   the board tree view.

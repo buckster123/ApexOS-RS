@@ -1,6 +1,6 @@
 # Mandala Mode — deep-nesting recursion for extreme long-horizon runs in ApexOS-RS
 
-**Series:** follows `session-orchestration-loop-prd.md` and `apexos-rs-loop-prd-evaluation.md`. This doc designs the depth-N extension that the worker-tier evaluation deliberately deferred (§6.5: "depth-1 fan-out in v1, revisit with field data") — by first deconstructing what is *actually load-bearing* in the I-Ching, sacred geometry, and other 64-principle systems, then building the mode from those extracted invariants.
+**Series:** follows `1-orchestration-loop-prd.md` and `2-repo-evaluation.md` (this directory). This doc designs the depth-N extension that the worker-tier evaluation deliberately deferred (§6.5: "depth-1 fan-out in v1, revisit with field data") — by first deconstructing what is *actually load-bearing* in the I-Ching, sacred geometry, and other 64-principle systems, then building the mode from those extracted invariants.
 
 ## 0. Stance — translate, don't transplant
 

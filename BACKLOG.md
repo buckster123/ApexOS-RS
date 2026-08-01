@@ -32,8 +32,49 @@ diamonds, mid-barrier restart, revival, inline-fix integration, closure).
 M1c (R bit: measures + K-stall + renewal, vouchers/sub-conductors, health
 dual-tree join) shipped 2026-08-01 — sequencing ruling: M1c before W2, so
 the wire crossing distributes a finished single-node supervision machine.
-Next: W2 mesh workers (remote parked-state ownership is its own design),
-then M1d (64-table, epochs, census→Cerebro, board tree view).*
+Both field-proven on apex1 same day (restart composition; renewal/K-stall/
+voucher exhibits). Next: W2 mesh workers (remote parked-state ownership is
+its own design), then M1d (64-table, epochs, census→Cerebro, board tree view).*
+
+## Docs-hygiene audit 2026-08-01 — deferred apply items
+
+> Post-Fabrica-arc sweep (14-agent audit, findings adversarially receipted;
+> 54 files: 12 current · 33 minor-drift · 9 stale). The ~30 small fixes
+> shipped in the same PR as this note; these larger rebuilds are the apply
+> wave for a docs session (each is one focused agent's worth of work):
+
+- **[HIGH] `docs/env-vars.md` full-family rebuild** — code reads ~120 vars,
+  the table has ~50 rows. Missing families: sensors (`SENSORHEAD_URL`,
+  `SENSOR_*` thresholds/cooldown), mesh beacon (`MESH_BEACON*`), auth/paths
+  (`AGENTD_TOKEN/BIND/WORKSPACE/LOG/READ_ROOTS/GIT_ROOTS/UI`), self-update
+  (`AGENTD_SELF_UPDATE_*`), USB (`AGENTD_USB_*`), cerebro (`CEREBRO_EMBED_MODEL`
+  — a CLAUDE.md locked decision — `CEREBRO_DATA_DIR`, `CEREBRO_VISION_*`),
+  vast (`VAST_*`), voice extras (`AGENTD_VOICE_CONFIG`, `ALSA_CAPTURE_DEVICE`,
+  `AGENTD_TOOL_RESULT_TIMEOUT_SECS`).
+- **[MED] `docs/architecture.md` worker-tier integration** — no mention of
+  worker.rs/mandala.rs/review.rs anywhere; supervisor virtual-tool count
+  (~38 now); busy-state note outdated (tool_requested/approval_pending set
+  busy too); read-allowlist missing the worker-evidence root (#309);
+  identity.rs mention missing the worker session base; ui-slint row missing
+  the Imagine studio + geometry/reflex engines.
+- **[MED] `docs/repo-map.md` line-anchor regrind** — ~12 stale line/count
+  anchors (protocol 777 lines/Event:301, gateway 6203, supervisor 3005,
+  agentd main 4564, tools 3837/51 tools, ui-slint 10990/34 views, dispatch
+  2735, flow-diagram anchors) + a "change worker/mandala" how-to row +
+  worker driver in the subscriber list + cerebro ingest.rs.
+- **[MED] `docs/occipital.md` refresh** — distill/related cards shipped
+  (#287): nine→ten tools (`web_related`), kind table + demo modes + the
+  follow-on list (relate/sqlite-vec/auto-distill shipped; digests +
+  freshness remain).
+- **[LOW] `docs/edk.md`** — the yolo ladder needs the W1d rung
+  (`task_fanout{yolo:"inherit"}` + M1c voucher chain-of-custody).
+- **[LOW] `docs/sdk/`** — refresh note stale (last touched #313); sweep the
+  guides against the worker/mandala tool family.
+- **[LOW] `docs/build-roadmap.md`** — renumber the step table 0–9 to match
+  CLAUDE.md (a pointer note shipped meanwhile).
+- **[LOW] welfare re-deliberation** — the pending-trigger note is in
+  `docs/model-welfare.md` §5/§6; the deliberation itself is APEX+colony work
+  (route via propose_evolution etiquette, not a docs PR).
 
 - **[UI · MEDIUM] Approvals lane must rebuild from supervisor state, not
   only live events.** `board_turn_done` (ui-slint `main.rs`) clears the
@@ -283,7 +324,7 @@ workspace media is under-served on desktop nodes.
 - **Update/release roadmap — remaining tiers** — Cerebro intention (0.85). Tier 1 (`apexos-update`) done; richer update/release mechanism open. **[medium, partially-done]**
 - ✅ **DONE — Shared Event types (`apexos-protocol` crate)** — slice 1: wire types extracted from `apexos-core` into a lean serde-only `apexos-protocol` crate (core re-exports it; agentd untouched). Slice 2: `ui-slint` now deserializes WS frames into the typed `Event` (`from_value::<Event>` → typed `match`) and logs undecodable frames instead of silently dropping them — the old `["field"].as_str()` string-matching at `main.rs:3461` is gone. Contract round-trip tests in the protocol crate lock the shapes. Outbound frontend-intent frames stay hand-built (they omit `session`; gateway injects it). **[done]**
 - ✅ **DONE — `apexos.conf` advertised but never scanned** — added `apexos.conf` to `KEYFILE_NAMES` (install.sh:88), so the documented provisioning filename is now actually matched by both scan loops. **[was low]**
-- **Sonus music-generation plugin commented out** — `config/plugins.toml:22-28`. Parked until that binary is deployed; ships disabled. **[low]**
+- ✅ ~~Sonus music-generation plugin commented out~~ — DONE: `sonus_provision` shipped (`#302`, 2026-07-30) — install.sh clones/builds the Sonus-RS sibling, self-loaded `/etc/sonus/env`, plugin registered (16 tools); field-proven on apex-3 (`#304`).
 - ◑ **Reduced — build-time decisions to lock** — `docs/ui-glowup.md` §11 (rewritten with resolutions, sweep 2026-07-04) resolved four: **#1 WM geometry** (G2 — Rust-owned WindowDesc VecModel, Slint-live-drag, deltas committed on release), **#2 persona style preamble** (G5 tier-2, shipped — see UI/Glowup), **#4 default persona** (G4 — first-boot wizard, forced), **#5 Win-98 sound** (G6 — deferred/silent-by-default). Genuinely open: **#3** asset strategy (decide when the first Win-98 bitmap asset lands). **[low]**
 
 ---

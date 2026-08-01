@@ -275,6 +275,25 @@ homework**, and **severities are never inflated** — the reporter twice argued 
 · **Lift:** pure process, zero code — needs an agent with tools against the live capability, a
   writable shared drop-box for reports, and a merge gate a human holds.
 
+**The mandala conservation core — recursion you can prove terminates** ✅
+The Fabrica arc's pure substrate (`#306`–`#315`, 2026-07-31/08-01): a budget VECTOR
+(`BudgetVec{depth, cells, steps, deadline}`) whose admission law demands strict depth
+decrease + non-increase elsewhere (termination as well-founded descent, not hope);
+position-IS-identity addressing (`0.3.1.2` = disk file = git branch = ancestry by
+string prefix — ordinals never re-mint, so a re-fan after amnesia physically cannot
+collide); barriers whose wait-set is DERIVED from the address prefix (descendant-only
+by construction — deadlock impossibility is a theorem); measures as strictly-decreasing
+command-computed integers with a pure plateau detector (`k_stalled`) and automatic
+measure-keyed renewal (`renewal_grant`: half-remaining, floor 1, geometric); and a
+TOTAL supervision procedure (posture × six-bit observable word → exactly one
+single-line remediation, exhaustively tested over the whole input space) scheduled at
+golden-ratio Weyl offsets so sibling pulses cannot phase-lock.
+· `agentd/crates/agentd/src/mandala.rs` + `review.rs` (pure, exhaustively tested) ·
+  the runtime in `worker.rs` · the charter `docs/fabrica.md` · craft `docs/fabrica-skill.md`
+· **Lift:** the whole pure layer is std-only math over strings/ints — the descent
+  theorem, address algebra, barrier derivation, k-stall/renewal, and the total review
+  table lift into ANY recursive-orchestration system as one file with its tests.
+
 ---
 
 ## D. Interface

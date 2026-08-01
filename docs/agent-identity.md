@@ -67,6 +67,9 @@ the Cerebro space key and the thing the system stamps everywhere.
   `resolve_spawn_system` (supervisor) gives it a minimal task charter instead of the parental
   soul (`inherit_soul:true` is the explicit opt-in; an explicit `system` wins over both), and
   its Cerebro mints carry the system-stamped `spawn-derived` tag (see the stamp family below).
+  A third, **persistent** class sits between: Fabrica **worker sessions** (`[1<<62, 1<<63)`) —
+  parkable/revivable, minimal task charter, CCBS + soul deliberately skipped
+  (`docs/fabrica.md`; the gotchas "three-way partition" entry is the law).
 
 ---
 

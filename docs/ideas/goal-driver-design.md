@@ -244,8 +244,8 @@ core.
   loop closed. ✅ **Block-on-approval** (the testable half of `GoalPosture`) — a goal step that hits an
   `ask`-gated tool emits `ApprovalPending` in its own unwatched session; the driver now parks the goal
   **Blocked: "awaiting approval — &lt;tool&gt;"** (surfaced on the board, resumable via `goal_resume`)
-  instead of stalling silently. *Still deferred:* the per-goal **Yolo override** (auto-approve inside a
-  goal on a suggest node) — needs per-session policy threading into the supervisor.
+  instead of stalling silently. *(The per-goal Yolo
+  override shipped later — see field-test fix #3 below.)*
 
 Each slice is its own PR. P2a is the keystone; the rest layer on without rewrites.
 
@@ -282,3 +282,7 @@ Each slice is its own PR. P2a is the keystone; the rest layer on without rewrite
     switch; no new policy rule needed (`goal_create` is already `allow`). **The goal arc is now
     complete:** bounded · observable · LLM-steered · reason-bearing · restart-surviving ·
     cognitively-remembered · approval-safe · *and* autonomous for the hard cases.
+
+*Superseded-for-new-work by `docs/fabrica.md` (locked 2026-07-31): the goal
+driver is tier 1 of three — W1c grew it the AwaitingBatch posture, and the
+worker tier / Mandala Mode conduct through it.*

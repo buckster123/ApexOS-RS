@@ -20,7 +20,7 @@ Prior art feeding the arc:
 - The 2026-07-29 sweeps: web-studio feature inventory, craft-backend gaps, and
   the cutting-room portability verdicts (Cerebro session notes, FORGE).
 
-## Current state (post #289–#291)
+## Starting state (post #289–#291 — superseded by the ledger below; the arc completed A1–A7)
 
 Native app ships image generate + still preview + the shared jobs rail.
 Video jobs render a "open the browser studio" placeholder. The browser studio
@@ -64,7 +64,7 @@ as each lands.
 | U2a | Imaginarium | **Craft engine correctness** (the cutting-room port, part 1): per-segment normalize filter → concat, **master-clock single audio pass + music-bed audio track** (`AssetKind::Audio`, library audio sniff/mime/import/content-type), segment-owned captions (makes the lost-overlay bug unrepresentable), ffprobe durations, `-nostdin` + even-dimension pitfalls as tests | ✅ Imag#5 |
 | U2b | Imaginarium | **Craft engine expressiveness** (part 2): versioned merged timeline contract (style block, segment kinds `clip`/`still`+Ken Burns/`card`, speed, letterbox recipes), two-pass loudnorm ship pass, content-hash segment caching, provenance field | ✅ Imag#6 |
 | U3 | Imaginarium | **Thumbnails/posters** (`thumb.jpg` on completion via the contact-sheet recipe + `/v1/library/{id}/thumb`) + **async craft render** (job id immediately, poll like any job) | ✅ Imag#7 |
-| A4 | ApexOS-RS | **Image edit flow**: prompt + up to 3 sources (library chain / workspace picker), riding U1's job MediaRef | ✅ |
+| A4 | ApexOS-RS | **Image edit flow**: prompt + up to 3 sources (library chain / workspace picker), riding U1's job MediaRef | ✅ #300 |
 | A5 | ApexOS-RS | **The Cutting Room**: native timeline mode in the Imagine window — library picker with thumbnails, clip in/out/gain, segment captions, fades, style controls, render → job | ✅ #298 |
 | A6 | ApexOS-RS | **Score with Sonus**: music-bed picker off `/api/sonus/files` + `/api/sonus/stream` → library audio import → timeline bed; plus "🎵 ask APEX to compose" firing a queued `user_prompt` (the occipital-steer idiom). Honest no-sonus degrade | ✅ #299 |
 | A7 | — | **The agent story**: adapt the cutting-room skill so APEX drives the timeline API conversationally (procedure + soul evolution on the visual-artist node) | ✅ Imag#8 + `docs/imagine-craft-skill.md` |

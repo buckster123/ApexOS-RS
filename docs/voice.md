@@ -13,7 +13,9 @@
 | **TTS** (text→speech) | **Kokoro-82M** local *or* cloud API (ElevenLabs/OpenAI) → espeak-ng | UI plays `/api/tts` (client-side); `/api/speak` (server-side); backend per `AGENTD_VOICE_BACKEND` |
 
 Voice is **opt-in** (default off). Enable at install: the TUI add-on, a boot/USB
-`APEXOS_VOICE=1`, or `--voice`. Disable with `--no-voice`. The choice persists in
+`APEXOS_VOICE=1`, or `--voice` — or post-install: `apexos-update --voice` enables it
+in place, and `apexos-update --tui` reopens the picker seeded with current choices
+(flags forward since `#303`). Disable with `--no-voice`. The choice persists in
 `/etc/agentd/install.conf`, so `apexos-update` keeps it. (Voice-enable installs the
 local Kokoro path; the cloud API backends need only a key in `/etc/agentd/env` — no
 build, so they work on a voice-off node too.)
@@ -42,7 +44,8 @@ the kiosk), so *it* can reach the audio. Both directions:
   with `ALSA_CAPTURE_DEVICE` (defaults to the session's ALSA "default").
 
 This keeps **agentd fully sandboxed** (no security change) and works on desktop + web/PWA/phone
-(slice 8 shipped the web side). *Wake-word detection is still server-side (agentd listening), so
+(slice 8 shipped the web side). *Wake-word detection is still server-side (an on-node detector POSTs `/api/wake`;
+agentd dings and broadcasts `WakeTriggered` — agentd itself listens to nothing), so
 it remains a kiosk feature for now; the manual mic button is the desktop path.*
 
 ## Backend selection (`AGENTD_VOICE_BACKEND`)

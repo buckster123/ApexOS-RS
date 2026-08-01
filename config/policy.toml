@@ -217,6 +217,9 @@ mode = "suggest"
 "imaginarium_video_generate" = "ask"
 "imaginarium_video_edit"     = "ask"
 "imaginarium_video_extend"   = "ask"
+# craft_video assembles/edits LOCALLY (ffmpeg on the node — concat, audio,
+# normalize): no upstream spend, so it sits on the free-reads footing.
+"imaginarium_craft_video"    = "allow"
 
 # Sonus music-gen tools (sonus-mcp, Sonus-RS sibling) -------------------------
 # Same money logic as imaginarium. Reads + downloads are free: allow

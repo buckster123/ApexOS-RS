@@ -14,8 +14,11 @@ The client switches sessions with `hello` frames — `{"type":"hello","resume_se
 restores (gateway answers with a fresh `session_init` carrying the replayed history),
 `{"type":"hello","new":true}` mints a new session on the live socket; `hello` may also
 carry `agent_id` (identity bind — gated via `gate_agent_bind` for session-token humans)
-and `persona`. (ui-slint still sends a legacy `{"type":"session_init"}` frame on connect
-for Python-agentd cross-compat; the Rust gateway drops it as an undecodable frame — harmless.)
+and `persona`. A standalone `{"type":"set_persona","persona":"…"}` inbound frame switches
+the live session's persona (empty string clears to default; not echoed as an Event) —
+ui-slint sends it on persona switch and every (re)connect. (ui-slint still sends a legacy
+`{"type":"session_init"}` frame on connect for Python-agentd cross-compat; the Rust
+gateway drops it as an undecodable frame — harmless.)
 
 Key inbound events. **NB:** the gateway sends the raw `Event` enum
 (`serde_json::to_string(&event)`, no reshaping). Tool fields nest under
@@ -26,12 +29,14 @@ stringify it for the row key; don't expect a flat `call_id`.
 | Event | Fields | Action |
 |-------|--------|--------|
 | `agent_text` | `delta: string` | append to text buffer (lazily creates the agent bubble + sets busy — Rust agentd has no `turn_started`) |
+| `agent_thinking` | `delta: string` | session-scoped thinking-stream deltas (adaptive thinking, Claude-5 family — render or ignore; same lazy-bubble stream as `agent_text`) |
 | `turn_started` | — | **Python agentd only — Rust agentd never emits it.** UI keeps a handler for cross-compat; on Rust the `agent_text` lazy-bubble path sets busy instead |
 | `turn_complete` | — | clear busy, TTS if enabled |
 | `tool_requested` | `call: {id, tool, args, needs_approval}` | push tool block (status=running) |
 | `tool_result` | `call: <id>, output: {ok, content}` | update block by `call`; ok→done, !ok→error |
 | `approval_pending` | `call: {id, tool, args}` | show approve/reject buttons |
 | `sensor_reading` | `reading: {kind, …}` | update IAQ / thermal state |
+| `sensor_alert` | `{node_id, kind, value, threshold, sensor_id}` | GLOBAL — one per persistence-filtered sustained event; the `ui_reflex` trigger |
 | `wake_triggered` | — | flash wake indicator |
 
 Send user message:

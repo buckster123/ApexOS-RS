@@ -1,6 +1,6 @@
 # Evaluation — the Conductor/Child Loop PRD as a coding-task driver for ApexOS-RS
 
-**Scope:** assess the PRD (`session-orchestration-loop-prd.md`) against the actual tree at `buckster123/ApexOS-RS` (cloned 2026-07-30, v0.1.0-beta line), reusing the existing goal driver and state machines where they fit, and specifying new code where they don't.
+**Scope:** assess the PRD (`1-orchestration-loop-prd.md` in this directory) against the actual tree at `buckster123/ApexOS-RS` (cloned 2026-07-30, v0.1.0-beta line), reusing the existing goal driver and state machines where they fit, and specifying new code where they don't.
 
 ## 1. Verdict
 

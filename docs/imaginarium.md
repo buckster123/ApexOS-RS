@@ -22,7 +22,7 @@ memory.
         ▲  Bearer IMAGINARIUM_TOKEN (minted at install)
    ┌────┴─────────────────────┬──────────────────────────┐
  agentd MCP plugin            ui-slint Imagine app        browser studio
- (`imaginarium mcp`,          (planned — PR 2)            http://127.0.0.1:8791/
+ (`imaginarium mcp`,          (shipped — `#290`)          http://127.0.0.1:8791/
   PROXY mode via env)
 ```
 
@@ -69,7 +69,9 @@ Best-effort like occipital: a clone/build failure warns and continues; the next
 
 ## The agent's tools (MCP, policy-gated)
 
-`imaginarium mcp` in proxy mode exposes ten tools; `config/policy.toml` seeds
+`imaginarium mcp` in proxy mode exposes eleven tools (`imaginarium_craft_video`
+joined with the studio craft arc — local ffmpeg assembly, policy allow);
+`config/policy.toml` seeds
 explicit rules (live nodes gain them via `sync_policy_rules` on the next
 `apexos-update`):
 
@@ -104,9 +106,9 @@ design undone in one line.
   on a Slint timer + audio via `aplay`; design in `docs/imagine-studio.md`).
   Honest states: node-offline banner, token-rejected banner, a distinct
   **NO TOKEN** state, busy guard. The studio arc (`docs/imagine-studio.md`)
-  has since added **video generation** (T2V + I2V via `library:` chain refs,
-  `no_wait` submit + rail polling) and the first **ChainBar** edges
-  (image→ANIMATE, video→EXTEND). Still parked in `BACKLOG.md`: edit flows,
+  completed A1–A7 (video generation, ChainBar edges, cinema pipeline `#297`,
+  the cutting-room timeline `#298`, Sonus scoring `#299`, image edit flow
+  `#300`, the craft skill `#301`). Still parked in `BACKLOG.md`:
   follow-along auto-reveal, `imagine_save`.
 
   **How the app gets its reach** (base URL + LAN token): env

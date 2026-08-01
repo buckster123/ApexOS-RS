@@ -145,7 +145,7 @@ This is the audience magnet for overnight / multi-agent / coding runs, and **mos
 | Cross-node lane | `MeshMessage` / cross-node `agent_spawn` |
 | Card state + history | (new) `GoalStateChanged` + the event log |
 
-CLAUDE.md already defers *"Sub-agent windows — Popup per child session, maps to SubAgentStarted
+The deferred ledger (now `docs/build-roadmap.md` — the 07-21 lean-core refactor moved it out of CLAUDE.md) already defers *"Sub-agent windows — Popup per child session, maps to SubAgentStarted
 events"* — the board is the grown-up version of that. Columns = goal/turn states; cards =
 goals/subtasks/sub-agents; lanes = agents/nodes. A **read-only board ships today** against the
 existing stream, before any Goal-driver exists.
