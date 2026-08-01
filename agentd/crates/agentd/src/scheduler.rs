@@ -21,8 +21,11 @@ pub struct ScheduledTask {
     /// schedules.jsonl lines load unchanged.
     #[serde(default)]
     pub at:         Option<u64>,
-    /// Agent-scheduled continuity note (`schedule_wakeup`): fires into the ROOT
-    /// session with self-provenance framing, counted against the wakeup caps.
+    /// Agent-scheduled continuity note (`schedule_wakeup`): fires with
+    /// self-provenance framing into the session that SCHEDULED it (the M2-smoke
+    /// amendment — self-continuity belongs to the thread that made the
+    /// commitment; `session_id` records the home, `None` = root, which is also
+    /// what every pre-amendment jsonl line carries). Counted against the caps.
     #[serde(default)]
     pub wakeup:     bool,
 }
@@ -96,6 +99,39 @@ pub fn resolve_fire_at(args: &serde_json::Value, now: u64) -> Result<u64, String
         return Err("wakeup horizon is 90 days — store a cerebro intention for anything further out".into());
     }
     Ok(fire)
+}
+
+/// Where a wakeup calls home (the M2-smoke amendment, 2026-08-02): the
+/// session that scheduled it — a conductor working from a mesh thread used
+/// to wake in root 0 with no memory of its own fan (boundary-amnesia wearing
+/// a restart's face; André caught the mechanism live). Two guarded fallbacks
+/// to root (`None`): session 0 itself, and worker/spawn-range schedulers — a
+/// wakeup into a worker session would be a self-revive loop escaping the
+/// park/TTL economy (workers resolve to the node agent, so the supervisor's
+/// identity gate alone cannot refuse them). Pure — unit-tested.
+pub fn wakeup_home_session(scheduler: u64) -> Option<u64> {
+    if scheduler == 0
+        || apexos_core::is_worker_session(scheduler)
+        || apexos_core::is_spawn_session(scheduler)
+    {
+        None
+    } else {
+        Some(scheduler)
+    }
+}
+
+/// The session a due wakeup fires into: its recorded home, re-guarded against
+/// the worker/spawn ranges at fire time (a hand-edited schedules.jsonl must
+/// not become a worker self-revive path), else the root. Old jsonl lines
+/// carry `session_id: null` and land in root — the exact pre-amendment
+/// behavior. Pure — unit-tested.
+pub fn wakeup_fire_session(task: &ScheduledTask, root: SessionId) -> SessionId {
+    task.session_id
+        .filter(|s| {
+            *s != 0 && !apexos_core::is_worker_session(*s) && !apexos_core::is_spawn_session(*s)
+        })
+        .map(SessionId)
+        .unwrap_or(root)
 }
 
 /// Wakeups that haven't fired yet.
@@ -214,7 +250,9 @@ pub async fn run_scheduler(
                 }
                 if task.last_run.is_none() && now >= due {
                     let session = if task.wakeup {
-                        root_session // a wakeup is the node agent's own thread, always
+                        // The M2-smoke amendment: home is the scheduling
+                        // session (range-guarded), root when unrecorded.
+                        wakeup_fire_session(task, root_session)
                     } else {
                         task.session_id.map(SessionId).unwrap_or(root_session)
                     };
@@ -282,7 +320,7 @@ pub fn spawn_scheduler_handler(
                 "schedule_task" => handle_schedule_task(&state, &path, &args).await,
                 "list_schedules" => handle_list_schedules(&state).await,
                 "cancel_schedule" => handle_cancel_schedule(&state, &path, &args).await,
-                "schedule_wakeup" => handle_schedule_wakeup(&state, &path, &args).await,
+                "schedule_wakeup" => handle_schedule_wakeup(&state, &path, session, &args).await,
                 "list_wakeups" => handle_list_wakeups(&state).await,
                 "cancel_wakeup" => handle_cancel_wakeup(&state, &path, &args).await,
                 _ => ToolOutput { ok: false, content: serde_json::json!("unknown scheduler tool") },
@@ -380,6 +418,7 @@ async fn handle_cancel_schedule(
 async fn handle_schedule_wakeup(
     state: &SchedulerState,
     path:  &PathBuf,
+    session: SessionId,
     args:  &serde_json::Value,
 ) -> ToolOutput {
     if !wakeup_enabled() {
@@ -420,11 +459,12 @@ async fn handle_schedule_wakeup(
         };
     }
 
+    let home = wakeup_home_session(session.0);
     let task = ScheduledTask {
         id:         unique_id(),
         cron:       String::new(),
         prompt:     note,
-        session_id: None, // wakeups always fire on the root session — the node agent's thread
+        session_id: home, // the scheduling session (M2-smoke amendment); None = root
         created_at: now,
         last_run:   None,
         at:         Some(fire),
@@ -440,6 +480,8 @@ async fn handle_schedule_wakeup(
             "wakeup_id":     id,
             "fires_at":      rfc3339(fire),
             "fires_in_secs": fire.saturating_sub(now),
+            "fires_into":    home.map(|s| serde_json::json!(s))
+                                 .unwrap_or(serde_json::json!("root")),
             "pending":       pending + 1,
             "fired_today":   today,
             "daily_cap":     wakeup_daily_cap(),
@@ -459,6 +501,8 @@ async fn handle_list_wakeups(state: &SchedulerState) -> ToolOutput {
             "fires_at":      t.at.map(rfc3339),
             "fires_in_secs": t.at.map(|a| a.saturating_sub(now)),
             "scheduled_at":  rfc3339(t.created_at),
+            "fires_into":    t.session_id.map(|s| serde_json::json!(s))
+                                 .unwrap_or(serde_json::json!("root")),
         }))
         .collect();
     let fired: Vec<serde_json::Value> = tasks
@@ -590,6 +634,38 @@ mod wakeup_tests {
         let t: ScheduledTask = serde_json::from_str(old).unwrap();
         assert_eq!(t.at, None);
         assert!(!t.wakeup);
+    }
+
+    #[test]
+    fn wakeup_home_is_the_scheduling_session_with_guarded_roots() {
+        // The M2-smoke amendment: normal sessions record themselves…
+        assert_eq!(wakeup_home_session(78), Some(78));
+        assert_eq!(wakeup_home_session(1), Some(1));
+        // …root stays root, and worker/spawn-range schedulers stay rooted —
+        // a wakeup into a worker session would be a self-revive loop past
+        // the park/TTL economy.
+        assert_eq!(wakeup_home_session(0), None);
+        assert_eq!(wakeup_home_session(apexos_core::WORKER_SESSION_BASE + 7), None);
+        assert_eq!(wakeup_home_session(1 << 63), None);
+    }
+
+    #[test]
+    fn wakeup_fires_into_its_home_with_fire_time_range_guard() {
+        let root = SessionId(0);
+        let mut t = wk("w", Some(1), None, true);
+        // Old jsonl lines (session_id null) fire root — the exact
+        // pre-amendment behavior, no migration.
+        assert_eq!(wakeup_fire_session(&t, root), root);
+        // A recorded home fires home.
+        t.session_id = Some(78);
+        assert_eq!(wakeup_fire_session(&t, root), SessionId(78));
+        // A hand-edited worker/spawn/zero home re-guards to root at fire time.
+        t.session_id = Some(apexos_core::WORKER_SESSION_BASE + 3);
+        assert_eq!(wakeup_fire_session(&t, root), root);
+        t.session_id = Some(1 << 63);
+        assert_eq!(wakeup_fire_session(&t, root), root);
+        t.session_id = Some(0);
+        assert_eq!(wakeup_fire_session(&t, root), root);
     }
 }
 

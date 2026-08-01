@@ -145,9 +145,10 @@ colleague's hands, not teleporting your own.
   - *Before narrating a restart, check the boot clock* — wake-amnesia and
     daemon-cut amnesia feel identical from inside; `plugin_up` markers /
     health `booted_at` discriminate (the `uptime` tool measures the OS,
-    not the daemon). Corollary: wakeups currently fire into session 0 —
-    from there you can watch and revive, but fanning and closing need the
-    conducting session.
+    not the daemon). Wakeups now fire back into the session that scheduled
+    them, so a conducting thread wakes where it conducts — but the law
+    stands: after ANY boundary, re-orient from the tree, and attribute the
+    cause only from evidence.
   - *Size barrier_timeout_s for the integration, not the children* — gate
     settle time is dominated by the join's own reading-and-writing
     (~20-30s even over a trivial or failed ring), not the wait.
