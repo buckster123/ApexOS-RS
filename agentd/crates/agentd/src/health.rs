@@ -255,20 +255,34 @@ pub fn spawn_health_marker(
 }
 
 /// Dual-tree integrity (Fabrica M1c) — a pure join over the driver's on-disk
-/// truth: mandalas.json × worktrees/<id>/*.json × workers.json. Returns the
-/// violations (empty = coherent). Three laws checked:
+/// truth: mandalas.json × worktrees/<id>/*.json × workers.json ×
+/// remote_workers.json. Returns the violations (empty = coherent). Three
+/// laws checked:
 ///   1. a CLOSED mandala holds no open cells;
-///   2. an open non-root cell's bound worker EXISTS in the ledger;
+///   2. an open non-root cell's bound worker EXISTS in its ledger — the
+///      LOCAL ledger for local-bodied cells, the REMOTE mirror ledger for
+///      cells with `node` (M2 smoke find: the probe flagged healthy open
+///      remote cells as "worker gone" because their wids live in
+///      remote_workers.json — a false incoherence for the whole lifetime of
+///      any cross-node ring);
 ///   3. a terminal worker leaves no cell open (reap lag — a crash between a
 ///      worker's terminal transition and its cell sync).
 pub fn mandala_violations(
     mandalas: &[serde_json::Value],
     trees: &[(u64, Vec<serde_json::Value>)],
     workers: &[serde_json::Value],
+    remotes: &[serde_json::Value],
 ) -> Vec<String> {
     let worker_state: std::collections::HashMap<u64, String> = workers
         .iter()
         .filter_map(|w| Some((w["id"].as_u64()?, w["state"].as_str()?.to_string())))
+        .collect();
+    // Remote rows persist state as the raw wire string (`state_raw`) — the
+    // three terminal strings are exact; anything else (assigning, running,
+    // cancel requested, a newer peer's word) reads open, the skew law.
+    let remote_state: std::collections::HashMap<u64, String> = remotes
+        .iter()
+        .filter_map(|r| Some((r["id"].as_u64()?, r["state_raw"].as_str().unwrap_or("").to_string())))
         .collect();
     let open = |st: &str| !matches!(st, "done" | "failed" | "cancelled");
     let mut out = Vec::new();
@@ -285,8 +299,15 @@ pub fn mandala_violations(
                 continue; // the root is the conductor's own cell — no worker binds it
             }
             if open(cstate) {
+                let remote_bodied = c["node"].as_str().is_some();
                 match c["worker"].as_u64() {
                     None => out.push(format!("mandala {id} cell {addr} is open with no worker bound")),
+                    Some(w) if remote_bodied => match remote_state.get(&w).map(String::as_str) {
+                        None => out.push(format!("mandala {id} cell {addr} is open but remote worker {w} is gone from the remote ledger")),
+                        Some(ws) if !open(ws) => out.push(format!(
+                            "mandala {id} cell {addr} is open but remote worker {w} is {ws} (reap lag)")),
+                        _ => {}
+                    },
                     Some(w) => match worker_state.get(&w).map(String::as_str) {
                         None => out.push(format!("mandala {id} cell {addr} is open but worker {w} is gone from the ledger")),
                         Some(ws) if !open(ws) => out.push(format!(
@@ -312,6 +333,7 @@ pub fn probe_mandala_coherence(log_dir: &Path) -> (bool, Vec<String>) {
     };
     let mandalas = read_list(log_dir.join("mandalas.json"));
     let workers = read_list(log_dir.join("workers.json"));
+    let remotes = read_list(log_dir.join("remote_workers.json"));
     let mut trees = Vec::new();
     for m in &mandalas {
         let Some(id) = m["id"].as_u64() else { continue };
@@ -331,7 +353,7 @@ pub fn probe_mandala_coherence(log_dir: &Path) -> (bool, Vec<String>) {
         }
         trees.push((id, cells));
     }
-    let violations = mandala_violations(&mandalas, &trees, &workers);
+    let violations = mandala_violations(&mandalas, &trees, &workers, &remotes);
     (violations.is_empty(), violations)
 }
 
@@ -403,6 +425,11 @@ mod tests {
                 serde_json::json!({ "addr": "0.2", "state": "open", "worker": 6 }),   // reap lag
                 serde_json::json!({ "addr": "0.3", "state": "open" }),                // no worker bound
                 serde_json::json!({ "addr": "0.4", "state": "open", "worker": 7 }),   // healthy
+                // M2 — remote-bodied cells check the REMOTE ledger:
+                serde_json::json!({ "addr": "0.5", "state": "open", "worker": 40, "node": "andre-laptop" }), // healthy remote (running)
+                serde_json::json!({ "addr": "0.6", "state": "open", "worker": 41, "node": "andre-laptop" }), // remote gone
+                serde_json::json!({ "addr": "0.7", "state": "open", "worker": 42, "node": "tvpi" }),         // remote reap lag
+                serde_json::json!({ "addr": "0.8", "state": "open", "worker": 43, "node": "tvpi" }),         // healthy remote (skew word)
             ]),
         ];
         let workers = vec![
@@ -410,14 +437,26 @@ mod tests {
             serde_json::json!({ "id": 6, "state": "done" }),    // terminal, cell 0.2 open
             serde_json::json!({ "id": 7, "state": "running" }),
         ];
-        let v = mandala_violations(&mandalas, &trees, &workers);
-        assert_eq!(v.len(), 4, "{v:?}");
+        let remotes = vec![
+            serde_json::json!({ "id": 40, "state_raw": "running" }),
+            serde_json::json!({ "id": 42, "state_raw": "done" }),        // terminal, cell 0.7 open
+            serde_json::json!({ "id": 43, "state_raw": "hibernating" }), // newer peer's word = open (skew law)
+        ];
+        let v = mandala_violations(&mandalas, &trees, &workers, &remotes);
+        assert_eq!(v.len(), 6, "{v:?}");
         assert!(v.iter().any(|s| s.contains("mandala 1 is closed but cell 0")));
         assert!(v.iter().any(|s| s.contains("cell 0.1 is open but worker 9 is gone")));
         assert!(v.iter().any(|s| s.contains("cell 0.2 is open but worker 6 is done (reap lag)")));
         assert!(v.iter().any(|s| s.contains("cell 0.3 is open with no worker bound")));
+        // The M2 smoke find: an open remote-bodied cell whose mirror row is
+        // alive is COHERENT (0.5, 0.8 — no false "worker gone"); a vanished
+        // or terminal mirror still flags through the remote ledger.
+        assert!(v.iter().any(|s| s.contains("cell 0.6 is open but remote worker 41 is gone from the remote ledger")));
+        assert!(v.iter().any(|s| s.contains("cell 0.7 is open but remote worker 42 is done (reap lag)")));
+        assert!(!v.iter().any(|s| s.contains("0.5")), "a live remote body is coherent");
+        assert!(!v.iter().any(|s| s.contains("0.8")), "an unknown wire word reads open — coherent");
         // A coherent world — and the cold-boot vacuum — are both green.
-        assert!(mandala_violations(&[], &[], &[]).is_empty());
+        assert!(mandala_violations(&[], &[], &[], &[]).is_empty());
         let (ok, list) = probe_mandala_coherence(Path::new("/nonexistent/apexos-health-xyz"));
         assert!(ok && list.is_empty(), "a cold boot is vacuously coherent");
     }

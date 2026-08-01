@@ -303,6 +303,13 @@ class):
   `send_to_agent(node, session)`. Epoch fingerprints refined: census word-SET
   (count jitter under-detected orbits on busy trees) + open remote-cell
   state lines (a working remote ring is never invisible sameness).
+  **Field-proven 2026-08-02**, four exhibits on apex1 ⇄ andre-laptop: the
+  colony diamond (25s fan→integrate→close), bindu restart mid-ring (reload +
+  reconcile + parked-gate revival), cross-node cell revive (parked crossed
+  in one poll; revive-by-send; gate self-opened), dark-peer fail-fast (both
+  siblings failed ~100μs apart; the gate integrated failure as data). Smoke
+  finds fixed same day: remote-aware health probe, override-open recording,
+  wake-edge episodes.
 
 Fabrica-app slices (parallel track): board rename; worker lane; tree/census
 views; per-cell intervention controls. `docs/fabrica-skill.md` lands with

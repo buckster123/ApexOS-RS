@@ -48,9 +48,17 @@ per stuck-state, dedup live). M2 cross-node rings `#321` built 2026-08-01:
 ring cells carry `node` — cell geometry stays on the bindu, the body is a W2
 remote row, the mirror closes the gate's loop; `remote_cell_veto` keeps
 gates/measures/vouchers/code-mandalas home; epoch fingerprints refined
-(census word-set + remote state lines). The M2 smoke owns the paths not
-live-proven yet: the colony diamond end-to-end, dark-peer fail-fast rings,
-cross-node cell revive, bindu restart mid-remote-ring, orbit-in-anger.
+(census word-set + remote state lines). M2 FIELD-PROVEN 2026-08-02 — four
+exhibits, apex1 ⇄ andre-laptop, zero inside/outside divergence on substance:
+colony diamond 25s end-to-end; bindu restart mid-ring (12 remote rows +
+poll target reloaded, parked-gate revival etiquette exercised for real);
+cross-node cell revive (parked crossed in one poll, revive-by-send, gate
+self-opened); dark-peer fail-fast (both siblings failed ~100μs apart, gate
+integrated failure as data). Smoke finds fixed same day (fix PR): remote-
+aware health probe, override-open recording at the wake edge, wake-edge
+episodes; wakeup-session routing BACKLOG'd below. Orbit-in-anger remains
+unproven-in-anger (the M1d exhibit proved the machinery deterministically;
+no natural orbit occurred during the smoke — nature owes us one).
 Deferred-with-conditions (field data reopens): **peer-clone ritual** (code
 mandalas with remote cells — needs a repo-on-both-ends story, refused
 mandala-level today) · **remote measures** (would need lap boundaries at the
@@ -128,6 +136,20 @@ not missing work (taught in `docs/fabrica-skill.md` remote section).
   menu's hard-coded row-count height. Flat-list-with-depth-indent is the
   house tree idiom (occipital reader blocks); kiosk scroll = the
   work_board ScrollView pattern.
+
+- **[CORE · MEDIUM] `schedule_wakeup` fires into session 0, not the
+  scheduling session** (M2 smoke find, André spotted it live 2026-08-02:
+  APEX conducted from session 78, woke in 0 with zero memory of its own fan
+  — boundary-amnesia wearing a restart's face; the amnesia mechanism behind
+  the Phase-2a misread). Consequence: a session-0 wake can watch
+  `mandala_status`/`list_workers` and can `send_to_agent`-revive, but the
+  conductor-ownership checks refuse fanning into or closing a mandala from
+  the wrong session — so a wakeup-driven conductor silently loses its write
+  powers. Recipe: thread the scheduling session through the wakeup record
+  (scheduler.rs) and emit the wake `UserPrompt` into it, defaulting to 0
+  only when the scheduling session is gone (session files prunable);
+  gotchas already carries the interim law (watch/revive from 0, act from
+  the conducting session).
 
 ---
 
