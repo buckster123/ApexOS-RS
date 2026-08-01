@@ -135,6 +135,11 @@ const REVIEW_PERIOD: Duration = Duration::from_secs(30);
 /// are unchanged; this is detection granularity, not policy.
 const TICK: Duration = Duration::from_secs(5);
 
+/// Torus epoch period (M1d): each open mandala rolls a census/fingerprint
+/// epoch on this cadence (golden-offset per mandala — epochs de-phase like
+/// everything else). Settled trees rest: no open cells, no epochs.
+const EPOCH_PERIOD: Duration = Duration::from_secs(600);
+
 /// The worker's reported outcome for the in-flight step (via `worker_report`),
 /// applied on `TurnComplete` — `goal.rs`'s Verdict, worker vocabulary.
 /// M1c: verdicts may carry a MEASURE (an R-cell's lap reading — command-
@@ -978,9 +983,13 @@ pub fn spawn_worker_driver(
     yolo_set:     GoalYoloSessions,
     models:       WorkerModels,
     mesh:         MeshDeps,
+    council_tx:   mpsc::Sender<(SessionId, ActionId, serde_json::Value)>,
 ) {
     tokio::spawn(async move {
         let mut mesh = mesh;
+        // M1d: per-mandala epoch clocks — seeded lazily in the tick (covers
+        // create, reload, and post-restart uniformly, no special cases).
+        let mut next_epoch: HashMap<u64, Instant> = HashMap::new();
         let mut workers: HashMap<u64, Worker>   = HashMap::new();
         let mut batches: HashMap<u64, BatchMeta> = HashMap::new();
         // Mandala state (M1a): records + per-mandala cell trees + worker→cell
@@ -1207,6 +1216,26 @@ pub fn spawn_worker_driver(
                         Ok(Event::SubAgentStarted { parent, .. }) => {
                             pb1_track(&mut spawn_log, &bus, parent.0).await;
                         }
+                        // M1d: an orbit council finished deliberating → bank
+                        // its synthesis on the mandala record so the next
+                        // mandala_status carries the reading to the conductor
+                        // (the driver never prompts a goal conductor — that
+                        // edge stays the goal driver's).
+                        Ok(Event::CouncilComplete { council_id, synthesis, .. })
+                            if council_id.starts_with("mnd") => {
+                            let mid = council_id[3..].split('e').next()
+                                .and_then(|s| s.parse::<u64>().ok());
+                            let banked = mid.and_then(|id| mandalas.get_mut(&id)).map(|m| {
+                                if m.orbit_council.as_deref() == Some(council_id.as_str()) {
+                                    m.orbit_synthesis = Some(synthesis.chars().take(300).collect());
+                                    true
+                                } else { false }
+                            }).unwrap_or(false);
+                            if banked {
+                                mandala::save_mandalas(&mandalas, &mandalas_path);
+                                eprintln!("[mandala] {} orbit council synthesis banked", mid.unwrap_or(0));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1290,6 +1319,13 @@ pub fn spawn_worker_driver(
                     // liveness probe, and a poll failure never fails a row —
                     // the batch deadline is the net).
                     run_due_polls(&remotes, &mut polls, &batches, &mesh, &mesh_out_tx).await;
+                    // M1d: torus epochs — census/fingerprint rollovers, the
+                    // orbit detector, the reading to Cerebro. Settled trees
+                    // rest; an orbit convenes a council, never a restart.
+                    if roll_due_epochs(&mut mandalas, &trees, &mut censuses, &mut next_epoch,
+                                       &proxy, &council_tx) {
+                        mandala::save_mandalas(&mandalas, &mandalas_path);
+                    }
                     update_gauges(&workers, &mesh);
                 }
             }
@@ -2924,6 +2960,64 @@ async fn prepare_mandala_cells(
         return Err(());
     };
 
+    // ── The composition table (M1d): static legality, refused at admission ──
+    // Two hooks. (1) MINT: each planned child's form must compose under the
+    // parent's post-fan form — R-over-R is forbidden (a vouchered SPIRAL/FORGE
+    // sub-conductor cannot mint measured children; nested recurrence has no
+    // joint termination argument). (2) CHANGING-LINE: a wide fan arms the
+    // parent's B, and the parent's NEW form must compose under the
+    // GRANDPARENT's — B-over-B is conditional on the breadth product down the
+    // path fitting the mandala's cell budget (stacked fans must not promise
+    // more frontier than the geometry holds).
+    {
+        let wide = tasks.len() > 1 || (join_task.is_some() && tasks.len() > 1);
+        let parent_post = if wide && join_task.is_none() { parent.form.arm_branch() } else { parent.form };
+        // (1) each child's mint form vs the parent's post-fan form.
+        let gate_planned = join_task.is_some() || barrier_arg.is_some();
+        for (i, t) in tasks.iter().enumerate() {
+            let mut child_form = CellForm::SPINE;
+            // The bare-gate form consumes the single task as a join; a ring
+            // under a one-call diamond hangs off the GATE, not the parent.
+            let is_the_gate = gate_planned && join_task.is_none() && i == 0;
+            if is_the_gate { child_form = child_form.arm_join(); }
+            if t.measure.is_some() { child_form = child_form.arm_recur(); }
+            let vs = if gate_planned && !is_the_gate { CellForm::GATE } else { parent_post };
+            // Free composes; Conditional is a B-over-B property, checked below.
+            if mandala::compose(vs, child_form) == mandala::Compose::Forbidden {
+                bus.emit(refuse(format!(
+                    "composition refused: {} over {} is R-over-R — nested recurrence is the classic livelock; drop the child's measure or conduct from an unmeasured cell",
+                    child_form.name(), vs.name()))).await;
+                return Err(());
+            }
+        }
+        // The join task itself (one-call diamond): GATE (+R if measured via
+        // bare-gate knobs) under the parent — same law.
+        if let Some(_j) = &join_task {
+            let gate_form = CellForm::GATE;
+            if mandala::compose(parent_post, gate_form) == mandala::Compose::Forbidden {
+                bus.emit(refuse("composition refused: a join cannot mint under this parent (R-over-R)".into())).await;
+                return Err(());
+            }
+        }
+        // (2) changing-line: the parent arming B, validated vs the grandparent.
+        if wide {
+            if let Some(gp_addr) = parent_addr.parent() {
+                if let Some(gp) = tree.get(&gp_addr.0) {
+                    let parent_new = parent.form.arm_branch();
+                    if mandala::compose(gp.form, parent_new) == mandala::Compose::Conditional {
+                        let width = tasks.len() as u8;
+                        if !mandala::breadth_product_ok(tree, &parent_addr, width, m.budget.cells) {
+                            bus.emit(refuse(format!(
+                                "B-over-B breadth product refused: a {}-wide fan under {} (itself under a branching {}) would promise more frontier than the {}-cell budget — narrow the fan or integrate first",
+                                width, parent_addr.0, gp.form.name(), m.budget.cells))).await;
+                            return Err(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // The layout: bare gate consumes the single task as the join; the
     // one-call diamond takes the join from `join` and the ring from tasks.
     let bare_gate = join_task.is_none() && barrier_arg.is_some();
@@ -3153,6 +3247,111 @@ fn sync_cells(
         cell.evidence = Some(evidence_path(agents_dir, *wid).to_string_lossy().into_owned());
         mandala::save_cell(&worktrees_dir.join(mid.to_string()), cell);
     }
+}
+
+// ── Torus epochs + the orbit detector (M1d) ─────────────────────────────────
+
+/// Roll due epochs: per open mandala on the golden-offset EPOCH_PERIOD clock,
+/// drain this epoch's census, fingerprint (axis + evidence digests + census),
+/// persist the reading to Cerebro (best-effort), and — when two consecutive
+/// epochs produce the SAME fingerprint over open cells — convene a council
+/// over the census instead of grinding a third lap. One council per distinct
+/// stuck-state (`orbit_fingerprint` remembers what already convened).
+///
+/// Deliberate softening vs the charter's "park Blocked" phrasing: v1 detects,
+/// records and deliberates but does NOT auto-park cells — the M1c field law
+/// (a break is a brake, not a wall) postdates the charter, and the anti-
+/// thrash rule owns remediation. Field data reopens this.
+fn roll_due_epochs(
+    mandalas: &mut HashMap<u64, MandalaRecord>,
+    trees: &HashMap<u64, HashMap<String, CellRecord>>,
+    censuses: &mut HashMap<u64, HashMap<String, u64>>,
+    next_epoch: &mut HashMap<u64, Instant>,
+    proxy: &ToolProxy,
+    council_tx: &mpsc::Sender<(SessionId, ActionId, serde_json::Value)>,
+) -> bool {
+    let now = Instant::now();
+    let mut dirty = false;
+    let mids: Vec<u64> = mandalas.keys().copied().collect();
+    for mid in mids {
+        match next_epoch.get(&mid) {
+            None => {
+                // Lazy seed — covers create, reload and restart uniformly.
+                next_epoch.insert(mid, now + review::golden_offset(mid, EPOCH_PERIOD));
+                continue;
+            }
+            Some(t) if *t > now => continue,
+            Some(_) => {}
+        }
+        next_epoch.insert(mid, now + EPOCH_PERIOD);
+        let open = trees.get(&mid).map(mandala::open_cells).unwrap_or(0);
+        if open == 0 { continue; } // settled trees rest — no epochs, no orbits
+        // This epoch's histogram drains (the census is per-epoch by charter).
+        let census: std::collections::BTreeMap<String, u64> =
+            censuses.remove(&mid).unwrap_or_default().into_iter().collect();
+        let mut ev_digests: Vec<String> = trees.get(&mid).map(|t| {
+            t.values()
+                .filter_map(|c| c.evidence.as_ref())
+                .filter_map(|p| std::fs::read(p).ok())
+                .map(|b| mandala::hex_digest(&b))
+                .collect()
+        }).unwrap_or_default();
+        let m = mandalas.get_mut(&mid).unwrap();
+        let fp = mandala::epoch_fingerprint(&m.invariant.hash, &mut ev_digests, &census);
+        let orbit = mandala::is_orbit(m.last_fingerprint.as_deref(), &fp, open)
+            && m.orbit_fingerprint.as_deref() != Some(fp.as_str());
+        m.epoch += 1;
+        m.last_census = census.clone();
+        m.last_fingerprint = Some(fp.clone());
+        eprintln!("[mandala] {mid} epoch {} rolled (fp {}, {} open cells){}",
+                  m.epoch, &fp[..12], open, if orbit { " — ORBIT" } else { "" });
+        // The run's reading → Cerebro (the council-handler idiom: best-effort,
+        // spawned — a slow or absent Cerebro never stalls the driver tick).
+        let reading = serde_json::json!({
+            "mandala": mid, "epoch": m.epoch, "fingerprint": fp,
+            "open_cells": open, "census": census,
+            "orbit": orbit, "orbits_total": m.orbits + u64::from(orbit),
+            "objective": m.invariant.objective.chars().take(120).collect::<String>(),
+        });
+        let content = format!("mandala {mid} epoch {} reading: {reading}", m.epoch);
+        let p2 = proxy.clone();
+        tokio::spawn(async move {
+            if let Err(e) = p2.call("memory_store", serde_json::json!({
+                "content": content,
+                "tags": ["mandala-census", "fabrica"],
+                "agent_id": apexos_core::node_agent_id(),
+            })).await {
+                eprintln!("[mandala] census store: {e}");
+            }
+        });
+        if orbit {
+            m.orbits += 1;
+            m.orbit_fingerprint = Some(fp.clone());
+            let council_id = format!("mnd{mid}e{}", m.epoch);
+            m.orbit_council = Some(council_id.clone());
+            m.orbit_synthesis = None;
+            let census_line = census.iter()
+                .map(|(k, v)| format!("{k}×{v}")).collect::<Vec<_>>().join(", ");
+            let topic = format!(
+                "ORBIT on mandala {mid}, epoch {}: two consecutive epochs produced an identical \
+                 fingerprint with {open} open cell(s) — the run is circling, not progressing. \
+                 OBJECTIVE: {}. REVIEW CENSUS: [{census_line}]. Deliberate ONE next move for the \
+                 conductor: which cells to cancel, steer, or integrate around — one line each, \
+                 never a subtree restart (the anti-thrash rule).",
+                m.epoch, m.invariant.objective.chars().take(200).collect::<String>());
+            // The gateway's sentinel pattern: no ToolResult expected. Small
+            // and cheap by design — 2 agents × ≤2 rounds + synthesis.
+            let args = serde_json::json!({
+                "council_id": council_id, "topic": topic,
+                "agents": ["VAJRA", "KETHER"], "max_rounds": 2,
+            });
+            if council_tx.try_send((SessionId(u64::MAX), ActionId(u64::MAX), args)).is_err() {
+                eprintln!("[mandala] {mid} orbit council not convened (channel busy) — the record still carries the orbit");
+            }
+        }
+        dirty = true;
+    }
+    dirty
 }
 
 // ── Barriers (M1b) ──────────────────────────────────────────────────────────
@@ -3521,6 +3720,9 @@ async fn create_mandala(
     mandalas.insert(id, MandalaRecord {
         id, conductor: call_session.0, lattice, budget, invariant, state: "open".into(),
         repo: repo.clone(), created_epoch: epoch_now(),
+        epoch: 0, last_fingerprint: None,
+        last_census: std::collections::BTreeMap::new(), orbits: 0,
+        orbit_fingerprint: None, orbit_council: None, orbit_synthesis: None,
     });
     let mut content = serde_json::json!({
         "mandala": id, "root": Addr::ROOT, "lattice": format!("{lattice:?}").to_lowercase(),
@@ -3584,6 +3786,22 @@ async fn handle_mandala_status(
             // Sorted for stable output — the census key is "<posture>:<PBV DCH bits>".
             let sorted: std::collections::BTreeMap<&String, &u64> = census.iter().collect();
             out["census"] = serde_json::json!(sorted);
+        } else if !m.last_census.is_empty() {
+            // Post-restart: the persisted last-epoch reading (M1d) — the
+            // in-memory histogram died with the old process, the epoch's didn't.
+            out["census"] = serde_json::json!(m.last_census);
+        }
+        // M1d: the torus reading — epoch, fingerprint, and any orbit verdicts.
+        if m.epoch > 0 {
+            out["epoch"] = serde_json::json!(m.epoch);
+            if let Some(fp) = &m.last_fingerprint {
+                out["fingerprint"] = serde_json::json!(&fp[..fp.len().min(12)]);
+            }
+        }
+        if m.orbits > 0 {
+            out["orbits"] = serde_json::json!(m.orbits);
+            if let Some(c) = &m.orbit_council { out["orbit_council"] = serde_json::json!(c); }
+            if let Some(s) = &m.orbit_synthesis { out["orbit_synthesis"] = serde_json::json!(s); }
         }
         out
     };

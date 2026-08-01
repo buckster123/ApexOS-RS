@@ -102,6 +102,97 @@ impl CellForm {
     }
 }
 
+// ── The composition table (M1d): static legality, 64 cells ──────────────────
+
+/// Form-over-form legality — the charter's 64-cell table as a TOTAL function
+/// over two booleans per side. Partitioned 36 free / 12 conditional / 16
+/// forbidden, asserted exhaustively in one unit test (the stability argument,
+/// in microseconds).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compose {
+    /// Composes freely — no extra check beyond the ordinary admission laws.
+    Free,
+    /// B-over-B: admitted only if the breadth PRODUCT down the path fits the
+    /// mandala's geometry budget (`breadth_product_ok`) — stacked fans must
+    /// not be able to promise more cells than the budget holds.
+    Conditional,
+    /// R-over-R: nested recurrence is the classic livelock — two open-ended
+    /// lap loops stacked have no joint termination argument. Forbidden at v1;
+    /// v2 may revisit only with a proven measure refinement (charter).
+    Forbidden,
+}
+
+/// The table. Row = parent form, column = child form; the partition falls
+/// out of the two risk bits that stack badly (R over R, B over B) — every
+/// other combination inherits its safety from the per-cell guard laws.
+pub fn compose(parent: CellForm, child: CellForm) -> Compose {
+    if parent.recurs() && child.recurs() {
+        Compose::Forbidden
+    } else if parent.branches() && child.branches() {
+        Compose::Conditional
+    } else {
+        Compose::Free
+    }
+}
+
+/// The Conditional check: multiply the ACTUAL direct-child counts along the
+/// ancestor chain of `parent` (root → parent, inclusive), times the width
+/// this fan proposes under it — the whole promised frontier must fit the
+/// mandala's cell budget. Pure over the tree.
+pub fn breadth_product_ok(
+    cells: &HashMap<String, CellRecord>,
+    parent: &Addr,
+    new_width: u8,
+    cells_budget: u8,
+) -> bool {
+    let mut product: u64 = new_width.max(1) as u64;
+    let mut walk = Some(parent.clone());
+    while let Some(a) = walk {
+        let direct: u64 = cells
+            .keys()
+            .filter(|k| {
+                let c = Addr((*k).clone());
+                a.is_ancestor_of(&c) && c.depth() == a.depth() + 1
+            })
+            .count() as u64;
+        product = product.saturating_mul(direct.max(1));
+        walk = a.parent();
+    }
+    product <= cells_budget as u64
+}
+
+// ── Epochs + the orbit detector (M1d) ───────────────────────────────────────
+
+/// A mandala's epoch fingerprint: hash(invariant, sorted evidence digests,
+/// census). Two CONSECUTIVE equal fingerprints = a true orbit — the run
+/// produced nothing new across two whole epochs while claiming activity
+/// (the A→B→A re-planning loop) — which convenes a council over the census
+/// rather than grinding a third lap.
+pub fn epoch_fingerprint(
+    invariant_hash: &str,
+    evidence_digests: &mut [String],
+    census: &std::collections::BTreeMap<String, u64>,
+) -> String {
+    evidence_digests.sort();
+    let mut canonical = format!("axis:{invariant_hash}\n");
+    for d in evidence_digests.iter() {
+        canonical.push_str("ev:");
+        canonical.push_str(d);
+        canonical.push('\n');
+    }
+    for (word, n) in census {
+        canonical.push_str(&format!("census:{word}={n}\n"));
+    }
+    hex_digest(canonical.as_bytes())
+}
+
+/// The orbit rule, pure: the new fingerprint equals the previous one AND the
+/// mandala still has open cells (a settled tree repeating its fingerprint is
+/// rest, not an orbit).
+pub fn is_orbit(prev: Option<&str>, next: &str, open_cells: usize) -> bool {
+    open_cells > 0 && prev == Some(next)
+}
+
 // ── Addr: position IS identity ───────────────────────────────────────────────
 
 /// A cell's address — `"0"` is the root, `"0.3.1"` root→3rd child→1st. From
@@ -379,6 +470,31 @@ pub struct MandalaRecord {
     /// Unix seconds at creation (M1a files default 0 = horizon unknown).
     #[serde(default)]
     pub created_epoch: u64,
+    /// M1d — the supervision epoch counter: how many census/fingerprint
+    /// rollovers this mandala has taken. 0 = never rolled (pre-M1d files).
+    #[serde(default)]
+    pub epoch: u64,
+    /// The last epoch's fingerprint — hash(axis, evidence digests, census).
+    /// Two consecutive equal fingerprints with open cells = an orbit.
+    #[serde(default)]
+    pub last_fingerprint: Option<String>,
+    /// The last epoch's review census (word → count) — persisted so the
+    /// run's reading survives a restart (the M1b census was in-memory only).
+    #[serde(default)]
+    pub last_census: std::collections::BTreeMap<String, u64>,
+    /// Orbits detected so far (diagnostic; the council convening is the act).
+    #[serde(default)]
+    pub orbits: u64,
+    /// The fingerprint that last CONVENED a council — continued sameness
+    /// never re-convenes (one council per distinct stuck-state, not per tick).
+    #[serde(default)]
+    pub orbit_fingerprint: Option<String>,
+    /// The orbit council's id + its synthesis tail, mirrored here so
+    /// `mandala_status` carries the deliberation to whoever conducts.
+    #[serde(default)]
+    pub orbit_council: Option<String>,
+    #[serde(default)]
+    pub orbit_synthesis: Option<String>,
 }
 
 /// A cell is OPEN while its worker hasn't reached a terminal state — open
@@ -590,6 +706,92 @@ mod tests {
     }
 
     #[test]
+    fn composition_table_partitions_exactly_36_12_16() {
+        // THE exhaustive test (the charter's stability argument): all 64
+        // form-over-form cells, partitioned 36 free / 12 conditional / 16
+        // forbidden — no cell unclassified, no cell double-counted.
+        let (mut free, mut cond, mut forb) = (0, 0, 0);
+        for p in 0..8u8 {
+            for c in 0..8u8 {
+                match compose(CellForm(p), CellForm(c)) {
+                    Compose::Free => free += 1,
+                    Compose::Conditional => cond += 1,
+                    Compose::Forbidden => forb += 1,
+                }
+            }
+        }
+        assert_eq!((free, cond, forb), (36, 12, 16), "the charter's partition");
+        // The semantics behind the counts:
+        // R-over-R is forbidden whatever else is armed…
+        assert_eq!(compose(CellForm::SPIRAL, CellForm::SPIRAL), Compose::Forbidden);
+        assert_eq!(compose(CellForm::FORGE_FORM, CellForm::SPIRAL), Compose::Forbidden);
+        assert_eq!(compose(CellForm::MANDALA, CellForm::SWARM), Compose::Forbidden);
+        // …B-over-B is conditional (breadth product) unless R-over-R trumps it…
+        assert_eq!(compose(CellForm::FAN, CellForm::FAN), Compose::Conditional);
+        assert_eq!(compose(CellForm::DIAMOND, CellForm::FAN), Compose::Conditional);
+        assert_eq!(compose(CellForm::SWARM, CellForm::FAN), Compose::Conditional);
+        assert_eq!(compose(CellForm::SWARM, CellForm::SWARM), Compose::Forbidden, "R∧B over R∧B: R wins");
+        // …everything else is free: depth under breadth, joins anywhere,
+        // recurrence under a plain fan, spines everywhere.
+        assert_eq!(compose(CellForm::SPINE, CellForm::SPINE), Compose::Free);
+        assert_eq!(compose(CellForm::FAN, CellForm::SPIRAL), Compose::Free);
+        assert_eq!(compose(CellForm::SPIRAL, CellForm::FAN), Compose::Free);
+        assert_eq!(compose(CellForm::GATE, CellForm::DIAMOND), Compose::Free);
+        assert_eq!(compose(CellForm::DIAMOND, CellForm::GATE), Compose::Free);
+    }
+
+    #[test]
+    fn breadth_product_walks_the_actual_tree() {
+        let mut cells = HashMap::new();
+        let mk = |addr: &str| CellRecord {
+            addr: Addr::parse(addr).unwrap(), form: CellForm::SPINE, task: "t".into(),
+            budget: BudgetVec { depth: 3, cells: 1, steps: 4, deadline_s: 600 },
+            invariant_hash: "h".into(), worker: None, state: "open".into(),
+            evidence: None, reparented_to: None, created_epoch: 0,
+            barrier_timeout_s: None, barrier_opened: false,
+            measure: None, measure_history: Vec::new(), voucher: false,
+        };
+        // Root with 4 children; 0.1 with 3 children.
+        for a in ["0", "0.0", "0.1", "0.2", "0.3", "0.1.0", "0.1.1", "0.1.2"] {
+            cells.insert(a.to_string(), mk(a));
+        }
+        // A width-5 fan under 0.1.0: product = 5 (new) × 3 (0.1's children)
+        // × 4 (root's children) = 60 ≤ 64 → ok; a width-6 fan = 72 → refuse.
+        let parent = Addr::parse("0.1.0").unwrap();
+        assert!(breadth_product_ok(&cells, &parent, 5, 64));
+        assert!(!breadth_product_ok(&cells, &parent, 6, 64));
+        // A tighter budget refuses earlier.
+        assert!(!breadth_product_ok(&cells, &parent, 5, 32));
+        // An empty tree: just the new width vs the budget.
+        assert!(breadth_product_ok(&HashMap::new(), &Addr::parse("0").unwrap(), 8, 64));
+        assert!(!breadth_product_ok(&HashMap::new(), &Addr::parse("0").unwrap(), 8, 4));
+    }
+
+    #[test]
+    fn epoch_fingerprint_is_order_stable_and_orbit_needs_open_cells() {
+        let census: std::collections::BTreeMap<String, u64> =
+            [("live:PBV".to_string(), 4u64), ("waiting:P".to_string(), 2)].into();
+        let mut ev1 = vec!["bbb".to_string(), "aaa".to_string()];
+        let mut ev2 = vec!["aaa".to_string(), "bbb".to_string()];
+        let f1 = epoch_fingerprint("axis1", &mut ev1, &census);
+        let f2 = epoch_fingerprint("axis1", &mut ev2, &census);
+        assert_eq!(f1, f2, "evidence order must not perturb the fingerprint");
+        // Any real change moves it: new evidence, different census, other axis.
+        let mut ev3 = vec!["aaa".to_string(), "bbb".to_string(), "ccc".to_string()];
+        assert_ne!(epoch_fingerprint("axis1", &mut ev3, &census), f1);
+        let census2: std::collections::BTreeMap<String, u64> =
+            [("live:PBV".to_string(), 5u64)].into();
+        assert_ne!(epoch_fingerprint("axis1", &mut ev1.clone(), &census2), f1);
+        assert_ne!(epoch_fingerprint("axis2", &mut ev1.clone(), &census), f1);
+        // The orbit rule: equal-consecutive AND open cells; rest is rest.
+        assert!(is_orbit(Some(&f1), &f2, 3));
+        assert!(!is_orbit(Some(&f1), &f2, 0), "a settled tree repeating is rest, not an orbit");
+        assert!(!is_orbit(None, &f1, 3), "the first epoch can never orbit");
+        let other = epoch_fingerprint("axis1", &mut ev3, &census);
+        assert!(!is_orbit(Some(&f1), &other, 3));
+    }
+
+    #[test]
     fn addr_algebra() {
         let a = Addr::parse("0.3.1").unwrap();
         assert_eq!(a.depth(), 2);
@@ -754,6 +956,11 @@ mod tests {
         let rec: MandalaRecord = serde_json::from_str(m).unwrap();
         assert!(rec.repo.is_none());
         assert_eq!(rec.created_epoch, 0);
+        // M1d fields default on pre-M1d files: never rolled, never orbited.
+        assert_eq!(rec.epoch, 0);
+        assert!(rec.last_fingerprint.is_none());
+        assert!(rec.last_census.is_empty());
+        assert_eq!(rec.orbits, 0);
     }
 
     #[test]
@@ -873,6 +1080,9 @@ mod tests {
             budget: BudgetVec { depth: 6, cells: 64, steps: 32, deadline_s: 86_400 },
             invariant: Invariant::new("o", "d", "v"),
             state: "open".into(), repo: None, created_epoch: 0,
+            epoch: 0, last_fingerprint: None,
+            last_census: std::collections::BTreeMap::new(), orbits: 0,
+            orbit_fingerprint: None, orbit_council: None, orbit_synthesis: None,
         });
         save_mandalas(&m, &path);
         let back = load_mandalas(&path);

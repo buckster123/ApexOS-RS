@@ -28,7 +28,7 @@ complementary designs, not redundant ones.
 |---|---|---|
 | **Goal driver** | One session, deterministic serial loop (`goal.rs`) | Shipped |
 | **Worker tier** (W) | One conductor goal fans a batch to N persistent, parkable, evidence-leaving child sessions | W1 shipped (`#306`–`#311`); W2 mesh shipped (`#318`) |
-| **Mandala Mode** (M) | Workers that may themselves conduct — depth-N recursion under conservation laws | M1a–M1c shipped (`#312`–`#315`); M1d/M2 open |
+| **Mandala Mode** (M) | Workers that may themselves conduct — depth-N recursion under conservation laws | M1a–M1d shipped (`#312`–`#320`); M2 open |
 
 The code regime rides on all three; Fabrica the app surfaces all of it.
 
@@ -279,9 +279,18 @@ class):
 - **M1c** ✅ `#315` — R: SPIRAL/FORGE-form; measures + K-stall ring-breaking;
   vouchers (sub-conductors live); reap rule + dual-tree integrity in the
   health probe. Field-proven incl. renewal + the brake-not-wall law.
-- **M1d** — full lattices + the 64-cell table + its exhaustive test +
-  changing-line adaptation; torus epochs + orbit→council; census → Cerebro;
-  the board tree view.
+- **M1d** ✅ `#320` — the 64-cell composition table (36 free / 12
+  conditional / 16 forbidden, ONE exhaustive test) gating admission:
+  R-over-R refuses (reachable via vouchered sub-conductors), B-over-B
+  conditional on the breadth product down the actual tree; changing-line
+  re-validation when a fan arms the parent's B. Torus epochs (600s golden
+  offsets, per-epoch census drain, fingerprint = axis + evidence digests +
+  census, persisted on the record) + the orbit detector → a small council
+  (one per distinct stuck-state; synthesis rides `mandala_status`; v1
+  deliberately does not auto-park — brake-not-wall, field data reopens);
+  census reading → Cerebro per epoch. Plus two board-truth fixes: the
+  never-bound WORKERS lane, and the surgical approvals sweep. The tree-view
+  WINDOW moved to the Fabrica-app track (recipe in BACKLOG).
 - **M2** — cross-node rings (wide rings on the GPU peer, the bindu on the
   spine); golden-offset heartbeats; remote-cell revive semantics.
 
