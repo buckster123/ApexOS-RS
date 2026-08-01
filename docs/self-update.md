@@ -213,16 +213,16 @@ agent continuity across reboots gives the *updater* its result channel.
 
 ## What agentd needs (the code)
 
-1. **Health marker writer** — ✅ IMPLEMENTED (slice 1, `agentd/src/health.rs`):
+1. **Health marker writer** — ✅ IMPLEMENTED (slice 1, `agentd/crates/agentd/src/health.rs`):
    `spawn_health_marker` writes a `booting` marker immediately, then `health.json`
    `{status:"healthy"}` once the staged gates pass. Marker dir = `AGENTD_UPDATE_DIR`
    (default `/var/lib/agentd/update`). Subscribes to the bus *before* the supervisor
    spawns so no early `PluginUp` is missed.
-2. **`build.rs` `GIT_COMMIT` embed** — ✅ IMPLEMENTED (slice 1, `agentd/build.rs`):
+2. **`build.rs` `GIT_COMMIT` embed** — ✅ IMPLEMENTED (slice 1, `agentd/crates/agentd/build.rs`):
    `git rev-parse HEAD` → `cargo:rustc-env=GIT_COMMIT`; the marker reports
    `health::build_commit()`. Re-runs on `.git/logs/HEAD` change (catches new commits
    on the same branch, which the staging build relies on).
-3. **`apply_daemon_update` tool** — ✅ IMPLEMENTED (slice 3, `agentd/src/self_update.rs`):
+3. **`apply_daemon_update` tool** — ✅ IMPLEMENTED (slice 3, `agentd/crates/agentd/src/self_update.rs`):
    a virtual tool dispatched by the supervisor to a handler in main.rs over a
    dedicated mpsc (like `propose_evolution`). Gates 0–2 + 4 (review = slice 4).
    **v1 build mechanism:** the requested `commit` must equal the repo's current HEAD

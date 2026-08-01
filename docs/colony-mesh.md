@@ -28,7 +28,7 @@ level, where the agents self-organize it. agentd does **not** hard-code node rol
 (transport, delegation, advertisement), not policy; the colony decides how to use it. Revisit only if
 soft self-governance proves insufficient.
 
-*Status note (2026-07): the colony is now **4 live nodes** — apex3 (andre-laptop, x86 desktop-mode,
+*Status note (2026-07; joined 2026-07-31 by the **Callosum seat** — “forge”, FORGE’s Claude Code sessions as a mesh-reachable seat, not a hardware node): the colony is now **4 live nodes** — apex3 (andre-laptop, x86 desktop-mode,
 pro tier) and tvpi (the TV Pi, joined 2026-07-20) alongside apex1/apex2. The table above records the
 original 2-node constitution; neither apex3 nor tvpi has yet self-declared a constitutional role —
 that's the colony's to deliberate.*
@@ -51,7 +51,7 @@ Grounding for the plan — several roadmap items are closer than the agents assu
   prefix becomes `[from X — to reply: send_to_agent(node="X", session_id=N)]`, and the reply —
   an ordinary explicit-id send — lands in the session that asked. The tool result carries
   `landed_session` (the peer's real landing thread, from its response). Still **fire-and-forget**
-  ("sent" = delivered, not answered) — `mesh_agent_spawn` remains the blocking request/response
+  ("sent" = delivered, not answered) — `agent_spawn` remains the blocking request/response
   path. Wire-compatible with pre-continuity nodes in both directions (missing `origin_session` →
   the classic `[from X]:` prefix). The field driver: the colony was routing around invisible
   replies with workspace file-drops ("filed not messaged — send_to_agent session routing is

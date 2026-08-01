@@ -1,6 +1,6 @@
 # PRD — Conductor / Child Session Orchestration Loop
 
-**Status:** Draft v0.1 · **Source:** reverse-engineered from the "SESSION" architecture diagram · **Date:** 2026-07-30
+**Status:** Draft v0.1 — preserved brainstorm input, superseded by `docs/fabrica.md` (locked 2026-07-31; the W tier shipped `#306`–`#311`) · **Source:** reverse-engineered from the "SESSION" architecture diagram · **Date:** 2026-07-30
 
 ## 1. Summary
 
