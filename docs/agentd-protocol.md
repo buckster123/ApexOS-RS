@@ -79,11 +79,14 @@ subscribes to the bus separately, so this never affects routing.
 Global/status events include `goal_state_changed` (the Work Board's goal lane —
 carries `session?` since W1d, the goal's own session, so the worker driver can
 cascade-cancel a cancelled conductor's batch) and its twin `worker_state_changed`
-(Fabrica W1a — the WORKERS lane: `{worker, batch, parent, session, task, state
+(Fabrica W1a — the WORKERS lane; since W2 it may carry `node?` for a worker
+hosted on a mesh peer, and those rows ride `session: 0` as a sentinel — the
+real session lives on the peer, so never key residency off it: `{worker, batch, parent, session, task, state
 queued|running|idle|parked|blocked|done|failed|cancelled, detail, yolo?}`, ids as
 bare numbers; `yolo` = batch-inherited auto-approve, W1d), plus `task_batch_done`
 (W1c — a batch reported: `{batch, parent, rows:[{worker, state, evidence,
-timed_out?}]}` where `evidence` is the worker's terminal evidence-file path —
+timed_out?, node?}]}` — `node` (W2) marks a row hosted on that mesh peer, its
+`evidence` then being the conductor-side MIRROR file; `evidence` is otherwise the worker's terminal evidence-file path —
 pointers, never payloads). All deliberately session-less so every client's board
 sees them.
 

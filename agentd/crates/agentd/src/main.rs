@@ -13,6 +13,7 @@ mod rehearse;
 mod evolution;
 mod goal;
 mod mandala;
+mod remote;
 mod review;
 mod worker;
 mod sensor_config;
@@ -266,6 +267,26 @@ async fn main() -> anyhow::Result<()> {
     let agents_dir   = log_dir.join("agents");       // terminal evidence files (the evidence rule)
     let mandalas_path = log_dir.join("mandalas.json"); // M1a: mandala records
     let worktrees_dir = log_dir.join("worktrees");     // M1a: THE FILESYSTEM IS THE TREE
+    // W2 mesh workers: conductor-side mirror rows live in their OWN file — peer
+    // worker-session ids collide numerically across nodes, so a remote row must
+    // never masquerade as a PersistedWorker (it would reload as a phantom local
+    // parked worker). The gateway's /api/worker/* handlers forward peer requests
+    // to the driver's mesh arm over this channel (the SpawnReq idiom).
+    let remotes_path = log_dir.join("remote_workers.json");
+    let (worker_mesh_tx, worker_mesh_rx) = tokio::sync::mpsc::channel::<apexos_gateway::WorkerMeshReq>(16);
+    let mesh_workers_enabled = std::env::var("AGENTD_MESH_WORKERS").map(|v| v != "0").unwrap_or(true);
+    if !mesh_workers_enabled {
+        eprintln!("[agentd] mesh workers DISABLED (AGENTD_MESH_WORKERS=0) — /api/worker/* and task_fanout{{node}} refuse");
+    }
+    // W2: live worker-load gauges, folded into /api/capabilities so conductors
+    // can route by free capacity ("the colony as the worker pool").
+    let worker_slots_gauge  = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let worker_queued_gauge = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Cap resolved once at boot (env wins, else the hardware tier's default) —
+    // computed HERE so the capabilities refresher can advertise it.
+    let hw_tier = tier_from_ram(read_ram_mb());
+    let worker_cap = worker::worker_cap_from_env(std::env::var("AGENTD_WORKER_CAP").ok().as_deref(), hw_tier);
+    eprintln!("[agentd] worker cap: {worker_cap} (tier {hw_tier}; AGENTD_WORKER_CAP overrides)");
 
     // Peer registry — /etc/agentd/peers.toml (created empty if missing)
     let peers_path = PathBuf::from(
@@ -416,6 +437,8 @@ async fn main() -> anyhow::Result<()> {
         fed_stats_path:       fed_stats_path.clone(),
         consolidate_tx:       consolidate_tx.clone(),
         spawn_tx:             spawn_tx.clone(),
+        worker_mesh_tx:       worker_mesh_tx.clone(),
+        mesh_workers_enabled,
         mesh_memory_tx:       mesh_memory_tx.clone(),
         capabilities:         Arc::clone(&capabilities_arc),
         vast_state:           vast_state.clone(),
@@ -649,15 +672,22 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Worker driver (Fabrica W1a) — the goal driver's twin for fanned-out batches.
-    // Cap resolved once at boot: env wins, else the hardware tier's default.
-    let hw_tier = tier_from_ram(read_ram_mb());
-    let worker_cap = worker::worker_cap_from_env(std::env::var("AGENTD_WORKER_CAP").ok().as_deref(), hw_tier);
-    eprintln!("[agentd] worker cap: {worker_cap} (tier {hw_tier}; AGENTD_WORKER_CAP overrides)");
+    // (Cap computed at boot, above, so /api/capabilities can advertise it.)
     worker::spawn_worker_driver(
         handle.clone(), bcast.subscribe(), worker_rx,
         workers_path, batches_path, agents_dir, mandalas_path, worktrees_dir,
         worker_cap, worker_proxy,
         goal_yolo.clone(), worker_models.clone(),
+        worker::MeshDeps {
+            mesh_rx: worker_mesh_rx,
+            remotes_path,
+            peers: Arc::clone(&peer_registry),
+            liveness: Arc::clone(&mesh_liveness),
+            node_id: Arc::clone(&node_id),
+            enabled: mesh_workers_enabled,
+            slots_gauge: Arc::clone(&worker_slots_gauge),
+            queued_gauge: Arc::clone(&worker_queued_gauge),
+        },
     );
 
     // Council handler — wire supervisor channel and spawn handler.
@@ -714,6 +744,11 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&node_id),
         cerebro_embed,
         Arc::clone(&sensor_presence),
+        WorkerLoad {
+            cap:    worker_cap,
+            slots:  Arc::clone(&worker_slots_gauge),
+            queued: Arc::clone(&worker_queued_gauge),
+        },
     );
 
     // Nightly autonomous memory consolidation: call dream_run directly via the
@@ -1708,7 +1743,12 @@ fn spawn_agent_router(
                 // never touches `histories` — the eviction rides the state event,
                 // so the router stays the sole owner of history residency. The
                 // JSONL on disk is truth; the revive edge above reloads it.
-                Ok(Event::WorkerStateChanged { session, state: apexos_core::WorkerState::Parked, .. }) => {
+                // W2 guard: REMOTE worker mirrors ride the same event with
+                // `session: SessionId(0)` (the sentinel — their real session
+                // lives on the peer), so only worker-RANGE sessions may evict;
+                // without this, a remote "parked" mirror would evict root 0.
+                Ok(Event::WorkerStateChanged { session, state: apexos_core::WorkerState::Parked, .. })
+                    if apexos_core::is_worker_session(session.0) => {
                     if histories.lock().await.remove(&session).is_some() {
                         eprintln!("[worker] session {} evicted from RAM (parked)", session.0);
                     }
@@ -2472,6 +2512,7 @@ fn spawn_embodiment_refresher(
     node_id:         Arc<String>,
     cerebro_embed:   Option<String>,
     sensor_presence: SensorPresence,
+    worker_load:     WorkerLoad,
 ) {
     tokio::spawn(async move {
         // Seed the clock immediately so the first turn (which can fire before the 2s
@@ -2483,17 +2524,29 @@ fn spawn_embodiment_refresher(
                                          &peer_registry, &node_id, &cerebro_embed, &sensor_presence).await;
             *embodiment.write().await = block;
             *capabilities.write().await = gather_capabilities(&tool_reg, &backend_arc, &model_arc,
-                                         &peer_registry, &node_id, &cerebro_embed, &sensor_presence).await;
+                                         &peer_registry, &node_id, &cerebro_embed, &sensor_presence, &worker_load).await;
             *ambient.write().await    = build_ambient_clock();
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }
     });
 }
 
+/// W2: the worker-tier load picture folded into `/api/capabilities` — the
+/// colony's routing signal ("who has free worker slots"). `cap` is boot-static;
+/// the gauges are updated by the worker driver at its persistence points, so
+/// the snapshot is current to within a driver tick.
+#[derive(Clone)]
+struct WorkerLoad {
+    cap:    usize,
+    slots:  Arc<std::sync::atomic::AtomicUsize>,
+    queued: Arc<std::sync::atomic::AtomicUsize>,
+}
+
 /// Structured capability snapshot for the mesh (colony Slice 2) — the same live
 /// probes `build_embodiment` uses, emitted as JSON for `GET /api/capabilities` so
 /// peers can route by capability ("which node has thermal? a GPU?"). Kept separate
 /// from the prompt-cache-sensitive embodiment STRING so this can't perturb the cache.
+#[allow(clippy::too_many_arguments)] // live-node wiring: each arc is a distinct source
 async fn gather_capabilities(
     tool_reg:        &Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
     backend_arc:     &Arc<RwLock<String>>,
@@ -2502,6 +2555,7 @@ async fn gather_capabilities(
     node_id:         &str,
     cerebro_embed:   &Option<String>,
     sensor_presence: &SensorPresence,
+    worker_load:     &WorkerLoad,
 ) -> serde_json::Value {
     let full = gather_tools(tool_reg).await;
     let reg  = tool_reg.read().await;
@@ -2535,6 +2589,12 @@ async fn gather_capabilities(
             "embed_model": cerebro_embed,
         },
         "mesh_peers": peer_count,
+        // W2: the worker-tier load picture — conductors route remote fans by it.
+        "worker": {
+            "cap":        worker_load.cap,
+            "slots_used": worker_load.slots.load(std::sync::atomic::Ordering::Relaxed),
+            "queued":     worker_load.queued.load(std::sync::atomic::Ordering::Relaxed),
+        },
         "tools":      tools,
     })
 }

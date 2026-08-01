@@ -10941,7 +10941,7 @@ fn dispatch_event(
         // WORKERS lane (Fabrica W1a). Typed arm ONLY — never add a string-keyed
         // "worker_state_changed" shortcut in the early dispatch, or whichever arm
         // lands second goes silently dead (the mesh_message lesson).
-        Event::WorkerStateChanged { worker, batch, state, task, detail, yolo, .. } => {
+        Event::WorkerStateChanged { worker, batch, state, task, detail, yolo, node, .. } => {
             let (badge, c) = match state {
                 WorkerState::Queued    => ("QUEUE", board_color(148, 163, 184)),
                 WorkerState::Running   => ("RUN",   board_color(34, 211, 238)),
@@ -10954,11 +10954,15 @@ fn dispatch_event(
             };
             let wid = worker.0;
             let title: String = task.chars().take(60).collect();
-            let base = if detail.is_empty() {
+            let mut base = if detail.is_empty() {
                 format!("batch {batch}")
             } else {
                 format!("batch {batch} · {detail}")
             };
+            // W2: a remote row names its hosting node on the card.
+            if let Some(n) = node {
+                base = format!("@{n} · {base}");
+            }
             // Batch-inherited yolo renders AUTO like goals (word carries if ⚡ tofus).
             let subtitle = if yolo { format!("⚡ AUTO · {base}") } else { base };
             // Approval digest bookkeeping: one card per batch with a count.

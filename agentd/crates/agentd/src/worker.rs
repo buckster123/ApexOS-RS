@@ -78,10 +78,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use apexos_core::{ActionId, BatchWorkerRow, BusHandle, Event, GoalState, GoalYoloSessions, SessionId, ToolOutput, ToolSpec, WorkerId, WorkerModels, WorkerState};
 
 use crate::mandala::{self, Addr, BudgetVec, CellForm, CellRecord, Invariant, Lattice, MandalaRecord};
+use crate::remote::{self, RemoteWorker};
 use crate::review::{self, Posture, Remediation, Word};
+use apexos_gateway::{LivenessMap, PeerRegistry, WorkerMeshKind, WorkerMeshReq};
 use apexos_plugins::ToolProxy;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc, RwLock};
 
 /// Hard ceiling on tasks per `task_fanout` call — one batch is one conductor
 /// thought, not a job queue (PRD open question 6: v1 takes a stance).
@@ -199,6 +203,84 @@ struct BatchMeta {
     /// its ToolResult. Transient — a restart demotes the batch to async (the
     /// caller's turn died with the daemon; there is no one left to unblock).
     inline_ack:    Option<(u64, u64)>, // (session, action id)
+    /// W2: a batch HOSTED for a remote conductor — (its node_id, its batch id).
+    /// When this batch reports, the rows also POST home to the origin node.
+    /// Persisted: a restart must not orphan the report edge.
+    origin:        Option<(String, u64)>,
+}
+
+/// W2 mesh-worker wiring handed to the driver by main.rs: the gateway request
+/// arm, the conductor-side mirror file, peer resolution, beacon liveness, the
+/// kill switch, and the capabilities load gauges.
+pub struct MeshDeps {
+    pub mesh_rx:      mpsc::Receiver<WorkerMeshReq>,
+    pub remotes_path: PathBuf,
+    pub peers:        Arc<RwLock<PeerRegistry>>,
+    pub liveness:     LivenessMap,
+    pub node_id:      Arc<String>,
+    pub enabled:      bool,
+    pub slots_gauge:  Arc<AtomicUsize>,
+    pub queued_gauge: Arc<AtomicUsize>,
+}
+
+/// Internal outcomes of spawned mesh HTTP calls (assigns + polls) — the
+/// driver never blocks its select loop on the network; spawned tasks answer
+/// here. `wids` echoes the conductor-side row ids the call was made for.
+enum MeshOutcome {
+    Assign { batch: u64, node: String, wids: Vec<u64>, result: Result<serde_json::Value, String> },
+    Poll   { batch: u64, node: String, result: Result<serde_json::Value, String> },
+}
+
+/// One (batch, node) poll target — supervision across the wire rides the
+/// review cadence: golden offsets, fib backoff on an unchanged snapshot,
+/// dark peers skipped (the beacon owns dark detection).
+struct PollTarget {
+    next:        Instant,
+    attempt:     u32,
+    fingerprint: u64,
+    inflight:    bool,
+}
+
+/// Resolve a peer's HTTP base + token from the registry (the supervisor's
+/// ws→http rewrite, registry-backed instead of a per-call file read).
+async fn peer_http(peers: &Arc<RwLock<PeerRegistry>>, node: &str) -> Option<(String, Option<String>)> {
+    let reg = peers.read().await;
+    reg.peers.iter().find(|p| p.node_id == node).map(|p| {
+        (p.ws_url.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1), p.token.clone())
+    })
+}
+
+/// POST one mesh-worker JSON body; returns the parsed reply or an error
+/// string. Bearer token when stored; MESH_HTTP_TIMEOUT_S bound.
+async fn mesh_post(http_base: &str, path: &str, token: Option<&str>, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let url = format!("{http_base}{path}");
+    let mut req = reqwest::Client::new()
+        .post(&url)
+        .timeout(Duration::from_secs(remote::MESH_HTTP_TIMEOUT_S))
+        .header("x-mesh-hops", "1")
+        .json(body);
+    if let Some(t) = token { req = req.bearer_auth(t); }
+    match req.send().await {
+        Ok(resp) => resp.json::<serde_json::Value>().await.map_err(|e| format!("bad reply: {e}")),
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
+/// Read one terminal worker's evidence doc back for a report/query payload
+/// (peer side — the doc travels inline so the conductor mirrors in one hop).
+fn read_evidence_doc(agents_dir: &Path, worker_id: u64) -> Option<serde_json::Value> {
+    std::fs::read_to_string(evidence_path(agents_dir, worker_id)).ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+}
+
+/// Refresh the capabilities load gauges (W2) — called at the driver's
+/// persistence points, so the snapshot is current to within a tick.
+fn update_gauges(workers: &HashMap<u64, Worker>, mesh: &MeshDeps) {
+    mesh.slots_gauge.store(slots_used(workers), Ordering::Relaxed);
+    let queued = workers.values()
+        .filter(|w| w.state == WorkerState::Queued && !w.barrier_held)
+        .count();
+    mesh.queued_gauge.store(queued, Ordering::Relaxed);
 }
 
 /// The on-disk form (transient `started`/`pending`/`turn_inflight` dropped).
@@ -250,6 +332,11 @@ struct PersistedBatch {
     created_epoch: u64,
     deadline_s:    u64,
     reported:      bool,
+    /// W2: set on batches hosted for a remote conductor (its node, its batch).
+    #[serde(default)]
+    origin_node:   Option<String>,
+    #[serde(default)]
+    origin_batch:  Option<u64>,
 }
 
 fn epoch_now() -> u64 {
@@ -274,7 +361,12 @@ pub fn task_fanout_spec() -> ToolSpec {
                       the one-call diamond: the gate's worker is held by a barrier until the \
                       ring settles, then integrates its evidence (merge/verify for code \
                       mandalas). Fanning wide? Give each task a disjoint scope; code mandalas \
-                      give every ring cell its own git worktree branch automatically.".into(),
+                      give every ring cell its own git worktree branch automatically. THE \
+                      COLONY IS THE WORKER POOL: give a task (or the whole batch) node:\"<peer>\" \
+                      and it runs on that node's own worker tier — its cap, its policy \
+                      (approvals land THERE, yolo never crosses), its evidence; the small \
+                      evidence doc mirrors back here when it settles, artifacts stay on the \
+                      peer. mesh_capabilities shows each peer's worker load.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -288,6 +380,7 @@ pub fn task_fanout_spec() -> ToolSpec {
                               "properties": {
                                   "prompt": { "type": "string", "description": "The task." },
                                   "model":  { "type": "string", "description": "Model for this one worker (wins over the batch model)." },
+                                  "node":   { "type": "string", "description": "Run this task on a MESH PEER's worker tier (wins over the batch node). Plain tasks only — not with mandala/inline. The peer's cap, policy and evidence apply; its report mirrors back here." },
                                   "measure": { "type": "string", "description": "Mandala only — arms the R bit (SPIRAL; with a barrier, FORGE): a command computing a non-negative integer (failing tests, TODO count, |diff|…) the cell runs each lap and reports; it must strictly decrease or the ring breaks (K-stall). A progressing R-cell at its step ceiling RENEWS by spending the parent cell's steps." },
                                   "voucher": { "type": "boolean", "description": "Mandala only — grants SUB-CONDUCTION: this cell's worker may task_fanout into its own subtree, funded by its own budget vector. Batch reports are delivered into its session." }
                               },
@@ -299,6 +392,8 @@ pub fn task_fanout_spec() -> ToolSpec {
                           "description": "async (the default): fan and return immediately — the coding path. inline: BLOCK until the batch reports and return the rows as this call's result — short batches only (max 4 tasks, deadline capped at 240s)." },
                 "model": { "type": "string",
                           "description": "Model for every worker in the batch (per-task model overrides this). Omit for the node default. The colony-model-mix lever: think on the big model, hammer on the small." },
+                "node": { "type": "string",
+                          "description": "Host every task in this batch on a MESH PEER's worker tier (per-task node overrides this). Omit for local workers. Not with mandala (cross-node rings are M2) or inline mode." },
                 "yolo": { "type": "string", "enum": ["inherit"],
                           "description": "inherit: workers auto-approve their OWN ask tools IF AND ONLY IF this calling session is itself yolo-armed (a yolo:true goal) — never more than the parent has. Default off." },
                 "batch_deadline_s": { "type": "integer",
@@ -602,6 +697,8 @@ fn confine_artifacts(paths: &[String], workspace: &Path) -> Result<Vec<String>, 
 
 /// One parsed task item: the prompt plus per-worker knobs. `measure` and
 /// `voucher` (M1c) are mandala-cell properties — refused on plain fans.
+/// `node` (W2) sends the task to a PEER's worker pool — refused on mandala
+/// fans (cross-node rings are M2) and in inline mode.
 #[derive(Clone)]
 struct TaskSpecItem {
     prompt: String,
@@ -610,11 +707,15 @@ struct TaskSpecItem {
     measure: Option<String>,
     /// Sub-conduction grant: this cell's worker may grow its own subtree.
     voucher: bool,
+    /// W2: host this task on a peer node's worker tier (the colony as the
+    /// worker pool). Per-task value wins over the batch-level `node`.
+    node: Option<String>,
 }
 
 /// Extract the tasks from `task_fanout` args — item = string | {prompt,
-/// model?, measure?, voucher?}. The per-task model wins over the batch-level
-/// `model`. Errors are conductor-facing strings (the tool result), not panics.
+/// model?, measure?, voucher?, node?}. The per-task model/node win over the
+/// batch-level `model`/`node`. Errors are conductor-facing strings (the tool
+/// result), not panics.
 fn parse_tasks(args: &serde_json::Value) -> Result<Vec<TaskSpecItem>, String> {
     let items = args["tasks"].as_array().ok_or("tasks must be an array of task strings or {prompt} objects")?;
     if items.is_empty() { return Err("tasks is empty — nothing to fan out".into()); }
@@ -622,6 +723,7 @@ fn parse_tasks(args: &serde_json::Value) -> Result<Vec<TaskSpecItem>, String> {
         return Err(format!("{} tasks exceeds the {MAX_BATCH_TASKS}-per-batch ceiling — split into sequential batches", items.len()));
     }
     let batch_model = args["model"].as_str().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 64);
+    let batch_node = args["node"].as_str().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 64);
     let mut tasks = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let prompt = item.as_str().or_else(|| item["prompt"].as_str()).unwrap_or("").trim();
@@ -633,7 +735,10 @@ fn parse_tasks(args: &serde_json::Value) -> Result<Vec<TaskSpecItem>, String> {
             .filter(|s| !s.is_empty() && s.len() <= 200)
             .map(str::to_owned);
         let voucher = item["voucher"].as_bool().unwrap_or(false);
-        tasks.push(TaskSpecItem { prompt: prompt.to_string(), model, measure, voucher });
+        let node = item["node"].as_str().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 64)
+            .or(batch_node)
+            .map(str::to_owned);
+        tasks.push(TaskSpecItem { prompt: prompt.to_string(), model, measure, voucher, node });
     }
     Ok(tasks)
 }
@@ -718,6 +823,8 @@ fn save_batches(batches: &HashMap<u64, BatchMeta>, path: &PathBuf) {
     let mut snapshot: Vec<PersistedBatch> = batches.iter().map(|(id, b)| PersistedBatch {
         batch: *id, parent: b.parent, created_epoch: b.created_epoch,
         deadline_s: b.deadline_s, reported: b.reported,
+        origin_node: b.origin.as_ref().map(|(n, _)| n.clone()),
+        origin_batch: b.origin.as_ref().map(|(_, ob)| *ob),
     }).collect();
     snapshot.sort_by_key(|b| b.batch);
     if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
@@ -827,6 +934,7 @@ async fn emit_state(bus: &BusHandle, id: u64, w: &Worker, detail: &str) {
         state:   w.state,
         detail:  detail.into(),
         yolo:    w.yolo,
+        node:    None, // local workers; remote rows emit via emit_remote_state
     }).await;
 }
 
@@ -869,8 +977,10 @@ pub fn spawn_worker_driver(
     proxy:        ToolProxy,
     yolo_set:     GoalYoloSessions,
     models:       WorkerModels,
+    mesh:         MeshDeps,
 ) {
     tokio::spawn(async move {
+        let mut mesh = mesh;
         let mut workers: HashMap<u64, Worker>   = HashMap::new();
         let mut batches: HashMap<u64, BatchMeta> = HashMap::new();
         // Mandala state (M1a): records + per-mandala cell trees + worker→cell
@@ -880,10 +990,19 @@ pub fn spawn_worker_driver(
         let mut trees: HashMap<u64, HashMap<String, CellRecord>> = HashMap::new();
         let mut cell_by_worker: HashMap<u64, (u64, Addr)> = HashMap::new();
         let mut next_mandala_id: u64 = 1;
+        // W2 mesh state: conductor-side mirror rows (their OWN map + file —
+        // peer session ids collide across nodes, so a remote row must never
+        // masquerade as a local Worker), the (batch, node) poll schedule, and
+        // the outcome channel spawned HTTP tasks answer on (the driver never
+        // blocks its select loop on the network).
+        let mut remotes: HashMap<u64, RemoteWorker> = HashMap::new();
+        let mut polls: HashMap<(u64, String), PollTarget> = HashMap::new();
+        let (mesh_out_tx, mut mesh_out_rx) = mpsc::channel::<MeshOutcome>(32);
         // Driver-private counters. Workers persist, so the reload MUST re-seed
         // all three past what's on disk (the next_goal_id discipline) — never
         // blind-reset like the spawn counter (safe there only because spawns
-        // never persist).
+        // never persist). Remote rows spend the SAME worker-id counter, so the
+        // remotes file re-seeds it too.
         let mut next_worker_id:  u64 = 1;
         let mut next_batch_id:   u64 = 1;
         let mut next_worker_sid: u64 = apexos_core::WORKER_SESSION_BASE;
@@ -893,6 +1012,9 @@ pub fn spawn_worker_driver(
         reload_batches(&mut batches, &batches_path, &mut next_batch_id);
         reload_mandalas(&mut mandalas, &mut trees, &mut cell_by_worker,
                         &mandalas_path, &worktrees_dir, &mut next_mandala_id);
+        reload_remotes(&mut remotes, &mut polls, &batches, &bus, &mesh.remotes_path,
+                       &mut next_worker_id, &mut next_batch_id).await;
+        update_gauges(&workers, &mesh);
 
         // Artifact confinement root: the node agent's workspace (workers run
         // as the node agent — resolve_agent_id on an unbound worker session).
@@ -916,13 +1038,18 @@ pub fn spawn_worker_driver(
                             // Mandala-scoped fans validate FIRST (address, descent,
                             // geometry, ring widths, join layout) and mint from fully
                             // composed plans; a plain fan passes None straight through.
+                            // W2: tasks may carry `node` — remote rows mint beside the
+                            // locals and their assigns spawn after the ack.
                             if let Some((ctx, minted)) = fanout(&mut workers, &mut batches, &mandalas, &trees, &cell_by_worker, &bus, cap, max_steps, &proxy, &yolo_set, &models, session, call_id, args,
-                                   &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid).await {
+                                   &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid,
+                                   &mesh, &mesh_out_tx, &mut remotes).await {
                                 if let Some(ctx) = &ctx {
                                     bind_cells(&mut trees, &mut cell_by_worker, &worktrees_dir, ctx, &minted);
                                 }
                                 save_workers(&workers, &workers_path);
                                 save_batches(&batches, &batches_path);
+                                remote::save_remotes(&remotes, &mesh.remotes_path);
+                                update_gauges(&workers, &mesh);
                             }
                         }
                         "mandala_close" => {
@@ -937,19 +1064,60 @@ pub fn spawn_worker_driver(
                         "mandala_status" => handle_mandala_status(&mandalas, &trees, &censuses, &bus, session, call_id).await,
                         "worker_report" => record_report(&mut workers, &bus, &workspace, session, call_id, args).await,
                         "worker_cancel" => {
-                            if cancel_request(&mut workers, &bus, &proxy, &agents_dir, &yolo_set, &models, session, call_id, args).await {
+                            if cancel_request(&mut workers, &mut remotes, &bus, &proxy, &agents_dir, &yolo_set, &models, &mesh, session, call_id, args).await {
                                 // A cancelled subtree can settle a gate — sync, sweep, admit.
                                 sync_cells(&mut trees, &cell_by_worker, &workers, &worktrees_dir, &agents_dir);
                                 check_barriers(&mut workers, &mut trees, &cell_by_worker, &mandalas, &bus, &worktrees_dir).await;
                                 admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
-                                if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
-                                    save_batches(&batches, &batches_path);
-                                }
+                                let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
+                                if chg { save_batches(&batches, &batches_path); }
+                                spawn_report_home(&mesh, reports).await;
                                 save_workers(&workers, &workers_path);
+                                remote::save_remotes(&remotes, &mesh.remotes_path);
+                                update_gauges(&workers, &mesh);
                             }
                         }
-                        "list_workers" => handle_list_workers(&workers, &bus, cap, &agents_dir, session, call_id).await,
+                        "list_workers" => handle_list_workers(&workers, &remotes, &bus, cap, &agents_dir, session, call_id).await,
                         _ => {}
+                    }
+                }
+                // ── W2: gateway mesh requests (peer fanout/query/cancel + report-home) ──
+                Some(req) = mesh.mesh_rx.recv() => {
+                    let saved = handle_mesh_req(
+                        &mut workers, &mut remotes, &mut batches, &mut polls,
+                        &bus, &proxy, &agents_dir, &yolo_set, &models, cap, max_steps,
+                        &mesh, &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid,
+                        req,
+                    ).await;
+                    if saved {
+                        save_workers(&workers, &workers_path);
+                        save_batches(&batches, &batches_path);
+                        remote::save_remotes(&remotes, &mesh.remotes_path);
+                        let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
+                        if chg { save_batches(&batches, &batches_path); }
+                        spawn_report_home(&mesh, reports).await;
+                        update_gauges(&workers, &mesh);
+                    }
+                }
+                // ── W2: outcomes of spawned mesh HTTP calls (assigns + polls) ──
+                Some(out) = mesh_out_rx.recv() => {
+                    match out {
+                        MeshOutcome::Assign { batch, node, wids, result } => {
+                            handle_assign_outcome(&mut remotes, &mut polls, &bus, &agents_dir, batch, &node, wids, result).await;
+                            let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
+                            if chg { save_batches(&batches, &batches_path); }
+                            spawn_report_home(&mesh, reports).await;
+                            remote::save_remotes(&remotes, &mesh.remotes_path);
+                        }
+                        MeshOutcome::Poll { batch, node, result } => {
+                            let changed = handle_poll_outcome(&mut remotes, &mut polls, &bus, &agents_dir, batch, &node, result).await;
+                            if changed {
+                                let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
+                                if chg { save_batches(&batches, &batches_path); }
+                                spawn_report_home(&mesh, reports).await;
+                                remote::save_remotes(&remotes, &mesh.remotes_path);
+                            }
+                        }
                     }
                 }
                 ev = bcast_rx.recv() => {
@@ -963,10 +1131,11 @@ pub fn spawn_worker_driver(
                                 sync_cells(&mut trees, &cell_by_worker, &workers, &worktrees_dir, &agents_dir);
                                 check_barriers(&mut workers, &mut trees, &cell_by_worker, &mandalas, &bus, &worktrees_dir).await;
                                 admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
-                                if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
-                                    save_batches(&batches, &batches_path);
-                                }
+                                let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
+                                if chg { save_batches(&batches, &batches_path); }
+                                spawn_report_home(&mesh, reports).await;
                                 save_workers(&workers, &workers_path);
+                                update_gauges(&workers, &mesh);
                             }
                         }
                         // A worker's turn hit an ask-gated tool: the turn is suspended on
@@ -1010,15 +1179,23 @@ pub fn spawn_worker_driver(
                                 let ids: Vec<u64> = workers.iter()
                                     .filter(|(_, w)| w.parent == parent.0 && !is_terminal(w.state))
                                     .map(|(id, _)| *id).collect();
-                                if !ids.is_empty() {
-                                    eprintln!("[worker] cascade: conductor session {} cancelled → {} worker(s)", parent.0, ids.len());
+                                // W2: the cascade reaches remote rows too — relayed
+                                // to their hosting nodes, confirmed by poll/report.
+                                let remote_ids: Vec<u64> = remotes.iter()
+                                    .filter(|(_, r)| r.parent == parent.0 && !r.is_terminal())
+                                    .map(|(id, _)| *id).collect();
+                                if !ids.is_empty() || !remote_ids.is_empty() {
+                                    eprintln!("[worker] cascade: conductor session {} cancelled → {} worker(s), {} remote", parent.0, ids.len(), remote_ids.len());
                                     cancel_workers(&mut workers, &bus, &proxy, &agents_dir, &yolo_set, &models, &ids).await;
+                                    relay_remote_cancels(&mut remotes, &bus, &mesh, &remote_ids).await;
                                     admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
-                                    if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
-                                        save_batches(&batches, &batches_path);
-                                    }
+                                    let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
+                                    if chg { save_batches(&batches, &batches_path); }
+                                    spawn_report_home(&mesh, reports).await;
                                     sync_cells(&mut trees, &cell_by_worker, &workers, &worktrees_dir, &agents_dir);
                                     save_workers(&workers, &workers_path);
+                                    remote::save_remotes(&remotes, &mesh.remotes_path);
+                                    update_gauges(&workers, &mesh);
                                 }
                             }
                             if try_close_for_conductor(&mut mandalas, &mut trees, &worktrees_dir, parent.0) {
@@ -1103,11 +1280,17 @@ pub fn spawn_worker_driver(
                     if failed_any {
                         admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
                     }
-                    if check_batches(&workers, &mut batches, &bus, &agents_dir).await {
-                        save_batches(&batches, &batches_path);
-                    }
+                    let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
+                    if chg { save_batches(&batches, &batches_path); }
+                    spawn_report_home(&mesh, reports).await;
                     if failed_any || reaped_any { sync_cells(&mut trees, &cell_by_worker, &workers, &worktrees_dir, &agents_dir); }
                     if failed_any || parked_any { save_workers(&workers, &workers_path); }
+                    // W2: due remote polls — supervision across the wire on the
+                    // review cadence (dark peers skipped; a poll is never the
+                    // liveness probe, and a poll failure never fails a row —
+                    // the batch deadline is the net).
+                    run_due_polls(&remotes, &mut polls, &batches, &mesh, &mesh_out_tx).await;
+                    update_gauges(&workers, &mesh);
                 }
             }
         }
@@ -1124,6 +1307,7 @@ fn reload_batches(batches: &mut HashMap<u64, BatchMeta>, path: &PathBuf, next_ba
             parent: pb.parent, created_epoch: pb.created_epoch,
             deadline_s: pb.deadline_s, reported: pb.reported,
             inline_ack: None, // the blocked caller died with the old process
+            origin: pb.origin_node.zip(pb.origin_batch),
         });
     }
 }
@@ -1165,6 +1349,502 @@ async fn reload_workers(
     eprintln!("[worker] reloaded workers from {} (non-terminal ones parked)", path.display());
 }
 
+// ── W2 mesh workers — the driver's remote seam ──────────────────────────────
+
+/// The remote-row emission chokepoint, `emit_state`'s twin. Remote rows ride
+/// `session: SessionId(0)` (the sentinel — their real session lives on the
+/// peer; the router's eviction guard keys off the worker RANGE, so the
+/// sentinel can never evict anything) plus `node: Some(..)`.
+async fn emit_remote_state(bus: &BusHandle, id: u64, r: &RemoteWorker, detail: &str) {
+    bus.emit(Event::WorkerStateChanged {
+        worker:  WorkerId(id),
+        batch:   r.batch,
+        parent:  SessionId(r.parent),
+        session: SessionId(0),
+        task:    r.task.chars().take(80).collect(),
+        state:   remote::row_state(&r.state_raw),
+        detail:  if detail.is_empty() { format!("{} @ {}", r.state_raw, r.node) } else { detail.into() },
+        yolo:    false,
+        node:    Some(r.node.clone()),
+    }).await;
+}
+
+/// Boot: reload conductor-side mirror rows, re-seed the shared counters, and
+/// resume the poll schedule for unsettled batches — the reconcile path after
+/// a conductor restart (the peer kept working while we were down; polls pick
+/// up whatever happened).
+async fn reload_remotes(
+    remotes: &mut HashMap<u64, RemoteWorker>,
+    polls: &mut HashMap<(u64, String), PollTarget>,
+    batches: &HashMap<u64, BatchMeta>,
+    bus: &BusHandle, path: &Path,
+    next_worker_id: &mut u64, next_batch_id: &mut u64,
+) {
+    let loaded = remote::load_remotes(path);
+    if loaded.is_empty() { return; }
+    for pr in loaded {
+        *next_worker_id = (*next_worker_id).max(pr.id + 1);
+        *next_batch_id  = (*next_batch_id).max(pr.batch + 1);
+        remotes.insert(pr.id, RemoteWorker {
+            batch: pr.batch, parent: pr.parent, node: pr.node, task: pr.task,
+            model: pr.model, remote_batch: pr.remote_batch, remote_worker: pr.remote_worker,
+            remote_session: pr.remote_session,
+            state_raw: if pr.state_raw.is_empty() { remote::STATE_ASSIGNING.into() } else { pr.state_raw },
+            summary: pr.summary, evidence: pr.evidence, assigned_epoch: pr.assigned_epoch,
+        });
+    }
+    let mut ids: Vec<u64> = remotes.keys().copied().collect();
+    ids.sort_unstable();
+    for id in &ids {
+        emit_remote_state(bus, *id, &remotes[id], "").await;
+    }
+    // Resume polling any (batch, node) group that was accepted and is not yet
+    // settled+reported — golden offsets de-phase the groups like reviews.
+    for (id, r) in remotes.iter() {
+        if r.remote_batch.is_none() { continue; }
+        let unsettled = !r.is_terminal()
+            || batches.get(&r.batch).map(|b| !b.reported).unwrap_or(false);
+        if unsettled {
+            polls.entry((r.batch, r.node.clone())).or_insert_with(|| PollTarget {
+                next: Instant::now() + review::golden_offset(*id, REVIEW_PERIOD),
+                attempt: 0, fingerprint: 0, inflight: false,
+            });
+        }
+    }
+    eprintln!("[worker] reloaded {} remote row(s) from {} ({} poll target(s) resumed)",
+              remotes.len(), path.display(), polls.len());
+}
+
+/// Fail a set of remote rows honestly (assign refused / transport dead / peer
+/// dark): terminal state, a mirror evidence file that names the cause, the
+/// state card — so batch math and integration never see a silent hole.
+async fn fail_remote_rows(
+    remotes: &mut HashMap<u64, RemoteWorker>,
+    bus: &BusHandle, agents_dir: &Path,
+    wids: &[u64], cause: &str,
+) {
+    for wid in wids {
+        let Some(r) = remotes.get_mut(wid) else { continue };
+        if r.is_terminal() { continue; }
+        r.state_raw = "failed".into();
+        r.summary = Some(format!("remote assignment failed: {cause}"));
+        let mirror = remote::fold_remote_evidence(
+            remote::compose_mirror_doc(*wid, r, &chrono::Utc::now().to_rfc3339()), None);
+        let path = evidence_path(agents_dir, *wid);
+        let _ = std::fs::create_dir_all(agents_dir);
+        if let Ok(json) = serde_json::to_string_pretty(&mirror) {
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, &json).is_ok() { let _ = std::fs::rename(&tmp, &path); }
+        }
+        r.evidence = Some(path.to_string_lossy().into_owned());
+        let r = &remotes[wid];
+        emit_remote_state(bus, *wid, r, &format!("assign failed: {cause}")).await;
+        eprintln!("[worker] remote {wid} failed: {cause}");
+    }
+}
+
+/// An assign POST answered (or died): join the peer's minted ids back onto
+/// our rows by request order, arm the poll target — or fail the rows with
+/// the honest cause.
+#[allow(clippy::too_many_arguments)]
+async fn handle_assign_outcome(
+    remotes: &mut HashMap<u64, RemoteWorker>,
+    polls: &mut HashMap<(u64, String), PollTarget>,
+    bus: &BusHandle, agents_dir: &Path,
+    batch: u64, node: &str, wids: Vec<u64>,
+    result: Result<serde_json::Value, String>,
+) {
+    let accept = result.and_then(|v| remote::parse_fanout_accept(&v));
+    match accept {
+        Ok((peer_batch, rows)) => {
+            for ar in rows {
+                let Some(wid) = wids.get(ar.index) else { continue };
+                if let Some(r) = remotes.get_mut(wid) {
+                    r.remote_batch = Some(peer_batch);
+                    r.remote_worker = Some(ar.worker);
+                    r.remote_session = Some(ar.session);
+                    r.state_raw = "queued".into();
+                    let r = &remotes[wid];
+                    emit_remote_state(bus, *wid, r, &format!("assigned to {node} (worker {}, session {})", ar.worker, ar.session)).await;
+                }
+            }
+            polls.insert((batch, node.to_string()), PollTarget {
+                next: Instant::now() + review::golden_offset(wids.first().copied().unwrap_or(batch), REVIEW_PERIOD),
+                attempt: 0, fingerprint: 0, inflight: false,
+            });
+            eprintln!("[worker] batch {batch}: {} task(s) assigned to {node} (peer batch {peer_batch})", wids.len());
+        }
+        Err(e) => {
+            fail_remote_rows(remotes, bus, agents_dir, &wids, &e).await;
+        }
+    }
+}
+
+/// Apply a rows payload (poll reply or report-home push) onto the mirror
+/// rows: states follow the peer verbatim, terminal rows get their evidence
+/// MIRROR written once (`agents/<local_wid>.json` — reading it IS the
+/// integration step; artifacts stay on the peer). Returns whether anything
+/// changed (the poll ladder's reset signal).
+async fn apply_wire_rows(
+    remotes: &mut HashMap<u64, RemoteWorker>,
+    bus: &BusHandle, agents_dir: &Path,
+    batch: u64, node: &str, rows: &[remote::WireRow],
+) -> bool {
+    let mut changed = false;
+    for wire in rows {
+        let hit = remotes.iter()
+            .find(|(_, r)| r.batch == batch && r.node == node && r.remote_worker == Some(wire.worker))
+            .map(|(id, _)| *id);
+        let Some(wid) = hit else { continue };
+        let r = remotes.get_mut(&wid).unwrap();
+        let state_changed = r.state_raw != wire.state;
+        if state_changed { r.state_raw = wire.state.clone(); }
+        if wire.summary.is_some() && r.summary != wire.summary { r.summary = wire.summary.clone(); changed = true; }
+        if state_changed { changed = true; }
+        if r.is_terminal() && r.evidence.is_none() {
+            let mirror = remote::fold_remote_evidence(
+                remote::compose_mirror_doc(wid, r, &chrono::Utc::now().to_rfc3339()),
+                wire.evidence_doc.as_ref());
+            let path = evidence_path(agents_dir, wid);
+            let _ = std::fs::create_dir_all(agents_dir);
+            if let Ok(json) = serde_json::to_string_pretty(&mirror) {
+                let tmp = path.with_extension("json.tmp");
+                if std::fs::write(&tmp, &json).is_ok() { let _ = std::fs::rename(&tmp, &path); }
+            }
+            r.evidence = Some(path.to_string_lossy().into_owned());
+            changed = true;
+        }
+        if state_changed {
+            let r = &remotes[&wid];
+            emit_remote_state(bus, wid, r, "").await;
+            eprintln!("[worker] remote {wid} @ {node} → {}", r.state_raw);
+        }
+    }
+    changed
+}
+
+/// A poll answered (or died): fold the snapshot in, ride the ladder — a
+/// changed picture resets to the base period, a quiet or failed one climbs
+/// fib. Poll failures NEVER fail a row (the batch deadline is the net).
+async fn handle_poll_outcome(
+    remotes: &mut HashMap<u64, RemoteWorker>,
+    polls: &mut HashMap<(u64, String), PollTarget>,
+    bus: &BusHandle, agents_dir: &Path,
+    batch: u64, node: &str,
+    result: Result<serde_json::Value, String>,
+) -> bool {
+    let mut changed = false;
+    if let Some(t) = polls.get_mut(&(batch, node.to_string())) {
+        t.inflight = false;
+        match result {
+            Ok(v) => {
+                let rows = remote::parse_rows(&v);
+                let fp = remote::rows_fingerprint(&rows);
+                changed = apply_wire_rows(remotes, bus, agents_dir, batch, node, &rows).await;
+                let fp_changed = fp != t.fingerprint;
+                t.fingerprint = fp;
+                t.attempt = if fp_changed || changed { 0 } else { t.attempt.saturating_add(1) };
+                t.next = Instant::now() + remote::next_poll_in(t.attempt, fp_changed || changed, REVIEW_PERIOD);
+            }
+            Err(e) => {
+                t.attempt = t.attempt.saturating_add(1);
+                t.next = Instant::now() + remote::next_poll_in(t.attempt, false, REVIEW_PERIOD);
+                eprintln!("[worker] poll {node} batch {batch}: {e} (deadline is the net)");
+            }
+        }
+    }
+    changed
+}
+
+/// Fire due polls: skip dark peers (attempt climbs so a dark stretch backs
+/// off naturally), drop targets whose batch is settled AND reported, spawn
+/// the query POST otherwise.
+async fn run_due_polls(
+    remotes: &HashMap<u64, RemoteWorker>,
+    polls: &mut HashMap<(u64, String), PollTarget>,
+    batches: &HashMap<u64, BatchMeta>,
+    mesh: &MeshDeps,
+    mesh_out_tx: &mpsc::Sender<MeshOutcome>,
+) {
+    let now = Instant::now();
+    let due: Vec<(u64, String)> = polls.iter()
+        .filter(|(_, t)| !t.inflight && t.next <= now)
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in due {
+        let (batch, node) = key.clone();
+        let group: Vec<&RemoteWorker> = remotes.values()
+            .filter(|r| r.batch == batch && r.node == node)
+            .collect();
+        let all_terminal = !group.is_empty() && group.iter().all(|r| r.is_terminal());
+        let reported = batches.get(&batch).map(|b| b.reported).unwrap_or(true);
+        if group.is_empty() || (all_terminal && reported) {
+            polls.remove(&key);
+            continue;
+        }
+        let Some(peer_batch) = group.iter().find_map(|r| r.remote_batch) else {
+            // Never accepted — assign already failed the rows; drop the target.
+            polls.remove(&key);
+            continue;
+        };
+        if apexos_gateway::beacon::peer_liveness(&mesh.liveness, &node).await.0 == "dark" {
+            let t = polls.get_mut(&key).unwrap();
+            t.attempt = t.attempt.saturating_add(1);
+            t.next = now + remote::next_poll_in(t.attempt, false, REVIEW_PERIOD);
+            continue;
+        }
+        let Some((base, token)) = peer_http(&mesh.peers, &node).await else {
+            let t = polls.get_mut(&key).unwrap();
+            t.attempt = t.attempt.saturating_add(1);
+            t.next = now + remote::next_poll_in(t.attempt, false, REVIEW_PERIOD);
+            continue;
+        };
+        let t = polls.get_mut(&key).unwrap();
+        t.inflight = true;
+        let body = serde_json::json!({ "from": *mesh.node_id, "batch": peer_batch });
+        let tx = mesh_out_tx.clone();
+        tokio::spawn(async move {
+            let result = mesh_post(&base, "/api/worker/query", token.as_deref(), &body).await;
+            let _ = tx.send(MeshOutcome::Poll { batch, node, result }).await;
+        });
+    }
+}
+
+/// Push a settled hosted batch home to its origin conductor (peer role).
+/// Fire-and-forget with a short retry ladder — a conductor that stays dark
+/// reconciles by its own polls; its batch deadline is the final net.
+async fn spawn_report_home(mesh: &MeshDeps, reports: Vec<(String, u64, u64, Vec<remote::WireRow>)>) {
+    for (node, origin_batch, local_batch, rows) in reports {
+        let Some((base, token)) = peer_http(&mesh.peers, &node).await else {
+            eprintln!("[worker] report-home: origin peer '{node}' no longer registered — its polls must reconcile");
+            continue;
+        };
+        let body = remote::build_rows_body(&mesh.node_id, origin_batch, local_batch, &rows);
+        tokio::spawn(async move {
+            for (i, delay) in std::iter::once(0u64).chain(remote::REPORT_RETRY_DELAYS_S).enumerate() {
+                if delay > 0 { tokio::time::sleep(Duration::from_secs(delay)).await; }
+                match mesh_post(&base, "/api/worker/report", token.as_deref(), &body).await {
+                    Ok(v) if v["ok"].as_bool() == Some(true) => {
+                        eprintln!("[worker] batch {local_batch} reported home to {node} (origin batch {origin_batch})");
+                        return;
+                    }
+                    Ok(v) => eprintln!("[worker] report-home to {node} refused (try {}): {}", i + 1, v["error"].as_str().unwrap_or("?")),
+                    Err(e) => eprintln!("[worker] report-home to {node} failed (try {}): {e}", i + 1),
+                }
+            }
+            eprintln!("[worker] report-home to {node} gave up — the conductor's polls reconcile");
+        });
+    }
+}
+
+/// Relay a cancel to the hosting nodes for a set of remote rows. Rows go
+/// `cancel requested` (NON-terminal — the peer's confirmation arrives by
+/// poll/report; a peer that never answers is bounded by the batch deadline).
+async fn relay_remote_cancels(
+    remotes: &mut HashMap<u64, RemoteWorker>,
+    bus: &BusHandle, mesh: &MeshDeps,
+    ids: &[u64],
+) {
+    // Group by (batch, node) — one POST per hosting peer batch.
+    let mut groups: HashMap<(u64, String), (Option<u64>, Vec<u64>)> = HashMap::new();
+    for id in ids {
+        let Some(r) = remotes.get_mut(id) else { continue };
+        if r.is_terminal() { continue; }
+        r.state_raw = remote::STATE_CANCEL_REQUESTED.into();
+        let entry = groups.entry((r.batch, r.node.clone())).or_insert((r.remote_batch, Vec::new()));
+        if let Some(rw) = r.remote_worker { entry.1.push(rw); }
+        let r = &remotes[id];
+        emit_remote_state(bus, *id, r, &format!("cancel relayed to {}", r.node)).await;
+    }
+    for ((_batch, node), (remote_batch, workers)) in groups {
+        let Some(rb) = remote_batch else { continue }; // never accepted — assign path already failed it
+        let Some((base, token)) = peer_http(&mesh.peers, &node).await else { continue };
+        let body = serde_json::json!({
+            "from": *mesh.node_id, "batch": rb,
+            "workers": workers,
+        });
+        tokio::spawn(async move {
+            match mesh_post(&base, "/api/worker/cancel", token.as_deref(), &body).await {
+                Ok(v) if v["ok"].as_bool() == Some(true) => {}
+                Ok(v) => eprintln!("[worker] cancel relay to {node} refused: {}", v["error"].as_str().unwrap_or("?")),
+                Err(e) => eprintln!("[worker] cancel relay to {node} failed: {e} (deadline is the net)"),
+            }
+        });
+    }
+}
+
+/// Dispatch one gateway mesh request (W2). Returns whether driver state
+/// changed (the caller persists + re-checks batches).
+#[allow(clippy::too_many_arguments)]
+async fn handle_mesh_req(
+    workers: &mut HashMap<u64, Worker>,
+    remotes: &mut HashMap<u64, RemoteWorker>,
+    batches: &mut HashMap<u64, BatchMeta>,
+    polls: &mut HashMap<(u64, String), PollTarget>,
+    bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path,
+    yolo_set: &GoalYoloSessions, models: &WorkerModels,
+    cap: usize, max_steps: u32,
+    mesh: &MeshDeps,
+    next_worker_id: &mut u64, next_batch_id: &mut u64, next_worker_sid: &mut u64,
+    req: WorkerMeshReq,
+) -> bool {
+    let WorkerMeshReq { kind, from, body, parent, reply } = req;
+    match kind {
+        // ── peer role: host a batch for a remote conductor ──
+        WorkerMeshKind::Fanout => {
+            let origin_batch = body["origin_batch"].as_u64().unwrap_or(0);
+            let Some(parent) = parent else {
+                let _ = reply.send(serde_json::json!({ "ok": false, "error": "no landing session resolved" }));
+                return false;
+            };
+            let items = body["tasks"].as_array().cloned().unwrap_or_default();
+            if items.is_empty() || items.len() > MAX_BATCH_TASKS {
+                let _ = reply.send(serde_json::json!({ "ok": false, "error": format!("tasks must be 1..={MAX_BATCH_TASKS}") }));
+                return false;
+            }
+            let mut tasks: Vec<(String, Option<String>)> = Vec::with_capacity(items.len());
+            for it in &items {
+                let prompt = it["prompt"].as_str().map(str::trim).unwrap_or("");
+                if prompt.is_empty() {
+                    let _ = reply.send(serde_json::json!({ "ok": false, "error": "a task has no prompt" }));
+                    return false;
+                }
+                let model = it["model"].as_str().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 64).map(str::to_owned);
+                tasks.push((remote::provenance_prefix(&from, origin_batch, prompt), model));
+            }
+            let deadline_s = body["deadline_s"].as_u64().map(|n| n.clamp(60, 86_400)).unwrap_or(DEFAULT_BATCH_DEADLINE_S);
+            let batch = *next_batch_id; *next_batch_id += 1;
+            batches.insert(batch, BatchMeta {
+                parent: parent.0, created_epoch: epoch_now(), deadline_s, reported: false,
+                inline_ack: None,
+                origin: Some((from.clone(), origin_batch)),
+            });
+            let mut minted_rows: Vec<serde_json::Value> = Vec::with_capacity(tasks.len());
+            let mut minted_ids: Vec<u64> = Vec::with_capacity(tasks.len());
+            for (i, (task, model)) in tasks.into_iter().enumerate() {
+                let wid = *next_worker_id;  *next_worker_id  += 1;
+                let sid = *next_worker_sid; *next_worker_sid += 1;
+                // Ordinary local workers: this node's cap/FIFO/policy/review
+                // all apply. yolo is ALWAYS false — it never crosses the wire.
+                workers.insert(wid, Worker {
+                    batch, parent: parent.0, session: sid,
+                    task, state: WorkerState::Queued, step: 1, summary: None,
+                    artifacts: Vec::new(), episode: None,
+                    started: Instant::now(), pending: None, turn_inflight: false,
+                    yolo: false, model, errored: false, step_ceiling: 0,
+                    barrier_held: false, next_review: None,
+                    last_review_key: None, review_attempt: 0,
+                });
+                minted_rows.push(serde_json::json!({ "index": i, "worker": wid, "session": sid }));
+                minted_ids.push(wid);
+            }
+            for wid in &minted_ids {
+                emit_state(bus, *wid, &workers[wid], "queued (mesh)").await;
+            }
+            admit_queued(workers, bus, proxy, yolo_set, models, cap, max_steps).await;
+            let admitted = minted_ids.iter().filter(|id| workers[id].state == WorkerState::Running).count();
+            eprintln!("[worker] hosting batch {batch} for {from} (origin batch {origin_batch}): {} task(s), {admitted} admitted", minted_ids.len());
+            let _ = reply.send(serde_json::json!({
+                "ok": true, "batch": batch, "workers": minted_rows,
+                "cap": cap, "admitted": admitted, "queued": minted_ids.len() - admitted,
+            }));
+            true
+        }
+        // ── peer role: the origin conductor polling its hosted batch ──
+        WorkerMeshKind::Query => {
+            let Some(batch) = body["batch"].as_u64() else {
+                let _ = reply.send(serde_json::json!({ "ok": false, "error": "missing batch" }));
+                return false;
+            };
+            let owned = batches.get(&batch)
+                .and_then(|b| b.origin.as_ref())
+                .map(|(n, _)| n == &from)
+                .unwrap_or(false);
+            if !owned {
+                let _ = reply.send(serde_json::json!({ "ok": false, "error": "not your hosted batch" }));
+                return false;
+            }
+            let origin_batch = batches[&batch].origin.as_ref().map(|(_, ob)| *ob).unwrap_or(0);
+            let rows = wire_rows_for_batch(workers, batch, agents_dir);
+            let _ = reply.send(remote::build_rows_body(&mesh.node_id, origin_batch, batch, &rows));
+            false
+        }
+        // ── peer role: the origin conductor cancelling its hosted batch ──
+        WorkerMeshKind::Cancel => {
+            let Some(batch) = body["batch"].as_u64() else {
+                let _ = reply.send(serde_json::json!({ "ok": false, "error": "missing batch" }));
+                return false;
+            };
+            let owned = batches.get(&batch)
+                .and_then(|b| b.origin.as_ref())
+                .map(|(n, _)| n == &from)
+                .unwrap_or(false);
+            if !owned {
+                let _ = reply.send(serde_json::json!({ "ok": false, "error": "not your hosted batch" }));
+                return false;
+            }
+            let asked: Option<Vec<u64>> = body["workers"].as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_u64()).collect());
+            let ids: Vec<u64> = workers.iter()
+                .filter(|(id, w)| w.batch == batch && !is_terminal(w.state)
+                    && asked.as_ref().map(|a| a.contains(id)).unwrap_or(true))
+                .map(|(id, _)| *id).collect();
+            if !ids.is_empty() {
+                cancel_workers(workers, bus, proxy, agents_dir, yolo_set, models, &ids).await;
+                admit_queued(workers, bus, proxy, yolo_set, models, cap, max_steps).await;
+            }
+            eprintln!("[worker] mesh cancel from {from}: batch {batch}, {} worker(s)", ids.len());
+            let _ = reply.send(serde_json::json!({ "ok": true, "cancelled": ids, "count": ids.len() }));
+            !ids.is_empty()
+        }
+        // ── conductor role: a hosting peer pushing its settled batch home ──
+        WorkerMeshKind::Report => {
+            let Some(batch) = body["origin_batch"].as_u64() else {
+                let _ = reply.send(serde_json::json!({ "ok": false, "error": "missing origin_batch" }));
+                return false;
+            };
+            let known = remotes.values().any(|r| r.batch == batch && r.node == from);
+            if !known {
+                let _ = reply.send(serde_json::json!({ "ok": false, "error": "no such remote batch here" }));
+                return false;
+            }
+            let rows = remote::parse_rows(&body);
+            let changed = apply_wire_rows(remotes, bus, agents_dir, batch, &from, &rows).await;
+            // The push replaces the next poll — the ladder resets so a
+            // follow-up straggler revival is observed promptly.
+            if let Some(t) = polls.get_mut(&(batch, from.clone())) {
+                t.attempt = 0;
+                t.next = Instant::now() + REVIEW_PERIOD;
+            }
+            eprintln!("[worker] report-home received from {from}: batch {batch}, {} row(s)", rows.len());
+            let _ = reply.send(serde_json::json!({ "ok": true, "applied": rows.len() }));
+            changed
+        }
+    }
+}
+
+/// Build the wire rows for a hosted batch (peer role): every worker of the
+/// batch, terminal rows carrying their evidence DOC inline (one hop — the
+/// conductor mirrors it; artifacts stay in this node's workspace).
+fn wire_rows_for_batch(workers: &HashMap<u64, Worker>, batch: u64, agents_dir: &Path) -> Vec<remote::WireRow> {
+    let mut rows: Vec<(u64, remote::WireRow)> = workers.iter()
+        .filter(|(_, w)| w.batch == batch)
+        .map(|(id, w)| {
+            let terminal = is_terminal(w.state);
+            (*id, remote::WireRow {
+                worker: *id,
+                session: w.session,
+                state: remote::state_str(w.state),
+                timed_out: false,
+                summary: w.summary.clone(),
+                evidence_doc: if terminal { read_evidence_doc(agents_dir, *id) } else { None },
+            })
+        })
+        .collect();
+    rows.sort_by_key(|(id, _)| *id);
+    rows.into_iter().map(|(_, r)| r).collect()
+}
+
 /// task_fanout: mint the batch, ack the conductor with the ids, then admit up
 /// to the cap. Refused from a worker session — workers are depth-1 (vouchers
 /// are the M-tier mechanism; there is no partial fan below the conductor).
@@ -1181,6 +1861,8 @@ async fn fanout(
     yolo_set: &GoalYoloSessions, models: &WorkerModels,
     call_session: SessionId, call_id: ActionId, args: serde_json::Value,
     next_worker_id: &mut u64, next_batch_id: &mut u64, next_worker_sid: &mut u64,
+    mesh: &MeshDeps, mesh_out_tx: &mpsc::Sender<MeshOutcome>,
+    remotes: &mut HashMap<u64, RemoteWorker>,
 ) -> Option<(Option<CellsCtx>, Vec<(u64, u64)>)> {
     let refuse = |msg: String| Event::ToolResult {
         session: call_session, call: call_id,
@@ -1229,6 +1911,35 @@ async fn fanout(
         }
         Some(addr.clone())
     } else { None };
+    // W2 remote validation, refused EARLY (nothing minted): `node` tasks are
+    // plain workers on a peer — no mandala cells (cross-node rings are M2),
+    // no inline holds (remote latency has no place in a 240s block), and the
+    // kill switch + registry gate the whole fan before any row exists.
+    let remote_nodes: Vec<String> = {
+        let mut ns: Vec<String> = tasks.iter().filter_map(|t| t.node.clone()).collect();
+        ns.sort(); ns.dedup(); ns
+    };
+    if !remote_nodes.is_empty() {
+        if !mesh.enabled {
+            bus.emit(refuse("mesh workers are disabled on this node (AGENTD_MESH_WORKERS=0)".into())).await;
+            return None;
+        }
+        if args["mandala"].as_u64().is_some() {
+            bus.emit(refuse("node + mandala don't compose yet — cross-node rings are M2; mandala cells stay on this node".into())).await;
+            return None;
+        }
+        if inline {
+            bus.emit(refuse("node tasks fan async — remote latency has no place in an inline hold".into())).await;
+            return None;
+        }
+        for n in &remote_nodes {
+            if peer_http(&mesh.peers, n).await.is_none() {
+                bus.emit(refuse(format!("'{n}' is not a registered mesh peer — list_mesh_peers shows them"))).await;
+                return None;
+            }
+        }
+    }
+
     // Mandala validation (M1b): geometry, ring widths, descent, join layout —
     // refused early, plans composed with the invariant + rituals verbatim.
     let ctx = match prepare_mandala_cells(mandalas, trees, bus, call_session, call_id, &args, &tasks, inline, caller_cell.as_ref()).await {
@@ -1252,7 +1963,15 @@ async fn fanout(
     batches.insert(batch, BatchMeta {
         parent: call_session.0, created_epoch: epoch_now(), deadline_s, reported: false,
         inline_ack: if inline { Some((call_session.0, call_id.0)) } else { None },
+        origin: None, // this node conducts; hosted batches mint in handle_mesh_req
     });
+    // W2: split the plain fan into local and remote tasks (a mandala fan has
+    // no remotes — refused above). Remote tasks become mirror rows spending
+    // the SAME worker-id counter, grouped per node for one assign POST each.
+    let (local_tasks, remote_tasks): (Vec<TaskSpecItem>, Vec<TaskSpecItem>) = match &ctx {
+        Some(_) => (Vec::new(), Vec::new()), // mandala path mints from plans below
+        None => tasks.into_iter().partition(|t| t.node.is_none()),
+    };
     // One mint list for both paths: (task text, model pin, barrier-held,
     // step ceiling). The hold rule (M1c refinement): pure-J cells hold at
     // mint; an R+J cell (FORGE) starts lapping immediately. Cell workers'
@@ -1263,7 +1982,7 @@ async fn fanout(
             holds_at_mint(p.barrier_timeout_s, p.measure.as_deref()),
             u32::from(p.budget.steps).clamp(1, 100),
         )).collect(),
-        None => tasks.into_iter().map(|t| (t.prompt, t.model, false, 0)).collect(),
+        None => local_tasks.into_iter().map(|t| (t.prompt, t.model, false, 0)).collect(),
     };
     let mut minted: Vec<(u64, u64)> = Vec::with_capacity(mint_list.len()); // (worker_id, session)
     for (task, model, held, ceiling) in mint_list {
@@ -1286,16 +2005,46 @@ async fn fanout(
         minted.push((wid, sid));
     }
 
+    // W2: mint the remote mirror rows — grouped per node, request order kept
+    // (the accept joins peer ids back by index). yolo NEVER rides a remote
+    // row (the peer's policy is sovereign); the model pin does.
+    let mut remote_groups: Vec<(String, Vec<u64>, Vec<remote::RemoteTaskItem>)> = Vec::new();
+    for t in &remote_tasks {
+        let node = t.node.clone().unwrap_or_default();
+        let wid = *next_worker_id; *next_worker_id += 1;
+        remotes.insert(wid, RemoteWorker {
+            batch, parent: call_session.0, node: node.clone(), task: t.prompt.clone(),
+            model: t.model.clone(), remote_batch: None, remote_worker: None,
+            remote_session: None, state_raw: remote::STATE_ASSIGNING.into(),
+            summary: None, evidence: None, assigned_epoch: epoch_now(),
+        });
+        match remote_groups.iter_mut().find(|(n, _, _)| n == &node) {
+            Some((_, wids, items)) => {
+                wids.push(wid);
+                items.push(remote::RemoteTaskItem { prompt: t.prompt.clone(), model: t.model.clone() });
+            }
+            None => remote_groups.push((node, vec![wid],
+                vec![remote::RemoteTaskItem { prompt: t.prompt.clone(), model: t.model.clone() }])),
+        }
+    }
+
     // Cards BEFORE the ack: bus order is delivery order, so the goal driver's
     // batch tracking (WorkerStateChanged → pending set) is provably armed
     // before the conductor's turn can resume off the ack and complete.
+    // Remote rows emit here too — the pending set must cover mixed batches.
     for (wid, _) in &minted {
         let w = &workers[wid];
         emit_state(bus, *wid, w, if w.barrier_held { "barrier armed — waiting on descendants" } else { "queued" }).await;
     }
+    for (_, wids, _) in &remote_groups {
+        for wid in wids {
+            let r = &remotes[wid];
+            emit_remote_state(bus, *wid, r, &format!("assigning to {}", r.node)).await;
+        }
+    }
 
-    let n = minted.len();
-    let admitted_now = (cap.saturating_sub(slots_used(workers))).min(n);
+    let n = minted.len() + remote_tasks.len();
+    let admitted_now = (cap.saturating_sub(slots_used(workers))).min(minted.len());
     if !inline {
         // Async: ack now, work proceeds in background. Inline holds the ack —
         // the batch report IS this call's result (emitted by check_batches).
@@ -1303,11 +2052,19 @@ async fn fanout(
             "batch": batch,
             "workers": minted.iter().map(|(w, s)| serde_json::json!({ "worker": w, "session": s })).collect::<Vec<_>>(),
             "count": n, "cap": cap,
-            "admitted": admitted_now, "queued": n - admitted_now,
+            "admitted": admitted_now, "queued": minted.len() - admitted_now,
             "batch_deadline_s": deadline_s,
             "yolo_inherited": yolo,
             "status": "fanned",
         });
+        if !remote_groups.is_empty() {
+            content["remote"] = serde_json::json!(remote_groups.iter().flat_map(|(node, wids, _)| {
+                wids.iter().map(move |w| serde_json::json!({ "worker": w, "node": node, "status": "assigning" }))
+            }).collect::<Vec<_>>());
+            content["remote_note"] = serde_json::json!(
+                "remote tasks run on their peer's own worker tier (its cap, its policy — approvals land THERE); \
+                 evidence mirrors land here when they settle");
+        }
         if let Some(c) = &ctx {
             content["cells"] = serde_json::json!(c.plans.iter().map(|p| p.addr.0.clone()).collect::<Vec<_>>());
             if let Some(gate) = c.plans.iter().find(|p| p.barrier_timeout_s.is_some()) {
@@ -1324,6 +2081,33 @@ async fn fanout(
     }
 
     admit_queued(workers, bus, proxy, yolo_set, models, cap, max_steps).await;
+
+    // W2: spawn one assign POST per hosting node — after the ack, never
+    // blocking the loop. A beacon-dark peer fails fast through the SAME
+    // outcome path (no 20s timeout burned against a known-dark node), and
+    // the sends themselves are spawned so a full outcome channel can never
+    // deadlock the driver against itself.
+    for (node, wids, items) in remote_groups {
+        let dark = apexos_gateway::beacon::peer_liveness(&mesh.liveness, &node).await.0 == "dark";
+        let resolved = if dark { None } else { peer_http(&mesh.peers, &node).await };
+        let tx = mesh_out_tx.clone();
+        match resolved {
+            Some((base, token)) => {
+                let body = remote::build_fanout_body(&mesh.node_id, batch, deadline_s, &items);
+                tokio::spawn(async move {
+                    let result = mesh_post(&base, "/api/worker/fanout", token.as_deref(), &body).await;
+                    let _ = tx.send(MeshOutcome::Assign { batch, node, wids, result }).await;
+                });
+            }
+            None => {
+                let cause = if dark { "peer dark (beacon)".to_string() } else { "peer vanished from the registry".to_string() };
+                tokio::spawn(async move {
+                    let _ = tx.send(MeshOutcome::Assign { batch, node, wids, result: Err(cause) }).await;
+                });
+            }
+        }
+    }
+
     eprintln!("[worker] batch {batch} fanned: {n} tasks from session {} (cap {cap}, deadline {deadline_s}s{}{}{})",
               call_session.0,
               if inline { ", inline" } else { "" },
@@ -1667,7 +2451,15 @@ async fn resume_from_approval(workers: &mut HashMap<u64, Worker>, bus: &BusHandl
 /// terminal, or when its deadline passes — stragglers ride the report marked
 /// `timed_out` (still revivable; a later revive finishes them outside it).
 /// Rows carry evidence PATHS, never payloads. One report per batch.
-async fn check_batches(workers: &HashMap<u64, Worker>, batches: &mut HashMap<u64, BatchMeta>, bus: &BusHandle, agents_dir: &Path) -> bool {
+/// W2: remote mirror rows join the terminal math and the rows; a batch HOSTED
+/// for a remote conductor additionally returns a report-home entry the caller
+/// pushes (the driver never blocks on the network here).
+async fn check_batches(
+    workers: &HashMap<u64, Worker>,
+    remotes: &HashMap<u64, RemoteWorker>,
+    batches: &mut HashMap<u64, BatchMeta>,
+    bus: &BusHandle, agents_dir: &Path,
+) -> (bool, Vec<(String, u64, u64, Vec<remote::WireRow>)>) {
     // (inline note: the held task_fanout ack is emitted AFTER TaskBatchDone —
     // bus order guarantees the goal driver's pending-batch set clears before
     // the blocked conductor turn can complete.)
@@ -1676,19 +2468,27 @@ async fn check_batches(workers: &HashMap<u64, Worker>, batches: &mut HashMap<u64
         .filter(|(_, b)| !b.reported)
         .filter(|(id, b)| {
             let members: Vec<&Worker> = workers.values().filter(|w| w.batch == **id).collect();
-            let all_terminal = !members.is_empty() && members.iter().all(|w| is_terminal(w.state));
+            let rmembers: Vec<&RemoteWorker> = remotes.values().filter(|r| r.batch == **id).collect();
+            let any = !members.is_empty() || !rmembers.is_empty();
+            let all_terminal = any
+                && members.iter().all(|w| is_terminal(w.state))
+                && rmembers.iter().all(|r| r.is_terminal());
             let expired = now >= b.created_epoch.saturating_add(b.deadline_s);
             all_terminal || expired
         })
         .map(|(id, _)| *id)
         .collect();
     let changed = !due.is_empty();
+    let mut report_home: Vec<(String, u64, u64, Vec<remote::WireRow>)> = Vec::new();
     for batch in due {
         let meta = batches.get_mut(&batch).unwrap();
         meta.reported = true;
         let parent = meta.parent;
         let inline_ack = meta.inline_ack.take();
-        let rows = batch_rows(workers, batch, agents_dir);
+        if let Some((node, origin_batch)) = meta.origin.clone() {
+            report_home.push((node, origin_batch, batch, wire_rows_for_batch(workers, batch, agents_dir)));
+        }
+        let rows = batch_rows(workers, remotes, batch, agents_dir);
         // Cancelled is its own count — lumping it under "failed" reads as a
         // defect where there was a decision (first smoke's tally confusion).
         let (done, failed, cancelled, timed_out) = rows.iter().fold((0, 0, 0, 0), |(d, f, c, t), r| match () {
@@ -1733,15 +2533,18 @@ async fn check_batches(workers: &HashMap<u64, Worker>, batches: &mut HashMap<u64
             }).await;
         }
     }
-    changed
+    (changed, report_home)
 }
 
 fn is_terminal(state: WorkerState) -> bool {
     matches!(state, WorkerState::Done | WorkerState::Failed | WorkerState::Cancelled)
 }
 
-/// Build a batch's report rows — pure over the worker map (unit-tested).
-fn batch_rows(workers: &HashMap<u64, Worker>, batch: u64, agents_dir: &Path) -> Vec<BatchWorkerRow> {
+/// Build a batch's report rows — pure over the worker + remote maps
+/// (unit-tested). Remote rows carry their hosting `node` and the local
+/// MIRROR evidence path (or "" until mirrored); an unknown peer state maps
+/// to the bounded typed fallback while `timed_out` carries the truth.
+fn batch_rows(workers: &HashMap<u64, Worker>, remotes: &HashMap<u64, RemoteWorker>, batch: u64, agents_dir: &Path) -> Vec<BatchWorkerRow> {
     let mut rows: Vec<(u64, BatchWorkerRow)> = workers.iter()
         .filter(|(_, w)| w.batch == batch)
         .map(|(id, w)| {
@@ -1753,9 +2556,21 @@ fn batch_rows(workers: &HashMap<u64, Worker>, batch: u64, agents_dir: &Path) -> 
                     evidence_path(agents_dir, *id).to_string_lossy().into_owned()
                 } else { String::new() },
                 timed_out: !terminal,
+                node: None,
             })
         })
         .collect();
+    rows.extend(remotes.iter()
+        .filter(|(_, r)| r.batch == batch)
+        .map(|(id, r)| {
+            (*id, BatchWorkerRow {
+                worker: WorkerId(*id),
+                state: remote::row_state(&r.state_raw),
+                evidence: r.evidence.clone().unwrap_or_default(),
+                timed_out: !r.is_terminal(),
+                node: Some(r.node.clone()),
+            })
+        }));
     rows.sort_by_key(|(id, _)| *id);
     rows.into_iter().map(|(_, r)| r).collect()
 }
@@ -1789,11 +2604,20 @@ async fn cancel_workers(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, pro
 }
 
 /// worker_cancel{worker?|batch?}: the fan's kill switch. Exactly one selector.
+/// W2: remote rows RELAY to their hosting node and sit `cancel requested`
+/// (non-terminal) until poll/report confirms — a peer that never answers is
+/// bounded by the batch deadline, so the kill switch can't wedge either.
 #[allow(clippy::too_many_arguments)]
-async fn cancel_request(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path, yolo_set: &GoalYoloSessions, models: &WorkerModels, call_session: SessionId, call_id: ActionId, args: serde_json::Value) -> bool {
-    let ids: Vec<u64> = match (args["worker"].as_u64(), args["batch"].as_u64()) {
-        (Some(w), None) => workers.get(&w).filter(|wk| !is_terminal(wk.state)).map(|_| vec![w]).unwrap_or_default(),
-        (None, Some(b)) => workers.iter().filter(|(_, wk)| wk.batch == b && !is_terminal(wk.state)).map(|(id, _)| *id).collect(),
+async fn cancel_request(workers: &mut HashMap<u64, Worker>, remotes: &mut HashMap<u64, RemoteWorker>, bus: &BusHandle, proxy: &ToolProxy, agents_dir: &Path, yolo_set: &GoalYoloSessions, models: &WorkerModels, mesh: &MeshDeps, call_session: SessionId, call_id: ActionId, args: serde_json::Value) -> bool {
+    let (ids, remote_ids): (Vec<u64>, Vec<u64>) = match (args["worker"].as_u64(), args["batch"].as_u64()) {
+        (Some(w), None) => (
+            workers.get(&w).filter(|wk| !is_terminal(wk.state)).map(|_| vec![w]).unwrap_or_default(),
+            remotes.get(&w).filter(|r| !r.is_terminal()).map(|_| vec![w]).unwrap_or_default(),
+        ),
+        (None, Some(b)) => (
+            workers.iter().filter(|(_, wk)| wk.batch == b && !is_terminal(wk.state)).map(|(id, _)| *id).collect(),
+            remotes.iter().filter(|(_, r)| r.batch == b && !r.is_terminal()).map(|(id, _)| *id).collect(),
+        ),
         _ => {
             bus.emit(Event::ToolResult { session: call_session, call: call_id,
                 output: ToolOutput { ok: false, content: serde_json::json!(
@@ -1801,14 +2625,20 @@ async fn cancel_request(workers: &mut HashMap<u64, Worker>, bus: &BusHandle, pro
             return false;
         }
     };
-    if ids.is_empty() {
+    if ids.is_empty() && remote_ids.is_empty() {
         bus.emit(Event::ToolResult { session: call_session, call: call_id,
             output: ToolOutput { ok: false, content: serde_json::json!("no matching non-terminal worker(s)") } }).await;
         return false;
     }
     cancel_workers(workers, bus, proxy, agents_dir, yolo_set, models, &ids).await;
+    relay_remote_cancels(remotes, bus, mesh, &remote_ids).await;
+    let mut content = serde_json::json!({ "cancelled": ids, "count": ids.len() + remote_ids.len() });
+    if !remote_ids.is_empty() {
+        content["cancel_relayed"] = serde_json::json!(remote_ids);
+        content["note"] = serde_json::json!("remote rows confirm terminal via their hosting node (poll/report); the batch deadline bounds a silent peer");
+    }
     bus.emit(Event::ToolResult { session: call_session, call: call_id,
-        output: ToolOutput { ok: true, content: serde_json::json!({ "cancelled": ids, "count": ids.len() }) } }).await;
+        output: ToolOutput { ok: true, content } }).await;
     true
 }
 
@@ -1836,7 +2666,9 @@ async fn pb1_track(spawn_log: &mut HashMap<u64, Vec<Instant>>, bus: &BusHandle, 
 
 /// Conductor visibility: a snapshot of all workers plus the admission picture.
 /// Terminal workers carry their evidence path — paths, not payloads, even here.
-async fn handle_list_workers(workers: &HashMap<u64, Worker>, bus: &BusHandle, cap: usize, agents_dir: &Path, call_session: SessionId, call_id: ActionId) {
+/// W2: remote mirror rows ride along with their node + raw peer state (the
+/// mirror is truth-as-last-observed; polls keep it honest).
+async fn handle_list_workers(workers: &HashMap<u64, Worker>, remotes: &HashMap<u64, RemoteWorker>, bus: &BusHandle, cap: usize, agents_dir: &Path, call_session: SessionId, call_id: ActionId) {
     let mut rows: Vec<(u64, serde_json::Value)> = workers.iter().map(|(id, w)| {
         let mut row = serde_json::json!({
             "worker": id, "batch": w.batch, "parent": w.parent, "session": w.session,
@@ -1851,6 +2683,17 @@ async fn handle_list_workers(workers: &HashMap<u64, Worker>, bus: &BusHandle, ca
         if w.barrier_held { row["barrier_held"] = serde_json::json!(true); }
         (*id, row)
     }).collect();
+    rows.extend(remotes.iter().map(|(id, r)| {
+        (*id, serde_json::json!({
+            "worker": id, "batch": r.batch, "parent": r.parent,
+            "node": r.node,
+            "remote_worker": r.remote_worker, "remote_session": r.remote_session,
+            "state": r.state_raw,
+            "task": r.task.chars().take(100).collect::<String>(),
+            "summary": r.summary.as_deref().map(|s| s.chars().take(200).collect::<String>()),
+            "evidence": r.evidence,
+        }))
+    }));
     rows.sort_by_key(|(id, _)| *id);
     let list: Vec<serde_json::Value> = rows.into_iter().map(|(_, j)| j).collect();
     bus.emit(Event::ToolResult { session: call_session, call: call_id,
@@ -3030,7 +3873,7 @@ mod tests {
         m.insert(2, Worker { batch: 7, ..mk(WorkerState::Failed) });
         m.insert(3, Worker { batch: 7, ..mk(WorkerState::Parked) });   // straggler
         m.insert(4, Worker { batch: 8, ..mk(WorkerState::Running) });  // other batch
-        let rows = batch_rows(&m, 7, agents);
+        let rows = batch_rows(&m, &HashMap::new(), 7, agents);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].worker, WorkerId(1));
         assert!(rows[0].evidence.ends_with("agents/1.json"));
@@ -3038,6 +3881,79 @@ mod tests {
         assert!(rows[1].evidence.ends_with("agents/2.json"));
         assert!(rows[2].timed_out, "non-terminal at report time = timed_out");
         assert!(rows[2].evidence.is_empty(), "no evidence file for a straggler");
+    }
+
+    fn mk_remote(batch: u64, node: &str, state: &str) -> RemoteWorker {
+        RemoteWorker {
+            batch, parent: 42, node: node.into(), task: "remote task".into(),
+            model: None, remote_batch: Some(3), remote_worker: Some(11),
+            remote_session: Some(apexos_core::WORKER_SESSION_BASE),
+            state_raw: state.into(), summary: None, evidence: None, assigned_epoch: 0,
+        }
+    }
+
+    #[test]
+    fn batch_rows_join_remote_mirrors_with_node_tags() {
+        // W2: a mixed batch's rows carry local rows (node None) and remote
+        // mirrors (node Some, MIRROR evidence path, tolerant state mapping).
+        let agents = Path::new("/var/lib/agentd/events/agents");
+        let mut locals = HashMap::new();
+        locals.insert(1, Worker { batch: 7, ..mk(WorkerState::Done) });
+        let mut remotes = HashMap::new();
+        remotes.insert(2, RemoteWorker {
+            evidence: Some("/var/lib/agentd/events/agents/2.json".into()),
+            ..mk_remote(7, "apex-3", "done")
+        });
+        remotes.insert(3, mk_remote(7, "apex-3", "running"));            // straggler
+        remotes.insert(4, mk_remote(7, "tvpi", "hibernating"));          // unknown state (newer peer)
+        remotes.insert(9, mk_remote(8, "apex-3", "done"));               // other batch
+        let rows = batch_rows(&locals, &remotes, 7, agents);
+        assert_eq!(rows.len(), 4);
+        assert!(rows[0].node.is_none(), "local rows carry no node");
+        assert_eq!(rows[1].node.as_deref(), Some("apex-3"));
+        assert_eq!(rows[1].evidence, "/var/lib/agentd/events/agents/2.json", "the MIRROR path rides the row");
+        assert!(!rows[1].timed_out);
+        assert!(rows[2].timed_out, "non-terminal remote at report time = timed_out");
+        assert!(rows[2].evidence.is_empty());
+        // The version-skew law: an unknown state is non-terminal (timed_out
+        // carries the truth) and maps to the bounded typed fallback.
+        assert!(rows[3].timed_out);
+        assert_eq!(rows[3].state, WorkerState::Queued);
+        assert_eq!(rows[3].node.as_deref(), Some("tvpi"));
+    }
+
+    #[test]
+    fn wire_rows_carry_evidence_docs_for_terminals_only() {
+        // Peer role: a hosted batch's wire rows inline the evidence DOC for
+        // terminal workers (one hop — the conductor mirrors it) and never for
+        // live ones. Missing files read None, never a panic.
+        let agents = Path::new("/nonexistent/agents-dir");
+        let mut m = HashMap::new();
+        m.insert(1, Worker { batch: 7, summary: Some("shipped".into()), ..mk(WorkerState::Done) });
+        m.insert(2, Worker { batch: 7, ..mk(WorkerState::Running) });
+        let rows = wire_rows_for_batch(&m, 7, agents);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].state, "done");
+        assert_eq!(rows[0].summary.as_deref(), Some("shipped"));
+        assert!(rows[0].evidence_doc.is_none(), "unreadable evidence reads None (the doc travels when it exists)");
+        assert_eq!(rows[1].state, "running");
+        assert!(rows[1].evidence_doc.is_none(), "live rows never carry docs");
+        assert_eq!(rows[0].session, apexos_core::WORKER_SESSION_BASE, "the peer's real session rides the row");
+    }
+
+    #[test]
+    fn parse_tasks_carries_node_with_batch_default() {
+        // W2: per-task node wins over the batch-level default; absent = local.
+        let args = serde_json::json!({
+            "tasks": ["local one", { "prompt": "remote one", "node": "apex-3" }, { "prompt": "defaulted" }],
+            "node": "tvpi"
+        });
+        let tasks = parse_tasks(&args).unwrap();
+        assert_eq!(tasks[0].node.as_deref(), Some("tvpi"), "batch node reaches bare-string tasks");
+        assert_eq!(tasks[1].node.as_deref(), Some("apex-3"), "per-task node wins");
+        assert_eq!(tasks[2].node.as_deref(), Some("tvpi"));
+        let local = parse_tasks(&serde_json::json!({ "tasks": ["x"] })).unwrap();
+        assert!(local[0].node.is_none(), "no node anywhere = local fan");
     }
 
     #[test]
@@ -3261,9 +4177,9 @@ mod tests {
     fn subconductor_report_hands_paths_not_payloads() {
         let rows = vec![
             BatchWorkerRow { worker: WorkerId(31), state: WorkerState::Done,
-                             evidence: "/var/lib/agentd/events/agents/31.json".into(), timed_out: false },
+                             evidence: "/var/lib/agentd/events/agents/31.json".into(), timed_out: false, node: None },
             BatchWorkerRow { worker: WorkerId(32), state: WorkerState::Parked,
-                             evidence: String::new(), timed_out: true },
+                             evidence: String::new(), timed_out: true, node: None },
         ];
         let r = subconductor_report(9, &rows);
         assert!(r.contains("BATCH 9 REPORT"));

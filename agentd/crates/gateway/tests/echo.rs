@@ -53,6 +53,8 @@ fn make_state(handle: apexos_core::BusHandle, bcast: tokio::sync::broadcast::Sen
         fed_stats_path:       PathBuf::from("."),
         consolidate_tx:       tokio::sync::mpsc::channel(1).0,
         spawn_tx:             tokio::sync::mpsc::channel(1).0,
+        worker_mesh_tx:       tokio::sync::mpsc::channel(1).0,
+        mesh_workers_enabled: true,
         mesh_memory_tx:       tokio::sync::mpsc::channel(1).0,
         capabilities:         Arc::new(tokio::sync::RwLock::new(serde_json::Value::Null)),
         vast_state:           VastState::new(),
