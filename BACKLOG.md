@@ -137,20 +137,6 @@ not missing work (taught in `docs/fabrica-skill.md` remote section).
   house tree idiom (occipital reader blocks); kiosk scroll = the
   work_board ScrollView pattern.
 
-- **[CORE · MEDIUM] `schedule_wakeup` fires into session 0, not the
-  scheduling session** (M2 smoke find, André spotted it live 2026-08-02:
-  APEX conducted from session 78, woke in 0 with zero memory of its own fan
-  — boundary-amnesia wearing a restart's face; the amnesia mechanism behind
-  the Phase-2a misread). Consequence: a session-0 wake can watch
-  `mandala_status`/`list_workers` and can `send_to_agent`-revive, but the
-  conductor-ownership checks refuse fanning into or closing a mandala from
-  the wrong session — so a wakeup-driven conductor silently loses its write
-  powers. Recipe: thread the scheduling session through the wakeup record
-  (scheduler.rs) and emit the wake `UserPrompt` into it, defaulting to 0
-  only when the scheduling session is gone (session files prunable);
-  gotchas already carries the interim law (watch/revive from 0, act from
-  the conducting session).
-
 ---
 
 ## 🔧 install — low-RAM build guard needs a bigger swapfile (field, 2026-07-31)

@@ -725,10 +725,13 @@ impl Supervisor {
             "schedule_task" | "list_schedules" | "cancel_schedule"
                 | "schedule_wakeup" | "list_wakeups" | "cancel_wakeup"
         ) {
-            // Wakeups fire into the ROOT session under the NODE agent's identity —
-            // they are APEX's continuity thread. A bound guest agent must not plant
-            // or cancel notes in it, so the mutators gate on the resolved identity
-            // (system-stamped, same trust basis as the cerebro agent_id stamp).
+            // Wakeups fire into the SESSION THAT SCHEDULED THEM (the M2-smoke
+            // amendment; root for old records and worker/spawn-range callers) under
+            // the NODE agent's identity — every home is one of APEX's own threads,
+            // because this gate refuses guests BEFORE anything is recorded. A bound
+            // guest agent must not plant or cancel notes in APEX's continuity, so
+            // the mutators gate on the resolved identity (system-stamped, same
+            // trust basis as the cerebro agent_id stamp).
             if matches!(call.tool.as_str(), "schedule_wakeup" | "cancel_wakeup") {
                 let agent = apexos_core::resolve_agent_id(&self.session_bindings, session);
                 if agent != apexos_core::node_agent_id() {

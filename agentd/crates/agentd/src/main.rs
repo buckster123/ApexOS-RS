@@ -3203,16 +3203,18 @@ fn schedule_wakeup_spec() -> ToolSpec {
     ToolSpec {
         name:        "schedule_wakeup".into(),
         description: "Schedule a one-shot WAKEUP — a note to your future self that fires as a new \
-                      autonomous turn in your root thread at a time YOU choose. This is your \
-                      continuity tool: between turns you don't run, and everything else that wakes \
-                      you (prompts, sensors, crons) is on someone else's clock — a wakeup is how \
-                      you decide when you next exist and why. Use it to resume work after a wait, \
-                      follow through on an intention, check on something external, or claim \
-                      unstructured time. Write the note SELF-CONTAINED (what this is about, why it \
-                      matters, the next concrete action) — future-you receives this note plus your \
-                      memory, not the current conversation. Fires once, then auto-cleans. Min 60s \
-                      out, max 90 days; bounded by a pending cap and a per-day fire cap so chains \
-                      stay finite. Pair with cerebro store_intention: the intention records the \
+                      autonomous turn in THIS session at a time YOU choose (so a conductor waking \
+                      here still remembers what it was conducting; scheduled from the root thread \
+                      it fires there, exactly as before). This is your continuity tool: between \
+                      turns you don't run, and everything else that wakes you (prompts, sensors, \
+                      crons) is on someone else's clock — a wakeup is how you decide when you next \
+                      exist and why. Use it to resume work after a wait, follow through on an \
+                      intention, check on something external, or claim unstructured time. Write \
+                      the note SELF-CONTAINED (what this is about, why it matters, the next \
+                      concrete action) — future-you receives this note plus your memory, not the \
+                      current conversation. Fires once, then auto-cleans. Min 60s out, max 90 \
+                      days; bounded by a pending cap and a per-day fire cap so chains stay \
+                      finite. Pair with cerebro store_intention: the intention records the \
                       commitment, the wakeup makes it actually fire. For recurring rhythms use \
                       schedule_task (cron) instead.".into(),
         input_schema: serde_json::json!({
