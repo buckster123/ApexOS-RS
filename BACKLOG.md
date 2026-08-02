@@ -81,14 +81,20 @@ not missing work (taught in `docs/fabrica-skill.md` remote section).
 > shipped in the same PR as this note; these larger rebuilds are the apply
 > wave for a docs session (each is one focused agent's worth of work):
 
-- **[HIGH] `docs/env-vars.md` full-family rebuild** — code reads ~120 vars,
-  the table has ~50 rows. Missing families: sensors (`SENSORHEAD_URL`,
-  `SENSOR_*` thresholds/cooldown), mesh beacon (`MESH_BEACON*`), auth/paths
-  (`AGENTD_TOKEN/BIND/WORKSPACE/LOG/READ_ROOTS/GIT_ROOTS/UI`), self-update
-  (`AGENTD_SELF_UPDATE_*`), USB (`AGENTD_USB_*`), cerebro (`CEREBRO_EMBED_MODEL`
-  — a CLAUDE.md locked decision — `CEREBRO_DATA_DIR`, `CEREBRO_VISION_*`),
-  vast (`VAST_*`), voice extras (`AGENTD_VOICE_CONFIG`, `ALSA_CAPTURE_DEVICE`,
-  `AGENTD_TOOL_RESULT_TIMEOUT_SECS`).
+- ~~[HIGH] `docs/env-vars.md` full-family rebuild~~ **DONE `#325`
+  (2026-08-02)** — rebuilt from a three-scout code inventory (agentd crates ·
+  cerebro+tools · ui/install/deploy), every read site receipted: ~130
+  runtime vars + installer flags + build knobs in 18 family sections, with
+  the sharp-edge semantics the old table missed (`MESH_AUTO_BOOTSTRAP` is
+  presence-only; `AGENTD_CACHE_TTL` garbage ≠ unset; `AGENTD_WORKSPACE`
+  fails closed in the policy engine; `CEREBRO_VISION_EMBED`'s three-way;
+  `APEX_GPIO_RESERVED` exact-`none`-only; `GIT_COMMIT` compile-time).
+- **[LOW · install] `APEXOS_SONUS` missing from the boot/USB file parser**
+  (env-vars sweep find, 2026-08-02): it is written to install.conf and
+  honored from CLI/TUI, but `_parse_key_file` (install.sh:206-214) never
+  reads it from `apexos.conf` — the other eight flags are parsed, so a
+  fresh-node USB provisioning file cannot enable Sonus. One-line fix: add
+  it to the parse list next time install.sh is touched.
 - **[MED] `docs/architecture.md` worker-tier integration** — no mention of
   worker.rs/mandala.rs/review.rs anywhere; supervisor virtual-tool count
   (~38 now); busy-state note outdated (tool_requested/approval_pending set
