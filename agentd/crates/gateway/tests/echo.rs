@@ -29,6 +29,7 @@ fn make_state(handle: apexos_core::BusHandle, bcast: tokio::sync::broadcast::Sen
         sessions_dir:         PathBuf::from("."),
         histories:            Arc::new(Mutex::new(HashMap::new())),
         next_session_id:      Arc::new(AtomicU64::new(1)),
+        history_budget:       Arc::new(std::sync::atomic::AtomicUsize::new(120_000)),
         sensor_bridge_token:  Arc::new(String::new()),
         api_token:            Arc::new(String::new()),
         soul_path:            PathBuf::from("."),

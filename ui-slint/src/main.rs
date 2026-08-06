@@ -3606,6 +3606,38 @@ mod tests {
     use super::{kind_from_ordinal, kind_from_slug, kind_ordinal, kind_slug, APP_TABLE};
     use super::redact_ws_url;
     use super::{restore_geom, GeomRec, GEOM_MIN_H, GEOM_MIN_W};
+    use super::{history_budget_label, history_label_tokens, history_usage_line};
+
+    #[test]
+    fn history_budget_labels_round_trip() {
+        for label in ["60k", "120k", "200k", "400k", "off"] {
+            let tokens = history_label_tokens(label).expect("preset label maps");
+            assert_eq!(history_budget_label(tokens), label, "round trip for {label}");
+        }
+        assert_eq!(history_label_tokens("weird"), None, "unknown labels are ignored");
+        assert_eq!(history_budget_label(150_000), "150k", "custom env budget still displays");
+    }
+
+    #[test]
+    fn history_usage_line_renders_and_hides() {
+        let h = serde_json::json!({
+            "budget": 120_000, "trim_trigger": 144_000,
+            "sessions": [{ "session_id": 0, "est_tokens": 87_000 }],
+        });
+        assert_eq!(
+            history_usage_line(&h),
+            "Largest window: session 0 ≈ 87k of 120k (trims at 144k)"
+        );
+        let off = serde_json::json!({
+            "budget": 0, "sessions": [{ "session_id": 3, "est_tokens": 12_000 }],
+        });
+        assert_eq!(
+            history_usage_line(&off),
+            "Largest window: session 3 ≈ 12k tokens (trimming off)"
+        );
+        assert_eq!(history_usage_line(&serde_json::json!({"budget": 120_000, "sessions": []})), "");
+        assert_eq!(history_usage_line(&serde_json::Value::Null), "", "pre-/api/history agentd");
+    }
 
     #[test]
     fn restore_geom_clamps_into_live_area() {
@@ -5994,6 +6026,8 @@ struct SettingsData {
     cache_enabled:      bool,
     cache_conversation: bool,
     cache_ttl:          String,
+    history_budget_label: String,
+    history_usage:        String,
     sensor_profile:     String,
     voice_backend:        String,
     voice_api_available:  bool,
@@ -6002,14 +6036,53 @@ struct SettingsData {
     oai_key_set:   bool,
 }
 
-// Fetch /api/status, /api/soul, /api/models, /api/cache, /api/sensors/config, /api/voice,
-// /api/backend in parallel.
+/// Stepped Settings label for a budget (0 → "off"); non-preset values render as
+/// "<n>k" so an env-seeded custom budget still displays (no button highlights —
+/// that's honest).
+fn history_budget_label(budget: u64) -> String {
+    if budget == 0 { "off".into() } else { format!("{}k", budget / 1000) }
+}
+
+/// The tapped Settings label → tokens for POST /api/history. Unknown → None.
+fn history_label_tokens(label: &str) -> Option<u64> {
+    match label {
+        "off"  => Some(0),
+        "60k"  => Some(60_000),
+        "120k" => Some(120_000),
+        "200k" => Some(200_000),
+        "400k" => Some(400_000),
+        _      => None,
+    }
+}
+
+/// The "window in use" readout from GET /api/history: the largest loaded session
+/// (sessions[] arrives sorted desc) against the budget. Empty when nothing loaded.
+fn history_usage_line(h: &serde_json::Value) -> String {
+    let (sid, est) = match h["sessions"].as_array().and_then(|a| a.first()) {
+        Some(s) => (s["session_id"].as_u64().unwrap_or(0), s["est_tokens"].as_u64().unwrap_or(0)),
+        None => return String::new(),
+    };
+    let budget = h["budget"].as_u64().unwrap_or(0);
+    if budget == 0 {
+        format!("Largest window: session {sid} ≈ {}k tokens (trimming off)", est / 1000)
+    } else {
+        let trigger = h["trim_trigger"].as_u64().unwrap_or(budget + budget / 5);
+        format!(
+            "Largest window: session {sid} ≈ {}k of {}k (trims at {}k)",
+            est / 1000, budget / 1000, trigger / 1000
+        )
+    }
+}
+
+// Fetch /api/status, /api/soul, /api/models, /api/cache, /api/history,
+// /api/sensors/config, /api/voice, /api/backend in parallel.
 async fn fetch_settings(client: &reqwest::Client, base_url: &str) -> SettingsData {
-    let (status, soul, models_resp, cache, sensors, voice, backend) = tokio::join!(
+    let (status, soul, models_resp, cache, history, sensors, voice, backend) = tokio::join!(
         json_get(client, format!("{base_url}/api/status")),
         json_get(client, format!("{base_url}/api/soul")),
         json_get(client, format!("{base_url}/api/models")),
         json_get(client, format!("{base_url}/api/cache")),
+        json_get(client, format!("{base_url}/api/history")),
         json_get(client, format!("{base_url}/api/sensors/config")),
         json_get(client, format!("{base_url}/api/voice")),
         json_get(client, format!("{base_url}/api/backend")),
@@ -6033,6 +6106,10 @@ async fn fetch_settings(client: &reqwest::Client, base_url: &str) -> SettingsDat
         cache_enabled:      cache["enabled"].as_bool().unwrap_or(true),
         cache_conversation: cache["cache_conversation"].as_bool().unwrap_or(true),
         cache_ttl:          cache["ttl"].as_str().unwrap_or("5m").to_string(),
+        // Defaults ("120k", no readout) if agentd predates /api/history.
+        history_budget_label: history["budget"].as_u64()
+            .map(history_budget_label).unwrap_or_else(|| "120k".into()),
+        history_usage:        history_usage_line(&history),
         sensor_profile:     sensors["profile"].as_str().unwrap_or("standard").to_string(),
         voice_backend:       voice["voice_backend"].as_str().unwrap_or("auto").to_string(),
         voice_api_available: voice["has_elevenlabs"].as_bool().unwrap_or(false)
@@ -9067,6 +9144,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_settings_cache_enabled(data.cache_enabled);
                     ui.set_settings_cache_conversation(data.cache_conversation);
                     ui.set_settings_cache_ttl(data.cache_ttl.into());
+                    ui.set_settings_history_budget(data.history_budget_label.into());
+                    ui.set_settings_history_usage(data.history_usage.into());
                     ui.set_settings_sensor_profile(data.sensor_profile.into());
                     ui.set_settings_voice_backend(data.voice_backend.into());
                     ui.set_settings_voice_api_available(data.voice_api_available);
@@ -10207,6 +10286,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(false);
             if ok { notify(ToastKind::Info, "Cache settings updated"); }
             else  { notify(ToastKind::Error, "Failed to update cache settings"); }
+        });
+    });
+
+    // ── set-history-budget callback ───────────────────────────────────────────
+    // Settings label → POST /api/history {budget}. Effective on the next turn
+    // (the router reads the atomic per prompt); persisted to history_config.json.
+    let rt_h_hist    = rt.handle().clone();
+    let client_hist  = Arc::clone(&http_client);
+    let base_hist    = http_base.clone();
+    let ui_weak_hist = ui.as_weak();
+    ui.on_set_history_budget(move |label| {
+        let Some(budget) = history_label_tokens(label.as_str()) else { return };
+        // Optimistic: reflect the new choice immediately.
+        if let Some(ui) = ui_weak_hist.upgrade() {
+            ui.set_settings_history_budget(label.clone());
+        }
+        let client = Arc::clone(&client_hist);
+        let base   = base_hist.clone();
+        rt_h_hist.spawn(async move {
+            let ok = client.post(format!("{base}/api/history"))
+                .json(&serde_json::json!({ "budget": budget }))
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok { notify(ToastKind::Info, "History window budget updated"); }
+            else  { notify(ToastKind::Error, "Failed to update history budget"); }
         });
     });
 
