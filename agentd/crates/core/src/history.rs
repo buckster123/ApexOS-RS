@@ -80,6 +80,23 @@ fn is_turn_start(m: &Message) -> bool {
 /// so the front stays byte-stable for many turns between trims and the cache
 /// busts once per band-crossing, not once per message. The budget is thus a
 /// soft ceiling — the resident window peaks at ~1.2× `budget_tokens`.
+/// Estimated tokens of a whole history (the same calibrated per-block estimator
+/// the trim uses) — the "window in use" readout for `GET /api/history`.
+pub fn estimate_history(history: &[Message]) -> usize {
+    history.iter().map(msg_tokens).sum()
+}
+
+/// The trim trigger band: trimming fires once the estimate crosses 1.2× budget
+/// (hysteresis — see the prompt-caching gotcha; don't trim-to-fit per message).
+pub fn trim_trigger(budget_tokens: usize) -> usize {
+    budget_tokens.saturating_add(budget_tokens / 5)
+}
+
+/// The trim floor: a fired trim cuts down to 0.75× budget at a turn boundary.
+pub fn trim_target(budget_tokens: usize) -> usize {
+    budget_tokens - budget_tokens / 4
+}
+
 pub fn trim_history(history: &mut Vec<Message>, budget_tokens: usize) {
     if budget_tokens == 0 {
         return;
@@ -94,7 +111,7 @@ pub fn trim_history(history: &mut Vec<Message>, budget_tokens: usize) {
     for i in (0..n).rev() {
         suffix[i] = suffix[i + 1] + msg_tokens(&history[i]);
     }
-    let trigger = budget_tokens.saturating_add(budget_tokens / 5);
+    let trigger = trim_trigger(budget_tokens);
     if suffix[0] <= trigger {
         return;
     }
@@ -103,7 +120,7 @@ pub fn trim_history(history: &mut Vec<Message>, budget_tokens: usize) {
     // fits the target keeps the most history. If even the last turn alone
     // exceeds it, fall back to the last turn-start (best effort — we never
     // split below one turn).
-    let target = budget_tokens - budget_tokens / 4;
+    let target = trim_target(budget_tokens);
     let mut last_start = None;
     let mut cut = None;
     for i in 0..n {

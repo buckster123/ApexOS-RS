@@ -56,13 +56,14 @@ accepted a "done" without reading anything, you didn't integrate — you hoped.
   your turn. Every inline poll is a paid turn — and a conductor spinning
   in yolo is nearly impossible to steer, because the wakeup gap is exactly
   where incoming messages land.
-- **Wakeup turns land in the root thread — tell your observers.** A
-  `schedule_wakeup` fires into session 0 by design, which is a DIFFERENT
-  session from wherever a human may be watching your conducting (first W2
-  smoke: the operator's window went quiet mid-exhibit and read as a bug
-  while everything ran fine in root). When a human is following live, say
-  which session your wakeups will act in — silence in their window is not
-  silence in the run.
+- **Wakeups fire into the session that scheduled them (`#323`) — tell your
+  observers which session that is.** A `schedule_wakeup` from a focused
+  session now fires back into THAT session (the amended law; worker- and
+  spawn-range callers still root to session 0 — self-revive-loop guard).
+  The first W2 smoke predates the fix: the operator's window went quiet
+  mid-exhibit and read as a bug while everything ran fine in root. When a
+  human is following live, say which session your wakeups will act in —
+  silence in their window is not silence in the run.
 - **Steers are turns, and turns are laps.** A send to a stepping worker
   runs as its own turn: it consumes a lap of the worker's budget, and it
   leaves one surplus driver directive queued behind it. On measured cells

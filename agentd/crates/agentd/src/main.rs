@@ -401,6 +401,18 @@ async fn main() -> anyhow::Result<()> {
     // the LIVE sensor-bridge stream (not plugin-tool names — see has_live_sensors).
     let sensor_presence: SensorPresence = Arc::new(std::sync::Mutex::new(None));
 
+    // History window budget: env seed overlaid by the persisted Settings choice
+    // (history_config.json wins on restart, like backend_config) — live-tunable
+    // via /api/history, read by the router once per prompt.
+    let env_history_budget: usize = std::env::var("AGENTD_HISTORY_TOKEN_BUDGET")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(120_000);
+    let history_budget = Arc::new(std::sync::atomic::AtomicUsize::new(
+        apexos_gateway::history_config::resolve_boot(
+            env_history_budget,
+            apexos_gateway::history_config::load_persisted().as_ref(),
+        ),
+    ));
+
     eprintln!("[agentd] serving UI from {}", ui_dir.display());
     let gw_state = GatewayState {
         bus:                  handle.clone(),
@@ -418,6 +430,7 @@ async fn main() -> anyhow::Result<()> {
         sessions_dir:         log_dir.join("sessions"),
         histories:            Arc::clone(&histories),
         next_session_id:      Arc::clone(&next_session_id),
+        history_budget:       Arc::clone(&history_budget),
         sensor_bridge_token,
         api_token,
         soul_path:            soul_path.clone(),
@@ -774,7 +787,8 @@ async fn main() -> anyhow::Result<()> {
     // agent_rx was subscribed above, before the supervisor spawned, so the early
     // PluginUp events that populate tool_reg are captured (see the comment there).
     spawn_agent_router(agent_rx, bcast.clone(), handle.clone(),
-                       tool_reg, histories, engine, max_depth, session_store, router_proxy,
+                       tool_reg, histories, Arc::clone(&history_budget),
+                       engine, max_depth, session_store, router_proxy,
                        Arc::clone(&session_bindings), Arc::clone(&persona_sessions),
                        Arc::clone(&identities), spawn_rx,
                        Arc::clone(&sensor_presence), Arc::clone(&sensor_profile),
@@ -1577,6 +1591,7 @@ fn spawn_agent_router(
     bus:           apexos_core::BusHandle,
     tool_reg:      Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
     histories:     Arc<Mutex<HashMap<SessionId, Vec<Message>>>>,
+    history_budget: Arc<std::sync::atomic::AtomicUsize>,
     engine:        Arc<TurnEngine>,
     max_depth:     u32,
     session_store: Arc<SessionStore>,
@@ -1671,12 +1686,9 @@ fn spawn_agent_router(
         let persist_dur = std::time::Duration::from_secs(alert_persist_secs);
         let alert_cooldown_secs: u64 = std::env::var("SENSOR_ALERT_COOLDOWN_SECS")
             .ok().and_then(|s| s.parse().ok()).unwrap_or(1800);
-        // Per-session history window (rough tokens). The always-on root session
-        // (SessionId(0)) accretes every sensor alert + scheduled task forever and
-        // re-sends its full history each turn; without a bound it eventually
-        // overruns the model context window and crash-loops. 0 disables trimming.
-        let history_token_budget: usize = std::env::var("AGENTD_HISTORY_TOKEN_BUDGET")
-            .ok().and_then(|s| s.parse().ok()).unwrap_or(120_000);
+        // Per-session history window budget rides in the `history_budget` atomic
+        // (env seed + persisted Settings choice, live-tunable via /api/history);
+        // the trim call below loads it per prompt. 0 disables trimming.
 
         // Per-session turn serialization (see TurnGate): one root_turn in flight per
         // session at a time, extra prompts queue and run FIFO when the slot frees.
@@ -1958,7 +1970,10 @@ fn spawn_agent_router(
                 // context sent to the model nor the resident Vec grows unbounded
                 // (cuts whole oldest turns at clean boundaries — never orphans a
                 // tool_result). The on-disk JSONL stays append-only for replay.
-                apexos_core::history::trim_history(history, history_token_budget);
+                apexos_core::history::trim_history(
+                    history,
+                    history_budget.load(std::sync::atomic::Ordering::Relaxed),
+                );
                 let snapshot     = history.clone();
                 let snapshot_len = snapshot.len();
                 drop(hist);

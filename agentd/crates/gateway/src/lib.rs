@@ -9,6 +9,7 @@ use axum::{
     routing::{delete, get, post},
 };
 pub mod backend_config;
+pub mod history_config;
 
 pub mod compute;
 
@@ -120,6 +121,9 @@ pub struct GatewayState {
     pub sessions_dir:          PathBuf,
     pub histories:             Arc<Mutex<HashMap<SessionId, Vec<CoreMessage>>>>,
     pub next_session_id:       Arc<AtomicU64>,
+    /// Per-session history window budget (rough tokens; 0 = trimming off) —
+    /// live-tunable from Settings via /api/history, read by the router per turn.
+    pub history_budget:        Arc<std::sync::atomic::AtomicUsize>,
     /// Shared secret for /sensor-bridge WS connections. Empty = no auth required.
     pub sensor_bridge_token:   Arc<String>,
     /// Bearer token for all other API + WS routes. Empty = auth disabled.
@@ -324,6 +328,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/model",       get(get_model_handler).post(set_model_handler))
         .route("/api/models",      get(get_models_handler))
         .route("/api/cache",       get(get_cache_handler).post(set_cache_handler))
+        .route("/api/history",     get(get_history_handler).post(set_history_handler))
         .route("/api/usage",       get(get_usage_handler))
         .route("/api/thermal/frame", get(thermal_frame_handler))
         .route("/api/backend",     get(get_backend_handler).post(set_backend_handler))
@@ -1304,6 +1309,46 @@ async fn set_cache_handler(
         "ttl":                c.ttl.label(),
         "summary":            c.summary(),
     }))
+}
+
+/// GET /api/history — the live window budget plus per-session "window in use"
+/// estimates (top 5 by size), so trim behavior stops being invisible. Bands are
+/// the trim's own math: fires past `trim_trigger`, cuts to `trim_target`.
+async fn get_history_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let budget = state.history_budget.load(Ordering::Relaxed);
+    let mut sessions: Vec<(u64, usize)> = {
+        let lock = state.histories.lock().await;
+        lock.iter()
+            .map(|(sid, h)| (sid.0, apexos_core::history::estimate_history(h)))
+            .collect()
+    };
+    sessions.sort_by_key(|&(_, est)| std::cmp::Reverse(est));
+    sessions.truncate(5);
+    Json(serde_json::json!({
+        "budget":       budget,
+        "trim_trigger": apexos_core::history::trim_trigger(budget),
+        "trim_target":  apexos_core::history::trim_target(budget),
+        "sessions":     sessions.iter().map(|(s, est)| serde_json::json!({
+            "session_id": s, "est_tokens": est,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// Live-tune + persist the history window budget. `{budget: n}` — 0 disables
+/// trimming, tiny values floor at 10k (`sanitize_budget`). Effective on the very
+/// next turn (the router reads the atomic per prompt); persisted to
+/// history_config.json — env stays the seed, delete the file to return to env.
+async fn set_history_handler(
+    State(state): State<GatewayState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some(raw) = body["budget"].as_u64() else {
+        return Json(serde_json::json!({ "ok": false, "error": "budget (number) required" }));
+    };
+    let budget = history_config::sanitize_budget(raw);
+    state.history_budget.store(budget, Ordering::Relaxed);
+    let persisted = history_config::persist(&history_config::HistoryConfig { budget });
+    Json(serde_json::json!({ "ok": true, "budget": budget, "persisted": persisted }))
 }
 
 /// Approximate Anthropic input/output price in $ per million tokens, by model family.

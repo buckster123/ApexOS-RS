@@ -34,6 +34,10 @@ export component SettingsView {
     in property <bool>           cache-enabled: true;
     in property <bool>           cache-conversation: true;
     in property <string>         cache-ttl: "5m";
+    // History window budget (stepped label: 60k/120k/200k/400k/off), live-tuned
+    // via /api/history; history-usage is the "window in use" readout line.
+    in property <string>         history-budget: "120k";
+    in property <string>         history-usage: "";
     // Sensor-alert sensitivity profile (standard / smoker / kitchen / workshop).
     in property <string>         sensor-profile: "standard";
     // Voice backend (auto / local / api / off), live-tuned via /api/voice.
@@ -56,6 +60,8 @@ export component SettingsView {
     callback set-default-login(bool);
     // (enabled, cache_conversation, ttl) — full desired state each tap.
     callback set-cache(bool, bool, string);
+    // The tapped budget label ("60k"…"off") — Rust maps it to tokens.
+    callback set-history-budget(string);
     callback set-sensor-profile(string);
     callback set-voice-backend(string);
     callback refresh();
@@ -728,6 +734,62 @@ export component SettingsView {
 
                     Text {
                         text: "Caches the soul + tools + conversation prefix (Anthropic only). Conversation caching is the big win on long sessions; 1h TTL survives pauses without re-writing.";
+                        color: Palette.text-dim;
+                        font-size: 10px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // ── History window ─────────────────────────────────────────
+                VerticalLayout {
+                    spacing: 12px;
+                    alignment: start;
+
+                    Text {
+                        text: "HISTORY WINDOW";
+                        color: Palette.text-dim;
+                        font-size: 9px;
+                        letter-spacing: 2px;
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        Text { text: "Per-session budget (rough tokens)"; color: Palette.text-dim; font-size: 10px; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            for opt in ["60k", "120k", "200k", "400k", "off"]: Rectangle {
+                                width: 62px;
+                                height: 32px;
+                                border-radius: Palette.radius;
+                                background: root.history-budget == opt ? Palette.primary-dim : Palette.surface;
+                                border-width: 1px;
+                                border-color: root.history-budget == opt ? Palette.primary : Palette.border;
+                                animate background   { duration: 150ms; }
+                                animate border-color { duration: 150ms; }
+                                TouchArea {
+                                    clicked => { root.set-history-budget(opt); }
+                                }
+                                Text {
+                                    text: opt;
+                                    color: root.history-budget == opt ? Palette.primary : Palette.text-dim;
+                                    font-size: 10px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    if root.history-usage != "": Text {
+                        text: root.history-usage;
+                        color: Palette.text-dim;
+                        font-size: 10px;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: "Oldest turns trim (with an honest seam marker) once a session's window crosses ~1.2× the budget. Off = unbounded — the always-on root session would eventually overrun the model context.";
                         color: Palette.text-dim;
                         font-size: 10px;
                         wrap: word-wrap;
