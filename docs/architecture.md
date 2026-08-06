@@ -64,12 +64,12 @@ ApexOS-RV) and `apexos-confine` (std-only path-confinement primitives —
 
 | Crate | Kind | Role |
 |-------|------|------|
-| `apexos-core` | lib | Shared types and the event bus. The wire protocol — `Event` / `ContentBlock` / `ToolCall` / `PolicyMode` / `EvolutionProposal`, with `ActionId`/`SessionId` newtypes that serialize as **bare numbers** — lives in the root `apexos-protocol` crate, re-exported here (`pub use apexos_protocol as types`). `bus.rs` is the in-process hub: `Bus::new` returns a `BusHandle` (mpsc inbox `emit`) and a `broadcast::Sender` (capacity 1024) to subscribe; `Bus::run` applies `SystemState::apply` (`state.rs`) then rebroadcasts. Also home to `history.rs` (the trim window + seam marker), `identity.rs` (agent identity, per-agent workspace roots, session bindings, `SPAWN_SESSION_BASE`/`is_spawn_session`), `persona.rs` (per-session style), and `vision.rs` (the image downscale shim). |
-| `apexos-gateway` | lib | The entire external surface. One axum `Router` (`router()`): `/ws` (UI/browser), `/sensor-bridge` (sensor ingest), `/terminal-ws` (PTY), REST `/api/*` (run/speak/record/transcribe/council/sessions/policy/model/backend/voice/auth/identities/mesh/media/workspace/…), plus mesh peer discovery (`mesh.rs`, avahi). `GatewayState` is a fat clone-of-Arcs struct holding the `BusHandle`, the broadcast sender, live-swappable model/backend/keys/policy `RwLock`s, the in-memory session `histories` map (shared `Arc<Mutex<HashMap>>` with the agent router), the two shared tokens (`AGENTD_TOKEN` + sensor-bridge), and the in-memory human session-token store (`session_auth` — minted by `POST /api/auth/login`, accepted by `require_token` alongside the shared token). |
-| `apexos-plugins` | lib | MCP plugin host + policy engine. `Supervisor::run` (`supervisor.rs`) multiplexes bus events (`ToolRequested` → `PolicyEngine.check` → dispatch or `ApprovalPending`; `UserApproval` resolves pending) and `SupervisorCmd` messages, spawns/supervises stdio MCP child processes (`mcp.rs`, newline-delimited JSON-RPC), and intercepts ~thirty *virtual tools* (propose/rollback_evolution, read_soul_md, soul_rehearse, schedule_* incl. the wakeup family, the goal_* family, convene_council, send_to_agent, the mesh_* family — file/memory/procedure relay, recall, capabilities — agent_spawn local + cross-node, query_event_log, apply_daemon_update, bootstrap_node, vast_*) before falling through to a real plugin. Dispatch also **system-stamps** plugin calls: `agent_id` on every cerebro call (`stamp_agent_id`), `__workspace` on every apexos-tools call, and a `spawn-derived` provenance tag on Cerebro mints from spawn sessions (`is_spawn_session`); an `agent_spawn` with no explicit `system` gets a minimal task charter (`resolve_spawn_system` — `inherit_soul:true` opts into full identity). `policy.rs` is pure rule eval (Allow/Ask, Yolo short-circuit, exact-then-`prefix.*` wildcard, Workspace rule). `config.rs` loads `plugins.toml`; `vast.rs` wraps vast.ai GPU recipes. |
+| `apexos-core` | lib | Shared types and the event bus. The wire protocol — `Event` / `ContentBlock` / `ToolCall` / `PolicyMode` / `EvolutionProposal`, with `ActionId`/`SessionId` newtypes that serialize as **bare numbers** — lives in the root `apexos-protocol` crate, re-exported here (`pub use apexos_protocol as types`). `bus.rs` is the in-process hub: `Bus::new` returns a `BusHandle` (mpsc inbox `emit`) and a `broadcast::Sender` (capacity 1024) to subscribe; `Bus::run` applies `SystemState::apply` (`state.rs`) then rebroadcasts. Also home to `history.rs` (the trim window + seam marker), `identity.rs` (agent identity, per-agent workspace roots, session bindings, the per-worker model pins), `persona.rs` (per-session style), and `vision.rs` (the image downscale shim). The **session-id classes** are a strict three-way partition — `normal < 1<<62 ≤ worker < 1<<63 ≤ spawn` (`WORKER_SESSION_BASE`/`SPAWN_SESSION_BASE`, `is_worker_session`/`is_spawn_session`) — wire-relevant (frontends class sessions too), so they live in `apexos-protocol` and re-export here: worker sessions persist (a parked worker's JSONL is its truth), spawn sessions never do. |
+| `apexos-gateway` | lib | The entire external surface. One axum `Router` (`router()`): `/ws` (UI/browser), `/sensor-bridge` (sensor ingest), `/terminal-ws` (PTY), REST `/api/*` (run/speak/record/transcribe/council/sessions/policy/model/backend/voice/auth/identities/mesh/media/workspace/worker/history/…; the four `/api/worker/*` routes are the peer-facing W2 mesh-worker seam, refused when `AGENTD_MESH_WORKERS=0`), plus mesh peer discovery (`mesh.rs`, avahi). `GatewayState` is a fat clone-of-Arcs struct holding the `BusHandle`, the broadcast sender, live-swappable model/backend/keys/policy `RwLock`s, the in-memory session `histories` map (shared `Arc<Mutex<HashMap>>` with the agent router), the two shared tokens (`AGENTD_TOKEN` + sensor-bridge), and the in-memory human session-token store (`session_auth` — minted by `POST /api/auth/login`, accepted by `require_token` alongside the shared token). |
+| `apexos-plugins` | lib | MCP plugin host + policy engine. `Supervisor::run` (`supervisor.rs`) multiplexes bus events (`ToolRequested` → `PolicyEngine.check` → dispatch or `ApprovalPending`; `UserApproval` resolves pending) and `SupervisorCmd` messages, spawns/supervises stdio MCP child processes (`mcp.rs`, newline-delimited JSON-RPC), and intercepts 38 *virtual tools* (propose/rollback_evolution, read_soul_md, soul_rehearse, schedule_* incl. the wakeup family, the goal_* family, the worker/mandala family — task_fanout, worker_report/worker_cancel/list_workers, mandala_create/status/close, all forwarded to the worker driver — convene_council, send_to_agent, the mesh_* family — file/memory/procedure relay, recall, capabilities — agent_spawn local + cross-node, query_event_log, apply_daemon_update, bootstrap_node, vast_*) before falling through to a real plugin. Dispatch also **system-stamps** plugin calls: `agent_id` on every cerebro call (`stamp_agent_id`), `__workspace` on every apexos-tools call, and a `spawn-derived` provenance tag on Cerebro mints from spawn sessions (`is_spawn_session`); an `agent_spawn` with no explicit `system` gets a minimal task charter (`resolve_spawn_system` — `inherit_soul:true` opts into full identity). `policy.rs` is pure rule eval (Allow/Ask, Yolo short-circuit, exact-then-`prefix.*` wildcard, Workspace rule). `config.rs` loads `plugins.toml`; `vast.rs` wraps vast.ai GPU recipes. |
 | `apexos-agent` | lib | Turn engine. `turn.rs` `run_turn` streams from the provider, emits `AgentText` deltas + `ToolRequested`, awaits matching `ToolResult` (a bounded timeout synthesizes an **honest blocker** via the pure `missing_result_message` — still-awaiting-approval / approved-but-silent / dispatched-stalled / bus-lagged — so a turn never wedges and never misreads a pending approval as a decline), loops to `TurnComplete`. `provider.rs` = `Provider` trait + `Chunk` stream; `anthropic.rs`/`oai.rs` are the two impls; `routing.rs` `RoutingProvider` dispatches per-call off a live-swappable backend `Arc<RwLock<String>>` so hot-swaps land on the next turn with no restart; `council.rs` runs parallel multi-agent deliberation. |
 | `apexos-store` | lib | `run_log_writer` — subscribes to the broadcast bus and appends every `Event` as date-rolling JSONL. |
-| `agentd` | **bin** | The daemon. Manual multi-thread tokio runtime (never `#[tokio::main]`). Wires `Bus::new`/`run` + gateway + supervisor + turn engine + scheduler + council; loads soul (`AGENTD_SOUL` or `config/soul.md`) and keys. `spawn_agent_router` is the central dispatcher (consumes broadcast `Event`s, owns abort handles / session children / depths, routes `UserPrompt`→`root_turn`, handles `SpawnAgent`/`AgentMessage`/`UserCancel`/sensor-alert→prompt). `spawn_evolution_applier` consumes `EvolutionProposed`, snapshots undo state, applies via `apply_evolution` (writes `soul.md`/`policy.toml`/`plugins.toml`, hot-reloads policy/agent), and journals undo into Cerebro episodes; the pure evolution core (kind/invert, the undo codec, the TOML edits) lives in `evolution.rs`. The **consolidate/rehearse worker seam**: `consolidate.rs` (session → Cerebro distillation) and `rehearse.rs` (`soul_rehearse` — tool-less probes of a candidate soul) run as agentd-side workers that own the provider + `ToolProxy`; the gateway/supervisor forward requests over dedicated mpscs and await the reply (never the lag-droppable broadcast bus). `scheduler.rs` (cron, polls every 60s), `council_handler.rs`, `session_store.rs` (per-root-session history JSONL), `goal.rs` (the autonomous goal driver), `self_update.rs` + `health.rs` (the self-update loop + health contract), `sensor_config.rs` (alert-profile persistence), `pac_lint.rs` (the pure PAC-2 Dense lint gate on `UpdateSystemPrompt` payloads), and `dream_digest.rs` (post-dream mesh push) round it out. |
+| `agentd` | **bin** | The daemon. Manual multi-thread tokio runtime (never `#[tokio::main]`). Wires `Bus::new`/`run` + gateway + supervisor + turn engine + scheduler + council; loads soul (`AGENTD_SOUL` or `config/soul.md`) and keys. `spawn_agent_router` is the central dispatcher (consumes broadcast `Event`s, owns abort handles / session children / depths, routes `UserPrompt`→`root_turn` — hydrating a parked worker session from its JSONL via `load_one`/`repair_history` on send — handles `SpawnAgent`/`AgentMessage`/`UserCancel`/sensor-alert→prompt, and evicts a parked worker's history from RAM). `spawn_evolution_applier` consumes `EvolutionProposed`, snapshots undo state, applies via `apply_evolution` (writes `soul.md`/`policy.toml`/`plugins.toml`, hot-reloads policy/agent), and journals undo into Cerebro episodes; the pure evolution core (kind/invert, the undo codec, the TOML edits) lives in `evolution.rs`. The **consolidate/rehearse worker seam**: `consolidate.rs` (session → Cerebro distillation) and `rehearse.rs` (`soul_rehearse` — tool-less probes of a candidate soul) run as agentd-side workers that own the provider + `ToolProxy`; the gateway/supervisor forward requests over dedicated mpscs and await the reply (never the lag-droppable broadcast bus). The **Fabrica worker tier** lives here too (docs/fabrica.md): `worker.rs` (the worker driver — `task_fanout` fans a batch into dedicated persisted `WORKER_SESSION_BASE` sessions driven through the same turn gate by emitting `UserPrompt`, the goal driver's pattern; tier-aware admission cap `AGENTD_WORKER_CAP`, park/revive, `worker_report`, terminal-worker evidence files `<log_dir>/agents/<id>.json` + Cerebro episodes, and the W2 mesh arm), `mandala.rs` (Mandala Mode's pure core — cells/forms/budgets; the on-disk tree at `<log_dir>/worktrees/<mandala>/<addr>.json` is the only authoritative structure), `review.rs` (the pure review procedure — residency posture × six-observable word → exactly one single-line remediation, scheduled at golden offsets with Fibonacci backoff), and `remote.rs` (the W2 pure core — `RemoteWorker` mirror rows in `remote_workers.json`, never in `workers.json`; a tolerant string-state wire so colony skew can't break supervision). `scheduler.rs` (cron + the wakeup family, polls every 60s; a wakeup fires into the session that scheduled it), `council_handler.rs`, `session_store.rs` (per-session history JSONL — every non-spawn session, incl. worker sessions), `goal.rs` (the autonomous goal driver — consumes `TaskBatchDone` for its AwaitingBatch posture), `self_update.rs` + `health.rs` (the self-update loop + health contract, incl. the `mandala_coherent` dual-tree probe — worker ledger vs mandala trees), `sensor_config.rs` (alert-profile persistence), `pac_lint.rs` (the pure PAC-2 Dense lint gate on `UpdateSystemPrompt` payloads), and `dream_digest.rs` (post-dream mesh push) round it out. |
 
 ### `cerebro/crates/` — cognitive memory
 
@@ -91,7 +91,7 @@ ApexOS-RV) and `apexos-confine` (std-only path-confinement primitives —
 
 | Crate | Kind | Role |
 |-------|------|------|
-| `ui-slint` | **bin** (`apexos-rs-ui`) | Slint declarative UI compiled to native GL, rendering via KMS/DRM on Pi (`SLINT_BACKEND=linuxkms`) or winit on desktop. `main.rs` holds all Rust logic: tokio bootstrap, WS client + reconnect, REST polling, event dispatch, the Rust-owned window manager, persona system, toasts/notifs, and the terminal/council PTY streams. `src/ui/appwindow.slint` is the root tree (compiled by `build.rs`); `src/ui/components/` are the views. |
+| `ui-slint` | **bin** (`apexos-rs-ui`) | Slint declarative UI compiled to native GL, rendering via KMS/DRM on Pi (`SLINT_BACKEND=linuxkms`) or winit on desktop. `main.rs` holds all Rust logic: tokio bootstrap, WS client + reconnect, REST polling, event dispatch, the Rust-owned window manager, persona system, toasts/notifs, the terminal/council PTY streams, and the adaptive-UI engines (Phase B geometry persistence + the Phase C `ui_reflex` table — docs/adaptive-ui.md). `src/ui/appwindow.slint` is the root tree (compiled by `build.rs`); `src/ui/components/` are the views — among them the work board (goal/worker lanes off `GoalStateChanged`/`WorkerStateChanged`), the Mandalas window (`mandala_view.slint` — the Fabrica tree rendered from shape-sniffed `mandala_status` payloads, rows pre-built in Rust), and the Imagine studio (`imagine_view.slint`). |
 
 ---
 
@@ -125,7 +125,7 @@ The **broadcast bus is the backbone**. `core::Bus` is the hub: an mpsc inbox
 (`BusHandle::emit`) feeds `Bus::run`, which applies `SystemState::apply` and fans out via a
 `broadcast::Sender`. Subscribers: gateway WS write tasks (every connected UI/browser), the
 supervisor (tools), the agent router (turns), the evolution applier, the store log writer,
-and the scheduler/council handlers. **A frame that fails `Event` deserialization in the
+the goal and worker drivers, and the scheduler/council handlers. **A frame that fails `Event` deserialization in the
 gateway is silently dropped** — wrong field names produce no error, just nothing.
 
 **Chat turn.** UI sends `{type:user_prompt}` → gateway `/ws` read task injects `session`,
@@ -140,6 +140,19 @@ allow/ask. On Ask it emits `ApprovalPending` (UI shows approve/reject, sends
 `{type:user_approval, action:<id>}`). On approval the supervisor calls the stdio MCP plugin
 (`apexos-tools` or `cerebro-mcp`) and emits `Event::ToolResult` → `run_turn` awaits the
 matching `ToolResult`, loops, then `TurnComplete`.
+
+**Worker fan-out (Fabrica).** A conductor calls `task_fanout` → the supervisor forwards
+over `worker_tx` to the worker driver → each task gets a dedicated **persisted** session
+(the `WORKER_SESSION_BASE` id class) driven through the same turn gate by emitting
+`UserPrompt` — a worker turn IS a normal turn (policy, approvals, tools all unchanged).
+Workers report via `worker_report{continue|done|blocked|yield}`; every terminal worker
+writes evidence to `<log_dir>/agents/<id>.json` and the batch closes with `TaskBatchDone`
+(rows carry evidence **paths**, never payloads — integration reads the files). Mandalas
+wrap fans in geometry (`mandala.rs` — the tree at `<log_dir>/worktrees/` is the
+structure); supervision is the pure review procedure (`review.rs`); a ring cell carrying
+`node` runs its body on a mesh peer via `/api/worker/*` (`remote.rs` mirror rows) while
+the cell — geometry, budget, barriers, closure — never leaves the conducting node.
+`WorkerStateChanged` is global, so the work board and the Mandalas window follow along.
 
 **Sensors.** `apex-sensor-bridge` (separate process) → WS push to `/sensor-bridge`
 (`SENSOR_BRIDGE_TOKEN` auth — its own gate, separate from the API token) →
@@ -166,7 +179,7 @@ The gateway write task filters outbound frames **per socket** (`event_session`,
 `gateway/src/lib.rs`): a session-scoped event (the conversation stream —
 `agent_text`/`tool_requested`/`turn_complete`/`approval_pending`/…) reaches only the
 socket bound to that session; global/status events (sensors, mesh, council, vast,
-evolution) go to every client. A frontend therefore receives **only its own session's
+evolution, goal/worker state) go to every client. A frontend therefore receives **only its own session's
 stream + globals** — clients don't (and shouldn't) filter outbound frames themselves.
 Anything whose routing is ambiguous stays global, so no status event is ever hidden; the
 supervisor subscribes to the bus separately, so the filter never affects tool routing.
@@ -191,19 +204,20 @@ voice live without re-initing the session.
 
 | Inbound event | Fields | Action |
 |---------------|--------|--------|
-| `agent_text` | `delta: string` | append to that row's bubble; **also the only signal that drives busy** |
+| `agent_text` | `delta: string` | append to that row's bubble; sets busy |
 | `turn_complete` | — | clear busy; TTS if enabled |
-| `tool_requested` | `call: {id, tool, args, needs_approval}` | push tool card (running) |
+| `tool_requested` | `call: {id, tool, args, needs_approval}` | push tool card (running); sets busy (tool-first turns) |
 | `tool_result` | `call: <id>, output: {ok, content}` | update card by id |
-| `approval_pending` | `call: {id, tool, args}` | show approve/reject |
+| `approval_pending` | `call: {id, tool, args}` | show approve/reject; sets busy (a turn in flight) |
+| `worker_state_changed` | `worker, batch, state, task, detail, yolo, node` | global — upsert the work-board WORKERS card |
 | `sensor_reading` | `reading: {kind, …}` | update IAQ / thermal |
 | `sensor_alert` | `node_id, kind, value, threshold, sensor_id` | global persistence-filtered alert (fires `ui_reflex` rules) |
 | `wake_triggered` | — | flash wake indicator |
 
 > **`turn_started` is Python-agentd-only.** The Rust daemon never emits it (see
-> `main.rs` comments). Busy state is therefore driven solely by `agent_text` — which is why
-> a tool-first turn (no leading text) does not set busy until text arrives. Do not wait on
-> `turn_started`.
+> `main.rs` comments). Busy state is driven by `agent_text`, `tool_requested`, **and**
+> `approval_pending` — a tool-first turn sets busy at its first tool card, and a tool
+> awaiting approval counts as a turn in flight. Do not wait on `turn_started`.
 
 Send a prompt: `{"type": "user_prompt", "text": "hello"}`
 Send approval: `{"type": "user_approval", "action": 5, "granted": true}` (the numeric
@@ -342,7 +356,10 @@ installed.
   startup orient never blocks on approval. Because `read_file`/`list_dir` are `allow`, the
   **tool process is the only gate** for reads — `tools.rs::confine` roots them to the
   workspace + a small read allowlist (`/etc/agentd/parts`, `/sys`, `/proc/cpuinfo`/`meminfo`,
-  `/var/lib/agentd/update`; `AGENTD_READ_ROOTS`-extensible) minus an always-blocked secret
+  `/var/lib/agentd/update`, and the worker-evidence root `<AGENTD_LOG>/agents` — default
+  `/var/lib/agentd/events/agents`, how a conductor reads batch evidence; the root is
+  `agents/` only, so session transcripts next door stay unreadable;
+  `AGENTD_READ_ROOTS`-extensible) minus an always-blocked secret
   denylist (`/etc/agentd/env`, `/proc/*/environ`, `~/.ssh`, `/etc/shadow`, `*.api_key`).
   `apexos-tools`' `run_command` denylist remains a soft substring heuristic, trivially
   bypassable; treat the approval gate + systemd sandbox, not the denylist, as the boundary.

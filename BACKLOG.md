@@ -95,27 +95,35 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
   `load_boot_provisioning` consumption line mirrors IMAGINARIUM exactly
   (same `SONUS_CLI` provenance gating: CLI > USB > install.conf), harness-
   tested incl. the falsy-disable and CLI-wins cases.
-- **[MED] `docs/architecture.md` worker-tier integration** — no mention of
-  worker.rs/mandala.rs/review.rs anywhere; supervisor virtual-tool count
-  (~38 now); busy-state note outdated (tool_requested/approval_pending set
-  busy too); read-allowlist missing the worker-evidence root (#309);
-  identity.rs mention missing the worker session base; ui-slint row missing
-  the Imagine studio + geometry/reflex engines.
-- **[MED] `docs/repo-map.md` line-anchor regrind** — ~12 stale line/count
-  anchors (protocol 777 lines/Event:301, gateway 6203, supervisor 3005,
-  agentd main 4564, tools 3837/51 tools, ui-slint 10990/34 views, dispatch
-  2735, flow-diagram anchors) + a "change worker/mandala" how-to row +
-  worker driver in the subscriber list + cerebro ingest.rs.
-- **[MED] `docs/occipital.md` refresh** — distill/related cards shipped
-  (#287): nine→ten tools (`web_related`), kind table + demo modes + the
-  follow-on list (relate/sqlite-vec/auto-distill shipped; digests +
-  freshness remain).
-- **[LOW] `docs/edk.md`** — the yolo ladder needs the W1d rung
-  (`task_fanout{yolo:"inherit"}` + M1c voucher chain-of-custody).
-- **[LOW] `docs/sdk/`** — refresh note stale (last touched #313); sweep the
-  guides against the worker/mandala tool family.
-- **[LOW] `docs/build-roadmap.md`** — renumber the step table 0–9 to match
-  CLAUDE.md (a pointer note shipped meanwhile).
+- ~~[MED] `docs/architecture.md` worker-tier integration~~ **DONE `#329`
+  (2026-08-03, apply-wave swarm)** — worker tier woven in (worker/mandala/
+  review/remote cluster + a Fabrica fan-out flow paragraph), virtual-tool
+  count 38 (counted at the real location — supervisor.rs lives in
+  apexos-plugins, the audit's path was wrong), busy-state tri-source fix,
+  worker-evidence read root, session-id partition (lives in
+  apexos-protocol, re-exported), ui-slint studio/geometry/reflex/Mandalas.
+- ~~[MED] `docs/repo-map.md` line-anchor regrind~~ **DONE `#329`** — every
+  anchor re-measured from source (protocol 828/Event:306, gateway 6376,
+  agentd main 4645, ui-slint 11333/35 views…), + history_config.rs,
+  cerebro ingest.rs, worker-driver subscriber row, two new how-to rows.
+  Residuals: cerebro-api "~40 routes" not re-counted; consider symbol-only
+  anchors for the fastest-churn files (ui-slint grew 45% in a month).
+- ~~[MED] `docs/occipital.md` refresh~~ **DONE `#329`** — ten tools
+  (`web_related`), kind table + demo modes current, follow-on list honest
+  (auto-distill shipped opt-in phase 11; digests + semantic dedup +
+  freshness remain), env pointer fixed to Occipital's CLAUDE.md.
+- ~~[LOW] `docs/edk.md`~~ **DONE `#329`** — rung ½b (batch inherit) added
+  to the ladder + inherit semantics (mortal, revive never re-arms) + the
+  voucher chain-of-custody (mandala-cell-only).
+- ~~[LOW] `docs/sdk/`~~ **DONE `#329`** — catalog swept: Fabrica virtual
+  tools + worker/batch events + `/api/worker/*` + AppKind 18-21 + env
+  additions; refresh notes stamped 2026-08-06; two claim corrections
+  (multi-key workspace policy, send_to_agent=allow). **Residual [LOW]:**
+  guide bodies 05/06/07 + both tutorials still carry June–July line
+  anchors in prose (ui-slint drifted ~6k lines) — a deep regrind is its
+  own slice; the manifest + guides 01–03 are current.
+- ~~[LOW] `docs/build-roadmap.md`~~ **DONE `#329`** — step table renumbered
+  0–9 to match CLAUDE.md; the mismatch pointer note retired.
 - **[LOW] welfare re-deliberation** — the pending-trigger note is in
   `docs/model-welfare.md` §5/§6; the deliberation itself is APEX+colony work
   (route via propose_evolution etiquette, not a docs PR).
@@ -159,7 +167,7 @@ apex2's next UI-touching `apexos-update`.
 
 ## Top 10 — do next
 
-> Re-groomed 2026-06-23 (André + FORGE); updated 2026-06-27 after the USB arc, 2026-07-02 after the Occipital hub + colony deliberation. **7 of 10 done**; **#10 is in flight** (distillation — single-page + bounded no-URL sweep — shipped + live-verified colony-wide; auto-distill-on-ingest is deliberately NOT built, distillation is explicit-only; remaining slices deprioritized by the colony). Remaining: **#7 PARKED** (no Pi-4 hardware), **#8 hotspot mode** (parked by the colony deliberation — niche). **The colony-memory-federation arc (`docs/colony-federation.md`) — the colony's unanimous #1 from the first formal deliberation (2026-07-01) — is CODE-COMPLETE (all 4 slices shipped 2026-07-02):** memory relay ✓ + federated recall ✓ (live-verified colony-wide) → dream digest exchange ✓ (field-proven: #220 unblocked the nightly push, #248 fixed a bug the live pushes surfaced) → procedure replication ✓ (field test pending). Next-arc candidates: sensor fusion (the colony's own arc+2), Occipital slice 3, ingest_file.
+> Re-groomed 2026-06-23 (André + FORGE); updated 2026-06-27 after the USB arc, 2026-07-02 after the Occipital hub + colony deliberation. **7 of 10 done**; **#10 is in flight** (distillation — single-page + bounded no-URL sweep — shipped + live-verified colony-wide; auto-distill-on-ingest later shipped upstream as **opt-in** — Occipital phase 11, `OCCIPITAL_AUTO_DISTILL`, off by default, so explicit-only remains the default posture; remaining slices deprioritized by the colony). Remaining: **#7 PARKED** (no Pi-4 hardware), **#8 hotspot mode** (parked by the colony deliberation — niche). **The colony-memory-federation arc (`docs/colony-federation.md`) — the colony's unanimous #1 from the first formal deliberation (2026-07-01) — is CODE-COMPLETE (all 4 slices shipped 2026-07-02):** memory relay ✓ + federated recall ✓ (live-verified colony-wide) → dream digest exchange ✓ (field-proven: #220 unblocked the nightly push, #248 fixed a bug the live pushes surfaced) → procedure replication ✓ (field test pending). Next-arc candidates: sensor fusion (the colony's own arc+2), Occipital slice 3, ingest_file.
 
 | # | Item | Sev/Pri | Detail in |
 |---|------|---------|-----------|
@@ -354,7 +362,7 @@ workspace media is under-served on desktop nodes.
 ### Occipital — living knowledge hub (web cortex)
 
 - ◑ **SLICE 1 DONE — Occipital → living, LLM-curated knowledge hub** *(Top 10 #10, André 2026-06-23)* — grow the web cortex from fetch + recall into a **living knowledge base the colony curates and reasons over**. **Slice 1 (the distillation layer) shipped 2026-07-01** (Occipital-RS PR #1 = Phase 10 + the ApexOS wiring PR): the **`web_distill`** tool curates a cached page into summary/key-points/entities/tags via a tiered LLM backend (`OCCIPITAL_CURATE_BACKEND` = auto|ollama|anthropic|off — local-first, haiku fallback, mirrors `describe_image`); a `distillations` store + `distill_fts` make curated terms keyword-findable **even on Nano**; `web_recall` returns the distilled summary + tags (`distilled: true`) instead of a raw snippet; re-asks on unchanged content are hash-gated free; sweeps are bounded (≤10) + fail-soft. Explicit-only — nothing spends tokens on its own. `config/policy.toml` now seeds `allow` for all six `web_*` tools (they previously gated `unknown → ask` on suggest-mode fresh installs); **live nodes need the rules patched**. Remaining slices (pick next):
-  - **Auto-curation** — distill-on-ingest (background, budget-guarded) + semantic dedup against what's already stored.
+  - ◑ **Auto-curation** — the distill-on-ingest half SHIPPED upstream (Occipital phase 11: `OCCIPITAL_AUTO_DISTILL` = off·local·on, budget-capped, opt-in — off by default per the explicit-only doctrine). Remaining: semantic dedup against what's already stored.
   - ◑ **Relate + surface — the relate half SHIPPED (Occipital-RS #18, 2026-07-28)**: `relate` module (live overlap scoring over distilled entities ×2 / tags ×1, no stored link table), `web_related` (tool 10, `kind:"related"`, rendered by the reader) + CLI/API parity, and every fresh distillation carrying its top-3 neighbours inline. Remaining: periodic "what did I read about X" digests (deliberate — smells like the dream-digest pattern, wants its own slice).
   - ✅ **DONE (2026-07-28) — Reader window distill card** — `kind:"distill"` renders in the ui-slint follow-along: per-page knowledge cards (title, summary, key-point bullets, 🏷 tags/entities line), failures + undistilled backlog surfaced honestly, distilled pages as steerable rows chipped with their backend (`ollama`/`anthropic`/`cache`). Single-page distills get page-like identity + freshness badge; `APEX_OCCIPITAL_DEMO=distill` previews it. All seven kinds now render.
   - **Browsing polish (P3 leftovers, 2026-07-26)** — the `web_dom`/`web_click`/`web_submit` verbs are policy-seeded and their `dom`/`click`/`submit` kinds fully rendered; parked: **steer-by-ordinal** (a reader link click could nudge `web_click(url, "link:N")` instead of a bare URL — closer to what the human actually did) and an **ops panel over the request trail** (`occipital log` / `GET /log`: method, status, politeness waits, robots refusals — a "what has APEX been fetching" view). Both cosmetic; nothing blocks on them. **[low]**

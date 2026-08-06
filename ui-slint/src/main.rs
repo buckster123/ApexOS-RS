@@ -1153,8 +1153,8 @@ fn seed_windows_when_area_live(
     }
     // Dev: APEX_OCCIPITAL_DEMO=1 opens the Occipital reader at launch with a
     // sample page so the follow-along window can be verified without agentd
-    // (snapshot server). =results|recall|dom|click|submit previews those
-    // modes. (Its auto-reveal places a window too — same wait applies.)
+    // (snapshot server). =results|recall|dom|click|submit|distill|related
+    // previews those modes. (Its auto-reveal places a window too — same wait applies.)
     if let Some(demo) = std::env::var_os("APEX_OCCIPITAL_DEMO") {
         apply_occipital_render(&ui, occipital_demo_render(&demo.to_string_lossy()));
     }

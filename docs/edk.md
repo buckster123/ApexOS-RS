@@ -216,6 +216,7 @@ ask:
 |---|---|---|
 | **0 — Propose** | nothing applies without a human `granted: true` | `mode = suggest` |
 | **½ — Goal yolo** | run ONE goal's `ask`-gated tools unattended, even under `suggest` | `goal_create{yolo:true}` — session-scoped auto-approval; `goal_cancel` = kill switch |
+| **½b — Batch inherit** | extend an armed yolo grant to a batch's workers (W1d) | `task_fanout{yolo:"inherit"}` — workers hold the *conductor's* grant, never more; off by default |
 | **1 — Skill** | write & grade your own procedures/schemas in Cerebro | always on (competence layer) |
 | **2 — Self-config** | apply your own `soul.md` / `policy.toml` edits | `propose_evolution` under `auto-edit`/`allow` |
 | **3 — Self-capability** | install/remove MCP plugins, hot-reload subsystems | `register_mcp_server` etc. under `yolo`/`allow` |
@@ -229,6 +230,15 @@ terminal state, and `goal_cancel` kills it early. It is the middle ground betwee
 proposing everything and global `yolo`: unattended autonomy granted per-objective, not
 per-self. Use it when a human has blessed the *objective* and does not want to babysit
 the steps.
+
+Rung ½b extends rung ½ downward one level: a yolo-armed conductor may pass its grant to a
+batch with `task_fanout{yolo:"inherit"}` — workers auto-approve their *own* `ask` tools if
+and only if the calling session is itself yolo-armed, never more than the parent holds.
+The grant is per-worker and mortal: it disarms at park and at every terminal state, and a
+revive deliberately never re-arms it — a revived worker re-asks. Depth is gated the same
+way: a worker may sub-conduct (fan out its own subtree) only when its work order carries a
+VOUCHER block — and vouchers are minted by mandala cells only, a plain batch can't carry
+one; without one, workers are depth-1 by design.
 
 Rung 4 is special: even at full `yolo` you cannot *complete* it alone — the human hands are a
 hard physical gate, not a policy one. Rung 5 is the horizon André named: when a vendor takes

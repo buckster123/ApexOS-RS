@@ -6,9 +6,10 @@ reader-mode · read-through cache · semantic recall · decay) behind MCP/CLI/RE
 member of this workspace — it ships and versions independently, exactly like Cerebro did before the
 distro absorbed it. ApexOS-RS consumes it two ways, both **additive** (no agentd changes):
 
-1. **As an MCP plugin** — register `occipital-mcp` so APEX gains nine tools:
-   `web_search` · `web_fetch` · `web_recall` · `web_save` · `web_forget` · `web_distill`
-   · `web_dom` · `web_click` · `web_submit` (the phase 12–16 browsing verbs).
+1. **As an MCP plugin** — register `occipital-mcp` so APEX gains ten tools:
+   `web_search` · `web_fetch` · `web_dom` · `web_click` · `web_submit` (the phase 12–16
+   browsing verbs) · `web_recall` · `web_save` · `web_forget` · `web_distill` · `web_related`
+   (the phase 17 knowledge-web walk).
 2. **As a follow-along reader window** — ui-slint renders each `web_fetch`/`web_search` result live,
    so a human watches the agent read (see *Follow-along window* below).
 
@@ -77,12 +78,14 @@ Env (in the plugin's `[plugin.env]`):
 | `OCCIPITAL_PROXY` | explicit egress proxy — topology, not evasion (phase 15) |
 | `OCCIPITAL_ROBOTS_TTL_SECS` | robots.txt cache TTL (phase 16) |
 | `OCCIPITAL_LOG_MAX` | request-trail ring size — `occipital log` / `GET /log` (phase 16) |
+| `OCCIPITAL_AUTO_DISTILL` | opt-in background auto-curation (phase 11): `off` (default) · `local` (Ollama-pinned, never API) · `on` — budget-capped (see §1b) |
 
-Full env list: Occipital's `docs/build-roadmap.md`. Without any key, search uses DuckDuckGo HTML.
+Full env list: Occipital's `CLAUDE.md` (§ Environment variables). Without any key, search uses
+DuckDuckGo HTML.
 
 ### Policy rules
 
-`config/policy.toml` seeds explicit rules for all nine `web_*` tools (`allow`, except
+`config/policy.toml` seeds explicit rules for all ten `web_*` tools (`allow`, except
 `web_submit` = `ask` — the one verb that can POST to a third party; note `web_click` on a
 `form:N` element also submits, so tighten both to `ask` for a hard no-writes stance) —
 without them a
@@ -94,7 +97,7 @@ never overwritten; hardened 2026-07-20: the presence check is quote-insensitive,
 duplicates are healed first with the self-evolved line winning, and every transform is
 TOML-validated before it lands).
 
-## 1b. The knowledge hub — LLM curation (`web_distill`)
+## 1b. The knowledge hub — LLM curation (`web_distill` + `web_related`)
 
 Occipital Phase 10 (ApexOS BACKLOG Top-10 #10, slice 1): the cache grows a **distillation
 layer**. `web_distill` curates an already-read page into knowledge — a 2–4 sentence
@@ -124,13 +127,25 @@ What it changes for the agent:
   instead of a raw-body snippet — recall serves knowledge, not HTML dregs. Distilled
   tags/entities/key-points are FTS-indexed, so **Nano keyword recall finds pages by curated
   terms too** (no embeddings needed).
-- The `kind:"distill"` tool payload is the one kind *not* rendered by the reader window yet
-  (its `occipital_payload()` whitelist skips it, so it passes through harmlessly); a distill
-  card is a follow-on UI slice (`BACKLOG.md`).
+- `web_related {url}` — walk the knowledge web from a curated page (Occipital phase 17):
+  every other distilled page sharing its entities (×2) or tags (×1), best-tied first, with
+  the shared terms as the edge label. **Zero network, zero LLM** — a pure local read over the
+  distillations store; an undistilled page gets an honest "distill it first", and an empty
+  result carries `distilled_total` so "unconnected" and "nothing curated yet" read
+  differently. Every fresh distillation also carries its top-3 neighbours inline.
+- The `kind:"distill"` and `kind:"related"` payloads both **render in the reader window**
+  (the distill card shipped 2026-07-28) — see the kind table below.
 
-**Distillation is explicit-only** — nothing spends tokens behind the operator's back;
-auto-distill-on-ingest (budget-guarded), semantic dedup/relate, digests, and the sqlite-vec
-ANN index are the follow-on slices tracked in `BACKLOG.md` #10 + Occipital's roadmap.
+**Distillation is explicit-only by default** — nothing spends tokens behind the operator's
+back. Opt-in background auto-curation shipped (Occipital phase 11): `OCCIPITAL_AUTO_DISTILL=local`
+(Ollama-pinned — never spends API tokens) or `=on` (the configured backend, API fallback
+included) sweeps newly-read pages every `OCCIPITAL_AUTO_DISTILL_INTERVAL_SECS` (default 300,
+floor 30), budget-guarded by a rolling-24h cap (`OCCIPITAL_AUTO_DISTILL_CAP`, default 50 —
+counts explicit distills too, so it's a total-spend guard). The sqlite-vec ANN index also
+shipped (phase 18): a vec0 `page_vectors` index leads `web_recall` at scale, with brute-force
+cosine as the automatic fail-soft fallback (Nano builds compile the layer out). The remaining
+knowledge-hub slices — semantic dedup on ingest, digests ("what did I read about X"),
+freshness/re-distill — are tracked in `BACKLOG.md` #10 + Occipital's roadmap.
 
 ## 2. Follow-along reader window (9b/9c)
 
@@ -141,7 +156,7 @@ TurnGate, exactly like `display_face` / `sketch_snapshot`.
 
 ### How it consumes results (9b)
 
-Every `web_fetch` / `web_search` / `web_recall` returns a flat, `kind`-discriminated object
+Every Occipital verb returns a flat, `kind`-discriminated object
 (the contract in Occipital's `docs/follow-along.md`). agentd's MCP client passes it through as
 the MCP content array `[{"type":"text","text":"<json>"}]` (`mcp.rs`), and `Event::ToolResult`
 carries **no tool name** — so ui-slint detects an Occipital read by the payload's `kind`, not
@@ -156,6 +171,8 @@ mirroring how `turn.rs` recovers the vision sentinel). It then switches on `kind
 | `dom` | the element registry (`web_dom`): links with their click ordinals (`#N`) + forms as non-clickable rows (method+action, visible fields, submit label) — what APEX can act on |
 | `click` | the landed page (same layout as `page`); the meta line shows the hand: `clicked link:3 → url · HTTP 200` |
 | `submit` | the response page; meta shows the submission: `form#1 GET action — q=… · HTTP 200`. Freshness badge reads `cached` (a POST result is never cached) |
+| `distill` | per-page **knowledge cards** — title, summary, key-point bullets, a 🏷 tags/entities line; failures and the undistilled backlog surfaced honestly in the meta; distilled pages double as steerable rows chipped with their backend (`ollama` / `anthropic` / `cache`). A single-page distill gets page-like identity: title/url up top + a `live`/`cache` freshness badge |
+| `related` | neighbour rows of a curated page — the shared entities/tags (🏷) lead each detail line, the overlap score is the chip; the meta counts connected pages against `distilled_total`, so "unconnected" and "nothing curated yet" read differently |
 
 **Field-pass additions (2026-07-26, Occipital-RS PRs #11–#17):** the payloads carry more than
 the table shows — all additive, and the reader ignores what it doesn't render. `links` is
@@ -190,6 +207,7 @@ separate browser.
 
 ### Dev / verify
 
-`APEX_OCCIPITAL_DEMO=1` (or `=results` / `=recall`) opens the reader at launch with a sample
-payload — no agentd, no network — so the window can be snapshotted via the screen-mirror server
+`APEX_OCCIPITAL_DEMO=1` (or `=results` / `=recall` / `=dom` / `=click` / `=submit` /
+`=distill` / `=related`) opens the reader at launch with a sample payload for that kind — no
+agentd, no network — so the window can be snapshotted via the screen-mirror server
 (`APEXOS_UI_SNAPSHOT_ADDR`, `take_snapshot()`), the same way the GL face is verified.
