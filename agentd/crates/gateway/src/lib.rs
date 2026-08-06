@@ -534,6 +534,12 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
     // Assign a fresh session_id immediately — no blocking on hello.
     let session_id = state.next_session_id.fetch_add(1, Ordering::SeqCst);
 
+    // Register the fresh session at mint time — a connected-but-silent client
+    // belongs in /api/sessions/active, and a later `hello{resume}` of a
+    // never-prompted id must find its (empty) entry instead of silently keeping
+    // the old session. (First UserPrompt used to be the only creator.)
+    state.histories.lock().await.entry(SessionId(session_id)).or_default();
+
     // Initial bind (slice 3e): an authenticated human's first session resolves to
     // one of THEIR agents (their default) up front — so a guest can't act as APEX
     // (the node default) in the fresh session before explicitly picking an agent.
@@ -613,15 +619,17 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
                     let resume = val["resume_session"].as_u64().map(SessionId);
                     let want_new = val["new"].as_bool().unwrap_or(false);
                     let hist = {
-                        let lock = histories.lock().await;
+                        let mut lock = histories.lock().await;
                         match resume {
                             Some(s) if lock.contains_key(&s) => {
                                 session_id = s.0;
                                 lock.get(&s).cloned().unwrap_or_default()
                             }
                             _ if want_new => {
-                                // Fresh chat: a new id from the shared atomic, empty history.
+                                // Fresh chat: a new id from the shared atomic, empty
+                                // history — registered at mint like the connect path.
                                 session_id = next_session_id.fetch_add(1, Ordering::SeqCst);
+                                lock.insert(SessionId(session_id), Vec::new());
                                 vec![]
                             }
                             _ => vec![],  // keep current session_id

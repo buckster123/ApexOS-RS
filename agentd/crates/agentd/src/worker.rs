@@ -620,8 +620,10 @@ pub fn worker_system(parent_agent: &str) -> String {
          conductor. You exist for exactly one task, delivered in your prompt. Work it directly \
          with the minimum tools required. Report through worker_report: done{{summary}} when the \
          task is complete — the summary plus your final text are the deliverable the conductor \
-         reads; continue to take another step; yield to pause for input; blocked{{reason}} if \
-         truly stuck. Not reporting also completes the task, with your final text as the \
+         reads. MECHANICAL RULE: if you created or modified ANY file, every such path goes in \
+         done's artifacts:[…] — the conductor integrates from artifacts, and an empty list with \
+         files produced reads as no files produced. continue takes another step; yield pauses \
+         for input; blocked{{reason}} if truly stuck. Not reporting also completes the task, with your final text as the \
          deliverable. Skip orientation: no memory recall, inbox checks, or self-inspection unless \
          the task itself asks for them. Approval-gated tools still ask a human — prefer ungated \
          paths. Do not spawn agents. Fan out further work ONLY if your work order carries a \
@@ -635,9 +637,10 @@ fn directive_first(worker_id: u64, batch: u64, max_steps: u32, task: &str) -> St
     format!(
         "WORKER {worker_id} (batch {batch}) — step 1/{max_steps}.\n\nTASK:\n{task}\n\n\
          Work the task NOW. When it is complete, call `worker_report{{status:\"done\", \
-         summary:\"…\"}}` — don't burn steps you don't need. `continue` takes another step, \
-         `yield` pauses for input, `blocked{{reason}}` parks it. No report also completes the \
-         task: your final text is the deliverable."
+         summary:\"…\", artifacts:[\"every file you produced\"]}}` — don't burn steps you \
+         don't need. `continue` takes another step, `yield` pauses for input, \
+         `blocked{{reason}}` parks it. No report also completes the task: your final text is \
+         the deliverable."
     )
 }
 
@@ -4257,11 +4260,19 @@ mod tests {
         assert!(sys.contains("VOUCHER"), "the sub-conduction exception must be named (M1c)");
         assert!(sys.contains("Skip orientation"));
         assert!(sys.contains("final text"), "the no-report fallback must be named");
+        assert!(
+            sys.contains("MECHANICAL RULE") && sys.contains("artifacts:"),
+            "the artifacts demand must be mechanical, not a request (W2 field lesson)"
+        );
         let first = directive_first(3, 1, 12, "write the tests");
         assert!(first.contains("WORKER 3 (batch 1)"));
         assert!(first.contains("step 1/12"));
         assert!(first.contains("write the tests"));
         assert!(first.contains("worker_report"));
+        assert!(
+            first.contains("artifacts:"),
+            "the done template must show the artifacts field at the point of use"
+        );
         let cont = directive_continue(3, 1, 4, 12, "write the tests", Some("edge cases"));
         assert!(cont.contains("step 4/12"));
         assert!(cont.contains("edge cases"));

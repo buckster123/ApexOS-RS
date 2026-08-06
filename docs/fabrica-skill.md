@@ -94,7 +94,9 @@ colleague's hands, not teleporting your own.
   one in hand, have the task `mesh_file_send` its deliverable home as its
   last act, or pull it yourself afterward. An EMPTY artifacts array is not
   proof of missing work — workers sometimes skip the declaration even when
-  asked (first W2 smoke): check the summary, then the peer workspace, before
+  asked (first W2 smoke; since `#327` the charter DEMANDS it mechanically
+  and the first directive shows the field, which shrinks the miss rate but
+  doesn't zero it): check the summary, then the peer workspace, before
   ruling a row hollow.
 - **The deadline is still the net.** Peer restarts park its workers (its
   law); a dark peer just stops answering polls. Either way your batch
