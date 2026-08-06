@@ -89,12 +89,11 @@ not missing work (taught in `docs/fabrica-skill.md` remote section).
   presence-only; `AGENTD_CACHE_TTL` garbage ≠ unset; `AGENTD_WORKSPACE`
   fails closed in the policy engine; `CEREBRO_VISION_EMBED`'s three-way;
   `APEX_GPIO_RESERVED` exact-`none`-only; `GIT_COMMIT` compile-time).
-- **[LOW · install] `APEXOS_SONUS` missing from the boot/USB file parser**
-  (env-vars sweep find, 2026-08-02): it is written to install.conf and
-  honored from CLI/TUI, but `_parse_key_file` (install.sh:206-214) never
-  reads it from `apexos.conf` — the other eight flags are parsed, so a
-  fresh-node USB provisioning file cannot enable Sonus. One-line fix: add
-  it to the parse list next time install.sh is touched.
+- ~~[LOW · install] `APEXOS_SONUS` missing from the boot/USB file parser~~
+  **DONE `#326` (2026-08-03)** — `_parse_key_file` reads it, the
+  `load_boot_provisioning` consumption line mirrors IMAGINARIUM exactly
+  (same `SONUS_CLI` provenance gating: CLI > USB > install.conf), harness-
+  tested incl. the falsy-disable and CLI-wins cases.
 - **[MED] `docs/architecture.md` worker-tier integration** — no mention of
   worker.rs/mandala.rs/review.rs anywhere; supervisor virtual-tool count
   (~38 now); busy-state note outdated (tool_requested/approval_pending set
@@ -143,14 +142,17 @@ not missing work (taught in `docs/fabrica-skill.md` remote section).
 
 ## 🔧 install — low-RAM build guard needs a bigger swapfile (field, 2026-07-31)
 
-**P2 · install.sh `ensure_build_swap`** — apex2 (Pi 5, 4 GB) OOMed building
-ui-slint during the 07-31 colony update **with the guard active and its 2 GB
-temp swapfile mounted**: the UI's working set has outgrown the #175-era
-sizing (~5.5 GB measured then; it's bigger now). Fix in a polish round: size
-the temp swapfile from a fresh measurement (likely 4 GB on ≤4 GB boards, or
-`max(2GB, 6GB − RAM)`), re-measure the actual peak on apex2, and note the
-number in the low-RAM gotcha. Not urgent — apex1 (8 GB) and apex-3 (x86)
-build fine and carry the colony meanwhile.
+✅ **DONE `#326` (2026-08-03)** — apex2's 07-31 OOM-with-guard-active had TWO
+causes: the working set outgrew the #175-era ~5.5 GB sizing (fresh x86 -j4
+unguarded measure: ~10 GB cgroup peak — the guarded -j1/opt-2 build is far
+lighter, but the trend is real), and **`ensure_build_swap` counted zram
+toward SwapTotal** — apex2's ~2 GB zram nominally "filled" half the 4 GiB
+target while living in the very RAM it was supposed to relieve. The guard
+now (a) counts only **disk-backed** swap (`/proc/swaps` minus `/dev/zram*`),
+(b) targets **6 GiB** of it, (c) caps the file by free disk (keeps ≥2 GB
+free; <512 MB allocatable → skip with a warning, never fill the disk).
+Extracted-function harness: 8 sizing/branch cases green. Field validation =
+apex2's next UI-touching `apexos-update`.
 
 ---
 
@@ -377,6 +379,20 @@ workspace media is under-served on desktop nodes.
 - ✅ **DONE — Shared Event types (`apexos-protocol` crate)** — slice 1: wire types extracted from `apexos-core` into a lean serde-only `apexos-protocol` crate (core re-exports it; agentd untouched). Slice 2: `ui-slint` now deserializes WS frames into the typed `Event` (`from_value::<Event>` → typed `match`) and logs undecodable frames instead of silently dropping them — the old `["field"].as_str()` string-matching at `main.rs:3461` is gone. Contract round-trip tests in the protocol crate lock the shapes. Outbound frontend-intent frames stay hand-built (they omit `session`; gateway injects it). **[done]**
 - ✅ **DONE — `apexos.conf` advertised but never scanned** — added `apexos.conf` to `KEYFILE_NAMES` (install.sh:88), so the documented provisioning filename is now actually matched by both scan loops. **[was low]**
 - ✅ ~~Sonus music-generation plugin commented out~~ — DONE: `sonus_provision` shipped (`#302`, 2026-07-30) — install.sh clones/builds the Sonus-RS sibling, self-loaded `/etc/sonus/env`, plugin registered (16 tools); field-proven on apex-3 (`#304`).
+- **[DECISION · posture, André 2026-08-03] New -RS siblings are lego-piece
+  apps, NOT install.sh add-ons.** Prefrontal-RS, Puerperium-RS (open-model
+  LoRA/worker experimentation), Cadre-RS (WIP), ApexRouter-RS, and future
+  siblings run as standalone additions on capable nodes (dev
+  laptop/desktop): agents reach them two-way via MCP/CLI/HTTP as usual;
+  human UIs are the regular browser or the sibling's own standalone Slint
+  app (some have one, built with ApexOS in mind) — not baked into the Pi
+  "OS" surface. Their absence from install flags/TUI rows is **by design,
+  not a gap** — occipital/imaginarium/sonus each graduated by deliberate
+  decision, and that remains the bar. Parked for a future charter session
+  (André's geany notes): whether any sibling graduates into the repo
+  proper (crate + Slint UI), and Prefrontal's js/npm UI deps vs the
+  no-npm ApexOS posture (fine while external; decide only if it's ever
+  pulled in). CerebroCortex-RS's UI/dash is tracked in its own repo.
 - ◑ **Reduced — build-time decisions to lock** — `docs/ui-glowup.md` §11 (rewritten with resolutions, sweep 2026-07-04) resolved four: **#1 WM geometry** (G2 — Rust-owned WindowDesc VecModel, Slint-live-drag, deltas committed on release), **#2 persona style preamble** (G5 tier-2, shipped — see UI/Glowup), **#4 default persona** (G4 — first-boot wizard, forced), **#5 Win-98 sound** (G6 — deferred/silent-by-default). Genuinely open: **#3** asset strategy (decide when the first Win-98 bitmap asset lands). **[low]**
 
 ---
