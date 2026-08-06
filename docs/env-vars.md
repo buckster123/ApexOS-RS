@@ -261,7 +261,7 @@ udev note: `ID_FS_LABEL` (only `APEX-*` sticks are claimed), `UDISKS_IGNORE`, an
 | `APEXOS_NO_SENSOR` | `true` (sensor OFF) | `false` is how you turn the BME688+MLX90640 head ON |
 | `APEXOS_VOICE` | off | `1` provisions Kokoro TTS + Whisper STT |
 | `APEXOS_IMAGINARIUM` | off | `1` provisions the Imaginarium node (needs an `XAI_API_KEY` for ACTIVE) |
-| `APEXOS_SONUS` | off | `1` provisions Sonus-RS. **Known gap:** honored from install.conf/CLI but NOT parsed from the boot/USB file (the other eight flags are) — fresh-node USB provisioning can't enable it (BACKLOG) |
+| `APEXOS_SONUS` | off | `1` provisions Sonus-RS — boot/USB file, install.conf, or `--sonus`, same provenance precedence as the other add-on flags (USB-parse gap closed `#326`) |
 | `CARGO_BUILD_JOBS` (+ `CARGO_PROFILE_RELEASE_{OPT_LEVEL,LTO,CODEGEN_UNITS}`) | low-RAM only | the OOM build guard: ≤4 GiB nodes build with jobs 1, opt-level 2, LTO off, 16 codegen units — installer-set for the build only, never persisted |
 | `KOKORO_MODEL_URL` / `KOKORO_VOICES_URL` / `WHISPER_GGML_URL` | upstream releases | model download overrides (mirrors / air-gapped installs) |
 | `SUDO_USER` | ambient | the unprivileged user cargo builds as (falls back to the repo owner) |

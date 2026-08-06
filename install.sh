@@ -110,6 +110,7 @@ KEYFILE_NAMES=(apexos.env apexos.conf apexos-rs.env agentd.env apex.env apexos.t
 FOUND_ANTHROPIC=""; FOUND_OPENROUTER=""; FOUND_KEY_SRC=""
 FOUND_MODE=""; FOUND_TIER=""; FOUND_NO_UI=""; FOUND_NO_SENSOR=""
 FOUND_NO_CEREBRO_API=""; FOUND_VOICE=""; FOUND_NO_OCCIPITAL=""; FOUND_IMAGINARIUM=""
+FOUND_SONUS=""
 
 # Resolved-choices record: written at the end of a successful install and restored
 # on every re-run (load_persisted_config) so `apexos-update` keeps the same
@@ -211,7 +212,8 @@ _parse_key_file() {
   FOUND_VOICE=$(_envval "$f" APEXOS_VOICE)
   FOUND_NO_OCCIPITAL=$(_envval "$f" APEXOS_NO_OCCIPITAL)
   FOUND_IMAGINARIUM=$(_envval "$f" APEXOS_IMAGINARIUM)
-  [[ -n "${FOUND_ANTHROPIC}${FOUND_OPENROUTER}${FOUND_MODE}${FOUND_TIER}${FOUND_NO_UI}${FOUND_NO_SENSOR}${FOUND_NO_CEREBRO_API}${FOUND_VOICE}${FOUND_NO_OCCIPITAL}${FOUND_IMAGINARIUM}" ]]
+  FOUND_SONUS=$(_envval "$f" APEXOS_SONUS)
+  [[ -n "${FOUND_ANTHROPIC}${FOUND_OPENROUTER}${FOUND_MODE}${FOUND_TIER}${FOUND_NO_UI}${FOUND_NO_SENSOR}${FOUND_NO_CEREBRO_API}${FOUND_VOICE}${FOUND_NO_OCCIPITAL}${FOUND_IMAGINARIUM}${FOUND_SONUS}" ]]
 }
 
 # Scan mounted media + the SD boot partition, then probe UNmounted removable
@@ -281,6 +283,7 @@ load_boot_provisioning() {
   [[ -n "$FOUND_NO_OCCIPITAL"   ]] && ! $NO_OCCIPITAL_CLI   && { _truthy "$FOUND_NO_OCCIPITAL"   && NO_OCCIPITAL=true   || NO_OCCIPITAL=false; }
   [[ -n "$FOUND_VOICE"          ]] && ! $NO_VOICE_CLI       && { _truthy "$FOUND_VOICE"          && NO_VOICE=false      || NO_VOICE=true; }
   [[ -n "$FOUND_IMAGINARIUM"    ]] && ! $IMAGINARIUM_CLI    && { _truthy "$FOUND_IMAGINARIUM"    && NO_IMAGINARIUM=false || NO_IMAGINARIUM=true; }
+  [[ -n "$FOUND_SONUS"          ]] && ! $SONUS_CLI          && { _truthy "$FOUND_SONUS"          && NO_SONUS=false      || NO_SONUS=true; }
   local what="settings"; [[ -n "$FOUND_ANTHROPIC" ]] && what="key + settings"
   ok "Provisioned from ${FOUND_KEY_SRC} ($what)"
 }
@@ -971,11 +974,26 @@ remove_build_swap() {
   BUILD_SWAP=""
 }
 trap remove_build_swap EXIT
-ensure_build_swap() {                                   # $1 = desired total swap (KB)
-  local need_kb=$1 have_kb sz_mb
-  have_kb=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
-  [[ "$have_kb" -ge "$need_kb" ]] && { info "Swap ($((have_kb / 1024)) MB) already sufficient for the build"; return 0; }
+ensure_build_swap() {                                   # $1 = desired DISK-BACKED swap (KB)
+  local need_kb=$1 have_kb sz_mb free_mb
+  # Count only disk-backed swap. zram counts toward SwapTotal but lives in the very
+  # RAM it's supposed to relieve (~⅓–½ of its nominal size stays resident as
+  # compressed pages) — apex2's 2 GB zram let the old total-swap check under-size
+  # the file and the 07-31 update OOMed with the guard active.
+  have_kb=$(awk '$1 !~ /^\/dev\/zram/ && NR > 1 {s += $3} END {print s + 0}' /proc/swaps 2>/dev/null || echo 0)
+  [[ "$have_kb" -ge "$need_kb" ]] && { info "Disk-backed swap ($((have_kb / 1024)) MB) already sufficient for the build"; return 0; }
   sz_mb=$(( (need_kb - have_kb) / 1024 + 256 ))
+  # Never fill the disk for swap: keep ≥2 GB free; under 512 MB of allocatable
+  # swap isn't worth the disk pressure — skip and let the build take its chances.
+  free_mb=$(df -Pm /var/tmp 2>/dev/null | awk 'NR==2{print $4}')
+  if [[ -n "$free_mb" && "$sz_mb" -gt $(( free_mb - 2048 )) ]]; then
+    sz_mb=$(( free_mb - 2048 ))
+    if [[ "$sz_mb" -lt 512 ]]; then
+      warn "Low disk on /var/tmp (${free_mb} MB free) — skipping build-swap top-up"
+      return 0
+    fi
+    warn "Build swap capped to ${sz_mb} MB by free disk on /var/tmp"
+  fi
   BUILD_SWAP="/var/tmp/apexos-build-swap"
   sudo rm -f "$BUILD_SWAP" 2>/dev/null || true
   warn "Adding ${sz_mb} MB temporary build swap ($BUILD_SWAP) — removed when the build finishes"
@@ -1008,7 +1026,7 @@ if ! $NO_UI && [[ "$RAM_KB" -gt 0 && "$RAM_KB" -lt 6291456 ]]; then   # < 6 GiB
     CARGO_PROFILE_RELEASE_LTO=off
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
   )
-  ensure_build_swap 4194304                                            # top up to ~4 GiB total swap
+  ensure_build_swap 6291456                        # top up to ~6 GiB DISK-BACKED swap (07-31: 4 GiB-total sizing OOMed apex2)
 fi
 
 BUILD_LOG=$(mktemp /tmp/apexos-cargo-build.XXXXXX.log)
