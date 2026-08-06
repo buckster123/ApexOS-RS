@@ -163,8 +163,12 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    beats nothing, tasks still flow (W2 assignments are proof-sized), humans
    carry the heavy artifacts. Input doc is charter-grade (v2 LOCKED
    2026-07-27, `docs/ideas/apexnet/`); **v3 charter → `docs/apexnet.md`**
-   (this intake's companion). Hardware: 2–3 ESP32+SX1262 boards (Heltec V3 /
-   LilyGo T3-S3) — André orders; Phases 1+3 are hardware-free.
+   (this intake's companion, LOCKED 2026-08-03). Hardware: 2–3 ESP32+SX1262
+   boards (Heltec V3 / LilyGo T3-S3) — André ordered 2026-08-03; P1–P3 are
+   hardware-free. **P1 (`apexos-mesh-proto` wire crate) SHIPPED 2026-08-07**
+   — framing + crypto envelope + replay windows + chunker + courier payloads,
+   both no_std gates, fuzz target (`fuzz/`; the 24 h clean run = residual
+   DoD, runnable any night). Next: P2 courier lane (also hardware-free).
 2. **Cadre review** *(sibling `Cadre-RS`; gated)* — review the Grok 4.5
    12-hour build against the clean-room PRD
    (`~/Downloads/Brainstorms/Cadre-RS/cadre-prd.md`) before anything touches

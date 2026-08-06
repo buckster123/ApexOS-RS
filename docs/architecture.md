@@ -50,11 +50,15 @@ instead of silently dropping it. (The old hand-matched-JSON era is over.)
 
 Seven binaries come out of `cargo build --release --workspace` (resolver 2, release
 profile `lto=thin`, `strip`). Library crates are listed alongside the binaries that use
-them. Two shared **root crates** sit above the three directory groups:
+them. Three shared **root crates** sit above the three directory groups:
 `apexos-protocol` (the serde-only wire contract — the `Event` enum + id newtypes,
 re-exported by `apexos-core`; **no_std-capable**: default `std`, with
 `--no-default-features --features alloc` as a second build gate, consumed bare-metal by
-ApexOS-RV) and `apexos-confine` (std-only path-confinement primitives —
+ApexOS-RV), `apexos-mesh-proto` (the ApexNET radio/UART wire contract —
+postcard/COBS/CRC32 framing, ChaCha20-Poly1305 envelope + replay windows, blake3
+chunker, courier payloads; same no_std dual-gate law, future consumers: the mesh
+bridge, the ESP32 brainstem firmware, agentd's mesh router — charter
+`docs/apexnet.md`), and `apexos-confine` (std-only path-confinement primitives —
 `confine_fs`/`confine_to_roots`, used by `apexos-tools`). The two voice sidecars
 (`tools/crates/apex-tts` Kokoro TTS, `tools/crates/apex-stt` Whisper STT) are
 **workspace-excluded** — they pin their own `ort`/C++ deps and are built separately by

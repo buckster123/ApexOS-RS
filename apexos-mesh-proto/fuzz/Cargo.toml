@@ -1,0 +1,26 @@
+[package]
+name = "apexos-mesh-proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+apexos-mesh-proto = { path = ".." }
+
+# The fuzz crate is its own workspace — it must never join the root workspace
+# (nightly-only, huge corpus dirs, its own profile).
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "deframer"
+path = "fuzz_targets/deframer.rs"
+test = false
+doc = false
+bench = false

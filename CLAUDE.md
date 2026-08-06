@@ -40,6 +40,7 @@ cerebro/crates/      # cognitive memory (cerebro lib · cerebro-mcp · cerebro-a
 tools/crates/        # system tool plugins (apexos-tools · apex-sensor-bridge)
                      #   + workspace-EXCLUDED sidecars: apex-tts (Kokoro), apex-stt (Whisper)
 apexos-protocol/     # shared wire types (no_std-capable; external consumer: ApexOS-RV)
+apexos-mesh-proto/   # ApexNET radio/UART wire contract (no_std+alloc; framing, crypto, chunker)
 ui-slint/            # Slint native UI (the unique contribution of this repo)
 web/                 # -RS-owned browser/PWA frontend (headless nodes' human surface)
 config/              # default plugins.toml, policy.toml, soul.md, parts inventory
@@ -175,7 +176,7 @@ The full ledger is **`docs/gotchas.md`** — grep it for your subsystem; entries
 - **Sensors/voice/vision**: SensorHead is external Python · persistence filter + sensitivity profiles · `SensorAlert` pairing · TTS/STT are workspace-excluded sidecars (ort decoupling) · client-side audio on desktop · camera/audio groups
 - **FS/safety**: confinement lives in the tool (`apexos-confine`) · git roots · USB exo-workspace under the workspace · eject via root systemd unit, never sudo (`NoNewPrivileges`)
 - **Adaptive UI**: tool-family idiom (no protocol changes) · latch etiquette (human always wins) · mutation cap · drag guard · reflex trigger mirror · geometry seed deferral
-- **Protocol**: `apexos-protocol` no_std — run BOTH test gates; `Map<K,V>` alias, never bare `HashMap`
+- **Protocol**: `apexos-protocol` + `apexos-mesh-proto` no_std — run BOTH test gates on each; `Map<K,V>` alias, never bare `HashMap`; mesh-proto framing/types are frozen+append-only (postcard is positional)
 - **Welfare seams**: trim markers, substrate notices, honest tool-failure signals are **correctness fixes** — never strip them to save tokens
 
 ---
