@@ -149,6 +149,50 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
 
 ---
 
+## Ideas intake 2026-08-03 — André's geany notes, triaged (FORGE + André)
+
+> Source: `~/ideas.md` + `~/Downloads/Brainstorms/` (ApexNET v2 preserved in
+> `docs/ideas/apexnet/`). Slotting follows the sibling **lego-piece posture**
+> (Infra/Deploy DECISION below). Agreed grab order: **1 → 6**.
+
+1. **ApexNET — the nervous system** *(in-repo; MED-priced, most shovel-ready)*
+   — routerless radio substrate (BLE gossip/GATT + LoRa + ESP32 "brainstem"
+   co-processor) + the **Tier-4 human-courier lane** (ID'd exo-workspace
+   sticks + a ledger that fits the lowest-bandwidth links). The subtle win:
+   the colony stays coherent through total internet failure — bytes/sec
+   beats nothing, tasks still flow (W2 assignments are proof-sized), humans
+   carry the heavy artifacts. Input doc is charter-grade (v2 LOCKED
+   2026-07-27, `docs/ideas/apexnet/`); **v3 charter → `docs/apexnet.md`**
+   (this intake's companion). Hardware: 2–3 ESP32+SX1262 boards (Heltec V3 /
+   LilyGo T3-S3) — André orders; Phases 1+3 are hardware-free.
+2. **Cadre review** *(sibling `Cadre-RS`; gated)* — review the Grok 4.5
+   12-hour build against the clean-room PRD
+   (`~/Downloads/Brainstorms/Cadre-RS/cadre-prd.md`) before anything touches
+   ApexOS-RS. Review swarm on André's go. EDK integration only after.
+3. **Aditus-RS** *(new sibling; smallest HIGH)* — the MCP/API **airlock**:
+   index + launchpad for external MCP servers, HTTP APIs, and skill powers
+   without evolving them into the binary. Charter session first: curation +
+   key-isolation (the imaginarium pattern) + on-demand tool loading so
+   external catalogs don't flood every context.
+4. **Workflow/canvas builder** *(in-repo; flagship-sized)* — n8n-style
+   canvas over the REAL registry: tools + procedures + skills as blocks,
+   exported as skill files (USB-portable) and cerebro procedures; two-way
+   (APEX draws suggestions — the sketchpad precedent); foreign-workflow
+   transpiler later. Charter session first (block model, skill-file format,
+   mapping onto task_fanout/goals).
+5. **ApexHub** *(new repo + Railway; staged)* — public demo + skill/
+   procedure hub + puerperium model/trace hub (Agora precedent). Stage A:
+   read-only hub. Stage B: **C2C** (colony-to-colony over the internet) —
+   its own security charter, AFTER ApexNET's identity roadmap (X25519/Noise)
+   exists; the LAN token model does not cross the internet.
+6. **DocSmith / Artifex-RS** *(sibling suite; parked, respected)* — three
+   interlocking PRDs (engine/live/mesh, one-writer, byte-fidelity;
+   `~/Downloads/Brainstorms/DocSmith/`, v0.2/v0.2/v0.1 dated 2026-08-05).
+   Waves already sequenced in its overview. Grab after the above clears;
+   its mesh stewardship pairs naturally with whatever C2C becomes.
+
+---
+
 ## 🔧 install — low-RAM build guard needs a bigger swapfile (field, 2026-07-31)
 
 ✅ **DONE `#326` (2026-08-03)** — apex2's 07-31 OOM-with-guard-active had TWO
@@ -178,7 +222,7 @@ apex2's next UI-touching `apexos-update`.
 | 5 | ✅ **DONE** — **USB drive → portable exo-workspace** (8 PRs, #196–#203) — the whole feature: Explorer file verbs (mkdir/rename/delete/move/copy), the `eject_media` agent tool + embodiment "stick mounted" hint, the **privilege-separated eject** (NoNewPrivileges blocks sudo → agentd drops a request file → root `.path`→`.service` drain → poll `/proc/mounts`), the proactive **plug notification**, **"Use this drive"** (relabel + device-picker UI + format/wipe; `usb-prep`'s USB-transport/never-system-disk gate is the security boundary), and the **phone-handoff PWA file browser** (browse/upload/download, reaches a mounted `media/` stick). `docs/usb-workspace.md`; real-USB hotplug is the field-test. | ✅ | Storage & workspaces |
 | 6 | ✅ **DONE** — **Audio/write EROFS** — the apexos-tools audio write tools (`audio_trim_silence`/`normalize`/`peak_limit`/`trim`/`clean`, + `audio_analyze`'s read) now route `path`/`output_path` through `confine()`: a relative path roots in the (per-agent) workspace, an out-of-workspace target returns a clear "outside workspace" error instead of an opaque ffmpeg EROFS under the read-only sandbox. Detail in Bugs/Correctness. | ✅ | Bugs/Correctness |
 | 7 | ⏸ **PARKED (no hardware)** — **install.sh on Pi 4 (2GB) + x86 mini-PC** — André's Pi 4 board is fried; the **Radxa Rock 3C** becomes the low-power / non-Pi validation node once it's off SD storage. x86 micro/standard is already exercised via apex-3. Revisit when the Radxa is provisioned. | ⏸ parked | Infra/Deploy |
-| 8 | ⏸ **PARKED (colony deliberation 2026-07-01: niche)** — **Hotspot mode (OS-level, UI/Settings toggle)** — a routerless node (LAN-in only) serves ApexOS over its OWN WiFi AP with a captive portal (login/auth) for phones, laptops, and mesh nodes. On/off from the UI. | ⏸ parked | Infra/Deploy |
+| 8 | ⏸ **PARKED → absorbed by ApexNET** — **Hotspot mode (OS-level, UI/Settings toggle)** — a routerless node serves ApexOS over its OWN WiFi AP. Parked as niche by the 07-01 colony deliberation; now folds into ApexNET's Tier-1 story (`docs/apexnet.md`) rather than standing alone. | ⏸ absorbed | Infra/Deploy |
 | 9 | ✅ **DONE** — **Token query-param → header-only** — the apex-sensor-bridge client now sends `SENSOR_BRIDGE_TOKEN` in the `Authorization: Bearer` header (tungstenite `ClientRequestBuilder`), never the `ws://…?token=` URL, so it can't leak into proxy/access logs; agentd's `/sensor-bridge` accepts the header (+ keeps `?token=` as rolling-update back-compat). **cerebro-api's `?token=` is left by design** — it's the browser-dashboard auth (`http://addr/?token=…`, which a browser can't header-auth) on a loopback-default bind. Detail in Security. | ✅ | Security |
 | 10 | **Occipital → living knowledge hub** — grow the web cortex beyond fetch/recall into an LLM-curated knowledge base: dedup + summarize + tag ingested pages, surface/relate them, sqlite-vec ANN index for scale. A real reading + knowledge layer for the colony. | med | Features → Occipital |
 
@@ -383,7 +427,7 @@ workspace media is under-served on desktop nodes.
 
 - ◑ **Largely confirmed — keyed-Pi "mom/noob" install test** — the core is **field-validated**: apex-2 (blank fresh-OS Pi 5) and apex-3 (x86 laptop) both **one-shot installed straight to ApexOS** on the first attempt (André, 2026-06-22/23), and the installer now also discovers + live-verifies the API key (#187). Remaining (optional, low): a deliberate wiped-Pi run that exercises the **first-boot persona wizard** end-to-end as a true non-technical user would. **[was high → low residual]**
 - ⏸ **PARKED (no hardware) — Test install.sh on Pi 4 (2GB) and x86 mini-PC** — validate hardware-tier detection + per-tier dependency sets for micro/standard. André's Pi 4 board is **fried**; the **Radxa Rock 3C** (DietPi) becomes the low-power / non-Pi validation node **once it's off SD storage** (needs faster storage first). x86 micro/standard is exercised live via apex-3. Revisit when the Radxa is provisioned. **[parked — was medium]**
-- **Hotspot mode (OS-level, UI/Settings toggle)** *(Top 10 #8, André's note #2/#4)* — an **OS-level** capability with an **on/off button in the UI/Settings**: a node with only an uplink LAN cable and no WiFi router flips itself into a **WiFi AP** that serves ApexOS + the UI to phones, laptops, **and mesh nodes** — fronted by a **captive portal** that lands clients on the login/auth screen (the 3e session-token flow, ties into Top-10 #2). **Touchpoints:** `hostapd` + `dnsmasq` (install.sh seeds the units; the toggle starts/stops them) with captive-portal DNS/redirect; detect "no router / uplink on eth → serve on wlan"; `AGENTD_BIND=0.0.0.0`; mDNS advertisement over the AP interface (the mesh discovery half already exists); a gateway `POST /api/hotspot {on}` + a Settings control to drive it. Leans on the **token gate (F036)** + the captive-portal login to stay safe on the open bind — mostly a *consumer* of auth that's already built. Needs the no-router hardware scenario to test. **[medium — own networking effort + a small UI/API surface]**
+- ⏸ **ABSORBED into ApexNET — Hotspot mode (OS-level, UI/Settings toggle)** *(Top 10 #8)* — the WiFi-AP-no-router capability is now Tier 1 of the ApexNET charter (`docs/apexnet.md`): a node flipping itself into the AP that carries the colony's high-bandwidth tier when no router exists. The captive-portal/login sketch here (hostapd+dnsmasq, `AGENTD_BIND=0.0.0.0`, token gate, mDNS over the AP interface) remains the implementation notes for that tier's human-facing half. No standalone slice. **[folded]**
 - **Update/release roadmap — remaining tiers** — Cerebro intention (0.85). Tier 1 (`apexos-update`) done; richer update/release mechanism open. **[medium, partially-done]**
 - ✅ **DONE — Shared Event types (`apexos-protocol` crate)** — slice 1: wire types extracted from `apexos-core` into a lean serde-only `apexos-protocol` crate (core re-exports it; agentd untouched). Slice 2: `ui-slint` now deserializes WS frames into the typed `Event` (`from_value::<Event>` → typed `match`) and logs undecodable frames instead of silently dropping them — the old `["field"].as_str()` string-matching at `main.rs:3461` is gone. Contract round-trip tests in the protocol crate lock the shapes. Outbound frontend-intent frames stay hand-built (they omit `session`; gateway injects it). **[done]**
 - ✅ **DONE — `apexos.conf` advertised but never scanned** — added `apexos.conf` to `KEYFILE_NAMES` (install.sh:88), so the documented provisioning filename is now actually matched by both scan loops. **[was low]**

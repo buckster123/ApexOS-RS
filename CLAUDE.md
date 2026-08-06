@@ -235,6 +235,7 @@ Load only the relevant doc when entering a subsystem.
 | `docs/imagine-studio.md` | Studio arc charter — video player, craft engine, slice ledger |
 | `docs/imagine-craft-skill.md` | The agent cutting room — APEX drives the timeline API (A7) |
 | `docs/self-update.md` | Daemon self-update loop (mk3) — design + invariants |
+| `docs/apexnet.md` | **ApexNET charter (v3)** — radio substrate (BLE/LoRa/brainstem) + Tier-4 courier lane; tiers, wire crate, tool gating, phases |
 | `docs/colony-mesh.md` | Mesh expansion — spine/edge, relay → capabilities → spawn |
 | `docs/colony-federation.md` | Cross-cerebro federation — share/query/consolidate charter |
 | `docs/pac.md` | PAC authoring dialect — glyph-lean souls/procedures (+ bench) |
