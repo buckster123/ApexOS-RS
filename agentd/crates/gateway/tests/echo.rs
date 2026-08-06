@@ -266,3 +266,61 @@ async fn pairing_claim_wrong_code_rejected() {
         .send().await.unwrap();
     assert_eq!(resp.status(), 403);
 }
+
+/// Receive the next session_init frame and return its session_id.
+async fn recv_session_init(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> u64 {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match ws.next().await.unwrap().unwrap() {
+                Message::Text(json) => {
+                    let val: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
+                    if val["type"].as_str() == Some("session_init") {
+                        break val["session_id"].as_u64().unwrap();
+                    }
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for session_init")
+}
+
+#[tokio::test]
+async fn idle_sessions_register_at_mint_and_empty_resume_switches() {
+    let (bus_actor, handle, bcast) = Bus::new(SystemState::default());
+    tokio::spawn(bus_actor.run());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let state = make_state(handle, bcast);
+    let histories = state.histories.clone();
+    tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+
+    // Connect and stay silent — the minted session must register with 0 messages.
+    let (mut ws, _) = connect_async(format!("ws://{}/ws", addr)).await.unwrap();
+    assert_eq!(recv_session_init(&mut ws).await, 1);
+    let mut registered = false;
+    for _ in 0..40 {
+        if histories.lock().await.contains_key(&SessionId(1)) { registered = true; break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(registered, "connected-but-silent session 1 not in histories");
+    assert_eq!(histories.lock().await.get(&SessionId(1)).unwrap().len(), 0);
+
+    // "+ New chat" mints session 2 — registered at mint too.
+    ws.send(Message::Text(r#"{"type":"hello","new":true}"#.into())).await.unwrap();
+    assert_eq!(recv_session_init(&mut ws).await, 2);
+    let mut registered = false;
+    for _ in 0..40 {
+        if histories.lock().await.contains_key(&SessionId(2)) { registered = true; break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(registered, "hello{{new}} session 2 not in histories");
+
+    // Resuming the never-prompted session 1 must actually switch (pre-fix it
+    // silently kept the current session because the empty id wasn't in the map).
+    ws.send(Message::Text(r#"{"type":"hello","resume_session":1}"#.into())).await.unwrap();
+    assert_eq!(recv_session_init(&mut ws).await, 1, "empty-session resume did not switch");
+}

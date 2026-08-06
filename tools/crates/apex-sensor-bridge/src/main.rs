@@ -214,6 +214,11 @@ fn run(url: &str, token: &str, node_id: &str, interval: Duration, sensorhead: Op
             }
             Ok((mut ws, _)) => {
                 eprintln!("[apex-sensor-bridge] connected");
+                // Short read timeout so the per-iteration inbound drain below can
+                // poll without stalling the send cadence.
+                if let tungstenite::stream::MaybeTlsStream::Plain(s) = ws.get_ref() {
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(50)));
+                }
                 'inner: loop {
                     // ── CPU temperature (sysfs — always) ─────────────────────
                     if let Some(celsius) = read_cpu_temp() {
@@ -238,6 +243,28 @@ fn run(url: &str, token: &str, node_id: &str, interval: Duration, sensorhead: Op
                     if let Err(e) = ws.send(Message::Ping(vec![].into())) {
                         eprintln!("[apex-sensor-bridge] ping error: {e} — reconnecting");
                         break 'inner;
+                    }
+
+                    // ── Drain inbound ────────────────────────────────────────
+                    // The client is otherwise write-only: server pings would never
+                    // be ponged and a server Close (or a half-open socket) sat
+                    // unnoticed until the next send failed — up to a full interval
+                    // late. Drain until the 50ms read timeout says empty.
+                    loop {
+                        match ws.read() {
+                            Ok(Message::Close(_)) => {
+                                eprintln!("[apex-sensor-bridge] server closed — reconnecting");
+                                break 'inner;
+                            }
+                            Ok(_) => continue, // pong replies / pings (auto-ponged by tungstenite)
+                            Err(tungstenite::Error::Io(ref e))
+                                if e.kind() == std::io::ErrorKind::WouldBlock
+                                    || e.kind() == std::io::ErrorKind::TimedOut => break,
+                            Err(e) => {
+                                eprintln!("[apex-sensor-bridge] read error: {e} — reconnecting");
+                                break 'inner;
+                            }
+                        }
                     }
 
                     std::thread::sleep(interval);
