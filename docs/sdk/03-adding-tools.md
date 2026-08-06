@@ -450,7 +450,7 @@ any candidate path would `Ask`.
 
 ### Existing tools (the full `list()` / `call()` registry)
 
-The 50 tools `apexos-tools` exposes today (verify against `list()` / `call()` in
+The 51 tools `apexos-tools` exposes today (verify against `list()` / `call()` in
 `tools.rs`):
 
 `run_command`, `read_file`, `write_file`, `list_dir`, `create_dir`, `delete_path`,
@@ -461,7 +461,7 @@ The 50 tools `apexos-tools` exposes today (verify against `list()` / `call()` in
 `audio_normalize`, `audio_peak_limit`, `audio_trim`, `audio_clean`, `gpio_info`,
 `gpio_read`, `gpio_write`, `gpio_pulse`, `gpio_pwm`, `gpio_servo`, `display_face`,
 `git_status`, `git_diff`, `git_log`, `git_branch`, `git_init`, `git_commit`, `git_push`,
-`git_checkout`, `git_reset`, `git_merge`, `eject_media`. Names are global across all
+`git_checkout`, `git_reset`, `git_merge`, `git_worktree`, `eject_media`. Names are global across all
 plugins — don't collide with these or with `cerebro-mcp`'s tools (`TOOL_NAMES`, 67
 entries, all functional).
 

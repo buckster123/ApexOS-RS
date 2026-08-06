@@ -408,26 +408,28 @@ turn engine feeds `content` back to the LLM.
 ## Policy / safety
 
 Your plugin's tools are **subject to the same approval policy as every other tool** —
-the supervisor checks policy before it ever calls you (`supervisor.rs:161-178`).
+the supervisor checks policy before it ever calls you (`supervisor.rs:384-403`).
 
 - **Approval gate.** Before dispatch, `PolicyEngine.check(tool_name, path)`
-  (`policy.rs:88`) returns `Allow` or `Ask`. On `Ask`, the supervisor emits
+  (`policy.rs:106`) returns `Allow` or `Ask`. On `Ask`, the supervisor emits
   `ApprovalPending`, holds your call, and only dispatches after a matching
-  `UserApproval { granted: true }` arrives (`supervisor.rs:168-201`). On deny it
+  `UserApproval { granted: true }` arrives (`supervisor.rs:420-441`). On deny it
   short-circuits to a `ToolResult { ok: false, content: "denied by user" }` and
   never calls you.
 - **How rules match your tool.** Rules in `config/policy.toml` key on the tool name,
-  matched exact-first then `prefix.*` wildcard (`policy.rs:141-147`). To auto-allow a
+  matched exact-first then `prefix.*` wildcard (`policy.rs:114-124`). To auto-allow a
   read-only tool, add a rule like `weather_now = "allow"`. `Yolo` mode short-circuits
-  to Allow for everything (`policy.rs:89`); the default `suggest` mode asks for any
+  to Allow for everything (`policy.rs:107`); the default `suggest` mode asks for any
   tool not explicitly allowed. **A tool with no rule defaults to Ask** in `suggest`
   mode — so a brand-new write-capable tool is gated until someone approves it or a
   rule is added. That is the safe default; do not weaken it without intent.
-- **The `path` argument is policy-visible.** `check` reads `call.args["path"]`
-  (`supervisor.rs:162`) and `Rule::Workspace` confines path-bearing tools to the
-  workspace. If your tool touches the filesystem, name the argument `path` so the
-  workspace rule can see it. *Caveat:* there is **no workspace rooting on reads** in
-  the stock policy — "allowed" is not "sandboxed."
+- **Path arguments are policy-visible.** The supervisor feeds every path-typed arg
+  key (`path`/`output_path`/`dest`/`destination`/`target`/`to`,
+  `supervisor.rs:389`) to `check`, most-restrictive wins, and `Rule::Workspace`
+  confines path-bearing tools to the workspace. If your tool touches the
+  filesystem, use one of those keys so the workspace rule can see it. *Caveat:*
+  there is **no workspace rooting on reads** in the stock policy — "allowed" is
+  not "sandboxed."
 - **The real confinement is the systemd sandbox, not the tool layer.** Your plugin is
   a child of `agentd`, which runs as the unprivileged `agentd` user under
   `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, and a

@@ -13,10 +13,12 @@
 > daemon and every client. Read this before adding any `Event` variant or writing
 > a new frontend (browser, PWA, alternate UI).
 
-This guide was ground-truthed against the source **as of a June 2026 snapshot**.
-Where it contradicts CLAUDE.md / `docs/gotchas.md` / `docs/agentd-protocol.md`
-(all maintained continuously), **those win and this guide is stale**, pending an
-SDK refresh.
+This guide was ground-truthed against the source **as of a June 2026 snapshot**;
+the Reference tables' line anchors and event inventory were re-checked
+**2026-08-06** (post-Fabrica — the worker-tier events shipped since the prose was
+written). Where it contradicts CLAUDE.md / `docs/gotchas.md` /
+`docs/agentd-protocol.md` (all maintained continuously), **those win and this
+guide is stale**, pending an SDK refresh.
 
 ---
 
@@ -25,7 +27,7 @@ SDK refresh.
 ### One enum is the protocol
 
 There is no separate `Intent` type. **`Event`** (the `Event` enum in
-`apexos-protocol/src/lib.rs:235` — `agentd/crates/core/src/types.rs` was folded
+`apexos-protocol/src/lib.rs:306` — `agentd/crates/core/src/types.rs` was folded
 into the extracted `apexos-protocol` crate, which `apexos-core` re-exports so
 `apexos_core::Event` still resolves) is a single tagged enum that carries *both*
 directions:
@@ -35,10 +37,10 @@ directions:
   `Intent` type.
 - **Outbound (daemon → frontend)** — everything else: `AgentText`, `ToolRequested`,
   `ToolResult`, `ApprovalPending`, `TurnComplete`, `SensorReading`, council/mesh/
-  vast/evolution/goal variants (`SensorAlert`, `MeshNodeStatus`, `MeshMessage`,
-  `MeshMemoryShared`, `GoalStateChanged`, … have shipped since this guide's
-  snapshot — the enum in `apexos-protocol/src/lib.rs:235` is the authoritative
-  inventory), etc.
+  vast/evolution/goal/worker variants (`SensorAlert`, `MeshNodeStatus`,
+  `MeshMessage`, `MeshMemoryShared`, `GoalStateChanged`, `TaskBatchDone`,
+  `WorkerStateChanged`, … have shipped since this guide's snapshot — the enum in
+  `apexos-protocol/src/lib.rs:306` is the authoritative inventory), etc.
 
 Serde config: `#[serde(tag = "type", rename_all = "snake_case")]`
 (the container attribute on `enum Event`). So every frame on the wire is a JSON object with a `"type"`
@@ -50,8 +52,9 @@ discriminant in **snake_case** and the variant's fields flattened alongside it:
 
 ### ID newtypes serialize as bare numbers
 
-`SessionId(pub u64)`, `ActionId(pub u64)`, `EvolutionId(pub u64)`
-(the ID newtypes in `apexos-protocol/src/lib.rs`; they also derive `Ord` for the
+`SessionId(pub u64)`, `ActionId(pub u64)`, `EvolutionId(pub u64)` — likewise the
+later `GoalId`/`WorkerId` — (the ID newtypes in `apexos-protocol/src/lib.rs`;
+they also derive `Ord` for the
 `no_std` consumer) are `#[derive(Serialize, Deserialize)]` tuple structs. Serde
 serializes a single-field tuple struct **transparently** — as the inner number,
 **not** as `{"0": 42}` and **not** as a string. So on the wire:
@@ -462,38 +465,43 @@ protocol tables in the same commit.
 | `sensor_reading` | `node_id: string`, `reading: SensorReading`, `timestamp: u64` | from `/sensor-bridge` |
 | `wake_triggered` | — | flash wake indicator |
 | `agent_message` / `agent_message_ack` | A2A routing | router re-injects as `user_prompt` |
-| `council_*` | see `apexos-protocol/src/lib.rs:305–312` | multi-agent deliberation stream |
+| `council_*` | see `apexos-protocol/src/lib.rs:376–383` | multi-agent deliberation stream |
 | `error` | `session: u64?`, `message` | `session` is optional |
-| `vast_*` | instance/tunnel lifecycle | `apexos-protocol/src/lib.rs:318–329` |
-| `peer_seen` / `peer_registered` / `peer_lost` | mesh discovery | `apexos-protocol/src/lib.rs:347–351` |
-| `evolution_proposed` / `evolution_applied` / `evolution_rolled_back` | self-modification audit | `apexos-protocol/src/lib.rs:363–376` |
+| `vast_*` | instance/tunnel lifecycle | `apexos-protocol/src/lib.rs:389–400` |
+| `peer_seen` / `peer_registered` / `peer_lost` | mesh discovery | `apexos-protocol/src/lib.rs:418–422` |
+| `evolution_proposed` / `evolution_applied` / `evolution_rolled_back` | self-modification audit | `apexos-protocol/src/lib.rs:434–451` |
 
 > `turn_started` is **not** emitted by the Rust daemon. Do not depend on it.
 
 > This table is a mid-2026 selection. Variants shipped since — `sensor_alert`,
 > `mesh_node_status`, `mesh_message`, `mesh_memory_shared`, `goal_state_changed`,
-> among others — are not listed; the full enum at `apexos-protocol/src/lib.rs:235`
-> is the authoritative inventory.
+> and the worker tier's `task_batch_done` / `worker_state_changed` (Fabrica),
+> among others — are not listed; the full enum at `apexos-protocol/src/lib.rs:306`
+> is the authoritative inventory, and the manifest catalog
+> ([extension-manifest.md](extension-manifest.md)) carries every variant's fields.
 
 ### Nested struct shapes (`apexos-protocol/src/lib.rs`)
 
 | Struct | JSON | Source |
 |--------|------|--------|
-| `ToolCall` | `{ "id": <num>, "tool": <str>, "args": {…}, "needs_approval": <bool> }` | `:406` |
-| `ToolOutput` | `{ "ok": <bool>, "content": <any> }` | `:415` |
-| `ToolSpec` | `{ "name", "description", "input_schema": {…} }` | `:421` |
-| `ContentBlock` | tagged `type`: `text`/`thinking`(`+signature`)/`tool_use`/`tool_result` | `:464` |
-| `SensorReading` | tagged `kind`: `temperature`/`humidity`/`pressure`/`motion`/`distance`/`gpio_level`/`air_quality`/`thermal_frame` | `:192` |
-| `EvolutionProposal` | tagged `kind`: `register_mcp_server`/`unregister_mcp_server`/`update_policy_rule`/`update_system_prompt`/`hot_reload_subsystem`/`request_hardware` | `:141` |
+| `ToolCall` | `{ "id": <num>, "tool": <str>, "args": {…}, "needs_approval": <bool> }` | `:523` |
+| `ToolOutput` | `{ "ok": <bool>, "content": <any> }` | `:532` |
+| `ToolSpec` | `{ "name", "description", "input_schema": {…} }` | `:538` |
+| `ContentBlock` | tagged `type`: `text`/`thinking`(`+signature`)/`tool_use`/`tool_result` | `:581` |
+| `SensorReading` | tagged `kind`: `temperature`/`humidity`/`pressure`/`motion`/`distance`/`gpio_level`/`air_quality`/`thermal_frame` | `:263` |
+| `EvolutionProposal` | tagged `kind`: `register_mcp_server`/`unregister_mcp_server`/`update_policy_rule`/`update_system_prompt`/`hot_reload_subsystem`/`request_hardware` | `:212` |
+| `BatchWorkerRow` | `{ "worker": <num>, "state": <WorkerState>, "evidence": <str>, "timed_out": <bool>?, "node": <str>? }` — rides `task_batch_done.rows` | `:120` |
 
 ### Enums
 
 | Type | Wire values | Source |
 |------|-------------|--------|
-| `PolicyMode` (global) | `suggest` \| `auto-edit` \| `yolo` (kebab-case) | `:82` |
-| `PolicyRule` (per-tool) | `allow` \| `ask` \| `workspace` (kebab-case) | `:98` |
-| `Subsystem` | `plugins` \| `policy` \| `agent` \| `gateway` (snake_case) | `:130` |
-| `Message` role | `user` \| `assistant` (tagged `role`) | `:457` |
+| `PolicyMode` (global) | `suggest` \| `auto-edit` \| `yolo` (kebab-case) | `:153` |
+| `PolicyRule` (per-tool) | `allow` \| `ask` \| `workspace` (kebab-case) | `:169` |
+| `Subsystem` | `plugins` \| `policy` \| `agent` \| `gateway` (snake_case) | `:201` |
+| `Message` role | `user` \| `assistant` (tagged `role`) | `:574` |
+| `GoalState` | `planning` \| `acting` \| `blocked` \| `reflecting` \| `done` \| `failed` \| `cancelled` (snake_case) | `:87` |
+| `WorkerState` | `queued` \| `running` \| `idle` \| `parked` \| `blocked` \| `done` \| `failed` \| `cancelled` (snake_case) | `:105` |
 
 ### Bus / state facts
 
@@ -516,7 +524,7 @@ The CLAUDE.md and (older) protocol tables contain stale claims. Trust the source
 | client sends `{type:"session_init"}` on connect | server **pushes** `session_init` first; client sends nothing to start (the connect handler in `gateway/src/lib.rs`) |
 | resume via `{type:"session_init", session_id}` | resume via `{type:"hello", resume_session:<id>}` (the `hello` handling in `gateway/src/lib.rs`) |
 | `turn_started` clears buffer / sets busy | Rust daemon **never emits** `turn_started`; busy is driven by `agent_text` |
-| `tool_result` has `call: <id>` | correct — `call` is a **bare number** here, *unlike* `tool_requested` where `call` is a full `ToolCall` object (`apexos-protocol/src/lib.rs:248` vs `:244`) |
+| `tool_result` has `call: <id>` | correct — `call` is a **bare number** here, *unlike* `tool_requested` where `call` is a full `ToolCall` object (`apexos-protocol/src/lib.rs:319` vs `:315`) |
 
 ### The four-layer checklist for a new variant
 

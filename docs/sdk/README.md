@@ -14,7 +14,10 @@ Read guide 01 first if you touch anything that crosses the daemon↔client
 boundary.
 
 > The guides were ground-truthed against the source with `file:line` anchors —
-> **as of a June 2026 snapshot** (last SDK refresh 2026-06-20). CLAUDE.md and
+> as of June–July 2026 snapshots; the tool/event catalog
+> ([extension-manifest.md](extension-manifest.md)) was last re-swept
+> **2026-08-06**, after the Fabrica worker/mandala tool family
+> (`task_fanout`/`worker_*`/`mandala_*`) landed. CLAUDE.md and
 > `docs/gotchas.md` (where the gotcha ledger now lives) are maintained
 > continuously; where a guide contradicts them, **CLAUDE.md/gotchas win and the
 > guide is stale**, pending an SDK refresh.

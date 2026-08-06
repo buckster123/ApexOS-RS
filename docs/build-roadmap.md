@@ -1,29 +1,28 @@
 # ApexOS-RS — Build Roadmap
 
-10 steps — **all shipped ✅** (live on the Pi 5 KMS/DRM kiosk; per-step gates in
-this file — CLAUDE.md now carries only the summary and indexes the same sequence
-0–9, so its "step 7" is this file's step 8). Each was independently testable: steps 1-9 develop
-and test on any Linux desktop with `SLINT_BACKEND=winit`; step 10 deploys to Pi
-with KMS/DRM.
+10 steps, numbered 0–9 — **all shipped ✅** (live on the Pi 5 KMS/DRM kiosk; per-step
+gates in this file — CLAUDE.md carries only the summary of the same sequence). Each was
+independently testable: steps 0-8 develop and test on any Linux desktop with
+`SLINT_BACKEND=winit`; step 9 deploys to Pi with KMS/DRM.
 
 ---
 
 | # | Step | Output | Est. effort |
 |---|------|--------|-------------|
-| 1 | **WS skeleton** | Connects to agentd, prints events as Slint label | 1 session |
-| 2 | **Agent chat** | Streaming text view, dark theme, send input | 1 session |
-| 3 | **Tool call blocks** | Collapsible tool call / result cards | 1 session |
-| 4 | **Home dashboard** | CPU/RAM/disk bars, IAQ badge (polls `/api/run`) | 1 session |
-| 5 | **Sensor window** | IAQ stats + thermal heatmap (custom Slint painter) | 1-2 sessions |
-| 6 | **Session management** | Session init with ID, session picker (past sessions) | 1 session |
-| 7 | **Voice controls** | Mic button → `/api/record/start`, speaker toggle → `/api/speak` | 1 session |
-| 8 | **Settings** | Soul.md editor (TextEdit), policy mode, plugin list | 1 session |
-| 9 | **Power + model/policy** | Power modal (reboot/shutdown), model/policy ComboBox | 1 session |
-| 10 | **KMS/DRM deploy** | `SLINT_BACKEND=linuxkms` on Pi, systemd service, remove cage | 1 session |
+| 0 | **WS skeleton** | Connects to agentd, prints events as Slint label | 1 session |
+| 1 | **Agent chat** | Streaming text view, dark theme, send input | 1 session |
+| 2 | **Tool call blocks** | Collapsible tool call / result cards | 1 session |
+| 3 | **Home dashboard** | CPU/RAM/disk bars, IAQ badge (polls `/api/run`) | 1 session |
+| 4 | **Sensor window** | IAQ stats + thermal heatmap (custom Slint painter) | 1-2 sessions |
+| 5 | **Session management** | Session init with ID, session picker (past sessions) | 1 session |
+| 6 | **Voice controls** | Mic button → `/api/record/start`, speaker toggle → `/api/speak` | 1 session |
+| 7 | **Settings** | Soul.md editor (TextEdit), policy mode, plugin list | 1 session |
+| 8 | **Power + model/policy** | Power modal (reboot/shutdown), model/policy ComboBox | 1 session |
+| 9 | **KMS/DRM deploy** | `SLINT_BACKEND=linuxkms` on Pi, systemd service, remove cage | 1 session |
 
 **Total: ~10-12 sessions** to a fully functional native distro — *done; all 10 gates passed.*
 
-Step 7 as-built drifted from the plan: voice I/O went **client-side** — the mic button
+Step 6 as-built drifted from the plan: voice I/O went **client-side** — the mic button
 records via a local `arecord` and POSTs the WAV to `/api/transcribe` (replacing the
 server-side `/api/record/*`; wake-word listening stays server-side), and replies play
 locally from `/api/tts` WAV bytes, falling back to `/api/speak`. See `docs/voice.md`.
@@ -49,7 +48,7 @@ locally from `/api/tts` WAV bytes, falling back to `/api/speak`. See `docs/voice
 
 ---
 
-## Step 1 in detail: WS skeleton — ✅ DONE
+## Step 0 in detail: WS skeleton — ✅ DONE
 
 Goal: binary compiles, connects to `ws://localhost:8787/ws`, session_init handshake,
 inbound events logged to a Slint status label.
@@ -60,7 +59,7 @@ Files to create/edit:
 
 Test: `AGENTD_WS=ws://apexos.local:8787/ws cargo run` → window appears, status shows session ID.
 
-## Step 2 in detail: Agent chat — ✅ DONE
+## Step 1 in detail: Agent chat — ✅ DONE
 
 Goal: agent text streams into a ScrollView; user can type a message and send it.
 
@@ -76,7 +75,7 @@ As-built note: the Rust agentd never emits `turn_started` (Python agentd does) �
 lazily creates the agent bubble + sets busy on the first `agent_text` delta and keeps the
 `turn_started` handler only for cross-compat.
 
-## Step 5 in detail: Thermal heatmap — ✅ DONE (#105)
+## Step 4 in detail: Thermal heatmap — ✅ DONE (#105)
 
 Shipped, with one design correction: the `sensor_reading`/`thermal_frame` WS events
 deliberately carry only min/max/mean (kept small), so the full 32×24 grid rides an
@@ -86,7 +85,7 @@ SensorHead dashboard's `/api/thermal/data` (768 floats), ui-slint polls it (adap
 Rgba8Pixel>` → `slint::Image::from_rgba8`, and renders it (`image-rendering: pixelated`)
 in the SensorView. Live on apex1's MLX90640.
 
-## Step 10 in detail: KMS/DRM deploy — ✅ DONE
+## Step 9 in detail: KMS/DRM deploy — ✅ DONE
 
 ```bash
 sudo usermod -aG render,video,input agentd
