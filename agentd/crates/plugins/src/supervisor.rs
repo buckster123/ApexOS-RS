@@ -1168,6 +1168,35 @@ impl Supervisor {
             return;
         }
 
+        // Virtual tool: courier_queue — queue a workspace file for the Tier-4
+        // courier lane (ApexNET P2). The artifact waits in the outbox for the
+        // next APEX-* stick; if one is already mounted it's loaded (and its
+        // manifest gossiped) immediately. Source confined like mesh_file_send.
+        if call.tool == "courier_queue" {
+            let node    = call.args["node"].as_str().map(str::to_owned);
+            let path    = call.args["path"].as_str().unwrap_or("").to_owned();
+            let call_id = call.id;
+            let bus     = self.bus.clone();
+            let agent_id = apexos_core::resolve_agent_id(&self.session_bindings, session);
+            tokio::spawn(async move {
+                let output = courier_queue(node.as_deref(), &agent_id, &path).await;
+                bus.emit(Event::ToolResult { session, call: call_id, output }).await;
+            });
+            return;
+        }
+
+        // Virtual tool: courier_status — the outbox, announced inbound cargo,
+        // receipts heard, PSK availability, mounted sticks.
+        if call.tool == "courier_status" {
+            let call_id = call.id;
+            let bus     = self.bus.clone();
+            tokio::spawn(async move {
+                let output = courier_status().await;
+                bus.emit(Event::ToolResult { session, call: call_id, output }).await;
+            });
+            return;
+        }
+
         // Virtual tool: mesh_memory_send — share one of the caller's own memories
         // with a peer's Cerebro (colony-federation Slice 1). Reads the memory
         // scope-checked from the caller's OWN space (get_memory with the caller's
@@ -2347,7 +2376,7 @@ fn is_valid_host(s: &str) -> bool {
 
 /// Look up a peer's ws_url by node_id in peers.toml. Async because it reads a file.
 /// Look up a peer in peers.toml, returning its ws_url and (optional) a2a token.
-async fn find_peer(node_id: &str) -> Option<(String, Option<String>)> {
+pub(crate) async fn find_peer(node_id: &str) -> Option<(String, Option<String>)> {
     #[derive(serde::Deserialize)]
     struct PeersFile { #[serde(default)] peer: Vec<PeerEntry> }
     #[derive(serde::Deserialize)]
@@ -2434,6 +2463,82 @@ async fn mesh_file_send(node: Option<&str>, agent_id: &str, path: &str, dest: Op
         }
         Err(e) => err(format!("mesh_file_send: {e}")),
     }
+}
+
+/// `courier_queue(node, path)`: put one workspace file on the Tier-4 courier
+/// lane (ApexNET P2 — `docs/apexnet.md` §7). Confined source (the caller's
+/// system-stamped workspace), content-addressed into `<log_dir>/outbox.jsonl`;
+/// if an exo-workspace stick is already mounted, the outbox drains onto it
+/// immediately and the manifest gossip goes out over Tier 1.
+async fn courier_queue(node: Option<&str>, agent_id: &str, path: &str) -> ToolOutput {
+    let err = |m: String| ToolOutput { ok: false, content: serde_json::json!(m) };
+    let node = match node {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return err("courier_queue: missing 'node' (the destination node_id)".into()),
+    };
+    if path.is_empty() {
+        return err("courier_queue: missing 'path'".into());
+    }
+    let abs = match confine_mesh_source(agent_id, path) {
+        Ok(p)  => p,
+        Err(e) => return err(format!("courier_queue: {e}")),
+    };
+    let name = abs.file_name().and_then(|f| f.to_str()).unwrap_or("file").to_string();
+    // An unregistered destination still queues (a courier can reach nodes the
+    // LAN can't) — but say so: no gossip will announce it.
+    let registered = crate::supervisor::find_peer(&node).await.is_some();
+
+    let log_dir = crate::courier::log_dir_env();
+    let (abs_c, node_c, name_c) = (abs.clone(), node.clone(), name.clone());
+    let queued = tokio::task::spawn_blocking(move || {
+        crate::courier::queue_artifact(&log_dir, &abs_c, &node_c, &name_c)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("join: {e}")));
+    let entry = match queued {
+        Ok(e)  => e,
+        Err(e) => return err(format!("courier_queue: {e}")),
+    };
+
+    // A stick already in the port? Drain aboard now (first mounted, sorted).
+    let mut status = "queued — waiting for the next exo-workspace stick".to_string();
+    if let Some(label) = crate::courier::mounted_sticks().first().cloned() {
+        let lbl = label.clone();
+        let outcome = tokio::task::spawn_blocking(move || crate::courier::process_plug_env(&lbl)).await;
+        if let Ok(outcome) = outcome {
+            if outcome.report.loaded.iter().any(|(n, _)| n == &entry.name) {
+                status = format!("loaded onto {label} — carry it to {node} when ready");
+            }
+            let node_id = apexos_core::node_id();
+            let fails = crate::courier::dispatch_gossip(&node_id, outcome.gossip).await;
+            for f in fails {
+                eprintln!("[courier] gossip: {f}");
+            }
+        }
+    }
+    ToolOutput {
+        ok: true,
+        content: serde_json::json!({
+            "queued": true, "id": entry.id, "name": entry.name, "dest": entry.dest,
+            "bytes": entry.len, "root": entry.root, "status": status,
+            "announce": if registered { "gossip to dest over mesh when loaded" }
+                        else { "dest is not a registered peer — the stick ledger is the only signal" },
+        }),
+    }
+}
+
+/// `courier_status()`: outbox + heard ledger + PSK presence + mounted sticks.
+async fn courier_status() -> ToolOutput {
+    let log_dir = crate::courier::log_dir_env();
+    let psk_present = crate::courier::load_psk_env().is_some();
+    let node_id = apexos_core::node_id();
+    let mut v = tokio::task::spawn_blocking(move || {
+        crate::courier::status_json(&log_dir, psk_present, &node_id)
+    })
+    .await
+    .unwrap_or_else(|e| serde_json::json!({ "error": format!("join: {e}") }));
+    v["mounted_sticks"] = serde_json::json!(crate::courier::mounted_sticks());
+    ToolOutput { ok: true, content: v }
 }
 
 /// Cap on a federated memory's content (chars). A memory is distilled knowledge,

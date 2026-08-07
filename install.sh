@@ -1797,6 +1797,21 @@ if ! grep -q "^AGENTD_TOKEN=" "$ENV_FILE" 2>/dev/null; then
   ok "AGENTD_TOKEN generated (bearer auth enabled)"
 fi
 
+# ApexNET colony PSK (Tier-4 courier + future radio tiers, docs/apexnet.md §8) —
+# minted once per COLONY, never overwritten. This node mints one if absent; to
+# join an existing colony, copy the first node's /etc/agentd/apexnet.psk here
+# (Tier 1/USB distribution only — never over radio). Courier crypto is disabled
+# honestly until the file exists and matches the colony's.
+APEXNET_PSK="/etc/agentd/apexnet.psk"
+if [[ ! -f "$APEXNET_PSK" ]]; then
+  _psk=$(openssl rand -hex 32 2>/dev/null || true)
+  [[ -n "$_psk" ]] || _psk=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  printf '%s\n' "$_psk" > "$APEXNET_PSK"
+  chown agentd:agentd "$APEXNET_PSK" 2>/dev/null || true
+  chmod 0600 "$APEXNET_PSK"
+  ok "ApexNET colony PSK minted ($APEXNET_PSK — copy it to other nodes to share a colony)"
+fi
+
 # AGENTD_BIND — default the gateway to the LAN (0.0.0.0) so mesh peers can reach
 # this node. A mesh listener on loopback is never useful for multi-node operation
 # (it silently breaks inbound a2a / pairing — the peer connects out but nothing

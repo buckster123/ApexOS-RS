@@ -28,6 +28,14 @@ Android-friendly (the future phone-handoff leg). Prepare a stick with
 `apexos-workspace-init <mountpoint> [name]` (writes the marker + layout, and prints
 the relabel command, since relabelling needs the unmounted device).
 
+**Marker schema v2** (ApexNET Tier-4, `docs/apexnet.md` §7): new markers carry a
+`stick_id` — 8 random bytes hex, minted once at prep — plus `minted_by`/`minted_at`.
+The **label** stays the *mount* convention (labels are neither unique nor
+collision-safe); the **stick_id** is the *ledger* identity that courier manifests
+and receipts key on. v1 sticks upgrade in place on their next plug (agentd mints
+the id and bumps the marker — no re-prep), so every stick in circulation becomes
+courier-capable the first time it lands anywhere.
+
 ## Marker-gated own-mount (the claim)
 
 Only `APEX-*` sticks are claimed — every other USB is left to the desktop's file
@@ -198,12 +206,32 @@ untrusted FS image; deeper untrusted-filesystem hardening is a post-mk1 item.
   `read_file`/`write_file` under it, ⏏ unmounts cleanly; a *normal* USB still goes to
   GNOME (untouched). This is the one hardware-gated leg.
 
+## The courier lane (ApexNET Tier 4 — sticks as a transport)
+
+A stick is also a **mesh link** now (`docs/apexnet.md` §7, shipped as ApexNET P2):
+the agent queues a workspace file with **`courier_queue {node, path}`**; it waits in
+`<log_dir>/outbox.jsonl` until a stick is plugged (or loads immediately onto a
+mounted one) as content-addressed cargo under `apexos-courier/` — a **PSK-sealed
+manifest** (`manifest.json`, AAD-bound to the stick_id so it can't be replayed onto
+another stick), **`cargo/<blake3-root>`** files, and an append-only sealed
+**`receipts.json`**. On load, a `CourierManifest` gossip (Tier-1 POST
+`/api/courier/manifest` today; the ~56 B radio payload in P6) tells the destination
+its cargo is en route. On plug at the destination: blake3 verify → ingest to
+`workspace/courier/incoming/<origin>/` → receipt on the stick AND gossiped home
+(`/api/courier/receipt`) — the origin's outbox marks delivered at network speed, or
+when the stick walks home, whichever comes first. **Tamper fails closed and loud**:
+mismatched cargo is refused with an `accepted:false` receipt; a tampered manifest
+fails authentication wholesale. No PSK (`APEXNET_PSK_FILE`) → courier crypto is
+honestly disabled, the stick stays a plain exo-workspace. **`courier_status`** shows
+outbox / en-route / receipts. Nothing on a stick auto-executes — cargo is data.
+
 ## Status — the loop is closed
 
 The USB exo-workspace is feature-complete: the Explorer **file verbs**, the **`eject_media`**
 agent tool, the embodiment **"stick mounted" hint**, the **privilege-separated eject**, the
-**plug notification**, **"Use this drive"** (relabel + format, which subsumed the old
-"`apexos-workspace-init` as an Explorer action" idea), and the **phone-handoff PWA file
-browser** (browse / upload / download — `docs/web-ui.md`, so a phone reaches a mounted
-stick's files). Remaining work is field validation on real sticks (the one hardware-gated
-leg, like the Pi-only items) — not new features.
+**plug notification** (now courier-enriched), **"Use this drive"** (relabel + format, which
+subsumed the old "`apexos-workspace-init` as an Explorer action" idea), the **phone-handoff
+PWA file browser** (browse / upload / download — `docs/web-ui.md`, so a phone reaches a
+mounted stick's files), and the **Tier-4 courier lane** above. Remaining work is field
+validation on real sticks (the one hardware-gated leg, like the Pi-only items) — not new
+features.

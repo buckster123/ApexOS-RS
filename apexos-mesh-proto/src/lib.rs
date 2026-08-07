@@ -58,7 +58,7 @@ pub mod frame;
 pub mod types;
 
 pub use chunk::{blob_root, chunk_blob, ChunkSet, Reassembler, DEFAULT_CHUNK_SIZE};
-pub use crypto::{open, seal, Psk, ReplayWindow};
+pub use crypto::{open, open_blob, seal, seal_blob, Psk, ReplayWindow};
 pub use frame::{decode_frame, encode_frame, Deframer, DeframerStats};
 pub use types::{
     CourierManifest, CourierReceipt, Digest, MeshClass, MeshFrame, Payload, PlainPacket,

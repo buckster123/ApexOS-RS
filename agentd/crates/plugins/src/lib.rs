@@ -1,4 +1,5 @@
 pub mod config;
+pub mod courier;
 pub mod mcp;
 pub mod policy;
 pub mod supervisor;

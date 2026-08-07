@@ -2487,6 +2487,8 @@ async fn gather_tools(
     tools.push(worker::mandala_status_spec());
     tools.push(worker::mandala_close_spec());
     tools.push(send_to_agent_spec());
+    tools.push(courier_queue_spec());
+    tools.push(courier_status_spec());
     tools.push(mesh_file_send_spec());
     tools.push(mesh_memory_send_spec());
     tools.push(mesh_procedure_send_spec());
@@ -3397,6 +3399,43 @@ fn send_to_agent_spec() -> ToolSpec {
             },
             "required": ["message"]
         }),
+    }
+}
+
+fn courier_queue_spec() -> ToolSpec {
+    ToolSpec {
+        name:        "courier_queue".into(),
+        description: "Queue a workspace file for the Tier-4 courier lane: it waits in \
+                      the outbox until an APEX-* exo-workspace stick is plugged (or loads \
+                      immediately if one is mounted), rides the stick as blake3-verified, \
+                      PSK-sealed cargo, and a delivery receipt comes back the same way. \
+                      Use it for artifacts too big for the mesh, or for nodes the network \
+                      can't reach — a human carries the stick. 256 MiB cap.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "node": {
+                    "type":        "string",
+                    "description": "Destination node_id (e.g. \"apex2\"). May be a node the \
+                                    LAN can't reach — that's the point of a courier."
+                },
+                "path": {
+                    "type":        "string",
+                    "description": "Workspace-relative path of the file to send."
+                }
+            },
+            "required": ["node", "path"]
+        }),
+    }
+}
+
+fn courier_status_spec() -> ToolSpec {
+    ToolSpec {
+        name:        "courier_status".into(),
+        description: "Courier-lane state: outbox (waiting / on a stick / delivered), \
+                      inbound cargo announced by mesh gossip, receipts heard, whether \
+                      the colony PSK is present, and which sticks are mounted.".into(),
+        input_schema: serde_json::json!({ "type": "object", "properties": {} }),
     }
 }
 
