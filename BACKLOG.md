@@ -193,7 +193,15 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    decision — lands when the bridge inbound gives it a second transport
    (with/after P4). Also: P0 DoD met on André's bare ESP32-S3s (mesh-proto
    compiles for Xtensa; heartbeat firmware flashed) — BLE Tier 2 testable
-   pre-Pi-Hut. Next: P4 brainstem MVP · P1's 24 h fuzz (running).
+   pre-Pi-Hut. **P4a (brainstem on the wire) SHIPPED 2026-08-07** —
+   `firmware/brainstem` (workspace-excluded, embassy, USB-Serial-JTAG,
+   heartbeat + ack tasks, one-TX-owner channel) links the SAME
+   `apexos-mesh-proto`; real silicon replaced the simulator on the real
+   bridge (1 Hz, crc_fail 0), and a **hardware golden vector** now pins the
+   firmware↔bridge contract in CI. **P4 residual**: node-id provisioning +
+   flash-persisted counters, flash store-and-forward, and the charter's
+   two-boards-with-Pis-off DoD (needs the BLE tier). Next: P4b BLE gossip
+   (two bare S3s, no LoRa needed) · P5b router · P1's 24 h fuzz (running).
 2. **Cadre review** *(sibling `Cadre-RS`; gated)* — review the Grok 4.5
    12-hour build against the clean-room PRD
    (`~/Downloads/Brainstorms/Cadre-RS/cadre-prd.md`) before anything touches

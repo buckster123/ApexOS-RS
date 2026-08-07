@@ -237,6 +237,67 @@ async fn oversize_tx_frame_is_dropped_loudly_not_wedging() {
     assert_eq!(recv_n(&mut inbound, 1).await[0].ctr, 3);
 }
 
+// ── The hardware golden vector (ApexNET P4a) ────────────────────────────────
+
+/// A REAL heartbeat, captured off an ESP32-S3 running `firmware/brainstem`
+/// (2026-08-07, board d0:cf:13:26:69:ec) straight from `/dev/ttyACM1` — one
+/// COBS-delimited frame, exactly as the silicon emitted it.
+///
+/// This is the firmware↔bridge contract pinned to bytes that actually
+/// crossed a wire: it runs in CI forever with no hardware, and it fails the
+/// day either side's codec drifts. If the wire version bumps, RE-CAPTURE
+/// from hardware — never hand-edit this vector.
+const HW_HEARTBEAT_FRAME: &str = "0b0101e9071f09ffff030101021e0603c522a975";
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+        .collect()
+}
+
+#[tokio::test]
+async fn hardware_captured_heartbeat_decodes_end_to_end() {
+    use apexos_mesh_proto::{MeshClass, Payload, PlainPacket};
+
+    let (mut peer, _tx, mut inbound, stats, _h) = link_over_duplex();
+    let mut wire = unhex(HW_HEARTBEAT_FRAME);
+    wire.push(0x00); // the delimiter the capture split on
+    peer.write_all(&wire).await.unwrap();
+
+    let frames = recv_n(&mut inbound, 1).await;
+    let frame = &frames[0];
+    // The header the silicon stamped.
+    assert_eq!(frame.ver, apexos_mesh_proto::WIRE_VERSION);
+    assert_eq!(frame.class, MeshClass::Gossip);
+    assert_eq!(frame.sender, 1001, "brainstem NODE_ID");
+    assert!(frame.ctr >= 1, "counters mint from 1");
+
+    // The payload interior (unsealed on the USB link by design — the bridge
+    // itself stays PSK-free and never looks; the test may).
+    let (packet, rest) =
+        postcard::take_from_bytes::<PlainPacket>(&frame.ct).expect("firmware packet decodes");
+    assert!(rest.is_empty(), "exact-fit — no trailing bytes");
+    assert_eq!(packet.target, apexos_mesh_proto::BROADCAST);
+    assert_eq!(packet.hop_limit, 1);
+    match packet.payload {
+        Payload::Heartbeat {
+            uptime_s,
+            cortex_up,
+            conn,
+        } => {
+            // Captured with no cortex writing to the board, and the firmware
+            // reports Isolated (3) until a radio tier says otherwise.
+            assert!(!cortex_up, "no cortex was writing during the capture");
+            assert_eq!(conn, 3, "brainstem reports Isolated pre-radio");
+            assert!(uptime_s < 86_400, "sane uptime, got {uptime_s}");
+        }
+        other => panic!("expected a Heartbeat from the brainstem, got {other:?}"),
+    }
+    assert_eq!(stats.rx_frames.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.crc_fail.load(Ordering::Relaxed), 0);
+}
+
 // ── The real serial path: a PTY pair, the same tty machinery as socat ───────
 
 #[cfg(unix)]
