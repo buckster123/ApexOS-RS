@@ -1,0 +1,54 @@
+# ApexNET connectivity gating (docs/apexnet.md §6.3) — which tools stay
+# EXPOSED at which ConnectivityState. Honesty is mechanical: a tool the
+# current state can't serve is absent from the model's tool list, not
+# present-and-broken. Unlisted tools are ALWAYS available.
+#
+# Values name the WORST state a tool remains available at:
+#   "full"      only while WAN + LAN are normal
+#   "degraded"  survives WAN loss (mesh/LAN still up)
+#   "minimal"   survives down to radio-only (post-P4/P6 tiers)
+# (Below its floor the tool disappears; the supervisor also refuses a raced
+# call honestly. Additively synced like policy.toml — nodes keep local edits,
+# new repo rules append.)
+#
+# Deliberately UNLISTED, with reasons:
+#   courier_* — the courier lane exists precisely for the worst states.
+#   agent_spawn / task_fanout — they have LOCAL arms; hiding the whole tool
+#     would take local spawning away exactly when it matters (the node-
+#     targeted arms get arg-level handling with the P5 router).
+#   web_recall/save/forget/related/distill — occipital's LOCAL store, works
+#     offline; only the live-network web tools are WAN-bound.
+
+[tools]
+# ── WAN-dependent: gone the moment the internet is ─────────────────────────
+"http_fetch"                = "full"
+"bootstrap_node"            = "full"
+"apply_daemon_update"       = "full"
+"vast_launch"               = "full"
+"vast_status"               = "full"
+"vast_destroy"              = "full"
+"imaginarium_image_generate" = "full"
+"imaginarium_image_edit"    = "full"
+"imaginarium_video_generate" = "full"
+"imaginarium_video_edit"    = "full"
+"imaginarium_video_extend"  = "full"
+"imaginarium_craft_video"   = "full"
+"imaginarium_estimate"      = "full"
+"imaginarium_models"        = "full"
+"imaginarium_job_status"    = "full"
+"imaginarium_job_wait"      = "full"
+"imaginarium_jobs_list"     = "full"
+"web_fetch"                 = "full"
+"web_search"                = "full"
+"web_dom"                   = "full"
+"web_click"                 = "full"
+"web_submit"                = "full"
+
+# ── Mesh/LAN-dependent: survive WAN loss, die when the LAN does ────────────
+"send_to_agent"        = "degraded"
+"mesh_file_send"       = "degraded"
+"mesh_memory_send"     = "degraded"
+"mesh_procedure_send"  = "degraded"
+"mesh_recall"          = "degraded"
+"mesh_capabilities"    = "degraded"
+"list_mesh_peers"      = "degraded"

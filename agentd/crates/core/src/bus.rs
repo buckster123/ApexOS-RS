@@ -1,10 +1,10 @@
-use tokio::sync::{broadcast, mpsc};
 use crate::{Event, SystemState};
+use tokio::sync::{broadcast, mpsc};
 
 pub struct Bus {
-    inbox:    mpsc::Receiver<Event>,
+    inbox: mpsc::Receiver<Event>,
     outbound: broadcast::Sender<Event>,
-    state:    SystemState,
+    state: SystemState,
 }
 
 /// Cheap-to-clone handle other tasks use to send events to the bus.
@@ -22,10 +22,14 @@ impl BusHandle {
 impl Bus {
     /// Returns (Bus, handle-to-emit, broadcast-sender-to-subscribe).
     pub fn new(state: SystemState) -> (Self, BusHandle, broadcast::Sender<Event>) {
-        let (tx, inbox)       = mpsc::channel(1024);
-        let (outbound, _)     = broadcast::channel(1024);
-        let handle            = BusHandle { tx };
-        let bus               = Self { inbox, outbound: outbound.clone(), state };
+        let (tx, inbox) = mpsc::channel(1024);
+        let (outbound, _) = broadcast::channel(1024);
+        let handle = BusHandle { tx };
+        let bus = Self {
+            inbox,
+            outbound: outbound.clone(),
+            state,
+        };
         (bus, handle, outbound)
     }
 

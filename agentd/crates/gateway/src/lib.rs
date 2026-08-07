@@ -438,6 +438,11 @@ pub fn router(state: GatewayState) -> Router {
         // UNgated: the minimal profile list (id/name/has_pin) the login screen needs
         // before the client holds any token. PINs/agents stay behind /api/identities.
         .route("/api/auth/profiles", get(auth_profiles_handler))
+        // UNgated: the lean liveness ping (ApexNET §6.2/D8) — ~40 B of node_id +
+        // uptime, nothing mDNS discovery doesn't already broadcast on this LAN. The
+        // beacon probes THIS instead of pulling a multi-KB /api/capabilities body it
+        // discards; future radio-side probes won't hold tokens at all.
+        .route("/api/ping", get(ping_handler))
         .fallback(static_handler)
         .with_state(state)
 }
@@ -3850,6 +3855,18 @@ async fn mesh_file_handler(
         Ok(_)  => Json(serde_json::json!({ "ok": true, "path": dest, "bytes": body.len() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("write: {e}") })),
     }
+}
+
+/// GET /api/ping — the lean liveness probe (ApexNET §6.2). ~40 bytes; the
+/// answer IS the signal. Replaces the beacon's old habit of pulling the
+/// multi-KB /api/capabilities body every 30 s per peer and discarding it.
+async fn ping_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let uptime_s = std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split_whitespace().next().and_then(|f| f.parse::<f64>().ok()))
+        .map(|f| f as u64)
+        .unwrap_or(0);
+    Json(serde_json::json!({ "node_id": *state.node_id, "uptime_s": uptime_s }))
 }
 
 /// Shared kill switch for the courier's proactive session-0 notices (charter

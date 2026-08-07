@@ -1634,7 +1634,9 @@ policy_dedupe() {
 }
 
 sync_policy_rules() {
-  local shipped="$1" live="$2"
+  # $3 = the TOML section rules live in (default "rules"; connectivity.toml
+  # uses "tools" — same additive discipline, different table).
+  local shipped="$1" live="$2" section="${3:-rules}"
   [[ -f "$shipped" && -f "$live" ]] || return 0
 
   # 0) HEAL duplicate keys first. The pre-2026-07-20 sync greped only for the
@@ -1684,11 +1686,11 @@ sync_policy_rules() {
   local cand; cand=$(mktemp)
   cat "$live" > "$cand"
   local rules_ln next_ln=""
-  rules_ln=$(grep -n '^\[rules\]' "$cand" | head -1 | cut -d: -f1 || true)
+  rules_ln=$(grep -n "^\[${section}\]" "$cand" | head -1 | cut -d: -f1 || true)
   if [[ -n "$rules_ln" ]]; then
     next_ln=$(awk -v s="$rules_ln" 'NR>s && /^\[/{print NR; exit}' "$cand")
   else
-    printf '\n[rules]' >> "$cand"
+    printf '\n[%s]' "$section" >> "$cand"
   fi
   if [[ -n "$next_ln" ]]; then
     local tmp; tmp=$(mktemp)
@@ -1717,6 +1719,14 @@ if [[ ! -f /etc/agentd/policy.toml ]]; then
   install -m 644 "$REPO_DIR/config/policy.toml" /etc/agentd/policy.toml
 else
   sync_policy_rules "$REPO_DIR/config/policy.toml" /etc/agentd/policy.toml
+fi
+
+# connectivity.toml (ApexNET §6.3 tool gating) — same additive discipline as
+# policy: seed once, then sync new repo rules while a node's local edits win.
+if [[ ! -f /etc/agentd/connectivity.toml ]]; then
+  install -m 644 "$REPO_DIR/config/connectivity.toml" /etc/agentd/connectivity.toml
+else
+  sync_policy_rules "$REPO_DIR/config/connectivity.toml" /etc/agentd/connectivity.toml tools
 fi
 
 # soul.md — APEX's identity / system prompt (created from the default if missing).

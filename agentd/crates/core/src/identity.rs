@@ -37,20 +37,22 @@ pub fn node_agent_id() -> String {
 /// message to that peer's own session and surface its provenance).
 pub fn node_id() -> String {
     static NODE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    NODE_ID.get_or_init(|| {
-        std::env::var("APEX_NODE_ID")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| {
-                std::process::Command::new("hostname")
-                    .output()
-                    .ok()
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "apexos".into())
-            })
-    }).clone()
+    NODE_ID
+        .get_or_init(|| {
+            std::env::var("APEX_NODE_ID")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| {
+                    std::process::Command::new("hostname")
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "apexos".into())
+                })
+        })
+        .clone()
 }
 
 /// The node's workspace base: `$AGENTD_WORKSPACE`, else `/var/lib/agentd/workspace`.
@@ -79,7 +81,9 @@ pub fn workspace_base() -> PathBuf {
 pub fn agent_workspace_root(agent_id: &str) -> PathBuf {
     let base = workspace_base();
     let path_safe = !agent_id.is_empty()
-        && agent_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        && agent_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     if agent_id == node_agent_id() || !path_safe {
         base
     } else {
@@ -98,7 +102,7 @@ pub fn agent_workspace_root(agent_id: &str) -> PathBuf {
 /// PIN that the boot flow gates the profile's agents/memory behind.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct User {
-    pub id:   String,
+    pub id: String,
     pub name: String,
     /// Salted hash of the PIN (hex sha256(salt||pin)); None = open profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,7 +116,9 @@ pub struct User {
 }
 
 impl User {
-    pub fn has_pin(&self) -> bool { self.pin_hash.is_some() }
+    pub fn has_pin(&self) -> bool {
+        self.pin_hash.is_some()
+    }
 
     /// Set (or replace) the PIN with a fresh random salt.
     pub fn set_pin(&mut self, pin: &str) {
@@ -143,9 +149,9 @@ impl User {
 /// agent_id), soul, and default skin, owned by a user.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentRecord {
-    pub id:        String,
-    pub name:      String,
-    pub owner:     String,
+    pub id: String,
+    pub name: String,
+    pub owner: String,
     pub soul_file: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_skin: Option<String>,
@@ -161,7 +167,7 @@ pub struct Identities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_user: Option<String>,
     #[serde(default, rename = "user")]
-    pub users:  Vec<User>,
+    pub users: Vec<User>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentRecord>,
 }
@@ -190,9 +196,15 @@ impl Identities {
         std::fs::write(path, body)
     }
 
-    pub fn user(&self, id: &str) -> Option<&User> { self.users.iter().find(|u| u.id == id) }
-    pub fn user_mut(&mut self, id: &str) -> Option<&mut User> { self.users.iter_mut().find(|u| u.id == id) }
-    pub fn agent(&self, id: &str) -> Option<&AgentRecord> { self.agents.iter().find(|a| a.id == id) }
+    pub fn user(&self, id: &str) -> Option<&User> {
+        self.users.iter().find(|u| u.id == id)
+    }
+    pub fn user_mut(&mut self, id: &str) -> Option<&mut User> {
+        self.users.iter_mut().find(|u| u.id == id)
+    }
+    pub fn agent(&self, id: &str) -> Option<&AgentRecord> {
+        self.agents.iter().find(|a| a.id == id)
+    }
     pub fn agents_for<'a>(&'a self, owner: &str) -> Vec<&'a AgentRecord> {
         self.agents.iter().filter(|a| a.owner == owner).collect()
     }
@@ -212,9 +224,9 @@ impl Identities {
         }
         if self.agent(DEFAULT_AGENT_ID).is_none() {
             self.agents.push(AgentRecord {
-                id:        DEFAULT_AGENT_ID.to_string(),
-                name:      DEFAULT_AGENT_ID.to_string(),
-                owner:     DEFAULT_USER_ID.to_string(),
+                id: DEFAULT_AGENT_ID.to_string(),
+                name: DEFAULT_AGENT_ID.to_string(),
+                owner: DEFAULT_USER_ID.to_string(),
                 soul_file: apex_soul_file.to_string(),
                 default_skin: None,
             });
@@ -305,8 +317,7 @@ pub fn worker_model_for(models: &WorkerModels, session_id: u64) -> Option<String
 /// never root or another session. Co-located with [`SessionBindings`] as the other
 /// process-wide per-session runtime map; a `std::sync::Mutex` (not tokio) so the
 /// synchronous decision path checks it with a tiny lock→contains→drop.
-pub type GoalYoloSessions =
-    std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u64>>>;
+pub type GoalYoloSessions = std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u64>>>;
 
 /// True iff `session` is a goal running with goal-scoped yolo. **Fails closed** — a
 /// poisoned lock returns false, so a lock error can never silently auto-approve.
@@ -332,7 +343,10 @@ mod tests {
         let models: WorkerModels = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
         assert_eq!(worker_model_for(&models, 7), None); // unpinned → node default
         models.lock().unwrap().insert(7, "claude-haiku-4-5".into());
-        assert_eq!(worker_model_for(&models, 7).as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(
+            worker_model_for(&models, 7).as_deref(),
+            Some("claude-haiku-4-5")
+        );
         assert_eq!(worker_model_for(&models, 8), None); // strictly per-session
     }
 
@@ -357,7 +371,11 @@ mod tests {
 
     #[test]
     fn pin_hash_verify_and_salting() {
-        let mut u = User { id: "andre".into(), name: "Andre".into(), ..Default::default() };
+        let mut u = User {
+            id: "andre".into(),
+            name: "Andre".into(),
+            ..Default::default()
+        };
         // Open profile (no PIN) always verifies.
         assert!(!u.has_pin());
         assert!(u.verify_pin("anything"));
@@ -414,14 +432,19 @@ mod tests {
         // APEX / the node identity → the base, unchanged from pre-per-agent.
         assert_eq!(agent_workspace_root("APEX"), Path::new("/srv/ws"));
         // A bound non-default agent → its own subdir.
-        assert_eq!(agent_workspace_root("LUMA"), Path::new("/srv/ws/workspaces/LUMA"));
+        assert_eq!(
+            agent_workspace_root("LUMA"),
+            Path::new("/srv/ws/workspaces/LUMA")
+        );
         // A non-path-safe id (hand-edited registry) can't escape — falls back to base.
         assert_eq!(agent_workspace_root("../etc"), Path::new("/srv/ws"));
         assert_eq!(agent_workspace_root("a/b"), Path::new("/srv/ws"));
         // Empty workspace var → the documented default.
         std::env::remove_var("AGENTD_WORKSPACE");
-        assert_eq!(agent_workspace_root("LUMA"),
-                   Path::new("/var/lib/agentd/workspace/workspaces/LUMA"));
+        assert_eq!(
+            agent_workspace_root("LUMA"),
+            Path::new("/var/lib/agentd/workspace/workspaces/LUMA")
+        );
     }
 
     #[test]

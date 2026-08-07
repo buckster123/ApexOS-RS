@@ -858,6 +858,7 @@ async fn main() -> anyhow::Result<()> {
     // Mesh downtime beacon — active HTTP liveness on peers.toml; a node going dark
     // emits MeshNodeStatus + (default) a root-session alert so silence ≠ "all fine".
     apexos_gateway::spawn_beacon_loop(Arc::clone(&peer_registry), handle.clone(), Arc::clone(&mesh_liveness));
+    spawn_connectivity_watch(Arc::clone(&peer_registry), handle.clone(), Arc::clone(&mesh_liveness));
 
     // Event log
     let health_log_dir = log_dir.clone();
@@ -2461,6 +2462,8 @@ async fn gather_tools(
         .flatten()
         .cloned()
         .collect();
+    // (The connectivity filter is applied at the END of this fn — one place,
+    // every caller inherits it, the embodiment stays consistent by construction.)
     tools.push(agent_spawn_spec());
     tools.push(read_soul_md_spec());
     tools.push(propose_evolution_spec());
@@ -2502,7 +2505,98 @@ async fn gather_tools(
     tools.push(vast_launch_spec());
     tools.push(vast_destroy_spec());
     tools.push(vast_status_spec());
+    // ApexNET §6.3 — mechanical honesty: tools the current ConnectivityState
+    // can't serve are ABSENT, not present-and-broken. One filter here covers
+    // every caller (turns, spawns, capabilities, the embodiment's tool prose).
+    // No rules file / Full state → identity (today's behavior, no regression).
+    let state = apexos_core::connectivity::current();
+    let rules = apexos_core::connectivity::rules();
+    if !rules.is_empty() && state != apexos_core::connectivity::ConnectivityState::Full {
+        tools.retain(|t| apexos_core::connectivity::tool_available(&t.name, state, rules));
+    }
     tools
+}
+
+/// The ApexNET connectivity watcher (§6.2 — P5a): derive the node's
+/// ConnectivityState from a lean WAN probe + the beacon's peer liveness,
+/// LATCHED (a candidate must hold for APEXNET_LATCH_CHECKS consecutive
+/// rounds) so a flapping link can't churn the tool list — and with it the
+/// prompt-cache prefix — every probe. On a real transition: the process
+/// global flips (gather_tools + the ambient line + the supervisor backstop
+/// all read it), and the agent is told plainly (edge notice, session 0,
+/// APEXNET_NOTIFY_AGENT gates). Connectivity truth is an environmental
+/// fact — the agent should never have to infer it from tool failures.
+fn spawn_connectivity_watch(
+    peers: Arc<RwLock<PeerRegistry>>,
+    bus: apexos_core::BusHandle,
+    liveness: apexos_gateway::LivenessMap,
+) {
+    use apexos_core::connectivity::{self, ConnectivityState};
+
+    let check_secs = std::env::var("APEXNET_CHECK_SECS")
+        .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(60).max(15);
+    let threshold = std::env::var("APEXNET_LATCH_CHECKS")
+        .ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(3).max(1);
+    let probe_target = std::env::var("APEXNET_WAN_PROBE")
+        .ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "api.anthropic.com:443".to_string());
+    let notify = std::env::var("APEXNET_NOTIFY_AGENT")
+        .map(|v| { let v = v.to_lowercase(); v != "0" && v != "false" && v != "off" })
+        .unwrap_or(true);
+
+    tokio::spawn(async move {
+        let mut latch = connectivity::Latch::new(ConnectivityState::Full, threshold);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(check_secs)).await;
+
+            // WAN: one TCP connect, 4 s bound. Reachability of the port is the
+            // signal — no request is made, nothing is sent.
+            let wan_ok = matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(4),
+                    tokio::net::TcpStream::connect(&probe_target),
+                ).await,
+                Ok(Ok(_))
+            );
+            // Mesh: the beacon's map is the truth source (one axis, one owner).
+            let (alive, total) = {
+                let reg = peers.read().await;
+                let map = liveness.read().await;
+                let total = reg.peers.len();
+                let alive = reg.peers.iter()
+                    .filter(|p| map.get(&p.node_id).map(|l| !l.dark).unwrap_or(true))
+                    .count();
+                (alive, total)
+            };
+
+            let observed = connectivity::derive_state(wan_ok, alive, total);
+            if let Some((from, to)) = latch.observe(observed) {
+                connectivity::set_current(to);
+                eprintln!(
+                    "[connectivity] {} → {} (wan_ok={wan_ok}, peers {alive}/{total} alive)",
+                    from.as_str(), to.as_str()
+                );
+                if notify {
+                    let text = if to == ConnectivityState::Full {
+                        "🌐 Connectivity restored: **full**. The WAN answers again — the \
+                         complete tool set is back.".to_string()
+                    } else {
+                        format!(
+                            "🌐 Connectivity changed: **{} → {}**. The WAN probe stopped \
+                             answering; {alive}/{total} mesh peers alive. WAN tools are \
+                             hidden until the link returns — that's the environment, not a \
+                             fault of yours. Mesh a2a {}; heavy artifacts can ride the \
+                             courier lane (courier_queue).",
+                            from.as_str(), to.as_str(),
+                            if to == ConnectivityState::Degraded { "still works" }
+                            else { "is down too — the courier lane is the only path out" },
+                        )
+                    };
+                    bus.emit(Event::UserPrompt { session: SessionId(0), text, images: vec![] }).await;
+                }
+            }
+        }
+    });
 }
 
 /// Regenerate the live embodiment block every 30s (after a short delay so plugins
@@ -2515,11 +2609,23 @@ async fn gather_tools(
 /// which is plenty for temporal reasoning (elapsed-since-last-session, day/night,
 /// "is the 03:00 dream due"). Returned as one line the model reads as ambient context.
 fn build_ambient_clock() -> String {
-    format!(
+    let clock = format!(
         "[ambient — this node's live clock] Now: {} UTC · uptime {}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M (%a)"),
         fmt_uptime(read_uptime_secs()),
-    )
+    );
+    // ApexNET §6.4: while connectivity is degraded, the ambient line carries the
+    // state — an environmental fact the agent should never have to infer from
+    // tool failures. Latched (the watcher), so this only changes on real
+    // transitions; at Full it says nothing at all.
+    match apexos_core::connectivity::current() {
+        apexos_core::connectivity::ConnectivityState::Full => clock,
+        state => format!(
+            "{clock}\n[ambient — connectivity] {} — some tools are hidden until the link \
+             returns; heavy sends queue for the courier lane (courier_status shows them).",
+            state.as_str()
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // live-node wiring: each arc is a distinct source

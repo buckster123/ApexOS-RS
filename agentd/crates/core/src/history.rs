@@ -42,15 +42,15 @@ fn msg_tokens(m: &Message) -> usize {
     let body: usize = content
         .iter()
         .map(|b| match b {
-            ContentBlock::Text { text }              => text.len() / 4,
-            ContentBlock::Thinking { thinking, .. }  => thinking.len() / 4,
-            ContentBlock::ToolUse { input, .. }      => input.to_string().len() / 3,
+            ContentBlock::Text { text } => text.len() / 4,
+            ContentBlock::Thinking { thinking, .. } => thinking.len() / 4,
+            ContentBlock::ToolUse { input, .. } => input.to_string().len() / 3,
             ContentBlock::ToolResult { content, .. } => {
                 let s = content.to_string();
                 let backslashes = s.bytes().filter(|&c| c == b'\\').count();
                 (s.len() + 3 * backslashes) / 3
             }
-            ContentBlock::Image { .. }               => 1_600,
+            ContentBlock::Image { .. } => 1_600,
         })
         .sum();
     body + 4 // small per-message/role framing overhead
@@ -169,8 +169,12 @@ fn trim_marker(dropped_total: usize) -> Message {
 
 /// If `m` is a trim marker, its cumulative dropped count.
 fn marker_dropped(m: &Message) -> Option<usize> {
-    let Message::User { content } = m else { return None };
-    let [ContentBlock::Text { text }] = content.as_slice() else { return None };
+    let Message::User { content } = m else {
+        return None;
+    };
+    let [ContentBlock::Text { text }] = content.as_slice() else {
+        return None;
+    };
     let rest = text.strip_prefix(TRIM_MARKER_PREFIX)?;
     rest.split_whitespace().next()?.parse().ok()
 }
@@ -194,7 +198,8 @@ fn content_of(m: &Message) -> &Vec<ContentBlock> {
 /// `tool_use` ids carried by an assistant message (empty for user messages).
 fn tool_use_ids(m: &Message) -> Vec<String> {
     match m {
-        Message::Assistant { content } => content.iter()
+        Message::Assistant { content } => content
+            .iter()
             .filter_map(|b| match b {
                 ContentBlock::ToolUse { id, .. } => Some(id.clone()),
                 _ => None,
@@ -214,8 +219,8 @@ fn answers_any(m: &Message, ids: &[String]) -> bool {
 fn lost_result_block(id: &str) -> ContentBlock {
     ContentBlock::ToolResult {
         tool_use_id: id.to_string(),
-        content:     serde_json::json!(LOST_RESULT_MARKER),
-        is_error:    true,
+        content: serde_json::json!(LOST_RESULT_MARKER),
+        is_error: true,
     }
 }
 
@@ -226,25 +231,29 @@ fn lost_result_block(id: &str) -> ContentBlock {
 /// along after the results, as the API requires. Already-canonical messages are
 /// returned untouched (the no-op guarantee for clean histories).
 fn normalize_pair_answer(mut msg: Message, use_ids: &[String], changed: &mut bool) -> Message {
-    let Message::User { content } = &mut msg else { return msg };
-    let result_ids: Vec<&str> = content.iter()
+    let Message::User { content } = &mut msg else {
+        return msg;
+    };
+    let result_ids: Vec<&str> = content
+        .iter()
         .filter_map(|b| match b {
             ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
             _ => None,
         })
         .collect();
-    let results_first = content.iter()
+    let results_first = content
+        .iter()
         .skip_while(|b| matches!(b, ContentBlock::ToolResult { .. }))
         .all(|b| !matches!(b, ContentBlock::ToolResult { .. }));
     let no_alien = result_ids.iter().all(|i| use_ids.iter().any(|u| u == i));
-    let full     = use_ids.iter().all(|u| result_ids.iter().any(|i| i == u));
+    let full = use_ids.iter().all(|u| result_ids.iter().any(|i| i == u));
     if results_first && no_alien && full {
         return msg;
     }
     *changed = true;
     let mut results: Vec<ContentBlock> = Vec::new();
-    let mut rest:    Vec<ContentBlock> = Vec::new();
-    let mut covered: Vec<String>       = Vec::new();
+    let mut rest: Vec<ContentBlock> = Vec::new();
+    let mut covered: Vec<String> = Vec::new();
     for b in content.drain(..) {
         match &b {
             ContentBlock::ToolResult { tool_use_id, .. } => {
@@ -301,11 +310,16 @@ pub fn repair_history(history: &mut Vec<Message>) -> bool {
             // was consumed by a pairing below or never made the file. Keep the
             // message's other content (it may be real user text).
             if let Message::User { content } = &msg {
-                if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })) {
+                if content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                {
                     changed = true;
-                    let kept: Vec<ContentBlock> = content.iter()
+                    let kept: Vec<ContentBlock> = content
+                        .iter()
                         .filter(|b| !matches!(b, ContentBlock::ToolResult { .. }))
-                        .cloned().collect();
+                        .cloned()
+                        .collect();
                     if !kept.is_empty() {
                         out.push(Message::User { content: kept });
                     }
@@ -333,7 +347,9 @@ pub fn repair_history(history: &mut Vec<Message>) -> bool {
             None => {
                 // No result anywhere in the file — synthesize the honest loss.
                 changed = true;
-                out.push(Message::User { content: use_ids.iter().map(|i| lost_result_block(i)).collect() });
+                out.push(Message::User {
+                    content: use_ids.iter().map(|i| lost_result_block(i)).collect(),
+                });
             }
         }
     }
@@ -342,12 +358,16 @@ pub fn repair_history(history: &mut Vec<Message>) -> bool {
     // head (assistant-first) gets an honest opening marker.
     if matches!(out.first(), Some(Message::Assistant { .. })) {
         changed = true;
-        out.insert(0, Message::User {
-            content: vec![ContentBlock::Text {
-                text: "⊘ (session opening lost — the file head was truncated; \
-                       earlier context is on disk replay only)".into(),
-            }],
-        });
+        out.insert(
+            0,
+            Message::User {
+                content: vec![ContentBlock::Text {
+                    text: "⊘ (session opening lost — the file head was truncated; \
+                       earlier context is on disk replay only)"
+                        .into(),
+                }],
+            },
+        );
     }
 
     *history = out;
@@ -360,14 +380,22 @@ mod tests {
     use serde_json::json;
 
     fn user(text: &str) -> Message {
-        Message::User { content: vec![ContentBlock::Text { text: text.into() }] }
+        Message::User {
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
     }
     fn asst(text: &str) -> Message {
-        Message::Assistant { content: vec![ContentBlock::Text { text: text.into() }] }
+        Message::Assistant {
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
     }
     fn tool_call() -> Message {
         Message::Assistant {
-            content: vec![ContentBlock::ToolUse { id: "t1".into(), name: "x".into(), input: json!({}) }],
+            content: vec![ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "x".into(),
+                input: json!({}),
+            }],
         }
     }
     fn tool_res() -> Message {
@@ -381,8 +409,10 @@ mod tests {
     }
 
     fn has_orphan_tool_result(h: &[Message]) -> bool {
-        h.iter().any(|m| matches!(m, Message::User { content }
-            if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))))
+        h.iter().any(|m| {
+            matches!(m, Message::User { content }
+            if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })))
+        })
     }
 
     #[test]
@@ -400,7 +430,10 @@ mod tests {
             }],
         };
         // Stringified-JSON-in-JSON: every quote doubles into \" on the wire.
-        let escaped_inner = serde_json::to_string(&json!({"k": "v".repeat(200), "ts": "2026-07-26T00:00:00.000000000Z"})).unwrap();
+        let escaped_inner = serde_json::to_string(
+            &json!({"k": "v".repeat(200), "ts": "2026-07-26T00:00:00.000000000Z"}),
+        )
+        .unwrap();
         let escaped = Message::User {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "t1".into(),
@@ -408,9 +441,13 @@ mod tests {
                 is_error: false,
             }],
         };
-        assert!(msg_tokens(&clean_json) > msg_tokens(&prose),
-            "JSON must estimate denser than prose of equal length");
-        let esc_len = serde_json::to_string(&json!([{ "text": escaped_inner }])).unwrap().len();
+        assert!(
+            msg_tokens(&clean_json) > msg_tokens(&prose),
+            "JSON must estimate denser than prose of equal length"
+        );
+        let esc_len = serde_json::to_string(&json!([{ "text": escaped_inner }]))
+            .unwrap()
+            .len();
         let esc_est = msg_tokens(&escaped);
         assert!(esc_est > esc_len / 3,
             "escape-dense result must estimate above plain chars/3 (got {esc_est} for {esc_len} chars)");
@@ -499,7 +536,11 @@ mod tests {
         let len_before = h.len();
         trim_history(&mut h, 1000);
         assert_eq!(h.len(), len_before, "no re-trim inside the hysteresis band");
-        assert_eq!(marker_dropped(&h[0]), Some(dropped_first), "marker untouched inside the band");
+        assert_eq!(
+            marker_dropped(&h[0]),
+            Some(dropped_first),
+            "marker untouched inside the band"
+        );
 
         // Growing past the trigger trims again (the marker count advances).
         for _ in 0..3 {
@@ -507,7 +548,10 @@ mod tests {
             h.push(asst(&"a".repeat(400)));
         }
         trim_history(&mut h, 1000); // ~1532 > 1200 → band crossed
-        assert!(marker_dropped(&h[0]).unwrap() > dropped_first, "band crossing trims again");
+        assert!(
+            marker_dropped(&h[0]).unwrap() > dropped_first,
+            "band crossing trims again"
+        );
         assert!(!has_orphan_tool_result(&h));
     }
 
@@ -539,7 +583,12 @@ mod tests {
 
     #[test]
     fn keeps_last_turn_even_if_over_budget() {
-        let mut h = vec![user("first"), asst("x"), user(&"huge".repeat(10_000)), asst("y")];
+        let mut h = vec![
+            user("first"),
+            asst("x"),
+            user(&"huge".repeat(10_000)),
+            asst("y"),
+        ];
         trim_history(&mut h, 100);
         // Can't shrink below the last turn; keeps it, still starting at a user turn.
         assert!(is_turn_start(&h[0]));
@@ -552,8 +601,14 @@ mod tests {
     fn tool_call_id(id: &str) -> Message {
         Message::Assistant {
             content: vec![
-                ContentBlock::Text { text: "on it".into() },
-                ContentBlock::ToolUse { id: id.into(), name: "x".into(), input: json!({}) },
+                ContentBlock::Text {
+                    text: "on it".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: id.into(),
+                    name: "x".into(),
+                    input: json!({}),
+                },
             ],
         }
     }
@@ -578,8 +633,11 @@ mod tests {
             if uses.is_empty() {
                 continue;
             }
-            let Some(Message::User { content }) = h.get(i + 1) else { return false };
-            let answered: Vec<&str> = content.iter()
+            let Some(Message::User { content }) = h.get(i + 1) else {
+                return false;
+            };
+            let answered: Vec<&str> = content
+                .iter()
                 .filter_map(|b| match b {
                     ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
                     _ => None,
@@ -600,14 +658,23 @@ mod tests {
     fn repair_is_a_noop_on_clean_history() {
         // A representative healthy session: plain turns + a proper tool exchange.
         let mut h = vec![
-            user("hi"), asst("hello"),
-            user("do it"), tool_call_id("t1"), tool_res_id("t1"), asst("done"),
+            user("hi"),
+            asst("hello"),
+            user("do it"),
+            tool_call_id("t1"),
+            tool_res_id("t1"),
+            asst("done"),
             // an errored turn once left user,user on disk — benign, accepted live,
             // and must stay untouched
-            user("retry?"), user("still there?"), asst("yes"),
+            user("retry?"),
+            user("still there?"),
+            asst("yes"),
         ];
         let before = dump(&h);
-        assert!(!repair_history(&mut h), "clean history must not report repair");
+        assert!(
+            !repair_history(&mut h),
+            "clean history must not report repair"
+        );
         assert_eq!(dump(&h), before, "clean history must be byte-identical");
     }
 
@@ -618,22 +685,43 @@ mod tests {
         // assistant message — valid in memory that day, a 400 wedge after reload.
         let mut h = vec![
             user("earlier"),
-            tool_call_id("t1"),      // 108: thinking+text+tool_use
-            user("you here fren"),   // 109: the interleaved human prompt
-            tool_res_id("t1"),       // 110: the pair's real result
-            empty_asst(),            // 111: {"role":"assistant","content":[]}
+            tool_call_id("t1"),             // 108: thinking+text+tool_use
+            user("you here fren"),          // 109: the interleaved human prompt
+            tool_res_id("t1"),              // 110: the pair's real result
+            empty_asst(),                   // 111: {"role":"assistant","content":[]}
             asst("Yeah, here. What's up?"), // 112
         ];
         assert!(repair_history(&mut h));
-        assert!(pairing_ok(&h), "tool pairing must be adjacent after repair: {}", dump(&h));
+        assert!(
+            pairing_ok(&h),
+            "tool pairing must be adjacent after repair: {}",
+            dump(&h)
+        );
         // The displaced prompt survives, after the pair, before its answer.
         let json = dump(&h);
-        assert!(json.contains("you here fren"), "interleaved user text must never be dropped");
-        assert!(!json.contains("\"content\":[]"), "empty messages must be gone");
-        let displaced_pos = h.iter().position(|m| dump(std::slice::from_ref(m)).contains("you here fren")).unwrap();
-        let result_pos    = h.iter().position(|m| matches!(m, Message::User { content }
-            if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })))).unwrap();
-        assert!(displaced_pos > result_pos, "displaced prompt follows the tool pair");
+        assert!(
+            json.contains("you here fren"),
+            "interleaved user text must never be dropped"
+        );
+        assert!(
+            !json.contains("\"content\":[]"),
+            "empty messages must be gone"
+        );
+        let displaced_pos = h
+            .iter()
+            .position(|m| dump(std::slice::from_ref(m)).contains("you here fren"))
+            .unwrap();
+        let result_pos = h
+            .iter()
+            .position(|m| {
+                matches!(m, Message::User { content }
+            if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })))
+            })
+            .unwrap();
+        assert!(
+            displaced_pos > result_pos,
+            "displaced prompt follows the tool pair"
+        );
     }
 
     #[test]
@@ -642,7 +730,10 @@ mod tests {
         let mut h = vec![user("go"), tool_call_id("t1"), asst("anyway")];
         assert!(repair_history(&mut h));
         assert!(pairing_ok(&h), "{}", dump(&h));
-        assert!(dump(&h).contains("result lost"), "the synthesized result is an honest marker");
+        assert!(
+            dump(&h).contains("result lost"),
+            "the synthesized result is an honest marker"
+        );
         // is_error so the model treats it as a failure signal, not real output.
         assert!(matches!(&h[2], Message::User { content }
             if matches!(&content[0], ContentBlock::ToolResult { is_error: true, .. })));
@@ -652,10 +743,20 @@ mod tests {
     fn repair_fills_partially_lost_multi_tool_round() {
         // Two tool_uses, only one result survived the write.
         let mut h = vec![
-            Message::Assistant { content: vec![
-                ContentBlock::ToolUse { id: "t1".into(), name: "a".into(), input: json!({}) },
-                ContentBlock::ToolUse { id: "t2".into(), name: "b".into(), input: json!({}) },
-            ]},
+            Message::Assistant {
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "a".into(),
+                        input: json!({}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".into(),
+                        name: "b".into(),
+                        input: json!({}),
+                    },
+                ],
+            },
             tool_res_id("t1"),
             asst("carrying on"),
         ];
@@ -669,10 +770,18 @@ mod tests {
         // A result whose tool_use never made the file (truncated head): the API
         // rejects it, so the block goes; real user text in the message survives.
         let mut h = vec![
-            Message::User { content: vec![
-                ContentBlock::ToolResult { tool_use_id: "ghost".into(), content: json!("x"), is_error: false },
-                ContentBlock::Text { text: "and also".into() },
-            ]},
+            Message::User {
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "ghost".into(),
+                        content: json!("x"),
+                        is_error: false,
+                    },
+                    ContentBlock::Text {
+                        text: "and also".into(),
+                    },
+                ],
+            },
             asst("ok"),
         ];
         assert!(repair_history(&mut h));
@@ -693,8 +802,14 @@ mod tests {
 
     #[test]
     fn repair_drops_empty_messages_everywhere() {
-        let mut h = vec![user("a"), empty_asst(), asst("b"),
-                         Message::User { content: vec![] }, user("c"), asst("d")];
+        let mut h = vec![
+            user("a"),
+            empty_asst(),
+            asst("b"),
+            Message::User { content: vec![] },
+            user("c"),
+            asst("d"),
+        ];
         assert!(repair_history(&mut h));
         assert_eq!(h.len(), 4);
         assert!(!dump(&h).contains("\"content\":[]"));
@@ -708,15 +823,24 @@ mod tests {
     ///   APEXOS_REPAIR_CHECK_FILE=/tmp/35.jsonl cargo test -p apexos-core repair_check_file -- --nocapture
     #[test]
     fn repair_check_file() {
-        let Ok(path) = std::env::var("APEXOS_REPAIR_CHECK_FILE") else { return };
+        let Ok(path) = std::env::var("APEXOS_REPAIR_CHECK_FILE") else {
+            return;
+        };
         let text = std::fs::read_to_string(&path).expect("readable session file");
-        let mut h: Vec<Message> = text.lines()
+        let mut h: Vec<Message> = text
+            .lines()
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect();
         let n = h.len();
         let changed = repair_history(&mut h);
-        println!("{path}: {n} messages → {} after repair (changed: {changed})", h.len());
+        println!(
+            "{path}: {n} messages → {} after repair (changed: {changed})",
+            h.len()
+        );
         assert!(pairing_ok(&h), "file did not heal to valid pairing");
-        assert!(!dump(&h).contains("\"content\":[]"), "empty messages survived");
+        assert!(
+            !dump(&h).contains("\"content\":[]"),
+            "empty messages survived"
+        );
     }
 }
