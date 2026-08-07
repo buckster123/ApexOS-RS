@@ -1027,6 +1027,17 @@ if ! $NO_UI && [[ "$RAM_KB" -gt 0 && "$RAM_KB" -lt 6291456 ]]; then   # < 6 GiB
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
   )
   ensure_build_swap 6291456                        # top up to ~6 GiB DISK-BACKED swap (07-31: 4 GiB-total sizing OOMed apex2)
+else
+  # Mid-RAM guard (08-07: apex1 OOMed at full -j4 with the UI face + agentd +
+  # cerebro resident — total-RAM gating misses a BUSY board). The full-workspace
+  # release build peaks ~10 GB (measured, 07-31 cgroup memory.peak), so gate on
+  # what's actually AVAILABLE at build start. Binary output is untouched (full
+  # opt-level/LTO) — swap just turns an OOM kill into a slower build.
+  AVAIL_KB=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  if ! $NO_UI && [[ "$AVAIL_KB" -gt 0 && "$AVAIL_KB" -lt 10485760 ]]; then   # < 10 GiB available
+    warn "Only $((AVAIL_KB / 1024)) MB RAM available at build start (release build peaks ~10 GB) — topping up build swap"
+    ensure_build_swap 6291456
+  fi
 fi
 
 BUILD_LOG=$(mktemp /tmp/apexos-cargo-build.XXXXXX.log)

@@ -83,6 +83,7 @@ mode = "suggest"
 # workspace source, but the transport is a PSK-sealed, blake3-verified,
 # receipted exo-workspace stick a human carries. courier_status is a read.
 "courier_queue"    = "allow"
+"courier_cancel"   = "allow"
 "courier_status"   = "allow"
 # mesh_memory_send: share ONE of the caller's own memories with a peer's Cerebro
 # (colony federation, docs/colony-federation.md). Same trust basis as mesh a2a —

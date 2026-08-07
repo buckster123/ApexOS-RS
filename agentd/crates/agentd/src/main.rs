@@ -2488,6 +2488,7 @@ async fn gather_tools(
     tools.push(worker::mandala_close_spec());
     tools.push(send_to_agent_spec());
     tools.push(courier_queue_spec());
+    tools.push(courier_cancel_spec());
     tools.push(courier_status_spec());
     tools.push(mesh_file_send_spec());
     tools.push(mesh_memory_send_spec());
@@ -3425,6 +3426,22 @@ fn courier_queue_spec() -> ToolSpec {
                 }
             },
             "required": ["node", "path"]
+        }),
+    }
+}
+
+fn courier_cancel_spec() -> ToolSpec {
+    ToolSpec {
+        name:        "courier_cancel".into(),
+        description: "Withdraw an undelivered artifact from the courier outbox (ids from \
+                      courier_status). A copy already loaded on a stick still travels — \
+                      cancelling only stops future loads.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "integer", "description": "Outbox entry id." }
+            },
+            "required": ["id"]
         }),
     }
 }

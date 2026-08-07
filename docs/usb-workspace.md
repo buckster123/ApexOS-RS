@@ -223,7 +223,12 @@ when the stick walks home, whichever comes first. **Tamper fails closed and loud
 mismatched cargo is refused with an `accepted:false` receipt; a tampered manifest
 fails authentication wholesale. No PSK (`APEXNET_PSK_FILE`) → courier crypto is
 honestly disabled, the stick stays a plain exo-workspace. **`courier_status`** shows
-outbox / en-route / receipts. Nothing on a stick auto-executes — cargo is data.
+outbox / en-route / receipts; **`courier_cancel {id}`** withdraws an undelivered
+entry (a copy already aboard a stick still travels — cancel stops future loads).
+Destinations resolve against the peer registry at queue time (case/abbreviation —
+"apex2" → "ApexOS-2" — so the gossip announce fires; ambiguity errors with
+candidates; a truly-unknown dest still queues, loudly, since a courier can reach
+nodes the LAN can't). Nothing on a stick auto-executes — cargo is data.
 
 ## Status — the loop is closed
 
