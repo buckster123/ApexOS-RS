@@ -43,6 +43,9 @@ ApexOS-RS/
 │   ├── apexos-tools      apexos-tools      (bin) MCP stdio: shell/file/git/http/sysinfo/audio/GPIO
 │   ├── apex-sensor-bridge apex-sensor-bridge (bin) WS client: CPU temp / SensorHead → /sensor-bridge
 │   ├── apexos-mesh-bridge apexos-mesh-bridge (bin) ApexNET UART link daemon + apexos-brainstem-sim (bin)
+│
+├── firmware/brainstem/             # ESP32 brainstem firmware — workspace-EXCLUDED (Xtensa/`esp`
+│                                   # toolchain, own Cargo.lock); see firmware/README.md
 │   ├── apex-tts          apex-tts (bin, EXCLUDED) Kokoro TTS sidecar — own workspace/lock, :8770
 │   └── apex-stt          apex-stt (bin, EXCLUDED) Whisper STT sidecar — own workspace/lock, :8771
 │

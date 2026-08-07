@@ -41,6 +41,7 @@ tools/crates/        # system tool plugins (apexos-tools · apex-sensor-bridge �
                      #   + workspace-EXCLUDED sidecars: apex-tts (Kokoro), apex-stt (Whisper)
 apexos-protocol/     # shared wire types (no_std-capable; external consumer: ApexOS-RV)
 apexos-mesh-proto/   # ApexNET radio/UART wire contract (no_std+alloc; framing, crypto, chunker)
+firmware/brainstem/  # ESP32 brainstem firmware — workspace-EXCLUDED (Xtensa, `esp` toolchain)
 ui-slint/            # Slint native UI (the unique contribution of this repo)
 web/                 # -RS-owned browser/PWA frontend (headless nodes' human surface)
 config/              # default plugins.toml, policy.toml, soul.md, parts inventory

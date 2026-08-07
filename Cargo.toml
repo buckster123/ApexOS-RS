@@ -36,7 +36,9 @@ members = [
 # apex-tts (Kokoro TTS) + apex-stt (Whisper STT) are their OWN workspaces — apex-tts
 # pins a different `ort` rc than cerebro's fastembed (must resolve independently), and
 # both keep heavy ML/C++ builds off the main workspace. Built separately by install.sh.
-exclude = ["tools/crates/apex-tts", "tools/crates/apex-stt"]
+# apex-tts/apex-stt pin their own ort/C++ deps; firmware/ cross-compiles for
+# Xtensa on the `esp` toolchain — all three keep their own Cargo.lock.
+exclude = ["tools/crates/apex-tts", "tools/crates/apex-stt", "firmware/brainstem"]
 resolver = "2"
 
 [workspace.dependencies]
