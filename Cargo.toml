@@ -11,6 +11,8 @@ members = [
     "apexos-protocol",
     # ── ApexNET radio/UART wire contract (no_std+alloc; frame/crypto/chunker) ──
     "apexos-mesh-proto",
+    # ── ApexNET Pi↔brainstem UART bridge + brainstem simulator (P3) ─────────────
+    "tools/crates/apexos-mesh-bridge",
     # ── Path-confinement primitives (FS-sandbox algorithm; std-only) ────────────
     "apexos-confine",
     # ── Agent daemon ──────────────────────────────────────────────────────────

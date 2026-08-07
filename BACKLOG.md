@@ -176,8 +176,14 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    AND **field-proven 2026-08-07** (APEX's notes: andre-laptop → ApexOS-2
    via APEX-test stick, verified + receipted). Field polish shipped same
    day: queue-time dest resolution ("apex2"→"ApexOS-2"), `courier_cancel`,
-   MemAvailable-gated build swap (apex1 OOMed at total-RAM gating). Next:
-   P3 bridge + PTY harness (hardware-free) or await boards for P4.
+   MemAvailable-gated build swap (apex1 OOMed at total-RAM gating).
+   **P3 (bridge + harness) SHIPPED 2026-08-07** — `apexos-mesh-bridge`
+   (link FSM, generic `run_link`, MUST-6 counters, PSK-free) +
+   `apexos-brainstem-sim` (fault-injecting fake brainstem); all §4.3 MUSTs
+   as tests incl. real-PTY garbage end-to-end; live smoke: 200/200 frames
+   through a garbage storm. Not deployed until P4 (needs a brainstem).
+   Next: P4 brainstem MVP (needs boards — en route) · P1's 24 h fuzz
+   (running) · P2 field carry ✓ done.
 2. **Cadre review** *(sibling `Cadre-RS`; gated)* — review the Grok 4.5
    12-hour build against the clean-room PRD
    (`~/Downloads/Brainstorms/Cadre-RS/cadre-prd.md`) before anything touches

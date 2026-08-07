@@ -115,6 +115,9 @@
 | `MESH_SUBNET_GUARD` | `1` | restrict auto-discovered peers to the local /24. `0`/`false` loosens a safety guard |
 | `APEXNET_PSK_FILE` | `/etc/agentd/apexnet.psk` | colony PSK (hex, 32 B) sealing Tier-4 courier manifests/receipts (and the future radio envelope). Minted per-colony by install.sh; copy the SAME file to every node (Tier 1/USB only — never radio). Absent/malformed → courier crypto disabled with honest notices |
 | `APEXNET_NOTIFY_AGENT` | `1` | root-session notes for courier-ledger gossip (cargo announced en route, delivery receipts). `0` silences; the plug-time greeting is governed by `AGENTD_USB_NOTIFY_AGENT` |
+| `MESH_BRIDGE_DEV` | unset (required) | `apexos-mesh-bridge` serial device — the brainstem UART (P4) or a PTY (`apexos-brainstem-sim`/socat bench). Absent → the daemon exits with usage, it never guesses a port |
+| `MESH_BRIDGE_BAUD` | `115200` | UART baud rate |
+| `MESH_BRIDGE_STATS_SECS` | `30` (floor 5) | MUST-6 counter JSON line to stderr every N seconds |
 
 ## Vast.ai GPU bridge
 

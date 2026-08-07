@@ -48,7 +48,7 @@ instead of silently dropping it. (The old hand-matched-JSON era is over.)
 
 ## Crate inventory
 
-Seven binaries come out of `cargo build --release --workspace` (resolver 2, release
+Nine binaries come out of `cargo build --release --workspace` (resolver 2, release
 profile `lto=thin`, `strip`). Library crates are listed alongside the binaries that use
 them. Three shared **root crates** sit above the three directory groups:
 `apexos-protocol` (the serde-only wire contract — the `Event` enum + id newtypes,
