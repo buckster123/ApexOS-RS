@@ -1,0 +1,29 @@
+[package]
+name = "apexos-mesh-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "ApexNET P3 — the Pi↔brainstem UART bridge: link FSM, frame codec (apexos-mesh-proto), fault-hardened deframing, plus the brainstem simulator for hardware-free bench work."
+
+[[bin]]
+name = "apexos-mesh-bridge"
+path = "src/main.rs"
+
+[[bin]]
+name = "apexos-brainstem-sim"
+path = "src/bin/brainstem_sim.rs"
+
+[lib]
+name = "apexos_mesh_bridge"
+path = "src/lib.rs"
+
+[dependencies]
+apexos-mesh-proto = { path = "../../../apexos-mesh-proto" }
+tokio        = { workspace = true }
+# default features only — libudev enumeration is opt-in upstream and the bridge
+# opens devices by path, so no extra system build dep anywhere.
+tokio-serial = "5.5.0"
+serde_json   = { workspace = true }
+rand         = { workspace = true }
+# The simulator emits unsealed postcard(PlainPacket) stand-in payloads — the
+# bridge treats ct as opaque; real crypto is the P4 brainstem's job.
+postcard     = { version = "1.1.3", features = ["alloc"] }

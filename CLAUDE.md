@@ -37,7 +37,7 @@ A **pure-Rust distro** — one Cargo workspace, one `cargo build --release --wor
 ```
 agentd/crates/       # agent daemon (core · gateway · plugins · agent · store · agentd)
 cerebro/crates/      # cognitive memory (cerebro lib · cerebro-mcp · cerebro-api · cerebro-cli)
-tools/crates/        # system tool plugins (apexos-tools · apex-sensor-bridge)
+tools/crates/        # system tool plugins (apexos-tools · apex-sensor-bridge · apexos-mesh-bridge)
                      #   + workspace-EXCLUDED sidecars: apex-tts (Kokoro), apex-stt (Whisper)
 apexos-protocol/     # shared wire types (no_std-capable; external consumer: ApexOS-RV)
 apexos-mesh-proto/   # ApexNET radio/UART wire contract (no_std+alloc; framing, crypto, chunker)
