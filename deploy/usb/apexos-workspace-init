@@ -19,18 +19,27 @@ mkdir -p "$MNT/projects" "$MNT/data" "$MNT/notes"
 
 MARKER="$MNT/apexos-workspace.toml"
 if [[ -f "$MARKER" ]]; then
-  echo "init: $MARKER already present — leaving it" >&2
+  echo "init: $MARKER already present — leaving it (agentd upgrades v1 markers in place on plug)" >&2
 else
+  # Marker schema v2 (ApexNET Tier-4 courier, docs/apexnet.md §7): stick_id is the
+  # stick's *ledger* identity — 8 random bytes hex, minted exactly once at prep.
+  # The APEX-* filesystem label stays the *mount* convention (labels are neither
+  # unique nor collision-safe; the id is what manifests and receipts key on).
+  STICK_ID="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
   cat > "$MARKER" <<EOF
 # ApexOS exo-workspace — a portable agent workspace on removable media.
 # Presence of this file (and an APEX-* filesystem label) marks the stick as an
 # exo-workspace; a node claims it, own-mounts it under the agent workspace, and the
 # agent + Explorer + desktop apps read/write it. See docs/usb-workspace.md.
-version = 1
-name    = "$NAME"
-layout  = ["projects", "data", "notes"]
+# stick_id is the courier-ledger identity (docs/apexnet.md §7) — never edit it.
+version   = 2
+name      = "$NAME"
+layout    = ["projects", "data", "notes"]
+stick_id  = "$STICK_ID"
+minted_by = "$(hostname)"
+minted_at = "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 EOF
-  echo "init: wrote $MARKER" >&2
+  echo "init: wrote $MARKER (stick_id $STICK_ID)" >&2
 fi
 
 # Surface the label situation — udev claims only APEX-* labels.

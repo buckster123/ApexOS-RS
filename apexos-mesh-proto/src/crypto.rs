@@ -107,6 +107,30 @@ pub fn open(psk: &Psk, frame: &MeshFrame) -> Result<PlainPacket, Error> {
     Ok(packet)
 }
 
+/// Generic detached-nonce AEAD under the colony PSK — for courier artifacts
+/// at rest (charter §7: the stick's `manifest.json`/`receipts.json`), where
+/// the `(sender, ctr)` wire-nonce discipline doesn't apply. The caller
+/// supplies the nonce (random 12 B per seal — file-at-rest volume makes
+/// collision negligible; rotation lands in Phase 8) and the AAD (bind the
+/// artifact to its stick + domain so a sealed file can't be replayed onto
+/// another stick or another slot).
+pub fn seal_blob(psk: &Psk, nonce: &[u8; 12], aad: &[u8], plain: &[u8]) -> Result<Vec<u8>, Error> {
+    let cipher = ChaCha20Poly1305::new_from_slice(&psk.0).map_err(|_| Error::Crypto)?;
+    cipher
+        .encrypt(nonce.into(), AeadPayload { msg: plain, aad })
+        .map_err(|_| Error::Crypto)
+}
+
+/// Open a [`seal_blob`] artifact. Any tamper — ciphertext, nonce, or AAD
+/// (wrong stick, wrong domain, wrong key) — fails closed with
+/// [`Error::Crypto`].
+pub fn open_blob(psk: &Psk, nonce: &[u8; 12], aad: &[u8], ct: &[u8]) -> Result<Vec<u8>, Error> {
+    let cipher = ChaCha20Poly1305::new_from_slice(&psk.0).map_err(|_| Error::Crypto)?;
+    cipher
+        .decrypt(nonce.into(), AeadPayload { msg: ct, aad })
+        .map_err(|_| Error::Crypto)
+}
+
 /// Per-sender anti-replay: the classic 64-entry sliding-bitmap window over
 /// `ctr`, run by **every** receiver including the brainstem. Accepts each
 /// counter at most once; rejects anything older than `highest - 63`.

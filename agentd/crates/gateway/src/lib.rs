@@ -388,6 +388,9 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/worker/cancel",      post(worker_cancel_mesh_handler))
         .route("/api/worker/report",      post(worker_report_mesh_handler).layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)))
         .route("/api/mesh/file",          post(mesh_file_handler).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
+        .route("/api/courier/manifest",   post(courier_manifest_handler))
+        .route("/api/courier/receipt",    post(courier_receipt_handler))
+        .route("/api/courier/status",     get(courier_status_handler))
         .route("/api/mesh/memory",        post(mesh_memory_handler).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
         .route("/api/mesh/recall",        post(mesh_recall_handler))
         .route("/api/mesh/nodes",         get(mesh_nodes_handler))
@@ -3849,6 +3852,124 @@ async fn mesh_file_handler(
     }
 }
 
+/// Shared kill switch for the courier's proactive session-0 notices (charter
+/// §6.4 — connectivity/courier truth is an environmental fact). Default ON.
+fn apexnet_notify() -> bool {
+    std::env::var("APEXNET_NOTIFY_AGENT")
+        .map(|v| { let v = v.to_lowercase(); v != "0" && v != "false" && v != "off" })
+        .unwrap_or(true)
+}
+
+/// POST /api/courier/manifest — Tier-1 courier-ledger gossip (ApexNET P2,
+/// `docs/apexnet.md` §7 step 1): a peer announces "stick S carrying root R
+/// for node D departed me". `from` must name a registered peer (the mesh
+/// pattern — bearer token proves trust, `from` names which peer). The heard
+/// ledger enables the plug notification's announced-vs-unannounced diff; if
+/// the cargo is for THIS node, the agent hears about it before the human
+/// arrives. Radio tiers replace this POST with the ~56 B `CourierManifest`
+/// payload in P6 — same semantics.
+async fn courier_manifest_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let from = match body["from"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(f) if state.peer_registry.read().await.contains(f) => f.to_string(),
+        Some(f) => return Json(serde_json::json!({
+            "ok": false, "error": format!("'{f}' is not a registered peer on this node")
+        })),
+        None => return Json(serde_json::json!({ "ok": false, "error": "missing 'from'" })),
+    };
+    let (stick, root) = (body["stick"].as_str().unwrap_or("").to_string(),
+                         body["root"].as_str().unwrap_or("").to_string());
+    if stick.is_empty() || root.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "missing stick/root" }));
+    }
+    let heard = apexos_plugins::courier::HeardManifest {
+        stick: stick.clone(),
+        root,
+        origin: body["origin"].as_str().unwrap_or(&from).to_string(),
+        dest: body["dest"].as_str().unwrap_or("").to_string(),
+        len: body["len"].as_u64().unwrap_or(0),
+        epoch: body["epoch"].as_u64().unwrap_or(0) as u32,
+        name: body["name"].as_str().unwrap_or("").to_string(),
+        heard_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    };
+    let for_me = heard.dest == *state.node_id;
+    let (origin, name, len) = (heard.origin.clone(), heard.name.clone(), heard.len);
+    let log_dir = apexos_plugins::courier::log_dir_env();
+    let news = tokio::task::spawn_blocking(move || {
+        apexos_plugins::courier::ledger_hear_manifest(&log_dir, heard)
+    }).await.unwrap_or(false);
+    if news && for_me && apexnet_notify() {
+        let what = if name.is_empty() { "cargo".to_string() } else { format!("**{name}**") };
+        let text = format!(
+            "📦 Courier gossip from the mesh: stick `{stick}` departed **{origin}** carrying \
+             {what} ({len} bytes) addressed to this node. It arrives when a human plugs the \
+             stick in — it will be blake3-verified and receipted automatically; nothing to do \
+             until then."
+        );
+        state.bus.emit(Event::UserPrompt { session: SessionId(0), text, images: vec![] }).await;
+    }
+    Json(serde_json::json!({ "ok": true, "news": news }))
+}
+
+/// POST /api/courier/receipt — the loop-closing half (§7 step 4): the
+/// destination gossips "stick S's root R ingested (or refused)" back toward
+/// the origin, which learns of delivery at network speed instead of waiting
+/// for the stick to walk home. Marks the matching outbox entry delivered.
+async fn courier_receipt_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let from = match body["from"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(f) if state.peer_registry.read().await.contains(f) => f.to_string(),
+        Some(f) => return Json(serde_json::json!({
+            "ok": false, "error": format!("'{f}' is not a registered peer on this node")
+        })),
+        None => return Json(serde_json::json!({ "ok": false, "error": "missing 'from'" })),
+    };
+    let heard = apexos_plugins::courier::HeardReceipt {
+        stick: body["stick"].as_str().unwrap_or("").to_string(),
+        root: body["root"].as_str().unwrap_or("").to_string(),
+        node: body["node"].as_str().unwrap_or(&from).to_string(),
+        accepted: body["accepted"].as_bool().unwrap_or(false),
+        heard_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    };
+    if heard.stick.is_empty() || heard.root.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "missing stick/root" }));
+    }
+    let (node, accepted) = (heard.node.clone(), heard.accepted);
+    let log_dir = apexos_plugins::courier::log_dir_env();
+    let (news, delivered) = tokio::task::spawn_blocking(move || {
+        apexos_plugins::courier::ledger_hear_receipt(&log_dir, heard)
+    }).await.unwrap_or((false, None));
+    if news && apexnet_notify() {
+        if let Some(name) = &delivered {
+            let text = if accepted {
+                format!("🧾 Courier receipt: **{name}** was delivered to **{node}** and verified — \
+                         the sneakernet loop closed.")
+            } else {
+                format!("⚠️ Courier receipt: **{node}** REFUSED **{name}** (verification failed \
+                         in transit). The outbox still holds it — re-queue onto the next stick.")
+            };
+            state.bus.emit(Event::UserPrompt { session: SessionId(0), text, images: vec![] }).await;
+        }
+    }
+    Json(serde_json::json!({ "ok": true, "news": news, "matched_outbox": delivered.is_some() }))
+}
+
+/// GET /api/courier/status — the courier lane's state for UI/tools.
+async fn courier_status_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let log_dir = apexos_plugins::courier::log_dir_env();
+    let psk_present = apexos_plugins::courier::load_psk_env().is_some();
+    let node_id = state.node_id.to_string();
+    let mut v = tokio::task::spawn_blocking(move || {
+        apexos_plugins::courier::status_json(&log_dir, psk_present, &node_id)
+    }).await.unwrap_or_else(|e| serde_json::json!({ "error": format!("join: {e}") }));
+    v["mounted_sticks"] = serde_json::json!(apexos_plugins::courier::mounted_sticks());
+    Json(v)
+}
+
 /// POST /api/mesh/memory — receive a memory from a mesh peer (token-gated) and
 /// import it into THIS node's Cerebro (colony-federation Slice 1). `from` must
 /// name a registered peer (the bearer token proves trust; `from` names which
@@ -5222,21 +5343,49 @@ async fn media_plugged_handler(
     if !valid_exo_label(&label) {
         return Json(serde_json::json!({ "ok": false, "error": "label must be APEX-<name>" }));
     }
+    // The courier pass (ApexNET P2): stick identity, verify+ingest cargo for
+    // this node, receipts home, outbox drained aboard — then the ledger
+    // gossip goes out over Tier 1, best-effort (a dark peer is fine: the
+    // stick itself is the durable copy).
+    let lbl = label.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        apexos_plugins::courier::process_plug_env(&lbl)
+    }).await.ok();
+    let courier_section = outcome.as_ref()
+        .and_then(|o| apexos_plugins::courier::compose_plug_notice(&o.report));
+    if let Some(o) = outcome {
+        if !o.gossip.is_empty() {
+            let node_id = state.node_id.to_string();
+            tokio::spawn(async move {
+                for f in apexos_plugins::courier::dispatch_gossip(&node_id, o.gossip).await {
+                    eprintln!("[courier] gossip: {f}");
+                }
+            });
+        }
+    }
+
     // Default ON; AGENTD_USB_NOTIFY_AGENT=0/false/off silences the proactive greeting.
     let notify = std::env::var("AGENTD_USB_NOTIFY_AGENT")
         .map(|v| { let v = v.to_lowercase(); v != "0" && v != "false" && v != "off" })
         .unwrap_or(true);
     if notify {
-        let text = format!(
+        let mut text = format!(
             "🔌 A USB exo-workspace stick **{label}** was just plugged in and mounted at \
              `media/{label}` — portable storage you read + write like any workspace folder. \
              If André's about to work from it, take a quick look and offer to pick up where \
              its files leave off; when he's done with it you can `eject_media` it (label \
              \"{label}\") so it's safe to unplug."
         );
+        if let Some(section) = &courier_section {
+            text.push_str("\n\nCourier lane (this plug):\n");
+            text.push_str(section);
+        }
         state.bus.emit(Event::UserPrompt { session: SessionId(0), text, images: vec![] }).await;
     }
-    Json(serde_json::json!({ "ok": true, "label": label, "notified": notify }))
+    Json(serde_json::json!({
+        "ok": true, "label": label, "notified": notify,
+        "courier": courier_section.is_some(),
+    }))
 }
 
 /// Bytes → a short human size for the device picker ("57.3 GB").

@@ -79,6 +79,11 @@ mode = "suggest"
 "send_to_agent"    = "allow"
 "list_mesh_peers"  = "allow"
 "mesh_file_send"   = "allow"
+# courier_queue: the Tier-4 sneakernet sibling of mesh_file_send — same confined
+# workspace source, but the transport is a PSK-sealed, blake3-verified,
+# receipted exo-workspace stick a human carries. courier_status is a read.
+"courier_queue"    = "allow"
+"courier_status"   = "allow"
 # mesh_memory_send: share ONE of the caller's own memories with a peer's Cerebro
 # (colony federation, docs/colony-federation.md). Same trust basis as mesh a2a —
 # registered peer + bearer token — and strictly less potent than the already-

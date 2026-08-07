@@ -113,6 +113,8 @@
 | `MESH_DISCOVERY_INTERVAL` | `60` | avahi-browse mDNS discovery interval (seconds) |
 | `MESH_AUTO_BOOTSTRAP` | off | auto-add discovered peers. **Presence-only**: ANY value — including `0` or empty — enables it; unset is the only off |
 | `MESH_SUBNET_GUARD` | `1` | restrict auto-discovered peers to the local /24. `0`/`false` loosens a safety guard |
+| `APEXNET_PSK_FILE` | `/etc/agentd/apexnet.psk` | colony PSK (hex, 32 B) sealing Tier-4 courier manifests/receipts (and the future radio envelope). Minted per-colony by install.sh; copy the SAME file to every node (Tier 1/USB only — never radio). Absent/malformed → courier crypto disabled with honest notices |
+| `APEXNET_NOTIFY_AGENT` | `1` | root-session notes for courier-ledger gossip (cargo announced en route, delivery receipts). `0` silences; the plug-time greeting is governed by `AGENTD_USB_NOTIFY_AGENT` |
 
 ## Vast.ai GPU bridge
 

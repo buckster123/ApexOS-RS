@@ -89,6 +89,39 @@ fn nonces_differ_across_senders_and_counters() {
     assert_ne!(nonce_for(0x0100, 0), nonce_for(0, 1));
 }
 
+#[test]
+fn blob_envelope_roundtrips_and_fails_closed() {
+    use apexos_mesh_proto::{open_blob, seal_blob};
+    let nonce = [7u8; 12];
+    let aad = b"apexos-courier:v1:manifest:aabbccdd00112233";
+    let ct = seal_blob(&psk(), &nonce, aad, b"the manifest").unwrap();
+    assert_eq!(
+        open_blob(&psk(), &nonce, aad, &ct).unwrap(),
+        b"the manifest"
+    );
+    // Wrong AAD (another stick / another domain).
+    assert_eq!(
+        open_blob(
+            &psk(),
+            &nonce,
+            b"apexos-courier:v1:receipts:aabbccdd00112233",
+            &ct
+        ),
+        Err(Error::Crypto)
+    );
+    // Wrong nonce.
+    assert_eq!(open_blob(&psk(), &[8u8; 12], aad, &ct), Err(Error::Crypto));
+    // Wrong key.
+    assert_eq!(
+        open_blob(&Psk([0x43; 32]), &nonce, aad, &ct),
+        Err(Error::Crypto)
+    );
+    // Flipped byte.
+    let mut bad = ct.clone();
+    bad[0] ^= 1;
+    assert_eq!(open_blob(&psk(), &nonce, aad, &bad), Err(Error::Crypto));
+}
+
 // ── Replay windows ──────────────────────────────────────────────────────────
 
 #[test]

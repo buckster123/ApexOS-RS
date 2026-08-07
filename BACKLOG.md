@@ -166,9 +166,15 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    (this intake's companion, LOCKED 2026-08-03). Hardware: 2–3 ESP32+SX1262
    boards (Heltec V3 / LilyGo T3-S3) — André ordered 2026-08-03; P1–P3 are
    hardware-free. **P1 (`apexos-mesh-proto` wire crate) SHIPPED 2026-08-07**
-   — framing + crypto envelope + replay windows + chunker + courier payloads,
-   both no_std gates, fuzz target (`fuzz/`; the 24 h clean run = residual
-   DoD, runnable any night). Next: P2 courier lane (also hardware-free).
+   (#331) — framing + crypto envelope + replay windows + chunker + courier
+   payloads, both no_std gates, fuzz target (`fuzz/`; the 24 h clean run =
+   residual DoD, runnable any night). **P2 (Tier-4 courier lane) SHIPPED
+   2026-08-07** — marker v2 stick_id, PSK-sealed manifest/receipts, blake3
+   cargo, outbox.jsonl drain-to-stick, Tier-1 ledger gossip
+   (`/api/courier/*`), courier-enriched plug notice, `courier_queue`/
+   `courier_status` tools; DoD loop + tamper-fails-closed proven in tests;
+   residual = the two-node field carry (real stick, two LAN nodes). Next:
+   P3 bridge + PTY harness (hardware-free) or await boards for P4.
 2. **Cadre review** *(sibling `Cadre-RS`; gated)* — review the Grok 4.5
    12-hour build against the clean-room PRD
    (`~/Downloads/Brainstorms/Cadre-RS/cadre-prd.md`) before anything touches
