@@ -64,8 +64,7 @@ pub fn prepare_image(bytes: &[u8]) -> anyhow::Result<PreparedImage> {
 /// Like [`prepare_image`] but with an explicit edge cap — used by tests so they
 /// don't depend on process-global env state.
 pub fn prepare_image_with_max_edge(bytes: &[u8], max_edge: u32) -> anyhow::Result<PreparedImage> {
-    let img = image::load_from_memory(bytes)
-        .map_err(|e| anyhow::anyhow!("decode image: {e}"))?;
+    let img = image::load_from_memory(bytes).map_err(|e| anyhow::anyhow!("decode image: {e}"))?;
 
     // Downscale only — `resize` preserves aspect ratio and would *upscale* a small
     // image up to the bounds, so guard on the longest edge first.
@@ -117,8 +116,7 @@ pub fn prepare_b64(data: &str) -> anyhow::Result<PreparedImage> {
 /// Read a file and prepare it. Convenience for tools that hand back a path.
 pub fn load_and_prepare(path: impl AsRef<Path>) -> anyhow::Result<PreparedImage> {
     let path = path.as_ref();
-    let bytes = std::fs::read(path)
-        .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
     prepare_image(&bytes)
 }
 
@@ -162,19 +160,24 @@ mod tests {
         });
         let img = image::DynamicImage::ImageRgb8(buf);
         let mut bytes = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
-            .unwrap();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
         bytes
     }
 
     fn synth_rgba_png(w: u32, h: u32) -> Vec<u8> {
-        let buf = image::RgbaImage::from_fn(w, h, |x, _| {
-            image::Rgba([(x % 256) as u8, 64, 200, 128])
-        });
+        let buf =
+            image::RgbaImage::from_fn(w, h, |x, _| image::Rgba([(x % 256) as u8, 64, 200, 128]));
         let img = image::DynamicImage::ImageRgba8(buf);
         let mut bytes = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
-            .unwrap();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
         bytes
     }
 
@@ -247,7 +250,9 @@ mod tests {
             { "type": "text", "text": "x" }
         ])));
         // Ordinary MCP text-block arrays must NOT (preserves existing stringify path).
-        assert!(!contains_image_block(&json!([{ "type": "text", "text": "hi" }])));
+        assert!(!contains_image_block(
+            &json!([{ "type": "text", "text": "hi" }])
+        ));
         assert!(!contains_image_block(&json!("a string")));
         assert!(!contains_image_block(&json!({ "vision": {} })));
         assert!(!contains_image_block(&json!([1, 2, 3])));

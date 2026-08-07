@@ -71,12 +71,14 @@ fn env_flag_on(key: &str) -> bool {
 }
 
 /// Probe one peer for liveness. Returns true if the node answered the HTTP layer at
-/// all (any status — even 401), false only on a transport error/timeout. Mirrors
-/// `supervisor::fetch_peer_capabilities`'s ws→http derivation + bearer.
+/// all (any status — even 401/404), false only on a transport error/timeout.
+/// Probes the lean `/api/ping` (~40 B — ApexNET D8) instead of the multi-KB
+/// `/api/capabilities` body the old probe pulled and discarded every round; a
+/// pre-ping peer 404s, which still counts as alive (it answered).
 async fn probe_peer(ws_url: &str, token: Option<&str>) -> bool {
     let http_base = ws_url.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1);
     let mut req = reqwest::Client::new()
-        .get(format!("{http_base}/api/capabilities"))
+        .get(format!("{http_base}/api/ping"))
         .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS));
     if let Some(t) = token {
         req = req.bearer_auth(t);

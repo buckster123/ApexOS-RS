@@ -182,8 +182,18 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    `apexos-brainstem-sim` (fault-injecting fake brainstem); all §4.3 MUSTs
    as tests incl. real-PTY garbage end-to-end; live smoke: 200/200 frames
    through a garbage storm. Not deployed until P4 (needs a brainstem).
-   Next: P4 brainstem MVP (needs boards — en route) · P1's 24 h fuzz
-   (running) · P2 field carry ✓ done.
+   **P5a (the honesty half of P5) SHIPPED 2026-08-07** — latched
+   ConnectivityState (core process-global + watcher: WAN TCP probe +
+   beacon liveness), lean `/api/ping` (beacon stops discarding multi-KB
+   capabilities bodies), `connectivity.toml` tool gating (gather_tools
+   internal filter + supervisor race backstop), edge notice + ambient
+   line, mesh_file_send→outbox fallback when degraded. **P5b residual
+   (the router half)**: MeshTransport trait + policy router + seen-cache
+   dedup + mock-transport chaos drill + the PeerLost claim-or-delete
+   decision — lands when the bridge inbound gives it a second transport
+   (with/after P4). Also: P0 DoD met on André's bare ESP32-S3s (mesh-proto
+   compiles for Xtensa; heartbeat firmware flashed) — BLE Tier 2 testable
+   pre-Pi-Hut. Next: P4 brainstem MVP · P1's 24 h fuzz (running).
 2. **Cadre review** *(sibling `Cadre-RS`; gated)* — review the Grok 4.5
    12-hour build against the clean-room PRD
    (`~/Downloads/Brainstorms/Cadre-RS/cadre-prd.md`) before anything touches

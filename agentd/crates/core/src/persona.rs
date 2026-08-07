@@ -13,9 +13,9 @@
 //! terse-technical voice, so the default path is byte-identical to before (zero
 //! regression, and nothing extra in the cached prompt prefix).
 
+use apexos_protocol::SessionId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use apexos_protocol::SessionId;
 
 /// Process-wide per-session active persona (slug → e.g. "mom"). A `std::sync::Mutex`
 /// (not tokio) — the read on the turn path is a tiny lock→clone→drop, never held
@@ -60,7 +60,10 @@ pub fn persona_style(persona: &str) -> Option<&'static str> {
 /// The style fragment for `session`'s active persona, or `None` when the session has
 /// no persona set, the persona is the default, or the lock is poisoned (fail-soft:
 /// a lock error just drops the style, never panics the turn).
-pub fn resolve_persona_style(map: &Mutex<HashMap<SessionId, String>>, session: SessionId) -> Option<String> {
+pub fn resolve_persona_style(
+    map: &Mutex<HashMap<SessionId, String>>,
+    session: SessionId,
+) -> Option<String> {
     let slug = map.lock().ok()?.get(&session).cloned()?;
     persona_style(&slug).map(str::to_owned)
 }
@@ -97,7 +100,9 @@ mod tests {
         let map: Mutex<HashMap<SessionId, String>> = Mutex::new(HashMap::new());
         assert_eq!(resolve_persona_style(&map, SessionId(7)), None); // unset
         map.lock().unwrap().insert(SessionId(7), "mom".into());
-        assert!(resolve_persona_style(&map, SessionId(7)).unwrap().contains("plain language"));
+        assert!(resolve_persona_style(&map, SessionId(7))
+            .unwrap()
+            .contains("plain language"));
         map.lock().unwrap().insert(SessionId(8), "apex".into());
         assert_eq!(resolve_persona_style(&map, SessionId(8)), None); // default → no fragment
     }

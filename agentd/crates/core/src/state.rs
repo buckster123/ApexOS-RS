@@ -1,14 +1,14 @@
-use std::collections::HashMap;
 use crate::types::*;
+use std::collections::HashMap;
 
 #[derive(Debug, Default)]
 pub struct SystemState {
     /// Whole agent tree held flat; parent links reconstruct hierarchy.
     pub sessions: HashMap<SessionId, AgentContext>,
     /// Currently-registered tools: tool name → owning plugin.
-    pub tools:    HashMap<String, PluginId>,
+    pub tools: HashMap<String, PluginId>,
     /// Live plugins and the tools each advertises.
-    pub plugins:  HashMap<PluginId, Vec<ToolSpec>>,
+    pub plugins: HashMap<PluginId, Vec<ToolSpec>>,
     /// Tool calls awaiting human approval.
     pub pending_approvals: HashMap<ActionId, SessionId>,
 }
@@ -18,8 +18,13 @@ impl SystemState {
     pub fn apply(&mut self, event: &Event) {
         match event {
             // ── session lifecycle ──────────────────────────────────────────
-            Event::UserPrompt { session, text, images } => {
-                let ctx = self.sessions
+            Event::UserPrompt {
+                session,
+                text,
+                images,
+            } => {
+                let ctx = self
+                    .sessions
                     .entry(*session)
                     .or_insert_with(|| AgentContext::root(*session));
                 // Text first (skipped when empty — e.g. an image-only prompt),
@@ -58,7 +63,11 @@ impl SystemState {
                 self.pending_approvals.remove(action);
             }
 
-            Event::ToolResult { session, call, output } => {
+            Event::ToolResult {
+                session,
+                call,
+                output,
+            } => {
                 let _ = (session, call, output);
             }
 
@@ -86,7 +95,7 @@ impl SystemState {
             }
 
             // Routing signals handled by the async layer; state is a no-op.
-            Event::SpawnAgent      { .. } => {}
+            Event::SpawnAgent { .. } => {}
             Event::SubAgentStarted { .. } => {}
 
             Event::SensorReading { .. } => {}
@@ -99,22 +108,22 @@ impl SystemState {
 
             Event::WakeTriggered => {}
 
-            Event::CouncilStarted    { .. } => {}
+            Event::CouncilStarted { .. } => {}
             Event::CouncilRoundStart { .. } => {}
             Event::CouncilAgentDelta { .. } => {}
-            Event::CouncilAgentDone  { .. } => {}
-            Event::CouncilRoundDone  { .. } => {}
-            Event::CouncilComplete   { .. } => {}
-            Event::CouncilButtIn     { .. } => {}
+            Event::CouncilAgentDone { .. } => {}
+            Event::CouncilRoundDone { .. } => {}
+            Event::CouncilComplete { .. } => {}
+            Event::CouncilButtIn { .. } => {}
 
             Event::Error { .. } => {}
 
             // Evolution events are handled by the async evolution layer.
             // SystemState tracks no extra fields for them — the event log is
             // the authoritative audit trail.
-            Event::EvolutionProposed { .. }    => {}
-            Event::EvolutionApplied  { .. }    => {}
-            Event::EvolutionRolledBack { .. }  => {}
+            Event::EvolutionProposed { .. } => {}
+            Event::EvolutionApplied { .. } => {}
+            Event::EvolutionRolledBack { .. } => {}
 
             // Goal driver: state lives in the driver task; the event log is the audit.
             Event::GoalStateChanged { .. } => {}
@@ -125,22 +134,22 @@ impl SystemState {
             Event::TaskBatchDone { .. } => {}
 
             // A2A: routing handled by the agent router; state is a no-op.
-            Event::AgentMessage    { .. } => {}
+            Event::AgentMessage { .. } => {}
             Event::AgentMessageAck { .. } => {}
 
             // Mesh: peer registry managed by gateway; state is a no-op.
-            Event::MeshMessage    { .. } => {}
+            Event::MeshMessage { .. } => {}
             Event::MeshMemoryShared { .. } => {}
-            Event::PeerSeen       { .. } => {}
+            Event::PeerSeen { .. } => {}
             Event::PeerRegistered { .. } => {}
-            Event::PeerLost       { .. } => {}
+            Event::PeerLost { .. } => {}
             Event::MeshNodeStatus { .. } => {}
 
             // Vast.ai: backend hot-swap handled by main.rs; state is a no-op.
-            Event::VastInstanceLaunched  { .. } => {}
-            Event::VastInstanceReady     { .. } => {}
+            Event::VastInstanceLaunched { .. } => {}
+            Event::VastInstanceReady { .. } => {}
             Event::VastInstanceDestroyed { .. } => {}
-            Event::VastTunnelLost        { .. } => {}
+            Event::VastTunnelLost { .. } => {}
         }
     }
 
@@ -148,7 +157,8 @@ impl SystemState {
 
     /// Register a child session created by the task manager (agent.spawn).
     pub fn register_child(&mut self, child: SessionId, parent: SessionId) {
-        self.sessions.insert(child, AgentContext::child(child, parent));
+        self.sessions
+            .insert(child, AgentContext::child(child, parent));
         if let Some(p) = self.sessions.get_mut(&parent) {
             p.spawned.push(child);
         }
@@ -173,14 +183,21 @@ mod tests {
     use super::*;
 
     fn spec(name: &str) -> ToolSpec {
-        ToolSpec { name: name.into(), description: String::new(),
-                   input_schema: serde_json::json!({}) }
+        ToolSpec {
+            name: name.into(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        }
     }
 
     #[test]
     fn user_prompt_creates_root_session_and_appends_history() {
         let mut s = SystemState::default();
-        s.apply(&Event::UserPrompt { session: SessionId(1), text: "hi".into(), images: vec![] });
+        s.apply(&Event::UserPrompt {
+            session: SessionId(1),
+            text: "hi".into(),
+            images: vec![],
+        });
         let ctx = s.sessions.get(&SessionId(1)).unwrap();
         assert!(ctx.is_root());
         assert_eq!(ctx.history.len(), 1);
@@ -190,12 +207,17 @@ mod tests {
     fn plugin_up_registers_tools_then_down_removes_them() {
         let mut s = SystemState::default();
         let pid = PluginId("cerebro".into());
-        s.apply(&Event::PluginUp { plugin: pid.clone(),
-            tools: vec![spec("cerebro.recall"), spec("cerebro.store")] });
+        s.apply(&Event::PluginUp {
+            plugin: pid.clone(),
+            tools: vec![spec("cerebro.recall"), spec("cerebro.store")],
+        });
         assert_eq!(s.tools.len(), 2);
         assert_eq!(s.tools.get("cerebro.recall"), Some(&pid));
 
-        s.apply(&Event::PluginDown { plugin: pid.clone(), reason: "exit".into() });
+        s.apply(&Event::PluginDown {
+            plugin: pid.clone(),
+            reason: "exit".into(),
+        });
         assert!(s.tools.is_empty());
         assert!(s.plugins.is_empty());
     }
@@ -203,37 +225,67 @@ mod tests {
     #[test]
     fn subtree_collects_transitive_children() {
         let mut s = SystemState::default();
-        s.apply(&Event::UserPrompt { session: SessionId(1), text: "root".into(), images: vec![] });
+        s.apply(&Event::UserPrompt {
+            session: SessionId(1),
+            text: "root".into(),
+            images: vec![],
+        });
         s.register_child(SessionId(2), SessionId(1));
         s.register_child(SessionId(3), SessionId(1));
         s.register_child(SessionId(4), SessionId(2));
         let mut tree = s.subtree(SessionId(1));
         tree.sort_by_key(|s| s.0);
-        assert_eq!(tree, vec![SessionId(1), SessionId(2), SessionId(3), SessionId(4)]);
+        assert_eq!(
+            tree,
+            vec![SessionId(1), SessionId(2), SessionId(3), SessionId(4)]
+        );
     }
 
     #[test]
     fn approval_pending_then_resolved_clears_state() {
         let mut s = SystemState::default();
-        let call = ToolCall { id: ActionId(7), tool: "shell.exec".into(),
-            args: serde_json::json!({"cmd":"ls"}), needs_approval: true };
-        s.apply(&Event::ApprovalPending { session: SessionId(1), call });
+        let call = ToolCall {
+            id: ActionId(7),
+            tool: "shell.exec".into(),
+            args: serde_json::json!({"cmd":"ls"}),
+            needs_approval: true,
+        };
+        s.apply(&Event::ApprovalPending {
+            session: SessionId(1),
+            call,
+        });
         assert_eq!(s.pending_approvals.len(), 1);
-        s.apply(&Event::UserApproval { session: SessionId(1), action: ActionId(7), granted: true });
+        s.apply(&Event::UserApproval {
+            session: SessionId(1),
+            action: ActionId(7),
+            granted: true,
+        });
         assert!(s.pending_approvals.is_empty());
     }
 
     #[test]
     fn second_user_prompt_appends_to_existing_session() {
         let mut s = SystemState::default();
-        s.apply(&Event::UserPrompt { session: SessionId(1), text: "first".into(), images: vec![] });
-        s.apply(&Event::UserPrompt { session: SessionId(1), text: "second".into(), images: vec![] });
+        s.apply(&Event::UserPrompt {
+            session: SessionId(1),
+            text: "first".into(),
+            images: vec![],
+        });
+        s.apply(&Event::UserPrompt {
+            session: SessionId(1),
+            text: "second".into(),
+            images: vec![],
+        });
         assert_eq!(s.sessions.get(&SessionId(1)).unwrap().history.len(), 2);
     }
 
     #[test]
     fn event_round_trips_through_json() {
-        let ev = Event::UserPrompt { session: SessionId(42), text: "hello".into(), images: vec![] };
+        let ev = Event::UserPrompt {
+            session: SessionId(42),
+            text: "hello".into(),
+            images: vec![],
+        };
         let json = serde_json::to_string(&ev).unwrap();
         let ev2: Event = serde_json::from_str(&json).unwrap();
         match ev2 {
@@ -251,7 +303,10 @@ mod tests {
         s.apply(&Event::UserPrompt {
             session: SessionId(1),
             text: "look".into(),
-            images: vec![ImageSource { media_type: "image/jpeg".into(), data: "QUJD".into() }],
+            images: vec![ImageSource {
+                media_type: "image/jpeg".into(),
+                data: "QUJD".into(),
+            }],
         });
         let ctx = s.sessions.get(&SessionId(1)).unwrap();
         assert_eq!(ctx.history.len(), 1);
@@ -273,7 +328,10 @@ mod tests {
         s.apply(&Event::UserPrompt {
             session: SessionId(1),
             text: String::new(),
-            images: vec![ImageSource { media_type: "image/png".into(), data: "QQ".into() }],
+            images: vec![ImageSource {
+                media_type: "image/png".into(),
+                data: "QQ".into(),
+            }],
         });
         match &s.sessions.get(&SessionId(1)).unwrap().history[0] {
             Message::User { content } => {
@@ -287,17 +345,19 @@ mod tests {
     #[test]
     fn evolution_proposed_round_trips_through_json() {
         let ev = Event::EvolutionProposed {
-            id:          EvolutionId(1),
-            proposal:    EvolutionProposal::UpdateSystemPrompt {
+            id: EvolutionId(1),
+            proposal: EvolutionProposal::UpdateSystemPrompt {
                 content: "you are apex".into(),
-                reason:  "initial soul".into(),
+                reason: "initial soul".into(),
             },
             proposed_by: SessionId(42),
         };
         let json = serde_json::to_string(&ev).unwrap();
         let ev2: Event = serde_json::from_str(&json).unwrap();
         match ev2 {
-            Event::EvolutionProposed { id, proposed_by, .. } => {
+            Event::EvolutionProposed {
+                id, proposed_by, ..
+            } => {
                 assert_eq!(id, EvolutionId(1));
                 assert_eq!(proposed_by, SessionId(42));
             }
@@ -308,10 +368,10 @@ mod tests {
     #[test]
     fn evolution_proposal_json_has_kind_tag() {
         let p = EvolutionProposal::RegisterMcpServer {
-            name:    "vision".into(),
+            name: "vision".into(),
             command: "/usr/local/bin/vision-mcp".into(),
-            env:     std::collections::HashMap::new(),
-            reason:  "add image capture".into(),
+            env: std::collections::HashMap::new(),
+            reason: "add image capture".into(),
         };
         let json = serde_json::to_value(&p).unwrap();
         assert_eq!(json["kind"], "register_mcp_server");
@@ -329,20 +389,30 @@ mod tests {
         });
         let p: EvolutionProposal = serde_json::from_value(wire).unwrap();
         match p {
-            EvolutionProposal::RequestHardware { part, capability, reason, bus, source } => {
+            EvolutionProposal::RequestHardware {
+                part,
+                capability,
+                reason,
+                bus,
+                source,
+            } => {
                 assert_eq!(part, "camera-module-3");
                 assert_eq!(capability, "eyes");
                 assert!(reason.contains("blind"));
-                assert_eq!(bus, "");      // defaulted
-                assert_eq!(source, "");   // defaulted
+                assert_eq!(bus, ""); // defaulted
+                assert_eq!(source, ""); // defaulted
             }
             _ => panic!("wrong variant"),
         }
         // and the tag is what the spec advertises
         let back = serde_json::to_value(EvolutionProposal::RequestHardware {
-            part: "p".into(), capability: "c".into(), reason: "r".into(),
-            bus: "csi".into(), source: "inventory:camera-module-3".into(),
-        }).unwrap();
+            part: "p".into(),
+            capability: "c".into(),
+            reason: "r".into(),
+            bus: "csi".into(),
+            source: "inventory:camera-module-3".into(),
+        })
+        .unwrap();
         assert_eq!(back["kind"], "request_hardware");
         assert_eq!(back["source"], "inventory:camera-module-3");
     }

@@ -556,6 +556,38 @@ impl Supervisor {
 
     /// Dispatch a tool call immediately (policy already checked).
     fn dispatch_tool(&self, session: SessionId, call: ToolCall) {
+        // ApexNET §6.3 call-time backstop: a tool hidden by the current
+        // ConnectivityState shouldn't normally be CALLED at all (gather_tools
+        // filtered it), but frames race state transitions — a turn built at
+        // Full can land at Degraded. Refuse honestly instead of failing
+        // opaquely. (Rules empty / state Full → this never fires.)
+        {
+            let state = apexos_core::connectivity::current();
+            let rules = apexos_core::connectivity::rules();
+            if !apexos_core::connectivity::tool_available(&call.tool, state, rules) {
+                let bus = self.bus.clone();
+                let call_id = call.id;
+                let tool = call.tool.clone();
+                tokio::spawn(async move {
+                    bus.emit(Event::ToolResult {
+                        session,
+                        call: call_id,
+                        output: ToolOutput {
+                            ok: false,
+                            content: serde_json::json!(format!(
+                                "{tool}: unavailable while connectivity is '{}' — the \
+                                 environment, not an error of yours. Queued paths: \
+                                 courier_queue (stick), or wait for the link (the ambient \
+                                 line clears when it returns).",
+                                state.as_str()
+                            )),
+                        },
+                    }).await;
+                });
+                return;
+            }
+        }
+
         // Virtual tool: propose_evolution — emits EvolutionProposed (for the
         // event log/UI) and routes (session, call_id, evolution_id, proposal) to
         // the evolution applier in main.rs over the dedicated `propose_tx` mpsc.
@@ -2473,7 +2505,37 @@ async fn mesh_file_send(node: Option<&str>, agent_id: &str, path: &str, dest: Op
                 err(format!("mesh_file_send: {detail} (status {status})"))
             }
         }
-        Err(e) => err(format!("mesh_file_send: {e}")),
+        Err(e) => {
+            // ApexNET §6.5: while connectivity is degraded, a transport failure
+            // is the EXPECTED case — the artifact lands in the courier outbox
+            // instead of erroring (commitments run late, they don't evaporate).
+            if apexos_core::connectivity::current()
+                != apexos_core::connectivity::ConnectivityState::Full
+            {
+                let log_dir = crate::courier::log_dir_env();
+                let (abs2, node2, name2) = (abs.clone(), node.to_string(), filename.clone());
+                let queued = tokio::task::spawn_blocking(move || {
+                    crate::courier::queue_artifact(&log_dir, &abs2, &node2, &name2)
+                })
+                .await
+                .unwrap_or_else(|je| Err(format!("join: {je}")));
+                return match queued {
+                    Ok(entry) => ToolOutput {
+                        ok: true,
+                        content: serde_json::json!({
+                            "status": "peer unreachable — queued for the courier lane",
+                            "outbox_id": entry.id, "node": node, "name": entry.name, "bytes": n,
+                            "note": "connectivity is degraded; delivery rides the next \
+                                     exo-workspace stick (courier_status tracks it)",
+                        }),
+                    },
+                    Err(qe) => err(format!(
+                        "mesh_file_send: {e} (courier fallback failed too: {qe})"
+                    )),
+                };
+            }
+            err(format!("mesh_file_send: {e}"))
+        }
     }
 }
 
