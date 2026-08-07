@@ -1,6 +1,6 @@
 # ApexNET — the nervous system (v3 charter)
 
-> **Status:** v3 DRAFT — review → lock (André) · **Date:** 2026-08-03
+> **Status:** v3 **LOCKED** (André, 2026-08-03 — merged as #330) · **Date:** 2026-08-03
 > **Supersedes:** `docs/ideas/apexnet/BT-LoRa-NERVOUS_SYSTEM-V2.md` (v2, locked 2026-07-27 — preserved as the input doc; its §3–§5 stand as written and are referenced, not repeated)
 > **Built from:** the v2 doc + a three-scout code recon (2026-08-03) against `d3ab7cc` — v2 predates W2 mesh workers (#318), M2 cross-node rings (#321), the beacon, and the shipped dream-digest push, all of which change §6–§7.
 

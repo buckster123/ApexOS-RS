@@ -18,6 +18,7 @@ their own workspaces/lockfiles, built separately by install.sh) and the **`web/`
 ```
 ApexOS-RS/
 ├── apexos-protocol/                # shared wire protocol — Event enum + WS/a2a contract (serde-only)
+├── apexos-mesh-proto/              # ApexNET radio/UART wire contract — framing, crypto envelope, chunker (no_std+alloc)
 ├── apexos-confine/                 # path-confinement primitives — the FS-sandbox algorithm (std-only)
 │
 ├── agentd/crates/                  # the agent daemon — event bus, gateway, plugins, turn engine

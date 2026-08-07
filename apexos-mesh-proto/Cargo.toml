@@ -1,0 +1,40 @@
+[package]
+name = "apexos-mesh-proto"
+version = "0.1.0"
+edition = "2021"
+description = "ApexNET wire contract — the radio/UART frame format shared by the Pi bridge, the ESP32 brainstem firmware, and agentd's mesh router. no_std + alloc; postcard/COBS/CRC32 framing, ChaCha20-Poly1305 envelope, blake3 chunker, courier payloads."
+
+[features]
+default = ["std"]
+# alloc is mandatory on every target (Vec-bearing wire types); `std` layers the
+# hosts' conveniences on top. Deps are concretized (not workspace-inherited)
+# because the no_std gate needs default-features off at the use site — the same
+# law as apexos-protocol.
+std = [
+    "alloc",
+    "serde/std",
+    "cobs/std",
+    "crc32fast/std",
+    "blake3/std",
+]
+alloc = [
+    "serde/alloc",
+    "postcard/alloc",
+    "cobs/alloc",
+    "chacha20poly1305/alloc",
+]
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive"] }
+postcard = { version = "1.1.3", default-features = false }
+cobs = { version = "0.5.1", default-features = false }
+crc32fast = { version = "1.5.0", default-features = false }
+chacha20poly1305 = { version = "0.11.0", default-features = false }
+blake3 = { version = "1.8.6", default-features = false }
+
+[dev-dependencies]
+proptest = "1"
+# Tests measure raw postcard sizes directly (wire_size.rs locks the charter's
+# byte-count claims).
+postcard = { version = "1.1.3", features = ["alloc"] }
+serde = "1"
