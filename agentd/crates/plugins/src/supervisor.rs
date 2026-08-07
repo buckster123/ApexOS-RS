@@ -1185,6 +1185,18 @@ impl Supervisor {
             return;
         }
 
+        // Virtual tool: courier_cancel — withdraw an undelivered outbox entry.
+        if call.tool == "courier_cancel" {
+            let id      = call.args["id"].as_u64();
+            let call_id = call.id;
+            let bus     = self.bus.clone();
+            tokio::spawn(async move {
+                let output = courier_cancel(id).await;
+                bus.emit(Event::ToolResult { session, call: call_id, output }).await;
+            });
+            return;
+        }
+
         // Virtual tool: courier_status — the outbox, announced inbound cargo,
         // receipts heard, PSK availability, mounted sticks.
         if call.tool == "courier_status" {
@@ -2484,9 +2496,25 @@ async fn courier_queue(node: Option<&str>, agent_id: &str, path: &str) -> ToolOu
         Err(e) => return err(format!("courier_queue: {e}")),
     };
     let name = abs.file_name().and_then(|f| f.to_str()).unwrap_or("file").to_string();
-    // An unregistered destination still queues (a courier can reach nodes the
-    // LAN can't) — but say so: no gossip will announce it.
-    let registered = crate::supervisor::find_peer(&node).await.is_some();
+    // Resolve the destination against the peer registry at QUEUE time (field
+    // note 08-07): "apex2" → "ApexOS-2" so the gossip announce actually fires.
+    // Ambiguity errors with the candidates; a truly-unknown dest still queues
+    // (a courier can reach nodes the LAN can't) — loudly.
+    let peers = crate::courier::peers_list();
+    let (node, resolved_note, registered) = match crate::courier::resolve_dest(&node, &peers) {
+        crate::courier::DestResolution::Exact(id) => (id, None, true),
+        crate::courier::DestResolution::Resolved(id) => {
+            let note = format!("resolved \"{node}\" → registered peer \"{id}\"");
+            (id, Some(note), true)
+        }
+        crate::courier::DestResolution::Ambiguous(c) => {
+            return err(format!(
+                "courier_queue: \"{node}\" matches several peers — pick one of: {}",
+                c.join(", ")
+            ));
+        }
+        crate::courier::DestResolution::Unknown => (node, None, false),
+    };
 
     let log_dir = crate::courier::log_dir_env();
     let (abs_c, node_c, name_c) = (abs.clone(), node.clone(), name.clone());
@@ -2516,14 +2544,51 @@ async fn courier_queue(node: Option<&str>, agent_id: &str, path: &str) -> ToolOu
             }
         }
     }
-    ToolOutput {
-        ok: true,
-        content: serde_json::json!({
-            "queued": true, "id": entry.id, "name": entry.name, "dest": entry.dest,
-            "bytes": entry.len, "root": entry.root, "status": status,
-            "announce": if registered { "gossip to dest over mesh when loaded" }
-                        else { "dest is not a registered peer — the stick ledger is the only signal" },
-        }),
+    let mut content = serde_json::json!({
+        "queued": true, "id": entry.id, "name": entry.name, "dest": entry.dest,
+        "bytes": entry.len, "root": entry.root, "status": status,
+        "announce": if registered {
+            "gossip to dest over mesh when loaded".to_string()
+        } else {
+            format!(
+                "\"{}\" is not a registered peer — the stick ledger is the only signal \
+                 (registered: {}). If that's a typo, courier_cancel {} and re-queue.",
+                entry.dest,
+                if peers.is_empty() { "none".to_string() } else { peers.join(", ") },
+                entry.id
+            )
+        },
+    });
+    if let Some(note) = resolved_note {
+        content["resolved"] = serde_json::json!(note);
+    }
+    ToolOutput { ok: true, content }
+}
+
+/// `courier_cancel(id)`: withdraw an undelivered artifact from the outbox.
+/// Honest physics: a copy already aboard a stick still travels — cancel only
+/// stops future loads.
+async fn courier_cancel(id: Option<u64>) -> ToolOutput {
+    let err = |m: String| ToolOutput { ok: false, content: serde_json::json!(m) };
+    let Some(id) = id else {
+        return err("courier_cancel: missing 'id' (see courier_status for outbox ids)".into());
+    };
+    let log_dir = crate::courier::log_dir_env();
+    let result =
+        tokio::task::spawn_blocking(move || crate::courier::outbox_cancel(&log_dir, id))
+            .await
+            .unwrap_or_else(|e| Err(format!("join: {e}")));
+    match result {
+        Ok((entry, caveat)) => {
+            let mut v = serde_json::json!({
+                "cancelled": true, "id": entry.id, "name": entry.name, "dest": entry.dest,
+            });
+            if let Some(c) = caveat {
+                v["note"] = serde_json::json!(c);
+            }
+            ToolOutput { ok: true, content: v }
+        }
+        Err(e) => err(format!("courier_cancel: {e}")),
     }
 }
 

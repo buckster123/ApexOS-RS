@@ -464,6 +464,116 @@ pub fn queue_artifact(
     Ok(entry)
 }
 
+// ── Destination resolution (field note 08-07: "apex2" vs "ApexOS-2") ────────
+
+/// All registered peer node_ids (peers.toml — same file/shape `find_peer`
+/// reads; this is the list view for resolution + honest errors).
+pub fn peers_list() -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct PeersFile {
+        #[serde(default)]
+        peer: Vec<PeerEntry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct PeerEntry {
+        node_id: String,
+    }
+    let path = std::env::var("PEERS_TOML").unwrap_or_else(|_| "/etc/agentd/peers.toml".into());
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| toml::from_str::<PeersFile>(&raw).ok())
+        .map(|f| f.peer.into_iter().map(|p| p.node_id).collect())
+        .unwrap_or_default()
+}
+
+/// How a queue-time destination resolved against the peer registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestResolution {
+    /// Exact registered id.
+    Exact(String),
+    /// Unambiguous alias (case/subsequence) → the canonical id.
+    Resolved(String),
+    /// The alias matches several peers — caller must pick.
+    Ambiguous(Vec<String>),
+    /// No registered peer comes close. Still queueable (a courier can reach
+    /// nodes the LAN can't) — but the caller should say so, loudly.
+    Unknown,
+}
+
+fn normalize(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// Is `needle` a subsequence of `hay` (both normalized)? Catches the natural
+/// human abbreviations — "apex2" ⊆ "apexos2", "tvpi" ⊆ "tvpi" — without a
+/// fuzzy-distance dependency.
+fn is_subsequence(needle: &str, hay: &str) -> bool {
+    let mut h = hay.chars();
+    needle.chars().all(|n| h.any(|c| c == n))
+}
+
+/// Resolve a human-supplied destination against the registered peers:
+/// exact → normalized-exact → unique subsequence (≥3 chars — "a2" is too
+/// little signal). Pure; the tool layer decides what each variant says.
+pub fn resolve_dest(query: &str, peers: &[String]) -> DestResolution {
+    if peers.iter().any(|p| p == query) {
+        return DestResolution::Exact(query.to_string());
+    }
+    let nq = normalize(query);
+    if nq.is_empty() {
+        return DestResolution::Unknown;
+    }
+    let exact_norm: Vec<&String> = peers.iter().filter(|p| normalize(p) == nq).collect();
+    match exact_norm.len() {
+        1 => return DestResolution::Resolved(exact_norm[0].clone()),
+        n if n > 1 => return DestResolution::Ambiguous(exact_norm.into_iter().cloned().collect()),
+        _ => {}
+    }
+    if nq.len() >= 3 {
+        let subseq: Vec<&String> = peers
+            .iter()
+            .filter(|p| is_subsequence(&nq, &normalize(p)))
+            .collect();
+        match subseq.len() {
+            1 => return DestResolution::Resolved(subseq[0].clone()),
+            n if n > 1 => return DestResolution::Ambiguous(subseq.into_iter().cloned().collect()),
+            _ => {}
+        }
+    }
+    DestResolution::Unknown
+}
+
+/// Cancel an undelivered outbox entry by id. Honest about the physics: if
+/// the artifact is already aboard a stick, that copy still travels — cancel
+/// only stops future loads (and the eventual receipt will simply find no
+/// outbox entry to mark).
+pub fn outbox_cancel(log_dir: &Path, id: u64) -> Result<(OutboxEntry, Option<String>), String> {
+    let _g = lock();
+    let mut entries = outbox_load(log_dir);
+    let idx = entries
+        .iter()
+        .position(|e| e.id == id)
+        .ok_or_else(|| format!("no outbox entry with id {id}"))?;
+    if entries[idx].receipted_at.is_some() {
+        return Err(format!(
+            "entry {id} ({}) was already delivered — nothing to cancel",
+            entries[idx].name
+        ));
+    }
+    let entry = entries.remove(idx);
+    outbox_save(log_dir, &entries)?;
+    let caveat = entry.loaded_on.as_ref().map(|stick| {
+        format!(
+            "already loaded on stick {stick} — that copy still travels; \
+             cancelling only stops future loads"
+        )
+    });
+    Ok((entry, caveat))
+}
+
 // ── The gossip ledger (what this node has HEARD) ────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1254,6 +1364,78 @@ mod tests {
         );
         assert!(!news2);
         assert!(delivered2.is_none());
+    }
+
+    #[test]
+    fn dest_resolution_catches_the_field_case() {
+        let peers = vec![
+            "ApexOS-2".to_string(),
+            "tvpi".to_string(),
+            "andre-laptop".to_string(),
+        ];
+        // The exact id passes through untouched.
+        assert_eq!(
+            resolve_dest("ApexOS-2", &peers),
+            DestResolution::Exact("ApexOS-2".into())
+        );
+        // The field friction: André's shorthand resolves to the canonical id.
+        assert_eq!(
+            resolve_dest("apex2", &peers),
+            DestResolution::Resolved("ApexOS-2".into())
+        );
+        // Case-insensitive exact.
+        assert_eq!(
+            resolve_dest("TVPI", &peers),
+            DestResolution::Resolved("tvpi".into())
+        );
+        // Abbreviation via subsequence.
+        assert_eq!(
+            resolve_dest("laptop", &peers),
+            DestResolution::Resolved("andre-laptop".into())
+        );
+        // Too short to trust as a subsequence; not near anything → Unknown.
+        assert_eq!(resolve_dest("a2", &peers), DestResolution::Unknown);
+        assert_eq!(resolve_dest("radxa", &peers), DestResolution::Unknown);
+        // Ambiguity is surfaced, never guessed through.
+        let twins = vec!["apex-a".to_string(), "apex-b".to_string()];
+        match resolve_dest("apex", &twins) {
+            DestResolution::Ambiguous(c) => assert_eq!(c.len(), 2),
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outbox_cancel_removes_undelivered_and_is_honest_about_loaded() {
+        let d = tmp();
+        let src = d.path().join("a.txt");
+        std::fs::write(&src, b"x").unwrap();
+        let e = queue_artifact(d.path(), &src, "apex2", "a.txt").unwrap();
+        // Plain cancel: entry gone, no caveat.
+        let (gone, caveat) = outbox_cancel(d.path(), e.id).unwrap();
+        assert_eq!(gone.id, e.id);
+        assert!(caveat.is_none());
+        assert!(outbox_load(d.path()).is_empty());
+        // Unknown id errors.
+        assert!(outbox_cancel(d.path(), 99).is_err());
+        // Loaded-on-a-stick cancel carries the caveat.
+        let e2 = queue_artifact(d.path(), &src, "apex2", "a.txt").unwrap();
+        let mut entries = outbox_load(d.path());
+        entries
+            .iter_mut()
+            .for_each(|x| x.loaded_on = Some("aabb".into()));
+        outbox_save(d.path(), &entries).unwrap();
+        let (_, caveat) = outbox_cancel(d.path(), e2.id).unwrap();
+        assert!(caveat.unwrap().contains("still travels"));
+        // Delivered entries refuse cancellation.
+        let e3 = queue_artifact(d.path(), &src, "apex2", "a.txt").unwrap();
+        let mut entries = outbox_load(d.path());
+        entries
+            .iter_mut()
+            .for_each(|x| x.receipted_at = Some("t".into()));
+        outbox_save(d.path(), &entries).unwrap();
+        assert!(outbox_cancel(d.path(), e3.id)
+            .unwrap_err()
+            .contains("already delivered"));
     }
 
     #[test]

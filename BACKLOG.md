@@ -172,8 +172,11 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    2026-08-07** — marker v2 stick_id, PSK-sealed manifest/receipts, blake3
    cargo, outbox.jsonl drain-to-stick, Tier-1 ledger gossip
    (`/api/courier/*`), courier-enriched plug notice, `courier_queue`/
-   `courier_status` tools; DoD loop + tamper-fails-closed proven in tests;
-   residual = the two-node field carry (real stick, two LAN nodes). Next:
+   `courier_status` tools; DoD loop + tamper-fails-closed proven in tests
+   AND **field-proven 2026-08-07** (APEX's notes: andre-laptop → ApexOS-2
+   via APEX-test stick, verified + receipted). Field polish shipped same
+   day: queue-time dest resolution ("apex2"→"ApexOS-2"), `courier_cancel`,
+   MemAvailable-gated build swap (apex1 OOMed at total-RAM gating). Next:
    P3 bridge + PTY harness (hardware-free) or await boards for P4.
 2. **Cadre review** *(sibling `Cadre-RS`; gated)* — review the Grok 4.5
    12-hour build against the clean-room PRD
