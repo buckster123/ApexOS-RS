@@ -37,6 +37,11 @@
 | `AGENTD_SOUL_DEV` | `config/soul.md` | dev fallback soul path (only consulted when the primary is missing) |
 | `AGENTD_PLUGINS_TOML` | `config/plugins.toml` (code) / `/etc/agentd/plugins.toml` (unit) | plugin/MCP-server registry; hot-rewritten by `RegisterMcpServer` evolution proposals |
 | `AGENTD_POLICY_TOML` | `config/policy.toml` (code) / `/etc/agentd/policy.toml` (unit) | approval-policy file (seed-if-absent + additive sync on `apexos-update`); load failure → policy defaults |
+| `EE_WORKSPACE` | falls back to `AGENTD_WORKSPACE`, then `./data/workspace` | **enterprise feature only** — confinement root for the EE tool-gate (`docs/enterprise.md`) |
+| `EE_TOOL_GATE_URL` | unset | **enterprise** — full URL of `POST` tool-gate; if set, overrides local shim |
+| `EE_ADMIN_URL` | unset | **enterprise** — EE admin origin; gate URL becomes `{EE_ADMIN_URL}/api/agentd/tool-gate` |
+| `EE_AGENTD_TOKEN` | unset | **enterprise** — bearer for the HTTP tool-gate sidecar |
+| `EE_DEFAULT_ROLE` | `operator` | **enterprise** — role stamped into every gate eval (`admin` / `operator` / `user`) |
 | `AGENTD_KEY_FILE` | `/var/lib/agentd/.api_key` | Anthropic key persistence (0600), written by the UI; `ANTHROPIC_API_KEY` env wins over the file at boot |
 | `AGENTD_OAI_KEY_FILE` | `/var/lib/agentd/.oai_api_key` | OAI/OpenRouter key persistence (0600); the env keys win at boot |
 | `AGENTD_HARDWARE_WISHLIST` | `hardware-wishlist.md` (code) / `/var/lib/agentd/hardware-wishlist.md` (unit) | file the `RequestHardware` evolution proposal appends to (atomic) |

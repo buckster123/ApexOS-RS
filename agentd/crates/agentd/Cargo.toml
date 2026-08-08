@@ -7,6 +7,13 @@ edition = "2021"
 name = "agentd"
 path = "src/main.rs"
 
+[features]
+default = []
+# Propagate enterprise tool-gate into apexos-plugins + init EE gate at boot.
+# Public CI: leave off. Dual-checkout EE: `cargo build -p agentd --features enterprise`
+# (and optional `.cargo/config.toml` paths override — docs/enterprise.md).
+enterprise = ["apexos-plugins/enterprise", "dep:apexos-ee-dispatch"]
+
 [dependencies]
 apexos-core    = { path = "../core" }
 apexos-confine = { path = "../../../apexos-confine" }
@@ -15,6 +22,8 @@ apexos-gateway = { path = "../gateway" }
 apexos-plugins = { path = "../plugins" }
 apexos-agent   = { path = "../agent" }
 apexos-store   = { path = "../store" }
+# Boot-time init_global_gate only; the supervisor chokepoint lives in plugins.
+apexos-ee-dispatch = { path = "../apexos-ee-dispatch", optional = true }
 tokio          = { workspace = true }
 reqwest        = { workspace = true }   # W2 mesh workers: assign/poll/report POSTs to peers
 anyhow         = { workspace = true }

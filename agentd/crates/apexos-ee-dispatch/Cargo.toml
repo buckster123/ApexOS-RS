@@ -1,0 +1,26 @@
+[package]
+name = "apexos-ee-dispatch"
+description = """
+Public agentd bridge for ApexOS-Enterprise tool gating.
+
+API-compatible with the private ApexOS-Enterprise crate of the same name so a
+local dual-checkout can swap in the real PolicyShim via Cargo `paths` override
+(see docs/enterprise.md). Default builds ship this in-tree shim: HTTP sidecar
+to EE admin-api, or a fail-closed local deny list when no sidecar is configured.
+"""
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["buckster123 (André)"]
+publish = false
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+# Blocking HTTP for the tool-gate sidecar (sync eval at the policy chokepoint).
+# rustls only — matches agentd's TLS stance; optional so unit tests stay light.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -3,12 +3,22 @@ name = "apexos-plugins"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# Enterprise tool-gate: path-dep on apexos-ee-dispatch (in-tree public shim by
+# default; dual-checkout real ApexOS-Enterprise via Cargo `paths` — docs/enterprise.md).
+# Default / public CI builds leave this OFF so EE is never required.
+enterprise = ["dep:apexos-ee-dispatch"]
+
 [dependencies]
 apexos-core       = { path = "../core" }
 apexos-confine    = { path = "../../../apexos-confine" }
 # The courier lane (courier.rs) reuses the ApexNET wire crate's crypto
 # envelope + blake3 content addressing — one implementation, both transports.
 apexos-mesh-proto = { path = "../../../apexos-mesh-proto" }
+# Optional: EE tool gate (see [features].enterprise). In-tree shim is
+# API-compatible with private ApexOS-Enterprise/crates/apexos-ee-dispatch.
+apexos-ee-dispatch = { path = "../apexos-ee-dispatch", optional = true }
 rand   = { workspace = true }
 base64 = { workspace = true }
 tokio        = { workspace = true }

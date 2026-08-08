@@ -149,6 +149,32 @@ async fn main() -> anyhow::Result<()> {
     let policy_arc: Arc<RwLock<PolicyEngine>> =
         Arc::new(RwLock::new(PolicyEngine::new(policy_config)));
 
+    // Enterprise tool-gate (feature = "enterprise"): install process-global
+    // AgentdToolGate once at boot. Supervisor evaluates every ToolRequested
+    // through evaluate_tool_global before civilian PolicyEngine.
+    // Env: EE_WORKSPACE / AGENTD_WORKSPACE, EE_TOOL_GATE_URL or EE_ADMIN_URL,
+    // EE_AGENTD_TOKEN, EE_DEFAULT_ROLE. See docs/enterprise.md.
+    #[cfg(feature = "enterprise")]
+    {
+        use apexos_ee_dispatch::{init_global_gate, AgentdToolGate};
+        let gate = AgentdToolGate::from_env();
+        init_global_gate(gate);
+        let ws = std::env::var("EE_WORKSPACE")
+            .or_else(|_| std::env::var("AGENTD_WORKSPACE"))
+            .unwrap_or_else(|_| "./data/workspace".into());
+        let sidecar = std::env::var("EE_TOOL_GATE_URL")
+            .ok()
+            .or_else(|| std::env::var("EE_ADMIN_URL").ok());
+        match sidecar {
+            Some(u) => eprintln!(
+                "[agentd] enterprise tool-gate: ON (sidecar {u}, workspace {ws})"
+            ),
+            None => eprintln!(
+                "[agentd] enterprise tool-gate: ON (local fail-closed shim, workspace {ws})"
+            ),
+        }
+    }
+
     // Channel for live policy mode changes from the /api/policy gateway route.
     let (policy_set_tx, mut policy_set_rx) = tokio::sync::mpsc::channel::<String>(8);
     {
