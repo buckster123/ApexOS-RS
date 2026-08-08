@@ -236,7 +236,7 @@ pub fn list() -> Value {
         },
         {
             "name": "http_fetch",
-            "description": "Make an HTTP request.",
+            "description": "Make an HTTP request (SSRF-guarded). When enterprise connectors are active (AGENTD_EE_CONNECTORS=1 or AGENTD_HTTP_FETCH_MODE=deny|allowlist), raw fetches are denied or host-allowlisted — prefer openapi_call / connector tools for SaaS APIs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1744,6 +1744,103 @@ fn delete_path(args: &Value) -> Value {
     }
 }
 
+// ── http_fetch policy modes (Phase 2: tighten when EE connectors present) ─────
+//
+// Default civilian: open + SSRF (block private/loopback/link-local).
+// When enterprise OpenAPI/connectors are the preferred egress path:
+//   AGENTD_EE_CONNECTORS=1           → default mode becomes `deny` (use connectors)
+//   AGENTD_HTTP_FETCH_MODE=open|allowlist|deny
+//   AGENTD_HTTP_FETCH_ALLOWLIST=h1,h2  → exact host names (implies allowlist if mode unset)
+// Explicit MODE=open always wins for lab nodes that still want free-form fetch.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpFetchMode {
+    /// SSRF only (historical default).
+    Open,
+    /// Host must appear on AGENTD_HTTP_FETCH_ALLOWLIST (SSRF still applies).
+    Allowlist,
+    /// Hard deny — prefer openapi_* / connector tools.
+    Deny,
+}
+
+fn http_fetch_mode() -> HttpFetchMode {
+    if let Ok(m) = std::env::var("AGENTD_HTTP_FETCH_MODE") {
+        match m.to_ascii_lowercase().as_str() {
+            "open" | "off" | "disabled" => return HttpFetchMode::Open,
+            "allowlist" | "allow-list" | "whitelist" => return HttpFetchMode::Allowlist,
+            "deny" | "block" | "connectors" | "connectors_only" => return HttpFetchMode::Deny,
+            _ => {}
+        }
+    }
+    // Allowlist env alone selects allowlist mode.
+    if let Ok(list) = std::env::var("AGENTD_HTTP_FETCH_ALLOWLIST") {
+        if !list.trim().is_empty() {
+            return HttpFetchMode::Allowlist;
+        }
+    }
+    // EE signal: connectors installed → deny free-form fetch unless operator opens it.
+    if matches!(
+        std::env::var("AGENTD_EE_CONNECTORS").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    ) {
+        return HttpFetchMode::Deny;
+    }
+    HttpFetchMode::Open
+}
+
+fn http_fetch_allowlist() -> Vec<String> {
+    std::env::var("AGENTD_HTTP_FETCH_ALLOWLIST")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Connector / allowlist gate *before* SSRF. Ok means proceed to ssrf_guard.
+fn http_fetch_policy_gate(url: &str) -> Result<(), String> {
+    match http_fetch_mode() {
+        HttpFetchMode::Open => Ok(()),
+        HttpFetchMode::Deny => Err(
+            "http_fetch is disabled while enterprise connectors are active \
+             (AGENTD_EE_CONNECTORS=1 or AGENTD_HTTP_FETCH_MODE=deny). \
+             Use openapi_call / connector tools for allowlisted SaaS APIs, \
+             or set AGENTD_HTTP_FETCH_MODE=open (lab) / allowlist + \
+             AGENTD_HTTP_FETCH_ALLOWLIST=host1,host2."
+                .into(),
+        ),
+        HttpFetchMode::Allowlist => {
+            let list = http_fetch_allowlist();
+            if list.is_empty() {
+                return Err(
+                    "http_fetch mode=allowlist but AGENTD_HTTP_FETCH_ALLOWLIST is empty — \
+                     denying all fetches (fail closed)"
+                        .into(),
+                );
+            }
+            let host = reqwest::Url::parse(url)
+                .map_err(|e| format!("invalid url: {e}"))?
+                .host_str()
+                .ok_or_else(|| "url has no host".to_string())?
+                .to_ascii_lowercase();
+            // Strip IPv6 brackets for comparison.
+            let bare = host
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .unwrap_or(host.as_str());
+            if list.iter().any(|h| h == bare || h == &host) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "http_fetch host '{bare}' not on AGENTD_HTTP_FETCH_ALLOWLIST \
+                     (connectors-preferred egress). Use openapi_call for catalog APIs \
+                     or add the host to the allowlist."
+                ))
+            }
+        }
+    }
+}
+
 /// Return true if an IP address must not be reachable via http_fetch
 /// (SSRF guard): loopback, link-local (incl. cloud metadata 169.254.169.254),
 /// and RFC1918 private ranges.
@@ -1827,6 +1924,10 @@ fn http_fetch(args: &Value) -> Value {
         Some(u) => u,
         None => return tool_error("url is required"),
     };
+    // Enterprise connector mode first (deny / host allowlist), then SSRF.
+    if let Err(e) = http_fetch_policy_gate(url) {
+        return tool_error(e);
+    }
     if let Err(e) = ssrf_guard(url) {
         return tool_error(e);
     }
@@ -3453,6 +3554,37 @@ mod tests {
         assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(172, 15, 0, 1))));
         assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
         assert!(!is_blocked_ip(IpAddr::V6("2606:4700:4700::1111".parse().unwrap())));
+    }
+
+    #[test]
+    fn http_fetch_deny_when_ee_connectors() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("AGENTD_HTTP_FETCH_MODE");
+        std::env::remove_var("AGENTD_HTTP_FETCH_ALLOWLIST");
+        std::env::set_var("AGENTD_EE_CONNECTORS", "1");
+        assert_eq!(http_fetch_mode(), HttpFetchMode::Deny);
+        let err = http_fetch_policy_gate("https://example.com/x").unwrap_err();
+        assert!(err.contains("disabled") || err.contains("connectors"), "{err}");
+        // Explicit open overrides EE signal
+        std::env::set_var("AGENTD_HTTP_FETCH_MODE", "open");
+        assert_eq!(http_fetch_mode(), HttpFetchMode::Open);
+        assert!(http_fetch_policy_gate("https://example.com/x").is_ok());
+        std::env::remove_var("AGENTD_EE_CONNECTORS");
+        std::env::remove_var("AGENTD_HTTP_FETCH_MODE");
+    }
+
+    #[test]
+    fn http_fetch_allowlist_host_gate() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("AGENTD_EE_CONNECTORS");
+        std::env::set_var("AGENTD_HTTP_FETCH_MODE", "allowlist");
+        std::env::set_var("AGENTD_HTTP_FETCH_ALLOWLIST", "api.example.com,cdn.example.com");
+        assert!(http_fetch_policy_gate("https://api.example.com/v1").is_ok());
+        assert!(http_fetch_policy_gate("https://evil.example.com/").is_err());
+        std::env::set_var("AGENTD_HTTP_FETCH_ALLOWLIST", "");
+        assert!(http_fetch_policy_gate("https://api.example.com/v1").is_err());
+        std::env::remove_var("AGENTD_HTTP_FETCH_MODE");
+        std::env::remove_var("AGENTD_HTTP_FETCH_ALLOWLIST");
     }
 
     // ─── Git tools ────────────────────────────────────────────────────────────

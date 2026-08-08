@@ -49,6 +49,26 @@ The supervisor then runs `evaluate_tool_global` **before** civilian policy:
 | `EE_AGENTD_TOKEN` | Bearer for the HTTP sidecar |
 | `EE_DEFAULT_ROLE` | Role stamped into the gate (`admin` / `operator` / `user`; default `operator`) |
 
+## `http_fetch` when connectors are present (Phase 2 #6)
+
+Raw `http_fetch` is the civilian free-form egress path (SSRF-guarded). With
+enterprise OpenAPI/connectors, prefer **catalog tools** (`openapi_call`, …)
+so egress hosts, auth, and audit stay on the connector rails.
+
+| Variable | Behavior |
+|----------|----------|
+| `AGENTD_EE_CONNECTORS=1` | **Deny** `http_fetch` by default (use connectors) |
+| `AGENTD_HTTP_FETCH_MODE=deny` | Same hard deny |
+| `AGENTD_HTTP_FETCH_MODE=allowlist` + `AGENTD_HTTP_FETCH_ALLOWLIST=h1,h2` | Only listed hosts (SSRF still applies) |
+| `AGENTD_HTTP_FETCH_ALLOWLIST=…` alone | Implies allowlist mode |
+| `AGENTD_HTTP_FETCH_MODE=open` | Force civilian open mode even if `AGENTD_EE_CONNECTORS=1` |
+
+EE install / compose should set `AGENTD_EE_CONNECTORS=1` on agentd when the
+OpenAPI connector plugin is registered. Lab nodes can `MODE=open` temporarily.
+
+Deny error text steers the model toward `openapi_call` rather than inventing
+workarounds.
+
 ## Dual-checkout: real PolicyShim in-process
 
 When `~/Projects/ApexOS-Enterprise` sits next to `ApexOS-RS`, swap the shim for
