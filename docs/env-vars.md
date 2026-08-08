@@ -42,6 +42,9 @@
 | `EE_ADMIN_URL` | unset | **enterprise** — EE admin origin; gate URL becomes `{EE_ADMIN_URL}/api/agentd/tool-gate` |
 | `EE_AGENTD_TOKEN` | unset | **enterprise** — bearer for the HTTP tool-gate sidecar |
 | `EE_DEFAULT_ROLE` | `operator` | **enterprise** — role stamped into every gate eval (`admin` / `operator` / `user`) |
+| `AGENTD_EE_CONNECTORS` | unset | When `1`/`true`, **deny** free-form `http_fetch` (prefer OpenAPI/connectors). See `docs/enterprise.md` |
+| `AGENTD_HTTP_FETCH_MODE` | auto | `open` \| `allowlist` \| `deny` — overrides EE connector default for `http_fetch` |
+| `AGENTD_HTTP_FETCH_ALLOWLIST` | empty | Comma hosts permitted when mode is allowlist (implies allowlist if MODE unset) |
 | `AGENTD_KEY_FILE` | `/var/lib/agentd/.api_key` | Anthropic key persistence (0600), written by the UI; `ANTHROPIC_API_KEY` env wins over the file at boot |
 | `AGENTD_OAI_KEY_FILE` | `/var/lib/agentd/.oai_api_key` | OAI/OpenRouter key persistence (0600); the env keys win at boot |
 | `AGENTD_HARDWARE_WISHLIST` | `hardware-wishlist.md` (code) / `/var/lib/agentd/hardware-wishlist.md` (unit) | file the `RequestHardware` evolution proposal appends to (atomic) |
