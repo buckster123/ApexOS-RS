@@ -5,3 +5,6 @@
 # Very-future side projects parked in-tree (not part of the RS distro build)
 /docs/rust-ai-3d-hud-skill/
 /world/
+
+# Local Cargo overrides (e.g. enterprise paths → private EE)
+.cargo/config.toml

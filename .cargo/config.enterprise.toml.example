@@ -1,0 +1,14 @@
+# Dual-checkout: use real ApexOS-Enterprise PolicyShim instead of the in-tree
+# public shim. Copy to `.cargo/config.toml` ONLY when the sibling tree exists:
+#
+#   cp .cargo/config.enterprise.toml.example .cargo/config.toml
+#   cargo build -p agentd --features enterprise
+#
+# A missing path here fails ALL cargo invocations (feature on or off). Keep
+# `.cargo/config.toml` gitignored on public clones without EE.
+#
+# Layout expected:
+#   ~/Projects/ApexOS-RS
+#   ~/Projects/ApexOS-Enterprise/crates/apexos-ee-dispatch
+
+paths = ["../ApexOS-Enterprise/crates/apexos-ee-dispatch"]

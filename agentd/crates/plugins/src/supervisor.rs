@@ -391,6 +391,98 @@ impl Supervisor {
                             .iter()
                             .filter_map(|k| call.args[*k].as_str())
                             .collect();
+
+                        // ── Enterprise tool-gate (feature = "enterprise") ─────────
+                        // Runs *in front of* civilian PolicyEngine. Deny is hard
+                        // (tool error, no approval prompt). Ask falls through to
+                        // the civilian approval queue. Execute continues to the
+                        // civilian check so policy.toml rules still apply.
+                        // See docs/enterprise.md.
+                        #[cfg(feature = "enterprise")]
+                        {
+                            use apexos_ee_dispatch::agentd_hook::{
+                                evaluate_tool_global, ToolHookInput, ToolHookResult,
+                            };
+                            let agent_id = apexos_core::resolve_agent_id(
+                                &self.session_bindings,
+                                session,
+                            );
+                            let role = std::env::var("EE_DEFAULT_ROLE")
+                                .unwrap_or_else(|_| "operator".into());
+                            // Most-restrictive across path candidates: any Deny
+                            // wins; else any Ask; else Execute (first confined).
+                            let path_opts: Vec<Option<&str>> = if candidates.is_empty() {
+                                vec![None]
+                            } else {
+                                candidates.iter().map(|p| Some(*p)).collect()
+                            };
+                            let mut ee_deny: Option<(String, Option<String>)> = None;
+                            let mut ee_ask: Option<String> = None;
+                            for p in &path_opts {
+                                match evaluate_tool_global(&ToolHookInput {
+                                    tool: call.tool.clone(),
+                                    role: role.clone(),
+                                    path: p.map(|s| s.to_string()),
+                                    agent_id: Some(agent_id.clone()),
+                                }) {
+                                    ToolHookResult::Deny { reason, layer } => {
+                                        ee_deny = Some((reason, layer));
+                                        break;
+                                    }
+                                    ToolHookResult::Ask { reason } => {
+                                        ee_ask = Some(reason);
+                                    }
+                                    ToolHookResult::Execute { .. } => {}
+                                }
+                            }
+                            if let Some((reason, layer)) = ee_deny {
+                                let layer_s = layer.unwrap_or_else(|| "policy".into());
+                                eprintln!(
+                                    "[policy:ee] DENY '{}' layer={layer_s}: {reason} (session {:?})",
+                                    call.tool, session
+                                );
+                                let bus = self.bus.clone();
+                                let call_id = call.id;
+                                let tool = call.tool.clone();
+                                tokio::spawn(async move {
+                                    bus.emit(Event::ToolResult {
+                                        session,
+                                        call: call_id,
+                                        output: ToolOutput {
+                                            ok: false,
+                                            content: serde_json::json!(format!(
+                                                "enterprise policy denied '{tool}' [{layer_s}]: {reason}"
+                                            )),
+                                        },
+                                    }).await;
+                                });
+                                continue;
+                            }
+                            if let Some(reason) = ee_ask {
+                                // Force the civilian path into Ask (approval queue).
+                                // Goal-yolo may still auto-approve below.
+                                eprintln!(
+                                    "[policy:ee] ASK '{}': {reason} (session {:?})",
+                                    call.tool, session
+                                );
+                                let goal_yolo = self.goal_yolo.as_ref().is_some_and(|set|
+                                    apexos_core::goal_session_is_yolo(set, session.0));
+                                if goal_yolo {
+                                    eprintln!("[policy] goal-yolo auto-approve (ee-ask): '{}' (session {:?})",
+                                        call.tool, session);
+                                    self.dispatch_tool(session, call);
+                                } else {
+                                    self.pending_approvals.insert(
+                                        call.id,
+                                        PendingApproval { session, call: call.clone() },
+                                    );
+                                    self.bus.emit(Event::ApprovalPending { session, call }).await;
+                                }
+                                continue;
+                            }
+                            // EE Execute → fall through to civilian PolicyEngine.
+                        }
+
                         let decision = {
                             let pol = self.policy.read().await;
                             if candidates.is_empty() {
