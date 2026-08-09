@@ -38,6 +38,38 @@ fn ct_eq(a: &str, b: &str) -> bool {
     a.ct_eq(b).into()
 }
 
+/// Decode a `?token=` query value without pulling in a crate: hex tokens from
+/// install.sh need no decode, but browsers/`xdg-open` sometimes percent-encode
+/// and form-urlencoded `+` is space. Best-effort; invalid escapes pass through.
+fn percent_decode_token(raw: &str) -> String {
+    // `+` → space is form-urlencoded convention (rare for our hex tokens).
+    let s = raw.replace('+', " ");
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s)
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Error helper — any anyhow error → 500 JSON
 // ---------------------------------------------------------------------------
@@ -1350,6 +1382,13 @@ async fn main() -> Result<()> {
 
     // Token auth — reads AGENTD_TOKEN (same shared secret as the agentd gateway).
     // Binds 127.0.0.1 by default; use CEREBRO_API_ADDR=0.0.0.0:8765 for LAN exposure.
+    //
+    // Lucida static shell (/, /style.css, /app.js) is PUBLIC on GET: the browser
+    // loads CSS/JS as relative requests that do NOT carry the ?token= from the
+    // HTML URL, so gating them 401'd the sky (unstyled page) even with a valid
+    // token on the document. Secrets stay in the API surface; app.js already
+    // parks the token in sessionStorage and sends Authorization: Bearer on
+    // every fetch/EventSource.
     let api_token = Arc::new(std::env::var("AGENTD_TOKEN").unwrap_or_default());
     if api_token.is_empty() {
         info!("cerebro-api: AGENTD_TOKEN not set — auth disabled (127.0.0.1 only)");
@@ -1360,17 +1399,26 @@ async fn main() -> Result<()> {
             let tok = token_mw.clone();
             async move {
                 if tok.is_empty() { return next.run(req).await; }
+                if req.method() == axum::http::Method::GET {
+                    let path = req.uri().path();
+                    if path == "/" || path == "/style.css" || path == "/app.js" {
+                        return next.run(req).await;
+                    }
+                }
                 let from_header = req.headers()
                     .get(header::AUTHORIZATION)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.strip_prefix("Bearer "))
                     .unwrap_or("");
                 if ct_eq(from_header, tok.as_str()) { return next.run(req).await; }
-                let from_query = req.uri().query().unwrap_or("")
+                // Query tokens may arrive percent-encoded (or with '+' as
+                // space, depending on the opener). Decode before compare.
+                let from_query_raw = req.uri().query().unwrap_or("")
                     .split('&')
                     .find_map(|p| p.strip_prefix("token="))
                     .unwrap_or("");
-                if ct_eq(from_query, tok.as_str()) { return next.run(req).await; }
+                let from_query = percent_decode_token(from_query_raw);
+                if ct_eq(&from_query, tok.as_str()) { return next.run(req).await; }
                 (StatusCode::UNAUTHORIZED, "invalid or missing token").into_response()
             }
         }
@@ -1394,7 +1442,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("cerebro-api listening on {addr}");
     if !api_token.is_empty() {
-        info!("Lucida observatory: http://{addr}/?token=<AGENTD_TOKEN>  (bearer token required)");
+        info!("Lucida shell: http://{addr}/  (static free; API needs ?token=<AGENTD_TOKEN> or Bearer)");
     }
     axum::serve(listener, app).await?;
     Ok(())
@@ -1419,5 +1467,17 @@ mod tests {
     #[test]
     fn normalize_priority_default_matches_lowercase_input() {
         assert_eq!(normalize_priority("MEDIUM"), normalize_priority("medium"));
+    }
+
+    #[test]
+    fn percent_decode_token_hex_pass_through() {
+        let t = "a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890";
+        assert_eq!(percent_decode_token(t), t);
+    }
+
+    #[test]
+    fn percent_decode_token_decodes_and_plus() {
+        assert_eq!(percent_decode_token("ab%2Bcd"), "ab+cd");
+        assert_eq!(percent_decode_token("a+b"), "a b");
     }
 }
