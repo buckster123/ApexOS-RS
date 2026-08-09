@@ -1,10 +1,15 @@
 # esp-generate ships 1024, which is tuned for call stacks on small MCUs. Most
 # of what trips it here is not a call stack at all: an `#[embassy_executor::task]`
 # function's "frame" is its *future*, allocated once in the static task pool,
-# not per-call. The five tasks hold an rx buffer, a `Deframer`, and the flash
-# store's scratch buffer — ~1.2-1.8 KB each, on a chip with 512 KB of SRAM.
+# not per-call.
+#
+# The largest is `radio_task` (~5.5 KB): it owns an HCI packet buffer (260 B,
+# the protocol's own maximum) and builds advertising commands up to a full
+# extended-advertising payload. Those buffers are the work; moving them into
+# the struct just moves them inside the same future. On a chip with 512 KB of
+# SRAM and six tasks, that is not close to a problem.
 #
 # Raised rather than sprinkled with `#[allow]`s so there is one place to
-# reason about it. Still a real guard: anything past 4 KB on this target
+# reason about it. Still a real guard: anything past 8 KB on this target
 # deserves a second look before it ships.
-stack-size-threshold = 4096
+stack-size-threshold = 8192

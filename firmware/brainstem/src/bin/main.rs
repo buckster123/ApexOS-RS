@@ -62,6 +62,7 @@
 #![deny(clippy::large_stack_frames)]
 
 use embassy_executor::Spawner;
+use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
@@ -77,9 +78,9 @@ use static_cell::StaticCell;
 
 use apexos_mesh_proto::{
     encode_frame, Deframer, MeshClass, MeshFrame, Payload, PlainPacket, BROADCAST,
-    FLAG_ACK_REQUESTED, WIRE_VERSION,
+    DEFAULT_HOP_LIMIT, FLAG_ACK_REQUESTED, WIRE_VERSION,
 };
-use brainstem::{counter, store};
+use brainstem::{counter, neighbors::Neighbors, radio::Radio, store};
 
 extern crate alloc;
 
@@ -101,11 +102,15 @@ const CORTEX_TIMEOUT_MS: u64 = 5_000;
 /// flash write happens well before [`counter::try_next`] would start
 /// refusing.
 const CTR_LOW_WATER: u64 = 128;
+/// How often the radio's advertised heartbeat is refreshed. Slower than the
+/// wired beat: the controller repeats the payload every advertising interval
+/// on its own, so this only sets how fresh `uptime_s` is.
+const RADIO_BEAT_MS: u64 = 2_000;
 
 /// Shared across tasks: last inbound frame time and this board's id.
 /// Single-core executor, so plain atomics are enough; `AtomicU64` is
 /// available on Xtensa via `portable-atomic`'s critical-section support.
-use portable_atomic::{AtomicU16, AtomicU64, Ordering};
+use portable_atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering};
 static LAST_INBOUND_MS: AtomicU64 = AtomicU64::new(0);
 static NODE_ID: AtomicU16 = AtomicU16::new(UNPROVISIONED_NODE_ID);
 
@@ -155,6 +160,15 @@ fn enqueue(frame: MeshFrame) {
 type StoreMutex =
     Mutex<CriticalSectionRawMutex, store::Store<partitions::FlashRegion<'static, FlashStorage<'static>>>>;
 
+/// Identity is read by the radio (to seal) and written by the wired link (on
+/// provisioning), so it outgrew being a task-local.
+type IdentityMutex = Mutex<CriticalSectionRawMutex, store::Identity>;
+static IDENTITY: StaticCell<IdentityMutex> = StaticCell::new();
+
+/// Radio neighbours currently alive — the heartbeat's connectivity byte and
+/// `BrainstemStatus` both report it, so it lives where both can see it.
+static NEIGHBOR_COUNT: AtomicU8 = AtomicU8::new(0);
+
 static FLASH: StaticCell<FlashStorage<'static>> = StaticCell::new();
 static PT_BUF: StaticCell<[u8; PARTITION_TABLE_MAX_LEN]> = StaticCell::new();
 static STORE: StaticCell<StoreMutex> = StaticCell::new();
@@ -185,9 +199,15 @@ async fn heartbeat_task() {
             Payload::Heartbeat {
                 uptime_s,
                 cortex_up,
-                // The brainstem's own view: 3 = Isolated until a radio tier
-                // exists to say otherwise (P6). Honest, not optimistic.
-                conn: 3,
+                // The brainstem's own view, now that it has a radio to form
+                // one: neighbours on the air means it is not alone, even with
+                // the cortex gone. Matches agentd's ConnectivityState values
+                // (2 = Minimal, 3 = Isolated).
+                conn: if NEIGHBOR_COUNT.load(Ordering::Relaxed) > 0 {
+                    2
+                } else {
+                    3
+                },
             },
             MeshClass::Gossip,
             BROADCAST,
@@ -229,7 +249,7 @@ fn decode_inbound(frame: &MeshFrame, psk: Option<&[u8; 32]>) -> Option<Inbound> 
 async fn inbound_task(
     mut rx: UsbSerialJtagRx<'static, Async>,
     store: &'static StoreMutex,
-    mut identity: store::Identity,
+    identity: &'static IdentityMutex,
 ) {
     use embedded_io_async::Read;
     // The SAME deframer the Pi bridge runs: bounded buffer, poison-frame
@@ -246,7 +266,8 @@ async fn inbound_task(
         }
         LAST_INBOUND_MS.store(now_ms(), Ordering::Relaxed);
         for frame in deframer.push(&buf[..n]) {
-            let Some(inbound) = decode_inbound(&frame, identity.psk.as_ref()) else {
+            let current = *identity.lock().await;
+            let Some(inbound) = decode_inbound(&frame, current.psk.as_ref()) else {
                 continue;
             };
             let (packet, sealed) = match inbound {
@@ -257,7 +278,7 @@ async fn inbound_task(
             if let Payload::Provision { node_id, psk } = &packet.payload {
                 // The acceptance rule, in one line: an un-commissioned board
                 // trusts the wire; a commissioned one trusts only the key.
-                let allowed = if identity.is_commissioned() {
+                let allowed = if current.is_commissioned() {
                     sealed
                 } else {
                     true
@@ -265,8 +286,9 @@ async fn inbound_task(
                 if allowed {
                     let mut guard = store.lock().await;
                     if guard.commission(*node_id, psk).await.is_ok() {
-                        identity.node_id = Some(*node_id);
-                        identity.psk = Some(*psk);
+                        let mut ident = identity.lock().await;
+                        ident.node_id = Some(*node_id);
+                        ident.psk = Some(*psk);
                         NODE_ID.store(*node_id, Ordering::Relaxed);
                     }
                 }
@@ -306,7 +328,7 @@ async fn status_task() {
                 // The flash store-and-forward queue lands with the radio
                 // tier that gives it somewhere to forward to.
                 queued: 0,
-                neighbors: 0,
+                neighbors: NEIGHBOR_COUNT.load(Ordering::Relaxed),
                 ctr_hw: counter::ceiling(),
             },
             MeshClass::Gossip,
@@ -332,6 +354,105 @@ async fn counter_task(store: &'static StoreMutex) {
             }
         }
         Timer::after(Duration::from_secs(10)).await;
+    }
+}
+
+/// Tier 2a gossip. Advertises a **sealed** heartbeat and listens for the
+/// neighbours' — the first frames in this system that are authenticated,
+/// because they are the first that ride hostile air (charter §0.4).
+///
+/// An **un-commissioned brainstem stays off the radio entirely**. It holds no
+/// colony key, so it could neither authenticate what it says nor verify what
+/// it hears; broadcasting anyway would put an unauthenticated claimant on the
+/// air. Silence is the honest state, and the wired link is how it stops being
+/// silent.
+#[embassy_executor::task]
+async fn radio_task(ble: esp_radio::ble::controller::BleConnector<'static>, identity: &'static IdentityMutex) {
+    let Ok(mut radio) = Radio::new(ble).await else {
+        // No radio is a degraded node, not a dead one: the wired link and the
+        // heartbeat carry on without it.
+        return;
+    };
+    let mut neighbors = Neighbors::new();
+    let mut next_beat = Instant::now();
+
+    loop {
+        // Advertising is a standing state, so the timer only decides how often
+        // we refresh the payload; between refreshes we are listening.
+        let now = Instant::now();
+        if now >= next_beat {
+            next_beat = now + Duration::from_millis(RADIO_BEAT_MS);
+            let ident = *identity.lock().await;
+            if let (Some(node_id), Some(psk)) = (ident.node_id, ident.psk) {
+                let uptime_s = (now_ms() / 1000) as u32;
+                let cortex_up = now_ms().saturating_sub(LAST_INBOUND_MS.load(Ordering::Relaxed))
+                    < CORTEX_TIMEOUT_MS
+                    && LAST_INBOUND_MS.load(Ordering::Relaxed) != 0;
+                let packet = PlainPacket {
+                    target: BROADCAST,
+                    hop_limit: DEFAULT_HOP_LIMIT,
+                    flags: 0,
+                    payload: Payload::Heartbeat {
+                        uptime_s,
+                        cortex_up,
+                        conn: if NEIGHBOR_COUNT.load(Ordering::Relaxed) > 0 {
+                            2
+                        } else {
+                            3
+                        },
+                    },
+                };
+                // A counter we cannot mint is a frame we must not send: the
+                // counter IS the nonce (see brainstem::counter).
+                if let Some(ctr) = counter::try_next()
+                    && let Ok(frame) = apexos_mesh_proto::seal(
+                        &apexos_mesh_proto::Psk(psk),
+                        MeshClass::Gossip,
+                        node_id,
+                        ctr,
+                        &packet,
+                    )
+                {
+                    let _ = radio.advertise(&frame).await;
+                }
+            }
+        }
+
+        match select(
+            Timer::at(next_beat),
+            radio.next_frame(),
+        )
+        .await
+        {
+            Either::First(_) => {}
+            Either::Second(Some(heard)) => {
+                let ident = *identity.lock().await;
+                let Some(psk) = ident.psk else { continue };
+                // Ignore our own broadcasts, and anything that does not open
+                // under the colony key — on the air, "unauthenticated" and
+                // "not ours" are the same answer: drop it.
+                if Some(heard.frame.sender) == ident.node_id {
+                    continue;
+                }
+                if apexos_mesh_proto::open(&apexos_mesh_proto::Psk(psk), &heard.frame).is_err() {
+                    continue;
+                }
+                // Replay check AFTER authentication: an unauthenticated frame
+                // must never be able to advance a peer's window.
+                if neighbors.accept(
+                    heard.frame.sender,
+                    heard.frame.ctr,
+                    heard.rssi_dbm,
+                    now_ms(),
+                ) {
+                    NEIGHBOR_COUNT.store(neighbors.alive(now_ms()) as u8, Ordering::Relaxed);
+                }
+            }
+            Either::Second(None) => {
+                Timer::after(Duration::from_millis(100)).await;
+            }
+        }
+        NEIGHBOR_COUNT.store(neighbors.alive(now_ms()) as u8, Ordering::Relaxed);
     }
 }
 
@@ -386,23 +507,36 @@ async fn main(spawner: Spawner) -> ! {
 
     // Boot-time counter discipline: resume ABOVE the previous ceiling, then
     // reserve a fresh block before a single frame goes out.
-    let identity = {
+    let identity_ref: &'static IdentityMutex = IDENTITY.init(Mutex::new(store::Identity::default()));
+    {
         let mut guard = store_ref.lock().await;
         let identity = guard.identity().await;
+        *identity_ref.lock().await = identity;
         if let Some(id) = identity.node_id {
             NODE_ID.store(id, Ordering::Relaxed);
         }
         let previous = guard.counter_high_water().await;
         let ceiling = guard.reserve_counters().await.unwrap_or(previous);
         counter::init(previous, ceiling);
-        identity
-    };
+    }
 
     spawner.spawn(tx_task(tx).expect("tx task pool"));
     spawner.spawn(heartbeat_task().expect("heartbeat task pool"));
-    spawner.spawn(inbound_task(rx, store_ref, identity).expect("inbound task pool"));
+    spawner.spawn(inbound_task(rx, store_ref, identity_ref).expect("inbound task pool"));
     spawner.spawn(status_task().expect("status task pool"));
     spawner.spawn(counter_task(store_ref).expect("counter task pool"));
+
+    // Tier 2a. The BT peripheral is handed over wholesale — nothing else in
+    // this firmware touches the radio.
+    match esp_radio::ble::controller::BleConnector::new(peripherals.BT, Default::default()) {
+        Ok(ble) => {
+            spawner.spawn(radio_task(ble, identity_ref).expect("radio task pool"));
+        }
+        Err(_) => {
+            // A brainstem whose radio will not initialise still beats on the
+            // wire. Degraded, not dead.
+        }
+    }
 
     loop {
         Timer::after(Duration::from_secs(60)).await;

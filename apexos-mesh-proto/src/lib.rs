@@ -39,7 +39,9 @@
 //! - [`types`] — `MeshFrame`, `PlainPacket`, `Payload`, `Digest`, courier
 //!   payloads. Serde types only, no logic.
 //! - [`frame`] — encode/decode pipeline + the incremental [`Deframer`]
-//!   (bounded memory, poison-frame advance, COBS resync; the fuzz target).
+//!   (bounded memory, poison-frame advance, COBS resync; the fuzz target),
+//!   plus [`encode_datagram`]/[`decode_datagram`] for packet links (BLE) that
+//!   already bound and CRC their own payloads.
 //! - [`crypto`] — ChaCha20-Poly1305 envelope: [`seal`]/[`open`], the nonce
 //!   and AAD constructions, and the per-sender [`ReplayWindow`].
 //! - [`chunk`] — content-addressed chunker for the Bulk lane: blake3 root,
@@ -59,7 +61,10 @@ pub mod types;
 
 pub use chunk::{blob_root, chunk_blob, ChunkSet, Reassembler, DEFAULT_CHUNK_SIZE};
 pub use crypto::{open, open_blob, seal, seal_blob, Psk, ReplayWindow};
-pub use frame::{decode_frame, encode_frame, Deframer, DeframerStats};
+pub use frame::{
+    decode_datagram, decode_frame, encode_datagram, encode_frame, Deframer, DeframerStats,
+    MAX_DATAGRAM_FRAME,
+};
 pub use types::{
     CourierManifest, CourierReceipt, Digest, MeshClass, MeshFrame, Payload, PlainPacket,
 };

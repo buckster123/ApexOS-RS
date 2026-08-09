@@ -62,10 +62,12 @@ struct Args {
     baud: u32,
     node_id: u16,
     sealed: bool,
+    /// Listen only: report what the board already believes, change nothing.
+    status: bool,
 }
 
 fn usage() -> &'static str {
-    "usage: apexos-brainstem-provision --port <dev> --node-id <n> [--baud <rate>] [--sealed]"
+    "usage: apexos-brainstem-provision --port <dev> (--node-id <n> [--sealed] | --status) [--baud <rate>]"
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -73,6 +75,7 @@ fn parse_args() -> Result<Args, String> {
     let mut node_id = None;
     let mut baud = 115_200u32;
     let mut sealed = false;
+    let mut status = false;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -94,11 +97,21 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--baud: {e}"))?
             }
             "--sealed" => sealed = true,
+            "--status" => status = true,
             "-h" | "--help" => return Err(usage().into()),
             other => return Err(format!("unknown argument {other}\n{}", usage())),
         }
     }
 
+    if status {
+        return Ok(Args {
+            port: port.ok_or_else(|| format!("--port is required\n{}", usage()))?,
+            baud,
+            node_id: 0,
+            sealed: false,
+            status: true,
+        });
+    }
     let node_id = node_id.ok_or_else(|| format!("--node-id is required\n{}", usage()))?;
     if node_id == 0 {
         // 0 is the firmware's "un-commissioned" marker; handing it out as a
@@ -110,6 +123,7 @@ fn parse_args() -> Result<Args, String> {
         baud,
         node_id,
         sealed,
+        status: false,
     })
 }
 
@@ -141,6 +155,91 @@ fn load_psk(path: &str) -> Result<[u8; 32], String> {
         .map_err(|_| format!("{path} is neither 64 hex chars nor 32 raw bytes"))
 }
 
+/// Peek at the board's current `node_id` from its own telemetry. `None` if it
+/// says nothing in time — treated as "unknown", never as "un-commissioned".
+async fn observe_node_id<S>(stream: &mut S) -> Option<u16>
+where
+    S: AsyncReadExt + Unpin,
+{
+    let mut deframer = Deframer::new();
+    let mut buf = [0u8; 512];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(7);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let read = match tokio::time::timeout(remaining, stream.read(&mut buf)).await {
+            Ok(Ok(0)) | Err(_) => continue,
+            Ok(Ok(n)) => n,
+            Ok(Err(_)) => return None,
+        };
+        for got in deframer.push(&buf[..read]) {
+            let Ok((packet, _)) = postcard::take_from_bytes::<PlainPacket>(&got.ct) else {
+                continue;
+            };
+            if let Payload::BrainstemStatus { node_id, .. } = packet.payload {
+                return Some(node_id);
+            }
+        }
+    }
+}
+
+/// Listen for one `BrainstemStatus` and print it. Reads no key — asking a
+/// board who it thinks it is should not require holding the colony's secret.
+async fn report_status(args: &Args) -> ExitCode {
+    let mut stream = match tokio_serial::new(&args.port, args.baud).open_native_async() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "opening {}: {e}\nis the bridge still running on this port?",
+                args.port
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut deframer = Deframer::new();
+    let mut buf = [0u8; 512];
+    let deadline = tokio::time::Instant::now() + CONFIRM_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            eprintln!("no status frame within {}s", CONFIRM_TIMEOUT.as_secs());
+            return ExitCode::FAILURE;
+        }
+        let read = match tokio::time::timeout(remaining, stream.read(&mut buf)).await {
+            Ok(Ok(0)) | Err(_) => continue,
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => {
+                eprintln!("reading {}: {e}", args.port);
+                return ExitCode::FAILURE;
+            }
+        };
+        for got in deframer.push(&buf[..read]) {
+            let Ok((packet, _)) = postcard::take_from_bytes::<PlainPacket>(&got.ct) else {
+                continue;
+            };
+            if let Payload::BrainstemStatus {
+                node_id,
+                queued,
+                neighbors,
+                ctr_hw,
+            } = packet.payload
+            {
+                let who = if node_id == 0 {
+                    "UN-COMMISSIONED".to_string()
+                } else {
+                    format!("node_id={node_id}")
+                };
+                println!(
+                    "{who} neighbors={neighbors} queued={queued} counter_high_water={ctr_hw}"
+                );
+                return ExitCode::SUCCESS;
+            }
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let args = match parse_args() {
@@ -150,6 +249,10 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    if args.status {
+        return report_status(&args).await;
+    }
 
     let psk_path =
         std::env::var("APEXNET_PSK_FILE").unwrap_or_else(|_| DEFAULT_PSK_PATH.to_string());
@@ -226,6 +329,20 @@ async fn main() -> ExitCode {
         }
     };
 
+    // What does the board think it is BEFORE we touch it? Confirming on
+    // "it reports the id we asked for" is vacuous when it already had that
+    // id — the reply is byte-identical whether the provision was honoured or
+    // refused, and a refusal that reads as success is worse than no check.
+    let before = observe_node_id(&mut stream).await;
+    if before == Some(args.node_id) {
+        eprintln!(
+            "note: this board already reports node_id={}, so its reply cannot\n\
+             distinguish an accepted provision from a refused one. Use a\n\
+             different --node-id if you need a confirmable result.",
+            args.node_id
+        );
+    }
+
     if let Err(e) = stream.write_all(&wire).await {
         eprintln!("writing to {}: {e}", args.port);
         return ExitCode::FAILURE;
@@ -284,9 +401,16 @@ async fn main() -> ExitCode {
             } = packet.payload
             {
                 if node_id == args.node_id {
-                    println!(
-                        "confirmed: board reports node_id={node_id}, counter high-water {ctr_hw}"
-                    );
+                    if before == Some(args.node_id) {
+                        println!(
+                            "board reports node_id={node_id}, counter high-water {ctr_hw} \
+                             (unchanged — see the note above; this is NOT proof it was accepted)"
+                        );
+                    } else {
+                        println!(
+                            "confirmed: board reports node_id={node_id}, counter high-water {ctr_hw}"
+                        );
+                    }
                     return ExitCode::SUCCESS;
                 }
             }

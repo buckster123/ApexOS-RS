@@ -5,8 +5,8 @@
 use proptest::prelude::*;
 
 use apexos_mesh_proto::{
-    chunk_blob, encode_frame, open, seal, CourierManifest, CourierReceipt, Deframer, Digest,
-    MeshClass, MeshFrame, Payload, PlainPacket, Psk, Reassembler,
+    chunk_blob, decode_frame, encode_frame, open, seal, CourierManifest, CourierReceipt, Deframer,
+    Digest, MeshClass, MeshFrame, Payload, PlainPacket, Psk, Reassembler,
 };
 
 fn arb_class() -> impl Strategy<Value = MeshClass> {
@@ -229,5 +229,42 @@ proptest! {
         prop_assert!(reasm.is_complete());
         prop_assert!(reasm.missing().is_empty());
         prop_assert_eq!(reasm.finish().unwrap(), blob);
+    }
+}
+
+proptest! {
+    /// Datagram framing carries exactly what stream framing carries — the
+    /// frame is the contract, the wrapper is the link's business.
+    #[test]
+    fn datagram_roundtrips_and_matches_stream_framing(frame in arb_frame()) {
+        use apexos_mesh_proto::{decode_datagram, encode_datagram};
+
+        let wire = match encode_datagram(&frame) {
+            Ok(w) => w,
+            // Oversized frames belong to the chunker, not this layer.
+            Err(_) => return Ok(()),
+        };
+        prop_assert_eq!(decode_datagram(&wire).unwrap(), frame.clone());
+
+        // Same frame, both link shapes: the stream form is strictly bigger
+        // (COBS + CRC32 + delimiter), which is exactly the overhead a radio
+        // must not pay.
+        if let Ok(stream) = encode_frame(&frame) {
+            prop_assert!(stream.len() > wire.len());
+            prop_assert_eq!(decode_frame(&stream[..stream.len() - 1]).unwrap(), frame);
+        }
+    }
+
+    /// Trailing bytes are rejected, so a datagram cannot smuggle a rider past
+    /// the decoder the way a naive length-prefixed parser would allow.
+    #[test]
+    fn datagram_rejects_trailing_bytes(frame in arb_frame(), rider in proptest::collection::vec(any::<u8>(), 1..8)) {
+        use apexos_mesh_proto::{decode_datagram, encode_datagram};
+        if let Ok(mut wire) = encode_datagram(&frame) {
+            wire.extend_from_slice(&rider);
+            if wire.len() <= apexos_mesh_proto::MAX_DATAGRAM_FRAME {
+                prop_assert!(decode_datagram(&wire).is_err());
+            }
+        }
     }
 }
