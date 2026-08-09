@@ -8,5 +8,5 @@ pub mod storage;
 pub mod types;
 pub mod vision;
 
-pub use cortex::{CerebroCortex, VisionHit, VisionQuery};
+pub use cortex::{CerebroCortex, RecallTrace, RecallTraceEvent, VisionHit, VisionQuery};
 pub use types::*;

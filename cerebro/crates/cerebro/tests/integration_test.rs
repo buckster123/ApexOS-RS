@@ -1658,7 +1658,7 @@ mod cortex_pipeline {
         config::Config,
         cortex::CerebroCortex,
         models::AssociativeLink,
-        types::{AgentId, LinkType, Visibility, VisibilityScope},
+        types::{AgentId, LinkType, MemoryId, Visibility, VisibilityScope},
     };
     use tempfile::TempDir;
 
@@ -1710,6 +1710,55 @@ mod cortex_pipeline {
         assert!(!results.is_empty(), "recall should return at least one result");
         assert_eq!(results[0].0.id, node.id, "remembered node should rank first");
         assert!(results[0].1 > 0.0, "recall score should be positive");
+    }
+
+    // U2 (the Thought lens): recall_traced returns the same act as recall —
+    // plus its anatomy. Seeds carry search similarities, events narrate the
+    // spread walks in hop order with valid endpoints, activated covers every
+    // event target, and the trace does not perturb the results themselves.
+    #[tokio::test]
+    async fn recall_traced_narrates_the_spread() {
+        let (cortex, _dir) = make_cortex().await;
+        let a = cortex.remember(
+            "the flux capacitor hums at exactly eighty-eight megahertz",
+            None, Some(vec!["lab".into()]), None, VisibilityScope::global(),
+        ).await.unwrap();
+        let b = cortex.remember(
+            "temporal displacement coil draws too much from the lab supply",
+            None, Some(vec!["lab".into()]), None, VisibilityScope::global(),
+        ).await.unwrap();
+
+        let (results, trace) = cortex
+            .recall_traced("flux capacitor megahertz", 5, VisibilityScope::global())
+            .await.unwrap();
+
+        assert!(!results.is_empty(), "traced recall must still recall");
+        assert!(results.iter().any(|(n, _)| n.id == a.id));
+
+        assert!(!trace.seeds.is_empty(), "seeds carry the search hits");
+        assert!(trace.seeds.iter().any(|(id, sim)| *id == a.id && *sim > 0.0));
+
+        assert!(!trace.events.is_empty(),
+            "the shared-tag auto-link must produce at least one walk event");
+        let known = |id: &MemoryId| *id == a.id || *id == b.id;
+        let mut last_hop = 0;
+        for e in &trace.events {
+            assert!(e.hop >= 1, "seeds are hop 0; walks start at 1");
+            assert!(e.hop >= last_hop, "events fire in hop order");
+            last_hop = e.hop;
+            assert!(known(&e.source) && known(&e.target),
+                "event endpoints must be real memory ids");
+            assert!(e.amount > 0.0);
+            assert!(trace.activated.iter().any(|(id, _)| *id == e.target),
+                "every walk target appears in the activation map");
+        }
+
+        // An unmatched query yields an empty act AND an empty trace.
+        let (none, empty) = cortex
+            .recall_traced("zzz qqq xxx unmatched", 5, VisibilityScope::global())
+            .await.unwrap();
+        assert!(none.is_empty());
+        assert!(empty.seeds.is_empty() && empty.events.is_empty() && empty.activated.is_empty());
     }
 
     #[tokio::test]
