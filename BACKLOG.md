@@ -200,8 +200,28 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    bridge (1 Hz, crc_fail 0), and a **hardware golden vector** now pins the
    firmware↔bridge contract in CI. **P4 residual**: node-id provisioning +
    flash-persisted counters, flash store-and-forward, and the charter's
-   two-boards-with-Pis-off DoD (needs the BLE tier). Next: P4b BLE gossip
-   (two bare S3s, no LoRa needed) · P5b router · P1's 24 h fuzz (running).
+   two-boards-with-Pis-off DoD (needs the BLE tier). **P4b SHIPPED** —
+   commissioning (`Provision` + `apexos-brainstem-provision`), flash-persisted
+   identity/key, reserved counter high-water, `BrainstemStatus` telemetry;
+   proven on hardware (first-touch accepted, unsealed re-provision refused,
+   sealed accepted, wrong key refused, identity+counter survive a reset).
+   P1's 24 h fuzz **retired clean** (zero crash artifacts, 6,796-input corpus).
+   Next: **P4c BLE gossip** — blocked on a radio question, see below · P5b
+   router · P6 LoRa when the Pi Hut boards land.
+
+   **P4c blocker (2026-08-09, needs a radio witness):** extended advertising
+   is confirmed WORKING on the S3 (`advertise_ext` enabled a 52 B payload, so
+   Tier 2a keeps its ~200 B MTU — v2 §11 open question 4 is answered). But **no
+   LE advertising reports arrive at all** — extended or legacy, from the other
+   board or from ambient devices — while every HCI command succeeds and no
+   report parse errors are being swallowed. TX has not been independently
+   witnessed either. Before more radio code: scan for the boards with a phone
+   BLE app (or `btmon` on a scanning host) to split "not transmitting" from
+   "not receiving". Also carry forward: `Advertiser`/`ScanSession` handles stop
+   the radio when dropped, and `Peripheral::advertise` is legacy-only.
+   The flash **store-and-forward queue** rides with P4c (the partition and
+   `sequential-storage` are already in place; `BrainstemStatus.queued` is the
+   observable, wired and reporting 0).
 2. **Cadre review** *(sibling `Cadre-RS`; gated)* — review the Grok 4.5
    12-hour build against the clean-room PRD
    (`~/Downloads/Brainstorms/Cadre-RS/cadre-prd.md`) before anything touches

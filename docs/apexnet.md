@@ -268,7 +268,9 @@ should consume this roadmap's identity layer rather than invent its own.
 | **P1 — Wire crate** | `apexos-mesh-proto`: frame pipeline, chunker, crypto envelope, courier payloads; both no_std gates in CI; proptest roundtrips | No | 24 h fuzz clean on the deframer |
 | **P2 — Courier lane** | Marker v2 + stick_id mint in prep; manifest/receipt read-write; plug-verification + enriched notification; outbox JSONL + drain-to-stick; ledger gossip *stubbed to Tier 1* | **No** | Two LAN nodes exchange an artifact via a physically-carried stick with manifest verification + receipt round trip; tamper test fails closed |
 | **P3 — Pi bridge** | `apexos-mesh-bridge` + PTY test harness + brainstem-simulator binary; the six MUSTs as tests | No | Survives every fault injector over socat PTYs |
-| **P4 — Brainstem MVP** | UART echo → heartbeat flood → neighbor table → flash store-and-forward | **Yes** | Two boards exchange authenticated heartbeats with both Pis off; queued msg survives brainstem power cycle |
+| **P4a — Brainstem on the wire** ✅ | esp-hal + embassy firmware, heartbeat + ack over USB-Serial-JTAG, same wire crate both ends | **Yes** | Real board drives the real bridge at 1 Hz, `crc_fail 0`; hardware golden vector in CI |
+| **P4b — Identity, key, memory** ✅ | Dedicated `apexnet` flash partition; `Provision` payload + `apexos-brainstem-provision`; reserved counter high-water; `BrainstemStatus` telemetry | **Yes** | First-touch commissioning accepted, unsealed re-provision refused, sealed accepted, wrong key refused; identity + counter survive a reset |
+| **P4c — BLE gossip** | Radio driver, neighbour table, flash store-and-forward queue | **Yes** | Two boards exchange authenticated heartbeats with both Pis off; queued msg survives brainstem power cycle |
 | **P5 — Router + honesty** | `MeshTransport` + policy router + ConnectivityState + tool gating + notices + lean `/api/ping` + transport-aware beacon | Sim only | Chaos drill: kill Wi-Fi mid-session → a2a continues over BLE, degraded notice shows, WAN tools absent, artifact lands in outbox; restore → drains |
 | **P6 — LoRa + digests** | lora-phy + duty-cycle governor (mocked-clock tested) + digest claims + chunk reconciliation + courier gossip goes real | Yes | Overnight digest exchange with Wi-Fi off; morning reconciliation converges; governor provably blocks over-budget TX |
 | **P7 — Fabrica over radio** | D9: evidence demotion on radio transports, router class rules for fanout/report, cross-tier revive | Yes | A W2 batch conducted over BLE-only completes with evidence pulled over a later Tier-1 window |
@@ -288,6 +290,40 @@ anti-confabulation version checklist) stand, plus: courier manifest round-trip
 + tamper corpus; same-label two-stick collision behavior decided (mount by
 stick_id subdir?— implementer's call, but decided, not inherited); gating
 config validate-before-persist (the policy-sync lesson, #274).
+
+### Answered: extended advertising (v2 §11 open question 4)
+
+v2 asked whether `trouble-host` on the chosen chip supports BLE 5 extended
+advertising, since the ~200 B gossip MTU depends on it and a sealed heartbeat
+(~37-45 B) does not fit legacy's 31 B payload.
+
+**Answered on hardware, 2026-08-09** (bare ESP32-S3, `esp-radio 0.18` +
+`trouble-host 0.6`, `Advertisement::ExtNonconnectableNonscannableUndirected`):
+extended advertising **works** — `advertise_ext` accepted and enabled a 52-byte
+payload. Tier 2a keeps its real MTU; the chunked-legacy fallback is not needed.
+
+Two things to carry into P4c:
+
+- `Peripheral::advertise` is **legacy-only** (it rejects extended props
+  outright); extended needs `advertise_ext`. `update_adv_data_ext` refreshes
+  the payload without redoing params — the right shape for a periodic
+  heartbeat.
+- The `Advertiser` and `ScanSession` handles **stop the radio when dropped**.
+  Both must be held for the lifetime of the advertising/scan.
+
+### Open: no advertising reports are received
+
+On the same rig, **no LE advertising reports of any kind reach the host** —
+neither extended nor legacy, from either board or from ambient devices — while
+every HCI command succeeds (host initialises, address set, `advertise_ext` and
+`scan_ext` both return `Ok`, event mask enables both report kinds, and no
+per-report parse errors are being swallowed). Transmission has not been
+independently witnessed either, so the fault could be on either side.
+
+Next step is an external radio witness (a phone BLE scanner, or `btmon` on a
+host that is scanning) to split "the boards are not transmitting" from "the
+boards are not receiving" before writing any more radio code against a stack
+whose behaviour is not yet understood.
 
 ---
 

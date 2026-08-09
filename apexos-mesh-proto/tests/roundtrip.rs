@@ -98,6 +98,16 @@ fn arb_payload() -> impl Strategy<Value = Payload> {
                 accepted,
             })
         }),
+        (any::<u16>(), any::<[u8; 32]>())
+            .prop_map(|(node_id, psk)| Payload::Provision { node_id, psk }),
+        (any::<u16>(), any::<u16>(), any::<u8>(), any::<u64>()).prop_map(
+            |(node_id, queued, neighbors, ctr_hw)| Payload::BrainstemStatus {
+                node_id,
+                queued,
+                neighbors,
+                ctr_hw,
+            }
+        ),
     ]
 }
 

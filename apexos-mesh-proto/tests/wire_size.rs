@@ -107,6 +107,134 @@ fn default_chunk_rides_one_wire_frame() {
     assert!(wire.len() <= 512, "chunk wire {} > 512", wire.len());
 }
 
+/// postcard writes an enum's variant *index*, not its name — so the order of
+/// `Payload` IS the wire contract, shared with firmware that may be flashed
+/// on a board nobody can reach. This pins every discriminant as a literal.
+/// Appending a variant extends this list; changing an existing number is a
+/// [`apexos_mesh_proto::WIRE_VERSION`] bump, never a quiet edit.
+#[test]
+fn payload_variant_indices_are_frozen() {
+    fn tag(p: &Payload) -> u8 {
+        postcard::to_allocvec(p).unwrap()[0]
+    }
+
+    assert_eq!(
+        tag(&Payload::Heartbeat {
+            uptime_s: 0,
+            cortex_up: false,
+            conn: 0
+        }),
+        0
+    );
+    assert_eq!(
+        tag(&Payload::Alarm {
+            code: 0,
+            detail: String::new()
+        }),
+        1
+    );
+    assert_eq!(tag(&Payload::A2A { body: vec![] }), 2);
+    assert_eq!(
+        tag(&Payload::DreamDigest(Digest {
+            ver: 0,
+            node: 0,
+            epoch: 0,
+            mem_root: [0; 32],
+            n_new: 0,
+            tags: [0; 4],
+            reserved: 0
+        })),
+        3
+    );
+    assert_eq!(
+        tag(&Payload::ChunkAnnounce {
+            root: [0; 32],
+            n_chunks: 0,
+            total_len: 0,
+            chunk_len: 0
+        }),
+        4
+    );
+    assert_eq!(
+        tag(&Payload::ChunkRequest {
+            root: [0; 32],
+            index: 0
+        }),
+        5
+    );
+    assert_eq!(
+        tag(&Payload::ChunkData {
+            root: [0; 32],
+            index: 0,
+            data: vec![]
+        }),
+        6
+    );
+    assert_eq!(
+        tag(&Payload::Ack {
+            of_sender: 0,
+            of_ctr: 0
+        }),
+        7
+    );
+    assert_eq!(
+        tag(&Payload::CourierManifest(CourierManifest {
+            stick: [0; 8],
+            origin: 0,
+            dest: 0,
+            root: [0; 32],
+            n_chunks: 0,
+            total_len: 0,
+            epoch: 0
+        })),
+        8
+    );
+    assert_eq!(
+        tag(&Payload::CourierReceipt(CourierReceipt {
+            stick: [0; 8],
+            root: [0; 32],
+            accepted: false
+        })),
+        9
+    );
+    assert_eq!(
+        tag(&Payload::Provision {
+            node_id: 0,
+            psk: [0; 32]
+        }),
+        10
+    );
+    assert_eq!(
+        tag(&Payload::BrainstemStatus {
+            node_id: 0,
+            queued: 0,
+            neighbors: 0,
+            ctr_hw: 0
+        }),
+        11
+    );
+}
+
+/// A provisioning frame must fit the brainstem's bounded RX path: it is the
+/// largest thing the cortex ever sends down the wire, and the firmware's
+/// deframer buffer is sized for it.
+#[test]
+fn provision_frame_fits_the_wired_link() {
+    let psk = Psk([3; 32]);
+    let packet = PlainPacket {
+        target: 1001,
+        hop_limit: 1,
+        flags: 0,
+        payload: Payload::Provision {
+            node_id: u16::MAX,
+            psk: [0xFF; 32],
+        },
+    };
+    let frame = seal(&psk, MeshClass::Critical, 1, u64::MAX, &packet).unwrap();
+    let wire = encode_frame(&frame).unwrap();
+    assert!(wire.len() <= 128, "provision wire {} > 128", wire.len());
+}
+
 #[test]
 fn oversized_frames_are_refused_at_encode() {
     let frame = MeshFrame {

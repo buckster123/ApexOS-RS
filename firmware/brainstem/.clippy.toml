@@ -1,1 +1,10 @@
-stack-size-threshold = 1024
+# esp-generate ships 1024, which is tuned for call stacks on small MCUs. Most
+# of what trips it here is not a call stack at all: an `#[embassy_executor::task]`
+# function's "frame" is its *future*, allocated once in the static task pool,
+# not per-call. The five tasks hold an rx buffer, a `Deframer`, and the flash
+# store's scratch buffer — ~1.2-1.8 KB each, on a chip with 512 KB of SRAM.
+#
+# Raised rather than sprinkled with `#[allow]`s so there is one place to
+# reason about it. Still a real guard: anything past 4 KB on this target
+# deserves a second look before it ships.
+stack-size-threshold = 4096

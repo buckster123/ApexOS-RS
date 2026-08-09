@@ -127,18 +127,22 @@ version = "0.1.0"
 dependencies = [
  "apexos-mesh-proto",
  "critical-section",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-sync 0.7.2",
  "embassy-time",
  "embedded-io-async 0.6.1",
+ "embedded-storage",
  "esp-alloc",
  "esp-backtrace",
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
  "esp-rtos",
+ "esp-storage",
  "portable-atomic",
  "postcard",
+ "sequential-storage",
  "static_cell",
 ]
 
@@ -956,6 +960,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-storage"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cf2b3f00c9f94b27c62a4f5296b19470c3a083c687c8146e554a459f9bee596"
+dependencies = [
+ "document-features",
+ "embedded-storage",
+ "esp-hal",
+ "esp-hal-procmacros",
+ "esp-metadata-generated",
+ "esp-rom-sys",
+ "esp-sync",
+]
+
+[[package]]
 name = "esp-sync"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1587,6 +1606,15 @@ name = "semihosting"
 version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8e4abf97879f4e80db69a9fba7bd64998e9bdad25f58ef045a778e191172fd4"
+
+[[package]]
+name = "sequential-storage"
+version = "8.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e750f14f4f6e5a81277c66311713a56106c8df0196df62a634d1fc806556832b"
+dependencies = [
+ "embedded-storage-async",
+]
 
 [[package]]
 name = "serde"

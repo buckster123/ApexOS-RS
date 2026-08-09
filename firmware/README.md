@@ -41,8 +41,30 @@ confusingly:
 cd firmware/brainstem
 . ~/export-esp.sh
 cargo build --release
-espflash flash --port /dev/ttyACM0 target/xtensa-esp32s3-none-elf/release/brainstem
+espflash flash --port /dev/ttyACM0 --partition-table partitions.csv \
+  target/xtensa-esp32s3-none-elf/release/brainstem
 ```
+
+**`--partition-table partitions.csv` is not optional.** The board keeps its
+identity, colony key and counter high-water in a dedicated `apexnet` data
+partition, which the default table does not have. Flash without it and the
+firmware panics at boot with a message saying exactly this — deliberately, in
+preference to silently forgetting who it is on every power cycle.
+
+## Commissioning a board
+
+A freshly flashed brainstem is anonymous: it beats, but reports `sender=0`
+and holds no key. Give it an identity from the Pi that owns it:
+
+```bash
+sudo systemctl stop apexos-mesh-bridge          # one reader per UART
+apexos-brainstem-provision --port /dev/ttyACM0 --node-id 1001
+# → confirmed: board reports node_id=1001, counter high-water 2048
+```
+
+The board persists both and confirms with its own telemetry — the tool trusts
+the board's word, not its own successful write. Re-provisioning a board that
+already holds the key needs `--sealed` (see the acceptance rule below).
 
 Serial access needs group membership (`sudo usermod -aG dialout $USER`, then
 re-login). The board enumerates as `/dev/ttyACM*` (native USB-Serial-JTAG,
@@ -75,9 +97,29 @@ that's the half-frame you joined mid-transmission, and the resync working.
   `postcard(PlainPacket)`: this is a physical wire between a board and its
   own Pi, and the bridge is PSK-free by design. Charter §0.4 ("every inbound
   *radio* payload is authenticated") is intact — no radio is involved yet.
-  Sealing arrives with the radio tiers and their key-provisioning story.
 - **The brainstem outlives the cortex** (principle 1): read errors and a
   silent host never stop the heartbeat; `cortex_up` simply goes false.
+- **The provisioning rule is asymmetric, and the board enforces it.** No
+  stored key ⇒ an unsealed `Provision` is honoured (trust on first use: whoever
+  holds the UART can already reflash the board). Key present ⇒ only a
+  provision that *opens under the current key* is honoured, which is what makes
+  re-keying authenticated. A `Provision` is never honoured from a radio tier —
+  a PSK on the air is the one thing this protocol must not do.
+- **Counters are reserved, not recorded.** `(sender, ctr)` is the AEAD nonce,
+  so a repeat is a key compromise, not a lost message. Flash holds a *ceiling
+  we promise never to exceed*; a reboot resumes above it and abandons whatever
+  the last boot left unspent. One flash write buys 1024 counters, and when the
+  reservation runs dry the firmware **drops frames rather than reuse a
+  counter**. Watch for it: a counter that jumps by ~1024 across a reboot is the
+  system working, not a bug.
+
+## The provisioning one-shot is a separate binary on purpose
+
+`apexos-brainstem-provision` lives beside the bridge but is not part of it.
+The bridge daemon is PSK-free by law — it runs forever parsing bytes off the
+hostile edge, and a parser bug in a process holding the colony key would leak
+the colony. The one-shot holds the key for the two seconds a commissioning
+takes, then exits.
 
 ## Hardware
 
