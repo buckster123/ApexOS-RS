@@ -12,6 +12,13 @@ path = "src/main.rs"
 name = "apexos-brainstem-sim"
 path = "src/bin/brainstem_sim.rs"
 
+# The commissioning one-shot. Separate from the daemon on purpose: the bridge
+# is PSK-free by law, and this is the only thing that reads the colony key —
+# for the two seconds it takes to hand a board its identity.
+[[bin]]
+name = "apexos-brainstem-provision"
+path = "src/bin/provision.rs"
+
 [lib]
 name = "apexos_mesh_bridge"
 path = "src/lib.rs"

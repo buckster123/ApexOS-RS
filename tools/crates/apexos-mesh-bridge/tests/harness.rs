@@ -334,3 +334,67 @@ async fn pty_pair_end_to_end_with_garbage_injection() {
     );
     assert_eq!(stats.rx_frames.load(Ordering::Relaxed), 50);
 }
+
+/// The commissioning contract, both directions of the acceptance rule.
+///
+/// `apexos-brainstem-provision` builds these two frames and the firmware
+/// decides on them; this pins the wire shape so the tool and the board cannot
+/// drift apart without a test going red. (The *decision* lives in firmware and
+/// is verified on hardware; what's checkable here is that each frame carries a
+/// `Provision` the board can actually read, and — crucially — that the sealed
+/// one does NOT parse as plain postcard, since that is exactly how the
+/// firmware tells "authenticated" from "someone on the wire".)
+#[test]
+fn provision_frames_match_what_the_firmware_expects() {
+    use apexos_mesh_proto::{seal, Payload, PlainPacket, Psk, BROADCAST, WIRE_VERSION};
+
+    let psk = [0x5Au8; 32];
+    let packet = PlainPacket {
+        target: BROADCAST,
+        hop_limit: 1,
+        flags: 0,
+        payload: Payload::Provision {
+            node_id: 1001,
+            psk,
+        },
+    };
+
+    // First touch: plain postcard in `ct`, exact fit.
+    let plain = MeshFrame {
+        ver: WIRE_VERSION,
+        class: MeshClass::Critical,
+        sender: 1,
+        ctr: 1,
+        ct: postcard::to_allocvec(&packet).unwrap(),
+    };
+    let mut deframer = Deframer::new();
+    let got = deframer.push(&encode_frame(&plain).unwrap());
+    assert_eq!(got.len(), 1);
+    let (decoded, rest) =
+        postcard::take_from_bytes::<PlainPacket>(&got[0].ct).expect("plain provision decodes");
+    assert!(rest.is_empty(), "exact fit — no trailing bytes to smuggle in");
+    assert_eq!(decoded.payload, packet.payload);
+
+    // Rotation: sealed under the current key. It must open under that key...
+    let sealed = seal(&Psk(psk), MeshClass::Critical, 1, 1, &packet).unwrap();
+    let mut deframer = Deframer::new();
+    let got = deframer.push(&encode_frame(&sealed).unwrap());
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        apexos_mesh_proto::open(&Psk(psk), &got[0]).unwrap().payload,
+        packet.payload
+    );
+    // ...and must NOT open under a different one.
+    assert!(apexos_mesh_proto::open(&Psk([0x11; 32]), &got[0]).is_err());
+    // ...and must not masquerade as an unsealed frame: ciphertext that parsed
+    // cleanly as a PlainPacket would let an unauthenticated sender look
+    // authenticated to the firmware's `decode_inbound`.
+    let as_plain = postcard::take_from_bytes::<PlainPacket>(&got[0].ct);
+    assert!(
+        match as_plain {
+            Err(_) => true,
+            Ok((_, rest)) => !rest.is_empty(),
+        },
+        "sealed ct must not decode as an exact-fit plain packet"
+    );
+}

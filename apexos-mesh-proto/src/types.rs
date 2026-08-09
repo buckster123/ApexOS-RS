@@ -126,6 +126,35 @@ pub enum Payload {
     /// Delivery proof gossiped back after ingest (~44 B). Proof of
     /// *delivery*, not proof of *read*.
     CourierReceipt(CourierReceipt),
+    /// **Commissioning ceremony, wired links only.** The cortex tells a
+    /// brainstem who it is and hands down the colony PSK, which the brainstem
+    /// persists to flash so it survives both its own power cycles and the
+    /// cortex's absence (charter §0.1 — the nervous system outlives the
+    /// cortex).
+    ///
+    /// Acceptance is asymmetric by design and enforced by the *receiver*:
+    /// - flash empty ⇒ accept unsealed (trust-on-first-use over the physical
+    ///   UART; whoever holds the wire can already reflash the board);
+    /// - key present ⇒ accept **only** inside a frame that opened under the
+    ///   current key, which makes rotation authenticated.
+    ///
+    /// Never honoured over a radio tier — see charter §0.4. A PSK on the air
+    /// is the one thing this protocol must never do.
+    Provision { node_id: u16, psk: [u8; 32] },
+    /// Brainstem telemetry, reported up the wired link. The firmware prints
+    /// nothing after boot (its serial line *is* the wire), so this frame is
+    /// how the cortex learns queue depth and counter state — the observable
+    /// that makes "a queued message survived a power cycle" checkable.
+    BrainstemStatus {
+        node_id: u16,
+        /// Frames waiting in the flash store-and-forward queue.
+        queued: u16,
+        /// Radio neighbours currently heard. 0 until the BLE tier lands.
+        neighbors: u8,
+        /// Persisted counter high-water mark — the reservation ceiling, not
+        /// the last counter used. Reboots resume above it, never below.
+        ctr_hw: u64,
+    },
 }
 
 /// Nightly per-node anti-entropy claim, ≤96 B before the envelope (v2 §7 +

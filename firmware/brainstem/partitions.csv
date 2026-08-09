@@ -1,0 +1,24 @@
+# ApexNET brainstem partition table.
+#
+# Deviates from the esp-generate default in exactly one way: a dedicated
+# `apexnet` data partition holding the board's persistent identity (node id +
+# colony PSK), its counter high-water mark, and the store-and-forward queue.
+#
+# It is its OWN partition on purpose. `nvs` is ESP-IDF's namespace and
+# `phy_init` is the radio's calibration store; squatting either would mean our
+# records and someone else's share an erase sector, which is how "the key
+# survived a reboot" quietly stops being true.
+#
+# Flashing MUST pass this table (see firmware/README.md) — the default table
+# has no apexnet partition, and the firmware refuses to run without it rather
+# than silently forgetting its identity on every boot.
+#
+# 128 KiB = 32 x 4 KiB sectors. sequential-storage wear-levels across them, so
+# the counter high-water (the hottest record, one write per reservation block)
+# has room to move for the life of the board.
+#
+# Name,     Type, SubType,   Offset,   Size,     Flags
+nvs,        data, nvs,       0x9000,   0x6000,
+phy_init,   data, phy,       0xf000,   0x1000,
+factory,    app,  factory,   0x10000,  0x300000,
+apexnet,    data, undefined, 0x310000, 0x20000,

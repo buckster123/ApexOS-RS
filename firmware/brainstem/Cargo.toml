@@ -40,6 +40,16 @@ esp-println = { version = "0.17.0", features = ["esp32s3"] }
 critical-section = "1.2.0"
 static_cell      = "2.1.1"
 
+# Persistent identity, key, counter high-water and the store-and-forward
+# queue. `esp-storage` exposes the on-board flash as embedded-storage traits;
+# `sequential-storage` layers wear-levelled map + FIFO queue on top of the
+# `apexnet` partition (see partitions.csv). Hand-rolling flash record
+# management is how silent corruption gets shipped.
+esp-storage        = { version = "0.9.0", features = ["esp32s3"] }
+sequential-storage = "8.0.1"
+embedded-storage   = "0.3.1"
+embassy-embedded-hal = "0.6.0"
+
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
 [profile.dev]
