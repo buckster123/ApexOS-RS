@@ -64,10 +64,14 @@ struct Args {
     sealed: bool,
     /// Listen only: report what the board already believes, change nothing.
     status: bool,
+    /// Hand the brainstem a message for another node, to carry and deliver.
+    queue_to: Option<u16>,
+    text: String,
 }
 
 fn usage() -> &'static str {
-    "usage: apexos-brainstem-provision --port <dev> (--node-id <n> [--sealed] | --status) [--baud <rate>]"
+    "usage: apexos-brainstem-provision --port <dev> \
+     (--node-id <n> [--sealed] | --status | --queue-to <n> --text <msg>) [--baud <rate>]"
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -76,6 +80,8 @@ fn parse_args() -> Result<Args, String> {
     let mut baud = 115_200u32;
     let mut sealed = false;
     let mut status = false;
+    let mut queue_to = None;
+    let mut text = String::new();
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -98,11 +104,34 @@ fn parse_args() -> Result<Args, String> {
             }
             "--sealed" => sealed = true,
             "--status" => status = true,
+            "--queue-to" => {
+                queue_to = Some(
+                    it.next()
+                        .ok_or("--queue-to needs a node id")?
+                        .parse::<u16>()
+                        .map_err(|e| format!("--queue-to: {e}"))?,
+                )
+            }
+            "--text" => text = it.next().ok_or("--text needs a value")?,
             "-h" | "--help" => return Err(usage().into()),
             other => return Err(format!("unknown argument {other}\n{}", usage())),
         }
     }
 
+    if let Some(dest) = queue_to {
+        if text.is_empty() {
+            return Err("--queue-to needs --text".into());
+        }
+        return Ok(Args {
+            port: port.ok_or_else(|| format!("--port is required\n{}", usage()))?,
+            baud,
+            node_id: 0,
+            sealed: false,
+            status: false,
+            queue_to: Some(dest),
+            text,
+        });
+    }
     if status {
         return Ok(Args {
             port: port.ok_or_else(|| format!("--port is required\n{}", usage()))?,
@@ -110,6 +139,8 @@ fn parse_args() -> Result<Args, String> {
             node_id: 0,
             sealed: false,
             status: true,
+            queue_to: None,
+            text: String::new(),
         });
     }
     let node_id = node_id.ok_or_else(|| format!("--node-id is required\n{}", usage()))?;
@@ -124,6 +155,8 @@ fn parse_args() -> Result<Args, String> {
         node_id,
         sealed,
         status: false,
+        queue_to: None,
+        text: String::new(),
     })
 }
 
@@ -153,6 +186,63 @@ fn load_psk(path: &str) -> Result<[u8; 32], String> {
     }
     <[u8; 32]>::try_from(raw.as_slice())
         .map_err(|_| format!("{path} is neither 64 hex chars nor 32 raw bytes"))
+}
+
+/// Hand a message down the wire addressed to ANOTHER node. The brainstem
+/// stores it in flash and delivers it over the radio when that peer appears —
+/// which is the point: the cortex can hand off and go away.
+///
+/// Unsealed, like everything on this wire: it is a cable between a board and
+/// its own Pi, and the brainstem seals it for the air at delivery time with a
+/// fresh counter.
+async fn queue_message(args: &Args) -> ExitCode {
+    let dest = args.queue_to.unwrap_or(0);
+    let packet = PlainPacket {
+        target: dest,
+        hop_limit: apexos_mesh_proto::DEFAULT_HOP_LIMIT,
+        flags: 0,
+        payload: Payload::A2A {
+            body: args.text.as_bytes().to_vec(),
+        },
+    };
+    let ct = match postcard::to_allocvec(&packet) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("encoding message failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let frame = apexos_mesh_proto::MeshFrame {
+        ver: WIRE_VERSION,
+        class: MeshClass::Gossip,
+        sender: CORTEX_SENDER,
+        ctr: 1,
+        ct,
+    };
+    let wire = match encode_frame(&frame) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("framing message failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut stream = match tokio_serial::new(&args.port, args.baud).open_native_async() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("opening {}: {e}", args.port);
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = stream.write_all(&wire).await {
+        eprintln!("writing to {}: {e}", args.port);
+        return ExitCode::FAILURE;
+    }
+    let _ = stream.flush().await;
+    println!(
+        "queued {} B for node {dest} — the board carries it from here",
+        args.text.len()
+    );
+    ExitCode::SUCCESS
 }
 
 /// Peek at the board's current `node_id` from its own telemetry. `None` if it
@@ -252,6 +342,9 @@ async fn main() -> ExitCode {
 
     if args.status {
         return report_status(&args).await;
+    }
+    if args.queue_to.is_some() {
+        return queue_message(&args).await;
     }
 
     let psk_path =

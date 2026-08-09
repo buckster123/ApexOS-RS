@@ -112,6 +112,23 @@ both transmitting, correctly report `0`.
 An **un-commissioned board stays off the radio entirely** — no key means
 nothing to authenticate with, and silence is the honest state.
 
+### Store-and-forward
+
+Hand a brainstem a message for a peer that is not there; it keeps it in flash
+and delivers it when that peer appears:
+
+```bash
+apexos-brainstem-provision --port /dev/ttyACM0 --queue-to 1002 --text 'hello'
+apexos-brainstem-provision --port /dev/ttyACM0 --status
+# → node_id=1001 neighbors=0 queued=1 counter_high_water=3072
+```
+
+The message is stored as **plaintext and sealed at delivery** with a fresh
+counter — one sealed at queue time would surface with a counter every receiver
+correctly rejects as a replay. It is retired only when the peer acknowledges
+it, so an unheard message stays queued, including across a power cut. The head
+of the queue blocks: a message for an absent peer holds up the ones behind it.
+
 ## Design notes that are easy to get wrong
 
 - **The firmware prints nothing after boot.** `esp-println` writes to the
