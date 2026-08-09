@@ -90,13 +90,34 @@ impl CerebroCortex {
         salience:    Option<f32>,
         scope:       VisibilityScope,
     ) -> Result<MemoryNode> {
+        self.remember_with_visibility(content, memory_type, tags, salience, scope, None).await
+    }
+
+    /// `remember` with an explicit visibility. `None` defaults to **Shared**
+    /// (Python parity — cortex.py's `visibility=Visibility.SHARED` default,
+    /// regardless of agent scope; the port used to force agent-scoped stores
+    /// Private, silently breaking cross-agent sharing — R-05). Private without
+    /// an owner is refused, mirroring update_memory's orphan guard: such a row
+    /// would be visible to no one.
+    pub async fn remember_with_visibility(
+        &self,
+        content: impl Into<String>,
+        memory_type: Option<MemoryType>,
+        tags:        Option<Vec<String>>,
+        salience:    Option<f32>,
+        scope:       VisibilityScope,
+        visibility:  Option<Visibility>,
+    ) -> Result<MemoryNode> {
         let content = content.into();
 
         // Thalamus: gate and initialize parameters
-        let visibility = match &scope.agent_id {
-            None    => Visibility::Shared,
-            Some(_) => Visibility::Private,
-        };
+        let visibility = visibility.unwrap_or(Visibility::Shared);
+        if visibility == Visibility::Private && scope.agent_id.is_none() {
+            anyhow::bail!(
+                "refusing to store a private memory with no owner (it would be \
+                 visible to no one) — pass agent_id alongside visibility:\"private\""
+            );
+        }
         let mut node = self.thalamus
             .evaluate_input(&content, memory_type, tags, salience, scope.agent_id.clone(), visibility)
             .ok_or_else(|| anyhow::anyhow!(

@@ -313,8 +313,11 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             let tag_vec = coerce_str_list(&args["tags"]);
             let tags = if tag_vec.is_empty() { None } else { Some(tag_vec) };
             let salience = args["salience"].as_f64().map(|f| f as f32);
-            let scope    = agent_scope(args);
-            let node = brain.remember(content, memory_type, tags, salience, scope).await?;
+            let scope      = agent_scope(args);
+            let visibility = parse_visibility(args)?;
+            let node = brain
+                .remember_with_visibility(content, memory_type, tags, salience, scope, visibility)
+                .await?;
             Ok(wire_node(&node))
         }
 
@@ -419,7 +422,13 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
             }
 
             let storage = brain.storage.read().await;
-            storage.sqlite.update_memory(&node).await?;
+            // Content edits snapshot the prior row into memory_versions inside
+            // the store (R-04) — the editor identity is the caller's scope.
+            storage.sqlite.update_memory_noted(
+                &node,
+                scope.agent_id.as_ref().map(|a| a.0.as_str()),
+                None,
+            ).await?;
             if content_changed {
                 storage.vector.embed_and_store(&node.id, &node.content).await?;
             }
@@ -442,8 +451,11 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 let tag_vec = coerce_str_list(&args["tags"]);
                 let tags = if tag_vec.is_empty() { None } else { Some(tag_vec) };
                 let salience = args["salience"].as_f64().map(|f| f as f32);
-                let scope = agent_scope(args);
-                let node = brain.remember(content, memory_type, tags, salience, scope).await?;
+                let scope      = agent_scope(args);
+                let visibility = parse_visibility(args)?;
+                let node = brain
+                    .remember_with_visibility(content, memory_type, tags, salience, scope, visibility)
+                    .await?;
                 Ok(wire_node(&node))
             } else {
                 let query = args["query"].as_str()
@@ -1650,6 +1662,21 @@ fn agent_scope(args: &Value) -> VisibilityScope {
     }
 }
 
+/// Parse an optional `visibility` argument (remember / memory_store — R-05).
+/// Absent → `None` (the cortex defaults to Shared, Python parity); present but
+/// unknown → a hard error, never a silent fallback.
+fn parse_visibility(args: &Value) -> anyhow::Result<Option<Visibility>> {
+    match args["visibility"].as_str() {
+        None => Ok(None),
+        Some(v) => match v.to_lowercase().as_str() {
+            "private" => Ok(Some(Visibility::Private)),
+            "shared"  => Ok(Some(Visibility::Shared)),
+            "thread"  => Ok(Some(Visibility::Thread)),
+            other => anyhow::bail!("unknown visibility '{other}' (private|shared|thread)"),
+        },
+    }
+}
+
 /// Canonical form for procedure-lookup tag comparison (colony C6): lowercase
 /// with `-`/`_`/space folded to one separator, so "Mesh_Recall" == "mesh-recall"
 /// == "mesh recall". Lookup-side only — stored tags are never rewritten.
@@ -1683,6 +1710,84 @@ mod tests {
         };
         let brain = Arc::new(CerebroCortex::new(config).await.unwrap());
         (brain, dir)
+    }
+
+    // R-05: `visibility` on remember/memory_store is honored, defaults Shared
+    // (Python parity — the port used to force agent-scoped stores Private),
+    // and private-without-owner is refused.
+    #[tokio::test]
+    async fn remember_honors_visibility_and_defaults_shared() {
+        let (brain, _dir) = make_brain().await;
+        let call = |name: &str, args: Value| json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name": name, "arguments": args}
+        });
+        let read = |resp: &Value| -> Value {
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+        };
+
+        // Agent-scoped store with no visibility arg → Shared (was: Private).
+        let r = read(&dispatch_tool(call("remember", json!({
+            "content": "agent-scoped memories default to shared now",
+            "agent_id": "FORGE"
+        })), Arc::clone(&brain)).await);
+        assert_eq!(r["visibility"].as_str(), Some("shared"));
+        assert_eq!(r["agent_id"].as_str(), Some("FORGE"));
+
+        // Explicit private is honored (memory_store alias too).
+        let r = read(&dispatch_tool(call("memory_store", json!({
+            "content": "explicitly private memory stays private",
+            "agent_id": "FORGE", "visibility": "private"
+        })), Arc::clone(&brain)).await);
+        assert_eq!(r["visibility"].as_str(), Some("private"));
+
+        // Private with no owner would be visible to no one → hard error.
+        let resp = dispatch_tool(call("remember", json!({
+            "content": "an owner-less private memory must be refused",
+            "visibility": "private"
+        })), Arc::clone(&brain)).await;
+        assert!(resp.get("error").is_some(), "owner-less private must error, got {resp}");
+
+        // Unknown visibility → hard error, not a silent fallback.
+        let resp = dispatch_tool(call("remember", json!({
+            "content": "unknown visibility values are rejected loudly",
+            "visibility": "public"
+        })), Arc::clone(&brain)).await;
+        assert!(resp.get("error").is_some(), "unknown visibility must error, got {resp}");
+    }
+
+    // R-04 at the wire: a content edit through update_memory creates a
+    // get_memory_versions snapshot of the prior content.
+    #[tokio::test]
+    async fn update_memory_content_edit_creates_version() {
+        let (brain, _dir) = make_brain().await;
+        let call = |name: &str, args: Value| json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name": name, "arguments": args}
+        });
+        let read = |resp: &Value| -> Value {
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+        };
+
+        let r = read(&dispatch_tool(call("remember", json!({
+            "content": "the original wording of this memory",
+            "agent_id": "FORGE"
+        })), Arc::clone(&brain)).await);
+        let id = r["id"].as_str().unwrap().to_string();
+
+        read(&dispatch_tool(call("update_memory", json!({
+            "memory_id": id, "content": "the revised wording of this memory",
+            "agent_id": "FORGE"
+        })), Arc::clone(&brain)).await);
+
+        let versions = read(&dispatch_tool(call("get_memory_versions", json!({
+            "memory_id": id
+        })), Arc::clone(&brain)).await);
+        let list = versions.as_array().or_else(|| versions["versions"].as_array())
+            .unwrap_or_else(|| panic!("unexpected versions shape: {versions}"));
+        assert_eq!(list.len(), 1, "content edit must create exactly one snapshot");
+        assert_eq!(list[0]["content"].as_str(), Some("the original wording of this memory"));
+        assert_eq!(list[0]["edited_by"].as_str(), Some("FORGE"));
     }
 
     #[test]

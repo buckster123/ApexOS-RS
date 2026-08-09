@@ -1262,9 +1262,11 @@ async fn episode_add_step(
     //
     // Colony C1 ("evolution residue"): the args below are load-bearing welfare +
     // privacy fixes, verified missing on all three live nodes —
-    //   agent_id  → attribution AND visibility: cerebro derives Private only when
-    //               an owner is present; without it these snapshots (full prior
-    //               souls!) stored Shared = federation-exposed via mesh_recall.
+    //   agent_id  → attribution (owner of the rollback record).
+    //   visibility → explicit "private": cerebro defaults to Shared for all new
+    //               stores (R-05 / Python parity). Without this, these snapshots
+    //               (full prior souls!) land Shared = federation-exposed via
+    //               mesh_recall. The old agent_id→Private derivation is gone.
     //   salience  → 0.25: a rollback artifact, not knowledge; auto-estimation was
     //               scoring soul text ~1.0 and dominating ranked recall.
     //   tags/type → now actually honored (the memory_store dispatch used to drop
@@ -1272,6 +1274,7 @@ async fn episode_add_step(
     let memory_id = match proxy.call("memory_store", serde_json::json!({
         "content":  content,
         "agent_id": agent_id,
+        "visibility": "private",
         "salience": 0.25,
         "tags":     ["evolution", "undo_snapshot"],
         // Type it explicitly: an undo snapshot is an EPISODIC record of an evolution
