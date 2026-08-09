@@ -209,16 +209,21 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    Next: **P4c BLE gossip** — blocked on a radio question, see below · P5b
    router · P6 LoRa when the Pi Hut boards land.
 
-   **P4c blocker (2026-08-09, needs a radio witness):** extended advertising
-   is confirmed WORKING on the S3 (`advertise_ext` enabled a 52 B payload, so
-   Tier 2a keeps its ~200 B MTU — v2 §11 open question 4 is answered). But **no
-   LE advertising reports arrive at all** — extended or legacy, from the other
-   board or from ambient devices — while every HCI command succeeds and no
-   report parse errors are being swallowed. TX has not been independently
-   witnessed either. Before more radio code: scan for the boards with a phone
-   BLE app (or `btmon` on a scanning host) to split "not transmitting" from
-   "not receiving". Also carry forward: `Advertiser`/`ScanSession` handles stop
-   the radio when dropped, and `Peripheral::advertise` is legacy-only.
+   **P4c blocker (2026-08-09, isolated on the bench):** the radio
+   **transmits but does not receive**. TX is externally witnessed — a phone
+   sees the board advertising by name. RX yields essentially nothing (2 reports
+   all session, while a phone in the room sees 5 devices), and the confounds are
+   excluded on the *same* board the phone can hear: antenna fitted, legacy AND
+   extended scan, scan-only (advertising disabled), and `.flatten()` removed so
+   no per-report parse error is swallowed. Every HCI command returns `Ok` and
+   the event mask enables both report kinds. Leads: the async `Controller` impl
+   over esp-radio's *blocking* `BleConnector` (waker registration for
+   unsolicited events vs command responses), `ExternalController<_, N>` slots,
+   and a raw-HCI spike bypassing `trouble-host` to split "controller never
+   emits" from "host never routes". Full detail + the traps already paid for
+   (ext-adv works at 52 B; `advertise` is legacy-only; `Advertiser`/`ScanSession`
+   stop the radio on Drop; legacy scan hardcodes duplicate filtering; a missing
+   antenna mimics a broken stack) → `docs/apexnet.md` §10.
    The flash **store-and-forward queue** rides with P4c (the partition and
    `sequential-storage` are already in place; `BrainstemStatus.queued` is the
    observable, wired and reporting 0).
