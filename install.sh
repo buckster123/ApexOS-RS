@@ -1833,6 +1833,19 @@ if [[ ! -f "$APEXNET_PSK" ]]; then
   ok "ApexNET colony PSK minted ($APEXNET_PSK — copy it to other nodes to share a colony)"
 fi
 
+# MESH_BRIDGE_TOKEN — auth for /mesh-bridge (ApexNET P5c). MUST be seeded here:
+# the bind below is 0.0.0.0, and that is only safe because every route is
+# token-gated. /mesh-bridge has its own scheme (like /sensor-bridge) and treats
+# an EMPTY token as "no auth" — which on a LAN-bound node would let anyone
+# connect as a bridge, read every outbound mesh frame, and make the radio lane
+# report itself healthy. Minted, not defaulted.
+if ! grep -q "^MESH_BRIDGE_TOKEN=" "$ENV_FILE" 2>/dev/null; then
+  _mbt=$(openssl rand -hex 24 2>/dev/null || true)
+  [[ -n "$_mbt" ]] || _mbt=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  printf 'MESH_BRIDGE_TOKEN=%s\n' "$_mbt" >> "$ENV_FILE"
+  ok "mesh-bridge token minted (pass it to apexos-mesh-bridge as MESH_BRIDGE_TOKEN)"
+fi
+
 # AGENTD_BIND — default the gateway to the LAN (0.0.0.0) so mesh peers can reach
 # this node. A mesh listener on loopback is never useful for multi-node operation
 # (it silently breaks inbound a2a / pairing — the peer connects out but nothing
