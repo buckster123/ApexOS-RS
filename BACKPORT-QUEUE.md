@@ -1,44 +1,25 @@
 # Cerebro backport queue ← CerebroCortex-RS
 
-> Queued 2026-08-08 from the standalone's Lucida arc (CC-RS PRs #22–#28).
-> Same discipline as the standalone's retired BACKPORT-QUEUE.md: port an
-> entry, delete the entry; delete the file when empty. ALWAYS diff the real
-> files before porting — the repos drift (mirror-wave lockstep helps but is
-> not a guarantee). Target: `cerebro/crates/`.
->
-> Standing context: ApexOS-RS is already on axum 0.8, so CC-RS's brace-route
-> 404 fix does NOT apply here (the 0.8-native router code originated in this
-> tree). Everything below does.
+> **Queue empty — 2026-08-10.** All Lucida-arc entries from CC-RS PRs #22–#28
+> have landed. This file can be deleted on the next hygiene pass; kept as a
+> tombstone until then. ALWAYS diff the real files before any future port —
+> the repos drift.
 
-## Landed 2026-08-10 — integrity wave (entries 1–3)
+## Landed
 
-- **W-A data-integrity** (CC-RS #22) — R-04 `update_memory_noted`, R-05
-  visibility SHARED default + `remember_with_visibility` (R-02 REM truncate
-  was already present), R-06 purge cleans `memory_versions` +
-  `vision_embeddings`. Evolution undo path now passes `visibility:"private"`
-  explicitly (R-05 broke the old agent_id→Private derivation).
-- **Ghost-FK repair** (CC-RS #27) — `repair_ghost_fk_memory_versions` on open.
-- **Seed-cap spread fix** (CC-RS #24) — budget = growth beyond seeds;
-  `full_seed_page_still_spreads` regression.
+| Entry | PR / note |
+|-------|-----------|
+| 1–3 Integrity (W-A, ghost-FK, seed-cap) | #349 |
+| 4 Traced recall | #350 |
+| 5 Lucida + API hardening + shell tile | this PR |
 
-## Landed 2026-08-10 — traced recall (entry 4)
+### Entry 5 detail
 
-- **Traced recall** (CC-RS #24) — `spread_events` + `TraceEvent`;
-  `recall_traced` + `RecallTrace` (plain `recall` is a thin wrapper, same
-  reinforcement); `POST /recall/trace` in cerebro-api. Thought-lens data.
-
-## 5. Optional, when the colony wants eyes: Lucida + U1b API hardening — CC-RS PRs #23/#25/#27/#28
-
-The whole observatory rides cerebro-api: `ui-web/` embedded at `/`,
-`/graph/export`, `/graph/layout` (PCA cache in a new `graph_layout` table,
-ON DELETE CASCADE), `/events` SSE audit tail + `/audit/since/{id}`,
-`/dream/reports`, `/meta`, plus API hardening worth taking even without the
-UI: **API mutations audit** (the MCP-only audit left REST writes invisible
-to self-history), **R-08** (trash lifecycle + bulk_delete via the
-coordinator's graph-eviction wrappers — deleted nodes stop spreading
-without a restart), REST remember/update accept `visibility`. Design
-charter: CC-RS `docs/UI-DESIGN.md`. Adapt into this repo (not a pin): web
-dash for laptop/desktop installs; native Cerebro app in the ApexOS-RS Slint
-shell for kiosk (lift Lucida patterns, rewrite as needed). A colony node
-running Lucida over its own brain is the demo that sells itself — but it's
-dessert, not integrity.
+- `cerebro/ui-web/` — Lucida observatory (vanilla Atlas/Thought/Dream/Health/Live)
+- `cerebro-api` serves it at `/` + `/graph/export`, `/graph/layout`, `/events`
+  SSE, `/audit/since/{id}`, `/meta`, `/dream/reports`
+- Storage: `graph_layout` table, layout/embedding helpers, audit cursor,
+  `list_dream_reports`
+- API hardening: mutation audit, R-08 coordinator graph eviction on
+  trash/delete/bulk, REST `visibility` on remember/update
+- ui-slint Web app tile → Lucida URL with `?token=` for browser auth

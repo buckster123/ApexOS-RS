@@ -2,11 +2,11 @@ import { Palette } from "../palette.slint";
 
 // ── WebView (🌐) ────────────────────────────────────────────────────────────
 //
-// Tier-D launcher: the Cerebro and Sensor Head dashboards are web UIs that Slint
-// can't embed (no iframe/webview), so we surface them as tiles that (a) show the
-// URL — useful even on a kiosk with no local browser, open it from your phone on
-// the LAN — and (b) best-effort open it via the host browser. Plus a free URL
-// bar (the old "Browser" tab). URLs are derived by Rust from the agentd host.
+// Tier-D launcher: Lucida (cerebro-api observatory on :8765) and Sensor Head are
+// web UIs that Slint can't embed (no iframe/webview), so we surface them as tiles
+// that (a) show the URL — useful even on a kiosk with no local browser, open it
+// from your phone on the LAN — and (b) best-effort open it via the host browser.
+// Plus a free URL bar. URLs are derived by Rust from the agentd host (+ token).
 //
 // preferred/min height 0 so the parent VerticalLayout sizes us via stretch.
 
@@ -109,7 +109,7 @@ export component WebView {
 
             LinkTile {
                 glyph: "🧠";
-                name: "Cerebro";
+                name: "Lucida · Cerebro";
                 url: root.cerebro-url;
                 open(u) => { root.open(u); }
             }

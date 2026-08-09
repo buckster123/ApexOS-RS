@@ -226,7 +226,7 @@ Seed-only note: the four plan pickers below persist to `AGENTD_VOICE_CONFIG` —
 | `APEX_FACE_AUTOOPEN` / `APEX_FACE_STATE` / `APEX_SKETCH_AUTOOPEN` / `APEX_OCCIPITAL_DEMO` | unset | dev hooks: auto-open Face/Sketchpad at launch, pin a face emote, open the Occipital reader with a sample payload — no agentd needed |
 | `FONTCONFIG_FILE` | UI-generated | the UI writes `$XDG_CACHE_HOME/apexos-rs/fonts.conf` (mono emoji, no tofu) and sets this — a pre-set value is respected as an operator override |
 | `BROWSER` | `xdg-open` | program for opening external URLs from the UI |
-| `CEREBRO_WEB_URL` | `http://{agentd-host}:8765` | cerebro dashboard URL the Web tile opens |
+| `CEREBRO_WEB_URL` | `http://{agentd-host}:8765` | Lucida observatory URL the Web tile opens (cerebro-api; ui-slint appends `?token=` from `AGENTD_TOKEN` when set) |
 | `XDG_CACHE_HOME` / `XDG_CONFIG_HOME` | `$HOME/.cache` / `$HOME/.config` | roots for the imagine cache, generated fonts.conf, and the persisted persona file |
 
 ## USB exo-workspace

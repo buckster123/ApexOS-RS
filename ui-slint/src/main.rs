@@ -7295,11 +7295,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Web launcher (Tier D): point the dashboard tiles at the real agentd host
     // (not localhost), so the URL is usable from any device on the LAN. Full-URL
-    // env overrides win.
+    // env overrides win. Cerebro URL is the Lucida observatory (:8765); append
+    // ?token= so EventSource/SSE can auth (browser can't set Authorization on
+    // a typed URL — same contract as cerebro-api's query-token auth).
     {
         let host = web_host(&http_base);
-        let cerebro = std::env::var("CEREBRO_WEB_URL").ok().filter(|s| !s.is_empty())
+        let mut cerebro = std::env::var("CEREBRO_WEB_URL").ok().filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("http://{host}:8765"));
+        if let Ok(t) = std::env::var("AGENTD_TOKEN") {
+            if !t.is_empty() && !cerebro.contains("token=") {
+                let sep = if cerebro.contains('?') { '&' } else { '?' };
+                cerebro = format!("{cerebro}{sep}token={t}");
+            }
+        }
         let sensorhead = std::env::var("SENSORHEAD_URL").ok().filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("http://{host}:8080"));
         ui.set_web_cerebro_url(cerebro.into());
