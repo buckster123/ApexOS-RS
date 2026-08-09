@@ -2,6 +2,7 @@ pub mod bus;
 pub mod connectivity;
 pub mod history;
 pub mod identity;
+pub mod mesh_router;
 pub mod persona;
 pub mod state;
 pub mod vision;

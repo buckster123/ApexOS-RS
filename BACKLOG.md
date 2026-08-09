@@ -223,16 +223,21 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    here, all now laws in `docs/apexnet.md` §10 + `docs/gotchas.md`: a missing
    antenna, the scan duplicate filter, and connectable advertising silently
    terminating on connection.
-   **P4d SHIPPED (2026-08-09) — the brainstem carries messages.** Flash outbox
-   on the `apexnet` partition (split: map `0..0x8000`, queue `0x8000..`).
-   Plaintext queued, **sealed at drain** with a fresh counter (a frame sealed
-   at queue time surfaces with a stale counter every receiver rejects as a
-   replay), delivered only when the target is a live neighbour, retired only
-   on an `Ack`. **Field-proven end to end**: queued for an absent peer →
-   `queued=1` → board restarted → `queued=1` → peer returned → delivered,
-   acked, `queued=0`, and the payload arrived on the far board's wired link.
-   That closes the charter's original P4 DoD. Known limitation, deliberate:
-   head-of-line blocking. Next: **P5b router**.
+Next: **P5c — register real lanes**.
+
+   **P5b SHIPPED (2026-08-09) — the policy router.** `apexos-core::mesh_router`:
+   the `MeshTransport` trait, `TransportId` cost ranking, and a router that
+   fans `Critical` out on every healthy lane (the seen-cache is what makes
+   that safe), gives `Gossip`/`Digest` the cheapest *solid* lane over a
+   cheaper flaky one, and has `Bulk` **refuse** narrow lanes rather than
+   dribble an artifact over LoRa for hours. An undersized MTU removes a lane
+   instead of truncating a frame. "No lanes" is a returned answer, not an
+   error. 12 tests against mock transports incl. flaky/down/undersized/failing.
+   **`PeerLost` RULED**: claimed, = unreachable on *every* transport (off the
+   LAN is not lost). Adds `GET /api/connectivity` (the honesty layer had no
+   external surface, which made a chaos drill blind) and
+   `deploy/apexos-mesh-drill.sh`, which verifies the degrade+recover edge and
+   refuses to reconfigure the machine it is auditing.
 2. **Cadre review** *(sibling `Cadre-RS`; gated)* — review the Grok 4.5
    12-hour build against the clean-room PRD
    (`~/Downloads/Brainstorms/Cadre-RS/cadre-prd.md`) before anything touches
