@@ -372,9 +372,27 @@ code than working around a host stack's defaults, keeps unit conversions under
 our own tests, and removes an entire dependency from the radio path. `trouble-host`
 stays available if a later phase genuinely needs GATT (the v2 §2.1 bulk lane).
 
-**Remaining hardware need:** board-to-board. With one antenna, the fitted board
-hears six real advertisers in the room but not the bare board beside it — a
-clean measure of how much the antenna is worth. P4c's DoD needs the second one.
+**Board-to-board is PROVEN** (2026-08-09, both antennas nominally fitted): with
+duplicates disabled, one board received the other's advertisement **90 times in
+~20 s** at **-69 dBm**, decoding cleanly to the advertiser's address and its
+`Complete Local Name`:
+
+```text
+04 3e 1d 02 01 00 00 │ 81 bf f3 4e b5 82 │ 11 │ 02 01 06 │ 0d 09 "APEXNET-80BF" │ bb
+LE Meta, adv report     advertiser address  len  flags      complete local name   RSSI
+```
+
+That is Tier 2a's physical layer working end to end between two colony
+brainstems — the charter's P4c gossip milestone, minus the ApexNET payload.
+
+**One asymmetry remains:** the reverse direction is silent. Board A's
+transmissions reach board B, and board B receives the room's other advertisers
+fine, but board B's transmissions never reach board A even though its firmware
+reports `ADV OK`. Reciprocity says a link that carries -69 dBm one way should
+carry it back, so the likely cause is a **U.FL connector not fully seated** on
+board B (they latch with a firm click and mis-seat easily) rather than
+anything in software. Confirm the same way the first antenna was confirmed:
+scan for the board's advertised name with a phone.
 
 ### Traps already paid for (carry into P4c)
 
