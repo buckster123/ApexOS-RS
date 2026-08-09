@@ -169,6 +169,15 @@ static IDENTITY: StaticCell<IdentityMutex> = StaticCell::new();
 /// `BrainstemStatus` both report it, so it lives where both can see it.
 static NEIGHBOR_COUNT: AtomicU8 = AtomicU8::new(0);
 
+/// Messages waiting in the flash outbox. Tracked in RAM because counting them
+/// means walking flash; seeded once at boot from the real queue.
+static QUEUE_DEPTH: AtomicU16 = AtomicU16::new(0);
+
+/// How long to keep a queued message on the air before re-sending it. Gossip
+/// is lossy and unacknowledged sends are cheap, so this is a re-send timer,
+/// not a failure timer.
+const OUTBOX_RETRY_MS: u64 = 4_000;
+
 static FLASH: StaticCell<FlashStorage<'static>> = StaticCell::new();
 static PT_BUF: StaticCell<[u8; PARTITION_TABLE_MAX_LEN]> = StaticCell::new();
 static STORE: StaticCell<StoreMutex> = StaticCell::new();
@@ -297,6 +306,24 @@ async fn inbound_task(
                 // frame, which now carries the new node id.
             }
 
+            // A packet the cortex addressed to some OTHER node is ours to
+            // carry, not to act on: queue it durably and let the radio deliver
+            // it when that peer turns up. This is the whole point of a
+            // brainstem outliving its cortex — the Pi can hand off a message
+            // and go away.
+            let me = NODE_ID.load(Ordering::Relaxed);
+            if packet.target != BROADCAST && packet.target != me && me != UNPROVISIONED_NODE_ID {
+                if let Ok(bytes) = postcard::to_allocvec(&packet)
+                    && bytes.len() <= store::MAX_QUEUED_MESSAGE
+                {
+                    let mut guard = store.lock().await;
+                    if guard.outbox_push(&bytes).await.is_ok() {
+                        QUEUE_DEPTH.store(guard.outbox_len().await, Ordering::Relaxed);
+                    }
+                }
+                continue;
+            }
+
             if packet.flags & FLAG_ACK_REQUESTED != 0
                 && let Some(ack) = frame_for(
                     Payload::Ack {
@@ -327,7 +354,7 @@ async fn status_task() {
                 node_id: NODE_ID.load(Ordering::Relaxed),
                 // The flash store-and-forward queue lands with the radio
                 // tier that gives it somewhere to forward to.
-                queued: 0,
+                queued: QUEUE_DEPTH.load(Ordering::Relaxed),
                 neighbors: NEIGHBOR_COUNT.load(Ordering::Relaxed),
                 ctr_hw: counter::ceiling(),
             },
@@ -367,7 +394,11 @@ async fn counter_task(store: &'static StoreMutex) {
 /// air. Silence is the honest state, and the wired link is how it stops being
 /// silent.
 #[embassy_executor::task]
-async fn radio_task(ble: esp_radio::ble::controller::BleConnector<'static>, identity: &'static IdentityMutex) {
+async fn radio_task(
+    ble: esp_radio::ble::controller::BleConnector<'static>,
+    identity: &'static IdentityMutex,
+    store: &'static StoreMutex,
+) {
     let Ok(mut radio) = Radio::new(ble).await else {
         // No radio is a degraded node, not a dead one: the wired link and the
         // heartbeat carry on without it.
@@ -375,6 +406,10 @@ async fn radio_task(ble: esp_radio::ble::controller::BleConnector<'static>, iden
     };
     let mut neighbors = Neighbors::new();
     let mut next_beat = Instant::now();
+    // The counter the head-of-queue message was last sent under; an Ack must
+    // match it to retire that message.
+    let mut pending_ctr: Option<u64> = None;
+    let mut next_drain = Instant::now();
 
     loop {
         // Advertising is a standing state, so the timer only decides how often
@@ -418,8 +453,42 @@ async fn radio_task(ble: esp_radio::ble::controller::BleConnector<'static>, iden
             }
         }
 
+        // Drain the outbox when its target is actually on the air. Sending
+        // into the void would burn counters and prove nothing.
+        if QUEUE_DEPTH.load(Ordering::Relaxed) > 0 && Instant::now() >= next_drain {
+            let ident = *identity.lock().await;
+            if let (Some(node_id), Some(psk)) = (ident.node_id, ident.psk) {
+                let mut msg = [0u8; store::MAX_QUEUED_MESSAGE];
+                let head = {
+                    let mut guard = store.lock().await;
+                    guard.outbox_peek(&mut msg).await
+                };
+                if let Some(len) = head
+                    && let Ok((packet, _)) =
+                        postcard::take_from_bytes::<PlainPacket>(&msg[..len])
+                    && neighbors.is_alive(packet.target, now_ms())
+                    && let Some(ctr) = counter::try_next()
+                    && let Ok(frame) = apexos_mesh_proto::seal(
+                        &apexos_mesh_proto::Psk(psk),
+                        MeshClass::Gossip,
+                        node_id,
+                        ctr,
+                        &packet,
+                    )
+                {
+                    if radio.advertise(&frame).await.is_ok() {
+                        pending_ctr = Some(ctr);
+                    }
+                    // Hold it on the air long enough to be heard, then let the
+                    // heartbeat resume; re-send if no ack arrives.
+                    next_drain = Instant::now() + Duration::from_millis(OUTBOX_RETRY_MS);
+                    next_beat = Instant::now() + Duration::from_millis(1_500);
+                }
+            }
+        }
+
         match select(
-            Timer::at(next_beat),
+            Timer::at(next_beat.min(next_drain)),
             radio.next_frame(),
         )
         .await
@@ -439,13 +508,66 @@ async fn radio_task(ble: esp_radio::ble::controller::BleConnector<'static>, iden
                 }
                 // Replay check AFTER authentication: an unauthenticated frame
                 // must never be able to advance a peer's window.
-                if neighbors.accept(
+                let Ok(packet) =
+                    apexos_mesh_proto::open(&apexos_mesh_proto::Psk(psk), &heard.frame)
+                else {
+                    continue;
+                };
+                if !neighbors.accept(
                     heard.frame.sender,
                     heard.frame.ctr,
                     heard.rssi_dbm,
                     now_ms(),
                 ) {
-                    NEIGHBOR_COUNT.store(neighbors.alive(now_ms()) as u8, Ordering::Relaxed);
+                    continue;
+                }
+                NEIGHBOR_COUNT.store(neighbors.alive(now_ms()) as u8, Ordering::Relaxed);
+
+                match &packet.payload {
+                    // Our queued message landed: it is safe to forget it.
+                    Payload::Ack { of_sender, of_ctr }
+                        if Some(*of_sender) == ident.node_id
+                            && Some(*of_ctr) == pending_ctr =>
+                    {
+                        let mut guard = store.lock().await;
+                        if guard.outbox_pop().await {
+                            QUEUE_DEPTH.store(guard.outbox_len().await, Ordering::Relaxed);
+                        }
+                        pending_ctr = None;
+                        next_drain = Instant::now();
+                    }
+                    // Addressed to us: hand it up the wire and acknowledge it
+                    // on the air, so the sender can drop its copy.
+                    _ if packet.target == ident.node_id.unwrap_or(UNPROVISIONED_NODE_ID) => {
+                        if let Some(up) =
+                            frame_for(packet.payload.clone(), MeshClass::Gossip, packet.target, 0)
+                        {
+                            enqueue(up);
+                        }
+                        if let Some(ctr) = counter::try_next()
+                            && let Ok(ack) = apexos_mesh_proto::seal(
+                                &apexos_mesh_proto::Psk(psk),
+                                MeshClass::Gossip,
+                                ident.node_id.unwrap_or(UNPROVISIONED_NODE_ID),
+                                ctr,
+                                &PlainPacket {
+                                    target: heard.frame.sender,
+                                    hop_limit: 1,
+                                    flags: 0,
+                                    payload: Payload::Ack {
+                                        of_sender: heard.frame.sender,
+                                        of_ctr: heard.frame.ctr,
+                                    },
+                                },
+                            )
+                        {
+                            let _ = radio.advertise(&ack).await;
+                            // Back to the heartbeat promptly; the ack has had
+                            // its moment on the air.
+                            next_beat = Instant::now() + Duration::from_millis(400);
+                        }
+                    }
+                    _ => {}
                 }
             }
             Either::Second(None) => {
@@ -518,6 +640,8 @@ async fn main(spawner: Spawner) -> ! {
         let previous = guard.counter_high_water().await;
         let ceiling = guard.reserve_counters().await.unwrap_or(previous);
         counter::init(previous, ceiling);
+        // Whatever the outbox held before the power cut is still there.
+        QUEUE_DEPTH.store(guard.outbox_len().await, Ordering::Relaxed);
     }
 
     spawner.spawn(tx_task(tx).expect("tx task pool"));
@@ -530,7 +654,7 @@ async fn main(spawner: Spawner) -> ! {
     // this firmware touches the radio.
     match esp_radio::ble::controller::BleConnector::new(peripherals.BT, Default::default()) {
         Ok(ble) => {
-            spawner.spawn(radio_task(ble, identity_ref).expect("radio task pool"));
+            spawner.spawn(radio_task(ble, identity_ref, store_ref).expect("radio task pool"));
         }
         Err(_) => {
             // A brainstem whose radio will not initialise still beats on the

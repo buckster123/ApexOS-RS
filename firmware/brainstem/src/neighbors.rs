@@ -84,6 +84,14 @@ impl Neighbors {
             .count()
     }
 
+    /// Is this specific peer on the air right now? The outbox asks before
+    /// spending a counter on a message nobody is there to hear.
+    pub fn is_alive(&self, node_id: u16, now_ms: u64) -> bool {
+        self.entries.iter().flatten().any(|e| {
+            e.node_id == node_id && now_ms.saturating_sub(e.last_seen_ms) < NEIGHBOR_TIMEOUT_MS
+        })
+    }
+
     /// Signal strength last heard from a neighbour, if it is still known.
     pub fn rssi(&self, node_id: u16) -> Option<i8> {
         self.entries

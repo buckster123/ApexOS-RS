@@ -27,15 +27,37 @@
 //! Benefit: a counter can never be handed out twice, including across a power
 //! cut mid-write.
 
-use embassy_embedded_hal::adapter::BlockingAsync;
-use embedded_storage::nor_flash::NorFlash as BlockingNorFlash;
+use embedded_storage::nor_flash::{
+    ErrorType, MultiwriteNorFlash as BlockingMultiwrite, NorFlash as BlockingNorFlash,
+    ReadNorFlash as BlockingReadNorFlash,
+};
+use embedded_storage_async::nor_flash::{
+    MultiwriteNorFlash as AsyncMultiwrite, NorFlash as AsyncNorFlash,
+    ReadNorFlash as AsyncReadNorFlash,
+};
 use sequential_storage::cache::Cache;
 use sequential_storage::map::{MapConfig, MapStorage};
+use sequential_storage::queue::{QueueConfig, QueueStorage};
 
 /// Size of the `apexnet` partition, mirrored from `partitions.csv`. The
 /// firmware checks the table against this at boot and refuses to run on a
 /// mismatch rather than quietly writing records into the wrong sectors.
 pub const APEXNET_PARTITION_LEN: u32 = 0x20000;
+
+/// The partition is split in two, because `sequential-storage`'s map and
+/// queue each own their range exclusively and would corrupt each other
+/// sharing one.
+///
+/// Identity is three tiny records plus a counter high-water that moves once
+/// per 1024 frames; the outbox is whole messages waiting for a peer. 32 KiB
+/// is luxurious for the former and the rest goes to the latter.
+///
+/// **Changing either boundary invalidates existing boards.** Records written
+/// under the old split can land outside the new range, where the store will
+/// not find them — a board would silently look un-commissioned. On a change,
+/// factory-reset (`espflash erase-region`) and re-commission.
+const MAP_RANGE: core::ops::Range<u32> = 0..0x8000;
+const QUEUE_RANGE: core::ops::Range<u32> = 0x8000..APEXNET_PARTITION_LEN;
 
 /// How many counters one flash write buys. At the 1 Hz wired heartbeat that
 /// is a write every ~17 minutes; the partition wear-levels across 32 sectors,
@@ -49,6 +71,11 @@ const KEY_CTR_HW: u8 = 2;
 /// Big enough for the largest record ([`KEY_PSK`], 32 B) plus key and header,
 /// rounded well past flash word alignment.
 const BUF_LEN: usize = 128;
+
+/// Ceiling on one queued message. A radio frame cannot exceed one extended
+/// advertisement anyway, so anything larger could never be delivered on this
+/// tier and is refused at the door rather than stored forever.
+pub const MAX_QUEUED_MESSAGE: usize = 256;
 
 /// What the board knows about itself at boot.
 #[derive(Clone, Copy, Default)]
@@ -67,50 +94,96 @@ impl Identity {
     }
 }
 
-/// Records are few and tiny, so the store runs uncached: a cache would have
-/// to be kept exactly consistent with flash contents (the crate is explicit
-/// that a stale one causes "undesirable things"), and it would buy nothing at
-/// three records.
-type Uncached = Cache<
-    sequential_storage::cache::Uncached,
-    sequential_storage::cache::Uncached,
-    sequential_storage::cache::Uncached,
-    u8,
->;
+
+/// Bridges the blocking flash to `sequential-storage`'s async traits, through
+/// a mutable borrow.
+///
+/// Two things forced this rather than `BlockingAsync`: that adapter does not
+/// implement `MultiwriteNorFlash` (which `queue::pop` requires), and the
+/// async traits have no blanket `&mut T` impl for it either — so the map and
+/// the queue could never take turns on one flash handle. Both storages want
+/// their flash by value; this hands each a borrow that ends when its view is
+/// dropped.
+///
+/// Flash access is genuinely blocking on this chip, so nothing is lost by not
+/// being truly async: these futures simply never yield.
+struct FlashRef<'a, F>(&'a mut F);
+
+impl<F: ErrorType> ErrorType for FlashRef<'_, F> {
+    type Error = F::Error;
+}
+
+impl<F: BlockingReadNorFlash> AsyncReadNorFlash for FlashRef<'_, F> {
+    const READ_SIZE: usize = F::READ_SIZE;
+
+    async fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+        self.0.read(offset, bytes)
+    }
+
+    fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+}
+
+impl<F: BlockingNorFlash> AsyncNorFlash for FlashRef<'_, F> {
+    const WRITE_SIZE: usize = F::WRITE_SIZE;
+    const ERASE_SIZE: usize = F::ERASE_SIZE;
+
+    async fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
+        self.0.erase(from, to)
+    }
+
+    async fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.0.write(offset, bytes)
+    }
+}
+
+impl<F: BlockingMultiwrite> AsyncMultiwrite for FlashRef<'_, F> {}
 
 /// The persistent store, parameterised over the blocking flash region so the
 /// partition plumbing stays in `main`.
-pub struct Store<S: BlockingNorFlash> {
-    map: MapStorage<u8, BlockingAsync<S>, Uncached>,
+///
+/// Owns the flash and lends it to a map view or a queue view per call; the
+/// two never exist at once, which is what keeps their ranges honest.
+pub struct Store<S: BlockingMultiwrite> {
+    flash: S,
     buf: [u8; BUF_LEN],
+    /// Scratch for queue operations. A field rather than a local because
+    /// `Store` lives in a static, while a local would be duplicated into the
+    /// future of every task that awaits an outbox call.
+    qbuf: [u8; MAX_QUEUED_MESSAGE],
 }
 
-impl<S: BlockingNorFlash> Store<S> {
+impl<S: BlockingMultiwrite> Store<S> {
     pub fn new(flash: S) -> Self {
         Self {
-            map: MapStorage::new(
-                BlockingAsync::new(flash),
-                MapConfig::new(0..APEXNET_PARTITION_LEN),
-                Cache::new_uncached(),
-            ),
+            flash,
             buf: [0u8; BUF_LEN],
+            qbuf: [0u8; MAX_QUEUED_MESSAGE],
         }
     }
+
 
     /// Read identity from flash. A read failure is reported as "not
     /// commissioned" rather than a panic: a board with an unreadable store
     /// must still boot and still beat — it just cannot talk on the radio,
     /// which is exactly the honest degradation the charter asks for.
     pub async fn identity(&mut self) -> Identity {
-        let node_id = self
-            .map
-            .fetch_item::<u16>(&mut self.buf, &KEY_NODE_ID)
+        // Destructured so the flash and the scratch buffer are disjoint
+        // borrows; `&mut self` as a whole cannot lend both at once.
+        let Self { flash, buf, .. } = self;
+        let mut map = MapStorage::new(
+            FlashRef(flash),
+            MapConfig::new(MAP_RANGE),
+            Cache::new_uncached(),
+        );
+        let node_id = map
+            .fetch_item::<u16>(buf, &KEY_NODE_ID)
             .await
             .ok()
             .flatten();
-        let psk = self
-            .map
-            .fetch_item::<&[u8]>(&mut self.buf, &KEY_PSK)
+        let psk = map
+            .fetch_item::<&[u8]>(buf, &KEY_PSK)
             .await
             .ok()
             .flatten()
@@ -126,12 +199,16 @@ impl<S: BlockingNorFlash> Store<S> {
     /// commissioned ⇒ still accepts a first-touch provision) rather than one
     /// that believes it has an identity it cannot authenticate.
     pub async fn commission(&mut self, node_id: u16, psk: &[u8; 32]) -> Result<(), ()> {
-        self.map
-            .store_item(&mut self.buf, &KEY_PSK, &psk.as_slice())
+        let Self { flash, buf, .. } = self;
+        let mut map = MapStorage::new(
+            FlashRef(flash),
+            MapConfig::new(MAP_RANGE),
+            Cache::new_uncached(),
+        );
+        map.store_item(buf, &KEY_PSK, &psk.as_slice())
             .await
             .map_err(|_| ())?;
-        self.map
-            .store_item(&mut self.buf, &KEY_NODE_ID, &node_id)
+        map.store_item(buf, &KEY_NODE_ID, &node_id)
             .await
             .map_err(|_| ())
     }
@@ -141,16 +218,20 @@ impl<S: BlockingNorFlash> Store<S> {
     /// is used, so a power cut can only ever waste counters, never repeat
     /// them.
     pub async fn reserve_counters(&mut self) -> Result<u64, ()> {
-        let current = self
-            .map
-            .fetch_item::<u64>(&mut self.buf, &KEY_CTR_HW)
+        let Self { flash, buf, .. } = self;
+        let mut map = MapStorage::new(
+            FlashRef(flash),
+            MapConfig::new(MAP_RANGE),
+            Cache::new_uncached(),
+        );
+        let current = map
+            .fetch_item::<u64>(buf, &KEY_CTR_HW)
             .await
             .ok()
             .flatten()
             .unwrap_or(0);
         let next = current.saturating_add(CTR_RESERVATION);
-        self.map
-            .store_item(&mut self.buf, &KEY_CTR_HW, &next)
+        map.store_item(buf, &KEY_CTR_HW, &next)
             .await
             .map_err(|_| ())?;
         Ok(next)
@@ -158,11 +239,77 @@ impl<S: BlockingNorFlash> Store<S> {
 
     /// The persisted ceiling, without reserving more.
     pub async fn counter_high_water(&mut self) -> u64 {
-        self.map
-            .fetch_item::<u64>(&mut self.buf, &KEY_CTR_HW)
+        let Self { flash, buf, .. } = self;
+        let mut map = MapStorage::new(
+            FlashRef(flash),
+            MapConfig::new(MAP_RANGE),
+            Cache::new_uncached(),
+        );
+        map.fetch_item::<u64>(buf, &KEY_CTR_HW)
             .await
             .ok()
             .flatten()
             .unwrap_or(0)
+    }
+
+    /// Queue a message for a peer that is not currently reachable.
+    ///
+    /// The **plaintext** packet is stored, not a sealed frame. Sealing binds
+    /// a counter, and a frame that sits in flash for a day would surface with
+    /// a counter far below everything sent since — which every receiver would
+    /// correctly reject as a replay. Seal at drain time, with a fresh counter.
+    ///
+    /// (The plaintext shares a partition with the colony key, so anyone who
+    /// can read one can read the other; storing it sealed would buy nothing.)
+    pub async fn outbox_push(&mut self, packet: &[u8]) -> Result<(), ()> {
+        let mut queue = QueueStorage::new(
+            FlashRef(&mut self.flash),
+            QueueConfig::new(QUEUE_RANGE),
+            Cache::new_uncached(),
+        );
+        // Never overwrite old data: a full outbox refuses new messages rather
+        // than silently dropping ones already promised delivery.
+        queue.push(packet, false).await.map_err(|_| ())
+    }
+
+    /// The oldest queued message, left in place. Returns its length.
+    pub async fn outbox_peek(&mut self, out: &mut [u8]) -> Option<usize> {
+        let mut queue = QueueStorage::new(
+            FlashRef(&mut self.flash),
+            QueueConfig::new(QUEUE_RANGE),
+            Cache::new_uncached(),
+        );
+        queue.peek(out).await.ok().flatten().map(|d| d.len())
+    }
+
+    /// Drop the oldest queued message — called only once delivery is
+    /// acknowledged, so an unheard message stays queued.
+    pub async fn outbox_pop(&mut self) -> bool {
+        let Self { flash, qbuf, .. } = self;
+        let mut queue = QueueStorage::new(
+            FlashRef(flash),
+            QueueConfig::new(QUEUE_RANGE),
+            Cache::new_uncached(),
+        );
+        matches!(queue.pop(qbuf).await, Ok(Some(_)))
+    }
+
+    /// How many messages are waiting. Walks the queue, so it is called at
+    /// boot and then tracked in RAM rather than polled.
+    pub async fn outbox_len(&mut self) -> u16 {
+        let Self { flash, qbuf, .. } = self;
+        let mut queue = QueueStorage::new(
+            FlashRef(flash),
+            QueueConfig::new(QUEUE_RANGE),
+            Cache::new_uncached(),
+        );
+        let Ok(mut iter) = queue.iter().await else {
+            return 0;
+        };
+        let mut n = 0u16;
+        while let Ok(Some(_)) = iter.next(qbuf).await {
+            n = n.saturating_add(1);
+        }
+        n
     }
 }
