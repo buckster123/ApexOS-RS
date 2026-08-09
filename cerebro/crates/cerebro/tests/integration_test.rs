@@ -1121,6 +1121,123 @@ mod storage_basic {
         }
     }
 
+    // R-06: memory_versions and vision_embeddings both REFERENCE memories(id)
+    // with no CASCADE — purging a memory that has either kind of child row
+    // used to fail with SQLITE_CONSTRAINT (FK 19). Both purge paths now clear
+    // them in-transaction, like links/vectors before them.
+    #[tokio::test]
+    async fn purge_memory_cleans_versions_and_vision_rows() {
+        let (store, _dir) = make_store().await;
+
+        let node = MemoryNode::new("versioned + captioned memory", MemoryType::Semantic);
+        let id = node.id.clone();
+        store.sqlite.insert_memory(&node).await.unwrap();
+        store.sqlite.log_memory_version(&node, Some("test"), Some("v0")).await.unwrap();
+        store.vector.store_vision_embedding(&id, &[0.1, 0.2, 0.3], Some("x.png"))
+            .await.unwrap();
+
+        store.sqlite.delete_memory(&id, &VisibilityScope::global()).await.unwrap();
+        let purged = store.sqlite.purge_memory(&id, &VisibilityScope::global()).await.unwrap();
+        assert!(purged, "purge with version + vision child rows should succeed");
+        assert!(store.sqlite.get_memory_versions_raw(&id.0, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn purge_all_deleted_cleans_versions_and_vision_rows() {
+        let (store, _dir) = make_store().await;
+
+        let node = MemoryNode::new("bulk versioned + captioned", MemoryType::Semantic);
+        let id = node.id.clone();
+        store.sqlite.insert_memory(&node).await.unwrap();
+        store.sqlite.log_memory_version(&node, Some("test"), Some("v0")).await.unwrap();
+        store.vector.store_vision_embedding(&id, &[0.4, 0.5], None).await.unwrap();
+
+        store.sqlite.delete_memory(&id, &VisibilityScope::global()).await.unwrap();
+        let n = store.sqlite.purge_all_deleted(&VisibilityScope::global()).await.unwrap();
+        assert_eq!(n, 1, "bulk purge with child rows should succeed");
+        assert!(store.sqlite.get_memory_versions_raw(&id.0, 10).await.unwrap().is_empty());
+    }
+
+    // R-04: a content edit snapshots the PRIOR row into memory_versions
+    // (Python parity — get_memory_versions' "each content change creates a
+    // snapshot" contract). Metadata-only updates snapshot nothing.
+    #[tokio::test]
+    async fn update_memory_snapshots_prior_content() {
+        let (store, _dir) = make_store().await;
+
+        let mut node = MemoryNode::new("first draft of the idea", MemoryType::Semantic);
+        let id = node.id.clone();
+        store.sqlite.insert_memory(&node).await.unwrap();
+
+        node.content = "second draft, sharpened".to_string();
+        store.sqlite.update_memory_noted(&node, Some("FORGE"), Some("sharpen"))
+            .await.unwrap();
+
+        let versions = store.sqlite.get_memory_versions_raw(&id.0, 10).await.unwrap();
+        assert_eq!(versions.len(), 1, "content edit must snapshot the prior row");
+        assert_eq!(versions[0]["content"].as_str().unwrap(), "first draft of the idea");
+        assert_eq!(versions[0]["edited_by"].as_str().unwrap(), "FORGE");
+
+        // Metadata-only update (the dream engine's usual write) — no snapshot.
+        node.salience = 0.9;
+        store.sqlite.update_memory(&node).await.unwrap();
+        let versions = store.sqlite.get_memory_versions_raw(&id.0, 10).await.unwrap();
+        assert_eq!(versions.len(), 1, "metadata-only update must not snapshot");
+    }
+
+    // The ghost-FK repair (U1b field find): a Python-migrated DB carries a
+    // memory_versions whose FK references the dropped memory_nodes — every
+    // colony brain is Python-migrated. Repair on open so R-04/R-06 writes work.
+    #[tokio::test]
+    async fn python_ghost_fk_memory_versions_repaired_on_open() {
+        use cerebro::storage::sqlite::SqliteStore;
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("test.db");
+
+        {
+            let store = SqliteStore::open(&db).await.unwrap();
+            let node = MemoryNode::new("survives the table rebuild", MemoryType::Semantic);
+            store.insert_memory(&node).await.unwrap();
+            store.log_memory_version(&node, Some("py-era"), Some("v0")).await.unwrap();
+        }
+        // Simulate the Python residue: same columns, FK aimed at the ghost.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 CREATE TABLE mv_py (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     memory_id TEXT NOT NULL, content TEXT NOT NULL,
+                     tags_json TEXT NOT NULL DEFAULT '[]', salience REAL NOT NULL,
+                     visibility TEXT NOT NULL, edited_by TEXT,
+                     edited_at TEXT NOT NULL, change_note TEXT,
+                     FOREIGN KEY (memory_id) REFERENCES memory_nodes(id) ON DELETE CASCADE
+                 );
+                 INSERT INTO mv_py SELECT * FROM memory_versions;
+                 DROP TABLE memory_versions;
+                 ALTER TABLE mv_py RENAME TO memory_versions;",
+            ).unwrap();
+        }
+
+        // Reopen: the repair must fire, keep the row, and unbreak writes.
+        let store = SqliteStore::open(&db).await.unwrap();
+        let mut node = store
+            .list_memories_scoped(&VisibilityScope::global(), &Default::default())
+            .await.unwrap().pop().unwrap();
+        let versions = store.get_memory_versions_raw(&node.id.0, 10).await.unwrap();
+        assert_eq!(versions.len(), 1, "pre-repair snapshot must survive the rebuild");
+        assert_eq!(versions[0]["change_note"], "v0");
+
+        // R-04 write path works again…
+        node.content = "edited after repair".into();
+        store.update_memory_noted(&node, Some("FORGE"), None).await.unwrap();
+        assert_eq!(store.get_memory_versions_raw(&node.id.0, 10).await.unwrap().len(), 2);
+
+        // …and so does the R-06 purge (FK now resolves against memories).
+        store.delete_memory(&node.id, &VisibilityScope::global()).await.unwrap();
+        assert!(store.purge_memory(&node.id, &VisibilityScope::global()).await.unwrap());
+    }
+
     // CB-022: purging a still-linked memory used to fail with a FOREIGN KEY
     // constraint error (links REFERENCES memories(id), foreign_keys=ON). The
     // purge now deletes dependent link rows in the same transaction.
@@ -1601,10 +1718,12 @@ mod cortex_pipeline {
         // must see ONLY visibility=shared — private never crosses the wire.
         let (cortex, _dir) = make_cortex().await;
         let apex = AgentId("APEX".into());
-        // Agent-scoped remember → Private; global remember → Shared.
-        cortex.remember(
-            "sqlite calibration detail this node keeps to itself",
+        // Explicitly-private agent memory vs a shared (default) global one
+        // (R-05: remember defaults to Shared regardless of scope now).
+        cortex.remember_with_visibility(
+            "sqlite calibration detail this node keeps to itself".to_string(),
             None, None, None, VisibilityScope::for_agent(apex.clone()),
+            Some(Visibility::Private),
         ).await.unwrap();
         let published = cortex.remember(
             "sqlite calibration wisdom published for the colony",
@@ -1641,10 +1760,12 @@ mod cortex_pipeline {
             None, None, None, VisibilityScope::global(),
         ).await.unwrap();
         // Content deliberately shares NO keywords with the query — reachable
-        // only via the associative link.
-        let private = cortex.remember(
+        // only via the associative link. Explicitly private (R-05: remember
+        // defaults to Shared now, Python parity).
+        let private = cortex.remember_with_visibility(
             "meadow rituals and quiet unrelated things",
             None, None, None, VisibilityScope::for_agent(alice.clone()),
+            Some(Visibility::Private),
         ).await.unwrap();
         cortex.associate(
             seed.id.clone(), private.id.clone(),

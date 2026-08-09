@@ -349,9 +349,10 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 | `dream_run` | — | `agent_id`, `max_llm_calls` (20, max 20) | `dream.run_cycle` | 6-phase report `{phases, success, …}` |
 | `dream_status` | — | — | last report | report or `{status:"no_cycles_run"}` |
 
-> Scoping note: a scoped write (`agent_id` set) is `Private`; an unscoped write is `Shared`.
-> The `visibility` arg in the `remember` schema is **not read** — use `share_memory` to flip
-> an existing memory to shared.
+> Scoping note: new stores default to **Shared** regardless of `agent_id` (Python parity,
+> R-05). Pass `visibility: "private"` with an `agent_id` for owner-only memories (private
+> without an owner is refused). Use `share_memory` to deliberately publish an existing
+> private memory; `update_memory` can also change visibility.
 
 > Listing note: `[summary row]` = `{id, content_head (200 chars), content_chars, memory_type,
 > tags, salience, agent_id, created_at}` — a browse index, not the texts (`list_schemas`

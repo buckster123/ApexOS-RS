@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::Path, sync::{Arc, OnceLock}};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::Mutex;
 
@@ -212,6 +212,54 @@ const SELECT_COLS: &str =
 // ---------------------------------------------------------------------------
 // One-time migration: Python CerebroCortex schema → Rust schema
 // ---------------------------------------------------------------------------
+
+/// Rebuild `memory_versions` when its FK points at a table that no longer
+/// exists (the Python original's `REFERENCES memory_nodes(id)`, orphaned by
+/// migration+reap). Data is preserved row-for-row, ids included. Idempotent:
+/// after one repair the probe is false forever.
+fn repair_ghost_fk_memory_versions(conn: &Connection) -> Result<()> {
+    let ghost: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM pragma_foreign_key_list('memory_versions') f
+            WHERE f.\"table\" NOT IN (SELECT name FROM sqlite_master WHERE type='table'))",
+        [],
+        |r| r.get(0),
+    )?;
+    if !ghost {
+        return Ok(());
+    }
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+    let repair = conn.execute_batch(
+        "BEGIN;
+         CREATE TABLE memory_versions_repair (
+             id          INTEGER PRIMARY KEY AUTOINCREMENT,
+             memory_id   TEXT NOT NULL,
+             content     TEXT NOT NULL,
+             tags_json   TEXT NOT NULL DEFAULT '[]',
+             salience    REAL NOT NULL,
+             visibility  TEXT NOT NULL,
+             edited_by   TEXT,
+             edited_at   TEXT NOT NULL,
+             change_note TEXT,
+             FOREIGN KEY (memory_id) REFERENCES memories(id)
+         );
+         INSERT INTO memory_versions_repair
+             (id, memory_id, content, tags_json, salience, visibility,
+              edited_by, edited_at, change_note)
+             SELECT id, memory_id, content, tags_json, salience, visibility,
+                    edited_by, edited_at, change_note
+             FROM memory_versions;
+         DROP TABLE memory_versions;
+         ALTER TABLE memory_versions_repair RENAME TO memory_versions;
+         CREATE INDEX IF NOT EXISTS idx_versions_memory ON memory_versions(memory_id);
+         COMMIT;",
+    );
+    // Restore FK enforcement even when the rebuild failed mid-batch.
+    let _ = conn.execute_batch("PRAGMA foreign_keys=ON;");
+    repair?;
+    tracing::info!("repaired memory_versions ghost FK (Python-migration residue → REFERENCES memories)");
+    Ok(())
+}
 
 /// Detects a Python-generated `cerebro.db` (table `memory_nodes` present) and
 /// converts it in-place to the Rust schema.  Runs once; subsequent opens are
@@ -463,6 +511,16 @@ impl SqliteStore {
         // One-time migration: if this DB was created by the Python CerebroCortex server
         // (uses memory_nodes / associative_links), transparently convert it to Rust schema.
         migrate_from_python(&mut conn)?;
+
+        // Ghost-FK repair (found 2026-08-08 by Lucida U1b's CRUD instruments):
+        // a Python-created DB already HAS a memory_versions table, so
+        // SCHEMA_SQL's IF NOT EXISTS skips it — and the Python original's FK
+        // references memory_nodes, which migration renamed and the reap
+        // dropped. With foreign_keys=ON, ANY write to the table (the R-04
+        // version snapshot) or dependent cleanup (the R-06 purge) then fails
+        // with "no such table: main.memory_nodes". Probe every open (cheap);
+        // rebuild with the canonical FK when the ghost is present.
+        repair_ghost_fk_memory_versions(&conn)?;
 
         // Try to create the vec0 virtual table; works only if sqlite-vec loaded successfully.
         let vec_available = conn.execute_batch(
@@ -752,8 +810,53 @@ impl SqliteStore {
     }
 
     pub async fn update_memory(&self, node: &MemoryNode) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
+        self.update_memory_noted(node, None, None).await
+    }
+
+    /// `update_memory` plus version provenance. When the incoming content
+    /// differs from the stored row, the PRIOR row is snapshotted into
+    /// `memory_versions` first (Python parity: cortex.update_memory saves a
+    /// version before every content edit — R-04; the retention sweep caps the
+    /// table at `CEREBRO_RETAIN_VERSIONS`). Metadata-only updates (salience,
+    /// tags, FSRS state — the dream engine's bread and butter) snapshot
+    /// nothing. Snapshot + UPDATE run inside one transaction.
+    pub async fn update_memory_noted(
+        &self,
+        node: &MemoryNode,
+        edited_by: Option<&str>,
+        change_note: Option<&str>,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        let prior: Option<(String, String, f64, String)> = tx
+            .query_row(
+                "SELECT content, tags, salience, visibility \
+                 FROM memories WHERE id = ? AND deleted_at IS NULL",
+                params![node.id.0],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        if let Some((old_content, old_tags, old_salience, old_visibility)) = prior {
+            if old_content != node.content {
+                tx.execute(
+                    "INSERT INTO memory_versions \
+                     (memory_id, content, tags_json, salience, visibility, \
+                      edited_by, edited_at, change_note) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        node.id.0,
+                        old_content,
+                        old_tags,
+                        old_salience,
+                        old_visibility,
+                        edited_by,
+                        Utc::now().to_rfc3339(),
+                        change_note,
+                    ],
+                )?;
+            }
+        }
+        tx.execute(
             "UPDATE memories SET \
              content=?2, memory_type=?3, layer=?4, salience=?5, tags=?6, agent_id=?7, \
              visibility=?8, thread_id=?9, emotional_valence=?10, emotional_intensity=?11, \
@@ -781,6 +884,7 @@ impl SqliteStore {
                 serde_json::to_string(&node.metadata)?,
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1066,6 +1170,11 @@ impl SqliteStore {
             "DELETE FROM links WHERE source_id = ?1 OR target_id = ?1",
             params![id.0],
         )?;
+        // memory_versions + vision_embeddings both REFERENCE memories(id) with
+        // no CASCADE, and foreign_keys=ON — leaving them fails the parent
+        // DELETE with SQLITE_CONSTRAINT (R-06).
+        tx.execute("DELETE FROM memory_versions WHERE memory_id = ?", params![id.0])?;
+        tx.execute("DELETE FROM vision_embeddings WHERE memory_id = ?", params![id.0])?;
         let changed = tx.execute("DELETE FROM memories WHERE id = ?", params![id.0])?;
         tx.commit()?;
         Ok(changed > 0)
@@ -1101,6 +1210,16 @@ impl SqliteStore {
         )?;
         tx.execute(
             &format!("DELETE FROM links WHERE target_id IN ({doomed})"),
+            dp.as_slice(),
+        )?;
+        // Same FK-safety as purge_memory (R-06): versions + vision rows must
+        // go before their parent memories.
+        tx.execute(
+            &format!("DELETE FROM memory_versions WHERE memory_id IN ({doomed})"),
+            dp.as_slice(),
+        )?;
+        tx.execute(
+            &format!("DELETE FROM vision_embeddings WHERE memory_id IN ({doomed})"),
             dp.as_slice(),
         )?;
         let changed = tx.execute(

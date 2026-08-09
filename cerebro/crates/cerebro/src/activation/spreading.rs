@@ -125,12 +125,21 @@ pub fn spread_traced(
         return (HashMap::new(), Vec::new());
     }
 
-    let max_nodes     = SPREADING_MAX_ACTIVATED;
+    // Deliberate deviation from Python (found via Lucida Thought lens, 2026-08-08):
+    // the activation budget bounds spread GROWTH — nodes newly activated beyond
+    // the seeds — not total map size. Python (spreading.py:155) checks
+    // `len(activated) >= max_activated` with the seeds already inside, and recall
+    // over-fetches k*5 = 50 = the cap, so on any store returning a full candidate
+    // page the spread broke before hop 1 and spreading activation was silently a
+    // no-op. (Also why the colony measured never_traversed_links_pct at exactly
+    // 100.0 for so long — the walk never happened on mature brains.)
+    let max_new       = SPREADING_MAX_ACTIVATED;
     let decay_per_hop = SPREADING_DECAY_PER_HOP;
     let max_hops      = SPREADING_MAX_HOPS;
     let threshold     = SPREADING_ACTIVATION_THRESHOLD;
     let halflife      = LINK_DECAY_HALFLIFE_DAYS;
     let now           = chrono::Utc::now();
+    let mut new_count = 0usize;
 
     // Initialise activation map with seeds (last weight wins on duplicate ids,
     // matching Python's dict assignment).
@@ -143,7 +152,7 @@ pub fn spread_traced(
     let mut traversed: HashSet<petgraph::graph::EdgeIndex> = HashSet::new();
 
     for hop in 0..max_hops {
-        if frontier.is_empty() || activated.len() >= max_nodes {
+        if frontier.is_empty() || new_count >= max_new {
             break;
         }
         let hop_decay = decay_per_hop.powi(hop as i32 + 1);
@@ -185,10 +194,11 @@ pub fn spread_traced(
                         None => {
                             activated.insert(neighbor, spread_amt);
                             next_frontier.insert(neighbor);
+                            new_count += 1;
                         }
                     }
 
-                    if activated.len() >= max_nodes {
+                    if new_count >= max_new {
                         break 'frontier;
                     }
                 }
@@ -257,5 +267,36 @@ mod tests {
     fn frontier_empty_seeds_is_empty() {
         let g: Graph<MemoryId, AssociativeLink> = Graph::new();
         assert!(reachable_frontier(&g, &[]).is_empty());
+    }
+
+    // The seed-cap no-op regression (2026-08-08): recall over-fetches
+    // k*5 = 50 = SPREADING_MAX_ACTIVATED seeds, and the budget check used to
+    // count seeds against the cap — so on any mature store the spread broke
+    // before hop 1 and NOTHING ever propagated (Python inherits this;
+    // deliberate deviation). The budget now bounds growth beyond the seeds.
+    #[test]
+    fn full_seed_page_still_spreads() {
+        let mut g: Graph<MemoryId, AssociativeLink> = Graph::new();
+        let seeds_n = SPREADING_MAX_ACTIVATED; // one full candidate page
+        let seed_idx: Vec<NodeIndex> = (0..seeds_n)
+            .map(|i| g.add_node(MemoryId(format!("seed{i}"))))
+            .collect();
+        let neighbor = g.add_node(MemoryId("assoc-only".into()));
+        g.add_edge(seed_idx[0], neighbor, AssociativeLink::new(
+            MemoryId("seed0".into()), MemoryId("assoc-only".into()),
+            LinkType::Semantic, 1.0,
+        ));
+
+        let mut visible: HashMap<NodeIndex, bool> =
+            seed_idx.iter().map(|&i| (i, true)).collect();
+        visible.insert(neighbor, true);
+        let seeds: Vec<(NodeIndex, f32)> =
+            seed_idx.iter().map(|&i| (i, 1.0)).collect();
+
+        let (activated, walked) = spread_traced(&g, &seeds, &visible);
+        assert!(!walked.is_empty(),
+            "a full seed page must not disable spreading (the pre-fix no-op)");
+        assert!(activated.contains_key(&neighbor),
+            "the association-only neighbor must be reachable past 50 seeds");
     }
 }
