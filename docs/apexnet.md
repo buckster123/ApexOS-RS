@@ -311,38 +311,88 @@ Two things to carry into P4c:
 - The `Advertiser` and `ScanSession` handles **stop the radio when dropped**.
   Both must be held for the lifetime of the advertising/scan.
 
-### Open: the radio transmits but does not receive
+### Resolved: the radio was never broken — the host stack was
 
-Bench findings from a two-board rig (bare ESP32-S3, `esp-radio 0.18` +
-`trouble-host 0.6`), 2026-08-09. **Transmission works and is externally
-witnessed**: a phone BLE scanner sees the board advertising by name
-(`APEXNET-80BF`, connectable legacy adv, Flags + Complete Local Name).
+Bench findings, bare ESP32-S3, 2026-08-09. Two separate things had to be
+peeled off before the picture was honest.
 
-**Reception yields essentially nothing**, and the confounds are now excluded
-one at a time on the *same* board that the phone can hear:
+**First, a missing antenna.** The devkits ship with an external 2.4 GHz patch
+antenna; without it every HCI command still succeeds and essentially nothing
+crosses the air. Fitted, a phone sees the board advertising by name. *A missing
+antenna is indistinguishable from a broken stack* — confirm RF hardware with an
+external witness before suspecting software.
 
-| Variable | Tested | Result |
+**Then, with a raw-HCI spike** (no `trouble-host` at all — hand-built HCI
+straight onto `esp-radio`'s byte pipe), the controller turned out to do
+**everything** correctly:
+
+| Path | Result |
+|---|---|
+| Legacy advertising | works (phone-witnessed) |
+| Extended advertising | works, 52 B payload |
+| Legacy scanning | **131 LE Meta events** |
+| Extended scanning | **174 LE Meta events** (subevent `0x0D`) |
+
+The reports decode to the exact devices a phone sees in the same room.
+
+**Root cause of "no reports": the duplicate filter.** Isolated by changing one
+variable at a time on the raw path:
+
+| Scan interval | `filter_duplicates` | LE Meta events |
 |---|---|---|
-| Antenna | The board the phone hears (external antenna fitted) | still no reports |
-| Scan API | `scan` (legacy) vs `scan_ext` (extended) | both silent |
-| Concurrency | scan-only build, advertising disabled | still silent |
-| Report parsing | `.flatten()` removed so per-report errors surface | no parse errors — nothing arrives at all |
+| 160 (100 ms, spec-correct) | off | **131** |
+| 10 (6.25 ms) | off | **108** |
+| 160 (100 ms, spec-correct) | **on** | **2** |
+| 10 (6.25 ms) | **on** | **2** |
 
-Meanwhile a phone in the same room sees five devices. Two lone reports were
-observed across the whole session (both the same Fast-Pair-style beacon), so
-the path is not *literally* dead — it delivers a negligible fraction of what
-is on the air. Every HCI command succeeds: the host initialises, sets its
-address, `advertise*`/`scan*` both return `Ok`, and `LeSetEventMask` enables
-both report kinds.
+`trouble-host`'s legacy `scan()` hardcodes `LeSetScanEnable(.., filter_duplicates = true)`,
+and `esp-radio`'s BLE `Config` defaults `scan_duplicate_refresh_period: 0` — a
+duplicate list that **never refreshes**. Together: every device is reported
+exactly once and then silenced forever. Two individually reasonable defaults
+combining into a radio that looks dead.
 
-**This blocks P4c**, because gossip needs the receive half. Leads worth
-pulling, in order: the async `Controller` impl over esp-radio's *blocking*
-`BleConnector` (is a waker registered, so the HCI RX future is polled when an
-unsolicited event — as opposed to a command response — arrives?); the
-`ExternalController<_, N>` slot count; and whether esp-radio's controller
-needs scan parameters this host does not send. A raw-HCI spike that bypasses
-`trouble-host` entirely would split "controller never emits the event" from
-"host never routes it".
+**A second, real defect (not the cause):** `bt-hci` 0.8.1 declares
+`le_scan_interval` / `le_scan_window` as `Duration<10_000>` (10 ms units); the
+Bluetooth spec defines them in **0.625 ms** units, so every value goes on the
+wire **16x too small**. A requested 100 ms arrives as 6.25 ms. Worth reporting
+upstream; harmless here only because interval == window keeps the duty cycle at
+100% either way.
+
+**Still open (smaller):** `trouble-host`'s `scan_ext` *does* pass
+`FilterDuplicates::Disabled`, yet still returned zero reports. Untested
+candidates: the 16x unit bug, the own-address kind (it sets RANDOM; the raw
+spike used PUBLIC), or its PHY-params construction.
+
+### The design consequence: Tier 2a needs no BLE host stack
+
+Gossip is **connectionless** — advertise and scan, no GATT, no connections, no
+L2CAP. That is a few HCI commands and an event loop, which the raw spike
+already demonstrates end to end. Driving HCI directly for Tier 2a is *less*
+code than working around a host stack's defaults, keeps unit conversions under
+our own tests, and removes an entire dependency from the radio path. `trouble-host`
+stays available if a later phase genuinely needs GATT (the v2 §2.1 bulk lane).
+
+**Board-to-board is PROVEN** (2026-08-09, both antennas nominally fitted): with
+duplicates disabled, one board received the other's advertisement **90 times in
+~20 s** at **-69 dBm**, decoding cleanly to the advertiser's address and its
+`Complete Local Name`:
+
+```text
+04 3e 1d 02 01 00 00 │ 81 bf f3 4e b5 82 │ 11 │ 02 01 06 │ 0d 09 "APEXNET-80BF" │ bb
+LE Meta, adv report     advertiser address  len  flags      complete local name   RSSI
+```
+
+That is Tier 2a's physical layer working end to end between two colony
+brainstems — the charter's P4c gossip milestone, minus the ApexNET payload.
+
+**One asymmetry remains:** the reverse direction is silent. Board A's
+transmissions reach board B, and board B receives the room's other advertisers
+fine, but board B's transmissions never reach board A even though its firmware
+reports `ADV OK`. Reciprocity says a link that carries -69 dBm one way should
+carry it back, so the likely cause is a **U.FL connector not fully seated** on
+board B (they latch with a firm click and mis-seat easily) rather than
+anything in software. Confirm the same way the first antenna was confirmed:
+scan for the board's advertised name with a phone.
 
 ### Traps already paid for (carry into P4c)
 
