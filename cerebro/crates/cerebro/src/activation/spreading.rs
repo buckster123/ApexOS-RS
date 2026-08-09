@@ -121,6 +121,39 @@ pub fn spread_traced(
     seeds: &[(NodeIndex, f32)],
     visible_nodes: &HashMap<NodeIndex, bool>,
 ) -> (HashMap<NodeIndex, f32>, Vec<petgraph::graph::EdgeIndex>) {
+    let (activated, events) = spread_events(graph, seeds, visible_nodes);
+    let mut seen: HashSet<petgraph::graph::EdgeIndex> = HashSet::new();
+    let walked = events.iter()
+        .filter(|e| seen.insert(e.edge))
+        .map(|e| e.edge)
+        .collect();
+    (activated, walked)
+}
+
+/// One contributing edge walk in a spread — the animation quantum of the
+/// Thought lens (Lucida U2). `hop` is 1-based; seeds are hop 0 and appear
+/// only in the caller's seed list. `amount` is the RAW (pre-normalization)
+/// activation the walk delivered — clients normalize for display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraceEvent {
+    pub hop:    u8,
+    pub source: NodeIndex,
+    pub target: NodeIndex,
+    pub edge:   petgraph::graph::EdgeIndex,
+    pub amount: f32,
+}
+
+/// `spread` plus the full event log: every edge walk that passed the
+/// threshold + visibility gates, in firing order, with the hop it fired on
+/// and the raw amount it carried. An edge CAN appear twice (activation
+/// flowing back through it on a later hop) — that repeat is real spread
+/// behavior, not a bug; `spread_traced` dedups when only stamping matters.
+/// The spread math is byte-identical to `spread` — this only records.
+pub fn spread_events(
+    graph: &Graph<MemoryId, AssociativeLink>,
+    seeds: &[(NodeIndex, f32)],
+    visible_nodes: &HashMap<NodeIndex, bool>,
+) -> (HashMap<NodeIndex, f32>, Vec<TraceEvent>) {
     if seeds.is_empty() {
         return (HashMap::new(), Vec::new());
     }
@@ -149,7 +182,7 @@ pub fn spread_traced(
     }
 
     let mut frontier: HashSet<NodeIndex> = activated.keys().copied().collect();
-    let mut traversed: HashSet<petgraph::graph::EdgeIndex> = HashSet::new();
+    let mut events: Vec<TraceEvent> = Vec::new();
 
     for hop in 0..max_hops {
         if frontier.is_empty() || new_count >= max_new {
@@ -184,7 +217,13 @@ pub fn spread_traced(
                     if spread_amt < threshold {
                         continue;
                     }
-                    traversed.insert(edge.id());
+                    events.push(TraceEvent {
+                        hop:    hop + 1,
+                        source: node,
+                        target: neighbor,
+                        edge:   edge.id(),
+                        amount: spread_amt,
+                    });
 
                     match activated.get(&neighbor).copied() {
                         Some(existing) => {
@@ -219,7 +258,7 @@ pub fn spread_traced(
         }
     }
 
-    (activated, traversed.into_iter().collect())
+    (activated, events)
 }
 
 #[cfg(test)]
@@ -269,6 +308,45 @@ mod tests {
         assert!(reachable_frontier(&g, &[]).is_empty());
     }
 
+    // U2: spread_events is the same spread, plus the recording — activations
+    // identical to spread(), walked set identical to spread_traced(), hops
+    // ordered, and every event carries a positive raw amount.
+    #[test]
+    fn spread_events_agrees_with_spread_and_traced() {
+        let mut g: Graph<MemoryId, AssociativeLink> = Graph::new();
+        let ids: Vec<NodeIndex> =
+            ["a", "b", "c", "d"].iter().map(|s| g.add_node(MemoryId((*s).into()))).collect();
+        for w in ids.windows(2) {
+            g.add_edge(w[0], w[1], link());
+        }
+        let visible: HashMap<NodeIndex, bool> = ids.iter().map(|&i| (i, true)).collect();
+        let seeds = [(ids[0], 1.0f32)];
+
+        let plain = spread(&g, &seeds, &visible);
+        let (activated, events) = spread_events(&g, &seeds, &visible);
+        let (traced_act, walked) = spread_traced(&g, &seeds, &visible);
+
+        assert_eq!(plain, activated, "recording must not change the math");
+        assert_eq!(activated, traced_act);
+        assert!(!events.is_empty(), "a live chain must produce walk events");
+
+        let unique_edges: HashSet<_> = events.iter().map(|e| e.edge).collect();
+        let walked_set: HashSet<_> = walked.into_iter().collect();
+        assert_eq!(unique_edges, walked_set, "traced walk = deduped event edges");
+
+        let mut last_hop = 0;
+        for e in &events {
+            assert!(e.hop >= 1 && e.hop <= SPREADING_MAX_HOPS);
+            assert!(e.hop >= last_hop, "events fire in hop order");
+            last_hop = e.hop;
+            assert!(e.amount > 0.0);
+        }
+        // The chain's first walk is a→b at hop 1.
+        assert_eq!(events[0].source, ids[0]);
+        assert_eq!(events[0].target, ids[1]);
+        assert_eq!(events[0].hop, 1);
+    }
+
     // The seed-cap no-op regression (2026-08-08): recall over-fetches
     // k*5 = 50 = SPREADING_MAX_ACTIVATED seeds, and the budget check used to
     // count seeds against the cap — so on any mature store the spread broke
@@ -293,8 +371,8 @@ mod tests {
         let seeds: Vec<(NodeIndex, f32)> =
             seed_idx.iter().map(|&i| (i, 1.0)).collect();
 
-        let (activated, walked) = spread_traced(&g, &seeds, &visible);
-        assert!(!walked.is_empty(),
+        let (activated, events) = spread_events(&g, &seeds, &visible);
+        assert!(!events.is_empty(),
             "a full seed page must not disable spreading (the pre-fix no-op)");
         assert!(activated.contains_key(&neighbor),
             "the association-only neighbor must be reachable past 50 seeds");

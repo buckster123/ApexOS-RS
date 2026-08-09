@@ -303,6 +303,46 @@ async fn recall(
     Ok(Json(Value::Array(arr)))
 }
 
+#[derive(Deserialize)]
+struct RecallTraceReq {
+    query:    String,
+    top_k:    Option<usize>,
+    agent_id: Option<String>,
+}
+
+/// POST /recall/trace — a REAL recall (same pipeline, same reinforcement:
+/// watching a thought is still thinking it) plus the trace the Thought lens
+/// animates: seeds with similarities, every spread walk in firing order,
+/// and the post-spread activation map. Results are summary rows — the field
+/// fetches full bodies from /memory/:id on select.
+async fn recall_trace(
+    State(brain): State<Brain>,
+    Json(req): Json<RecallTraceReq>,
+) -> AppResult {
+    let scope = scope_from(req.agent_id.as_deref());
+    let (results, trace) = brain
+        .recall_traced(&req.query, req.top_k.unwrap_or(10), scope)
+        .await?;
+    let rows: Vec<Value> = results.iter().map(|(n, s)| json!({
+        "id":            n.id.0,
+        "memory_type":   n.memory_type,
+        "content_head":  head_chars(&n.content, 200),
+        "content_chars": n.content.chars().count(),
+        "tags":          n.tags,
+        "salience":      round3(n.salience),
+        "score":         round3(*s),
+    })).collect();
+    Ok(Json(json!({ "results": rows, "trace": trace })))
+}
+
+fn head_chars(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
+fn round3(f: f32) -> f32 {
+    (f * 1000.0).round() / 1000.0
+}
+
 // GET /memory/:id
 async fn get_memory(
     Path(id): Path<String>,
@@ -914,6 +954,7 @@ async fn main() -> Result<()> {
         .route("/q/{query}",       get(quick_search))
         .route("/remember",        post(remember))
         .route("/recall",          post(recall))
+        .route("/recall/trace",    post(recall_trace))
         // Memory CRUD
         .route("/memory/{id}",              get(get_memory).put(update_memory).delete(delete_memory))
         .route("/memory/{id}/versions",     get(get_memory_versions))

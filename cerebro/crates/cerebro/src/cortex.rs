@@ -6,7 +6,7 @@ use petgraph::graph::NodeIndex;
 use tokio::sync::RwLock;
 
 use crate::{
-    activation::spread_traced,
+    activation::spread_events,
     config::Config,
     engines::{
         AffectEngine, DreamEngine, EpisodicEngine, ExecutiveEngine, GatingEngine,
@@ -16,6 +16,26 @@ use crate::{
     storage::StorageCoordinator,
     types::{MemoryId, MemoryType, Visibility, VisibilityScope},
 };
+
+/// The observable anatomy of one recall — what the Thought lens animates
+/// (Lucida U2). Seeds are hop 0 (vector/FTS similarity); events are every
+/// contributing spread walk in firing order (raw amounts, an edge may
+/// repeat); `activated` is the post-spread normalized activation per touched
+/// memory. Ids serialize as plain strings.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RecallTrace {
+    pub seeds:     Vec<(MemoryId, f32)>,
+    pub events:    Vec<RecallTraceEvent>,
+    pub activated: Vec<(MemoryId, f32)>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecallTraceEvent {
+    pub hop:    u8,
+    pub source: MemoryId,
+    pub target: MemoryId,
+    pub amount: f32,
+}
 
 /// CerebroCortex — top-level coordinator.
 /// Owns all 9 engines + the storage coordinator.
@@ -412,6 +432,22 @@ impl CerebroCortex {
         k:     usize,
         scope: VisibilityScope,
     ) -> Result<Vec<(MemoryNode, f32)>> {
+        Ok(self.recall_traced(query, k, scope).await?.0)
+    }
+
+    /// `recall` plus the observable anatomy of the act (Lucida U2, the
+    /// Thought lens): the search seeds with their similarities, every
+    /// contributing spread walk in firing order, and the post-spread
+    /// activation map. The trace is a RECORDING, not a different pipeline —
+    /// same math, same reinforcement writes (watching a thought is still
+    /// thinking it: the top-k are ACT-R/FSRS-reinforced and walked links are
+    /// stamped, exactly as in a plain recall).
+    pub async fn recall_traced(
+        &self,
+        query: &str,
+        k:     usize,
+        scope: VisibilityScope,
+    ) -> Result<(Vec<(MemoryNode, f32)>, RecallTrace)> {
         // Cross-process graph freshness (CB-003): pick up any memories/links
         // the OTHER front-end committed, so spreading sees them and the
         // association hits below aren't silently missing. One PRAGMA row when
@@ -430,7 +466,7 @@ impl CerebroCortex {
         let candidates = storage.vector
             .search_seeded(query, k * 5, scope_sql, &scope_params, query_vec.as_deref()).await?;
         if candidates.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], RecallTrace::default()));
         }
 
         // 2. Spreading activation from vector-search seeds.
@@ -472,7 +508,7 @@ impl CerebroCortex {
                 })
                 .collect()
         };
-        let (activated, walked) = spread_traced(&storage.graph.graph, &seeds, &visible_nodes);
+        let (activated, events) = spread_events(&storage.graph.graph, &seeds, &visible_nodes);
 
         // The walk is part of the memory act: stamp the links spreading
         // actually used, so link decay and the fragmentation watchdog's
@@ -480,21 +516,42 @@ impl CerebroCortex {
         // "exactly 100.0%" finding — the write half was never wired). SQLite
         // is the source of truth; the in-memory copy picks the stamps up on
         // its next rebuild (cross-process refresh / restart), so recall stays
-        // on the read guard with no new lock contention.
-        let walked_keys: Vec<(MemoryId, MemoryId, crate::types::LinkType)> = walked
+        // on the read guard with no new lock contention. (Events can repeat
+        // an edge — stamping dedups; the trace keeps the repeats.)
+        let mut stamped: std::collections::HashSet<petgraph::graph::EdgeIndex> =
+            std::collections::HashSet::new();
+        let walked_keys: Vec<(MemoryId, MemoryId, crate::types::LinkType)> = events
             .iter()
-            .filter_map(|&eidx| storage.graph.graph.edge_weight(eidx))
+            .filter(|e| stamped.insert(e.edge))
+            .filter_map(|e| storage.graph.graph.edge_weight(e.edge))
             .map(|l| (l.source_id.clone(), l.target_id.clone(), l.link_type))
             .collect();
         storage.sqlite.record_traversals(&walked_keys).await?;
 
+        // The wire-ready trace: node indices → memory ids.
+        let id_of = |idx: NodeIndex| storage.graph.graph.node_weight(idx).cloned();
+        let trace_events: Vec<RecallTraceEvent> = events.iter()
+            .filter_map(|e| Some(RecallTraceEvent {
+                hop:    e.hop,
+                source: id_of(e.source)?,
+                target: id_of(e.target)?,
+                amount: e.amount,
+            }))
+            .collect();
+
         // 3. Build score maps and union ID set
+        let trace_seeds: Vec<(MemoryId, f32)> = candidates.clone();
         let sims_map: HashMap<MemoryId, f32> = candidates.into_iter().collect();
         let assoc_map: HashMap<MemoryId, f32> = activated.into_iter()
             .filter_map(|(idx, score)| {
                 storage.graph.graph.node_weight(idx).map(|id| (id.clone(), score))
             })
             .collect();
+        let trace = RecallTrace {
+            seeds:     trace_seeds,
+            events:    trace_events,
+            activated: assoc_map.iter().map(|(id, s)| (id.clone(), *s)).collect(),
+        };
 
         let mut all_ids: Vec<MemoryId> = sims_map.keys().cloned().collect();
         for id in assoc_map.keys() {
@@ -543,7 +600,7 @@ impl CerebroCortex {
             .collect();
         storage.sqlite.record_accesses(&reinforcements).await?;
 
-        Ok(results)
+        Ok((results, trace))
     }
 
     // -----------------------------------------------------------------------

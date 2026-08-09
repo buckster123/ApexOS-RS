@@ -21,14 +21,11 @@
 - **Seed-cap spread fix** (CC-RS #24) — budget = growth beyond seeds;
   `full_seed_page_still_spreads` regression.
 
-## 4. Traced recall (feature — port with or ahead of any Lucida upstreaming) — CC-RS PR #24
+## Landed 2026-08-10 — traced recall (entry 4)
 
-`spread_events` + `TraceEvent` (spreading.rs; `spread_traced` derives from
-it — recording only, math untouched, fixtures unaffected), `recall_traced` +
-`RecallTrace` on the cortex (`recall` is a thin wrapper, same reinforcement
-— watching a thought is thinking it), `POST /recall/trace` in cerebro-api.
-The observable anatomy of a recall: seeds with similarities, per-hop walks
-in firing order, post-spread activation map.
+- **Traced recall** (CC-RS #24) — `spread_events` + `TraceEvent`;
+  `recall_traced` + `RecallTrace` (plain `recall` is a thin wrapper, same
+  reinforcement); `POST /recall/trace` in cerebro-api. Thought-lens data.
 
 ## 5. Optional, when the colony wants eyes: Lucida + U1b API hardening — CC-RS PRs #23/#25/#27/#28
 
