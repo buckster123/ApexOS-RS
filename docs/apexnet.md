@@ -372,27 +372,47 @@ code than working around a host stack's defaults, keeps unit conversions under
 our own tests, and removes an entire dependency from the radio path. `trouble-host`
 stays available if a later phase genuinely needs GATT (the v2 §2.1 bulk lane).
 
-**Board-to-board is PROVEN** (2026-08-09, both antennas nominally fitted): with
-duplicates disabled, one board received the other's advertisement **90 times in
-~20 s** at **-69 dBm**, decoding cleanly to the advertiser's address and its
-`Complete Local Name`:
+**Tier 2a's physical layer is PROVEN, bidirectionally** (2026-08-09, two bare
+ESP32-S3s, raw HCI on both sides, ~20 s window):
+
+| Direction | Receptions | RSSI |
+|---|---|---|
+| board A hears board B | **199** | -54 dBm |
+| board B hears board A | **184** | -52 dBm |
 
 ```text
-04 3e 1d 02 01 00 00 │ 81 bf f3 4e b5 82 │ 11 │ 02 01 06 │ 0d 09 "APEXNET-80BF" │ bb
-LE Meta, adv report     advertiser address  len  flags      complete local name   RSSI
+04 3e 1a 02 01 03 00 │ ed 69 26 13 cf d2 │ 0e │ 0d 09 "APEXNET-EC69" │ ca
+LE Meta, adv report     advertiser address  len  complete local name   RSSI
+                 ^^ 0x03 = ADV_NONCONN_IND
 ```
 
-That is Tier 2a's physical layer working end to end between two colony
-brainstems — the charter's P4c gossip milestone, minus the ApexNET payload.
+Two colony brainstems gossiping over the air, continuously, at healthy signal
+strength. What remains for P4c is the ApexNET payload and the flash queue —
+the radio itself is done.
 
-**One asymmetry remains:** the reverse direction is silent. Board A's
-transmissions reach board B, and board B receives the room's other advertisers
-fine, but board B's transmissions never reach board A even though its firmware
-reports `ADV OK`. Reciprocity says a link that carries -69 dBm one way should
-carry it back, so the likely cause is a **U.FL connector not fully seated** on
-board B (they latch with a firm click and mis-seat easily) rather than
-anything in software. Confirm the same way the first antenna was confirmed:
-scan for the board's advertised name with a phone.
+### The third cause: connectable advertising is a trap for gossip
+
+Before the raw-HCI advertiser, boards would transmit for a while and then go
+permanently silent while still receiving perfectly — surviving power cycles,
+untouched, on both boards independently. It looked exactly like failing
+hardware, and cost an antenna hunt it had nothing to do with.
+
+Cause: the bench beacon advertised **connectable** (to be easy to spot on a
+phone). A connectable advertiser **stops advertising the moment anything
+connects to it**, and nothing restarts it. On a desk within reach of a phone
+and a laptop that are both probing the band, a connectable named device is an
+invitation; one connection silences it forever.
+
+**Law: gossip advertises non-connectable (`ADV_NONCONN_IND`), always.** It is
+also what the tier wants on its merits — gossip is connectionless, a
+connection is a side channel nobody asked for, and any peer able to connect is
+a peer able to occupy the radio. If a future phase needs connectable
+advertising for the GATT bulk lane, it must own an explicit re-arm on
+disconnect, and that re-arm needs a test.
+
+Corollary for diagnosis: **"transmits for a while, then never again, while
+still receiving" is a connection, not a fault.** Check the advertising type
+before suspecting the antenna.
 
 ### Traps already paid for (carry into P4c)
 

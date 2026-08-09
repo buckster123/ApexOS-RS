@@ -209,28 +209,28 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    Next: **P4c BLE gossip** — blocked on a radio question, see below · P5b
    router · P6 LoRa when the Pi Hut boards land.
 
-   **P4c root cause FOUND (2026-08-09) — the radio was never broken.** Two
-   layers: (1) a missing external antenna (ships with the devkit; without it
-   every HCI command succeeds and nothing crosses the air); (2) with a raw-HCI
-   spike bypassing `trouble-host`, the controller does everything correctly —
-   legacy adv, ext adv, **legacy scan 131 events, ext scan 174 events**,
-   decoding to the same devices a phone sees. Root cause of the silence is the
-   **duplicate filter**: `trouble-host`'s legacy `scan()` hardcodes
-   `filter_duplicates=true` and `esp-radio` defaults
-   `scan_duplicate_refresh_period: 0` (never refreshes) ⇒ each device reported
-   once, ever. Proven by a 4-way A/B (dup filter is the variable; scan interval
-   is not). Separate real defect: `bt-hci` 0.8.1 declares scan interval/window
-   as `Duration<10_000>` where the spec says 0.625 ms units ⇒ every value 16x
-   too small (worth an upstream report). Still open (small): `scan_ext` passes
-   `FilterDuplicates::Disabled` yet returned zero — candidates are the unit
-   bug, own-address kind (RANDOM vs the spike's PUBLIC), or PHY params.
+   **P4c RADIO PROVEN (2026-08-09) — Tier 2a's physical layer works.** Two
+   bare ESP32-S3s gossip bidirectionally over raw HCI: **199 / 184 receptions**
+   in ~20 s at **-54 / -52 dBm**, decoding to advertiser address + name. Three
+   causes were peeled off to get there, all now laws in `docs/apexnet.md` §10:
+   (1) a **missing antenna** (ships with the devkit; without it every HCI
+   command still succeeds and nothing crosses the air); (2) the **duplicate
+   filter** — `trouble-host`'s legacy `scan()` hardcodes
+   `filter_duplicates=true` and `esp-radio` defaults a duplicate list that
+   never refreshes, so each device is reported once, ever (proven by a 4-way
+   A/B; scan interval is NOT the variable); (3) **connectable advertising
+   silently terminates on connection** and nothing re-arms it — which looks
+   exactly like dying TX while RX keeps working, survives power cycles, and
+   cost a wholly unnecessary antenna hunt. **Gossip advertises
+   non-connectable, always.** Separate real defect found on the way: `bt-hci`
+   0.8.1 declares scan interval/window as `Duration<10_000>` where the spec
+   says 0.625 ms units ⇒ every value 16x too small (worth an upstream report).
    **Design consequence: Tier 2a needs no BLE host stack** — connectionless
    advertise+scan is a handful of HCI commands and an event loop, already
-   demonstrated end to end; that is less code than working around a host
-   stack's defaults and keeps unit conversions under our own tests. Full detail
-   → `docs/apexnet.md` §10. **Remaining hardware need: a second antenna** (the
-   fitted board hears six advertisers in the room but not the bare board beside
-   it).
+   running end to end on both boards; that is less code than working around a
+   host stack's defaults and keeps unit conversions under our own tests.
+   Remaining for P4c: put ApexNET frames in the adv payload, the neighbour
+   table, and the flash store-and-forward queue.
    The flash **store-and-forward queue** rides with P4c (the partition and
    `sequential-storage` are already in place; `BrainstemStatus.queued` is the
    observable, wired and reporting 0).
