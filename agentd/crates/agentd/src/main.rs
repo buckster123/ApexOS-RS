@@ -461,9 +461,21 @@ async fn main() -> anyhow::Result<()> {
         // ApexNET P5c: the radio lane's seam. Its own token, like the sensor
         // bridge — a bridge that can inject mesh frames is a different trust
         // grant from one that can inject sensor readings.
-        mesh_bridge_token: std::sync::Arc::new(
-            std::env::var("MESH_BRIDGE_TOKEN").unwrap_or_default(),
-        ),
+        mesh_bridge_token: {
+            let t = std::env::var("MESH_BRIDGE_TOKEN").unwrap_or_default();
+            if t.is_empty() {
+                // Say it out loud rather than fail closed: a bench node on
+                // loopback is fine without one, and refusing to boot would
+                // strand a hand-run daemon. install.sh mints it for every
+                // real node, where the bind is 0.0.0.0.
+                eprintln!(
+                    "[mesh-bridge] WARNING: MESH_BRIDGE_TOKEN is empty — /mesh-bridge accepts \
+                     any connection. Anyone who can reach this port can read outbound mesh \
+                     frames. Fine on loopback; set it if this node binds the LAN."
+                );
+            }
+            std::sync::Arc::new(t)
+        },
         mesh_link: apexos_gateway::mesh_link::MeshLink::new(),
         api_token,
         soul_path:            soul_path.clone(),
