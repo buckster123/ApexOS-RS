@@ -311,19 +311,57 @@ Two things to carry into P4c:
 - The `Advertiser` and `ScanSession` handles **stop the radio when dropped**.
   Both must be held for the lifetime of the advertising/scan.
 
-### Open: no advertising reports are received
+### Open: the radio transmits but does not receive
 
-On the same rig, **no LE advertising reports of any kind reach the host** —
-neither extended nor legacy, from either board or from ambient devices — while
-every HCI command succeeds (host initialises, address set, `advertise_ext` and
-`scan_ext` both return `Ok`, event mask enables both report kinds, and no
-per-report parse errors are being swallowed). Transmission has not been
-independently witnessed either, so the fault could be on either side.
+Bench findings from a two-board rig (bare ESP32-S3, `esp-radio 0.18` +
+`trouble-host 0.6`), 2026-08-09. **Transmission works and is externally
+witnessed**: a phone BLE scanner sees the board advertising by name
+(`APEXNET-80BF`, connectable legacy adv, Flags + Complete Local Name).
 
-Next step is an external radio witness (a phone BLE scanner, or `btmon` on a
-host that is scanning) to split "the boards are not transmitting" from "the
-boards are not receiving" before writing any more radio code against a stack
-whose behaviour is not yet understood.
+**Reception yields essentially nothing**, and the confounds are now excluded
+one at a time on the *same* board that the phone can hear:
+
+| Variable | Tested | Result |
+|---|---|---|
+| Antenna | The board the phone hears (external antenna fitted) | still no reports |
+| Scan API | `scan` (legacy) vs `scan_ext` (extended) | both silent |
+| Concurrency | scan-only build, advertising disabled | still silent |
+| Report parsing | `.flatten()` removed so per-report errors surface | no parse errors — nothing arrives at all |
+
+Meanwhile a phone in the same room sees five devices. Two lone reports were
+observed across the whole session (both the same Fast-Pair-style beacon), so
+the path is not *literally* dead — it delivers a negligible fraction of what
+is on the air. Every HCI command succeeds: the host initialises, sets its
+address, `advertise*`/`scan*` both return `Ok`, and `LeSetEventMask` enables
+both report kinds.
+
+**This blocks P4c**, because gossip needs the receive half. Leads worth
+pulling, in order: the async `Controller` impl over esp-radio's *blocking*
+`BleConnector` (is a waker registered, so the HCI RX future is polled when an
+unsolicited event — as opposed to a command response — arrives?); the
+`ExternalController<_, N>` slot count; and whether esp-radio's controller
+needs scan parameters this host does not send. A raw-HCI spike that bypasses
+`trouble-host` entirely would split "controller never emits the event" from
+"host never routes it".
+
+### Traps already paid for (carry into P4c)
+
+- **Extended advertising works** — `advertise_ext` enabled a 52 B payload, so
+  Tier 2a keeps its ~200 B MTU and the chunked-legacy fallback is unnecessary.
+  (Whether it can be *received* is the open question above.)
+- `Peripheral::advertise` is **legacy-only** — it rejects extended props
+  outright; extended needs `advertise_ext`. `update_adv_data_ext` refreshes the
+  payload without redoing params: the right shape for a periodic heartbeat.
+- **`Advertiser` and `ScanSession` stop the radio when dropped.** Both must be
+  held for the lifetime of the advertising/scan.
+- `trouble-host` needs feature **`scan`**, or the report callbacks compile out
+  silently.
+- **Legacy scanning hardcodes `filter_duplicates = ON`** (`scan_ext` disables
+  it): each device is reported *once*, so a quiet room is indistinguishable
+  from a dead radio. Do not diagnose reception on legacy-scan counts alone.
+- **A missing antenna is indistinguishable from a broken stack**, and cost
+  most of a session here. Confirm RF hardware with an external witness (a
+  phone) before suspecting software.
 
 ---
 
