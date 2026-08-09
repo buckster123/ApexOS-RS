@@ -93,6 +93,25 @@ Expect one `rx ver=1 class=Gossip sender=1001` line per second and a stats
 line with `crc_fail: 0`. A single `decode_fail` when you attach is normal —
 that's the half-frame you joined mid-transmission, and the resync working.
 
+## Tier 2a — BLE gossip
+
+A commissioned brainstem advertises a **sealed** heartbeat and listens for its
+neighbours', over raw HCI (`src/radio.rs`) — no BLE host stack, because gossip
+is connectionless and a host stack's defaults cost more than they save. Ask a
+board what it can see:
+
+```bash
+apexos-brainstem-provision --port /dev/ttyACM0 --status
+# → node_id=1001 neighbors=1 queued=0 counter_high_water=9216
+```
+
+`neighbors` counts peers heard within 30 s whose frames **opened under this
+colony's key**. Two boards on different keys, sitting next to each other and
+both transmitting, correctly report `0`.
+
+An **un-commissioned board stays off the radio entirely** — no key means
+nothing to authenticate with, and silence is the honest state.
+
 ## Design notes that are easy to get wrong
 
 - **The firmware prints nothing after boot.** `esp-println` writes to the
@@ -109,6 +128,16 @@ that's the half-frame you joined mid-transmission, and the resync working.
   *radio* payload is authenticated") is intact — no radio is involved yet.
 - **The brainstem outlives the cortex** (principle 1): read errors and a
   silent host never stop the heartbeat; `cortex_up` simply goes false.
+- **Gossip advertises non-connectable, always.** A connectable advertiser
+  stops the moment anything connects and nothing re-arms it — a phone in the
+  room silences the node permanently while it keeps receiving. If you ever see
+  "it transmitted for a while and then never again", suspect a connection
+  before you suspect the antenna.
+- **Replay windows never forget.** A peer whose counter goes backwards is
+  rejected, because that and a replay attacker are the same bytes. Counters
+  are flash-persisted so this never happens in normal operation — but after an
+  `erase-region` factory reset, the *receiver* must be restarted before it
+  will accept its re-commissioned peer.
 - **The provisioning rule is asymmetric, and the board enforces it.** No
   stored key ⇒ an unsealed `Provision` is honoured (trust on first use: whoever
   holds the UART can already reflash the board). Key present ⇒ only a

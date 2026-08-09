@@ -18,13 +18,19 @@ embedded-io-async = "0.6"
 
 esp-hal = { version = "~1.1.0", features = ["esp32s3", "unstable"] }
 
-esp-rtos = { version = "0.3.0", features = ["embassy", "esp-alloc", "esp32s3"] }
+esp-rtos = { version = "0.3.0", features = [
+  "embassy",
+  "esp-alloc",
+  "esp-radio",
+  "esp32s3",
+] }
 
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3"] }
 
 embassy-executor = { version = "0.10.0", features = [] }
 embassy-time = "0.5.0"
 embassy-sync = "0.7.0"
+embassy-futures = "0.1"
 # Xtensa has no native 64-bit atomics; portable-atomic provides them via
 # critical sections (the ctr/timestamp pair the tasks share).
 portable-atomic = { version = "1", features = ["critical-section"] }
@@ -36,6 +42,10 @@ esp-backtrace = { version = "0.19.0", features = [
   "println",
 ] }
 esp-println = { version = "0.17.0", features = ["esp32s3"] }
+
+# Tier 2a rides raw HCI over esp-radio's byte pipe — no BLE host stack. See
+# src/radio.rs for why (and docs/apexnet.md §10 for what it cost to learn).
+esp-radio = { version = "0.18.0", features = ["ble", "esp-alloc", "esp32s3", "unstable"] }
 
 critical-section = "1.2.0"
 static_cell      = "2.1.1"

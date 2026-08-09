@@ -209,31 +209,25 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    Next: **P4c BLE gossip** — blocked on a radio question, see below · P5b
    router · P6 LoRa when the Pi Hut boards land.
 
-   **P4c RADIO PROVEN (2026-08-09) — Tier 2a's physical layer works.** Two
-   bare ESP32-S3s gossip bidirectionally over raw HCI: **199 / 184 receptions**
-   in ~20 s at **-54 / -52 dBm**, decoding to advertiser address + name. Three
-   causes were peeled off to get there, all now laws in `docs/apexnet.md` §10:
-   (1) a **missing antenna** (ships with the devkit; without it every HCI
-   command still succeeds and nothing crosses the air); (2) the **duplicate
-   filter** — `trouble-host`'s legacy `scan()` hardcodes
-   `filter_duplicates=true` and `esp-radio` defaults a duplicate list that
-   never refreshes, so each device is reported once, ever (proven by a 4-way
-   A/B; scan interval is NOT the variable); (3) **connectable advertising
-   silently terminates on connection** and nothing re-arms it — which looks
-   exactly like dying TX while RX keeps working, survives power cycles, and
-   cost a wholly unnecessary antenna hunt. **Gossip advertises
-   non-connectable, always.** Separate real defect found on the way: `bt-hci`
-   0.8.1 declares scan interval/window as `Duration<10_000>` where the spec
-   says 0.625 ms units ⇒ every value 16x too small (worth an upstream report).
-   **Design consequence: Tier 2a needs no BLE host stack** — connectionless
-   advertise+scan is a handful of HCI commands and an event loop, already
-   running end to end on both boards; that is less code than working around a
-   host stack's defaults and keeps unit conversions under our own tests.
-   Remaining for P4c: put ApexNET frames in the adv payload, the neighbour
-   table, and the flash store-and-forward queue.
-   The flash **store-and-forward queue** rides with P4c (the partition and
-   `sequential-storage` are already in place; `BrainstemStatus.queued` is the
-   observable, wired and reporting 0).
+   **P4c SHIPPED (2026-08-09) — the colony gossips over the air.** Tier 2a is
+   a raw-HCI driver in `firmware/brainstem/src/radio.rs` (no BLE host stack:
+   gossip is connectionless, so it is a handful of HCI commands and an event
+   loop). Extended advertising + extended scanning, non-connectable, sealed
+   `Heartbeat` frames under the colony PSK, per-sender replay windows in a
+   fixed-capacity neighbour table. **Field-proven on two S3s**: both report
+   `neighbors=1` with no cortex attached; re-key one onto a different colony
+   and both fall to `neighbors=0` while still transmitting in range — the
+   authentication boundary demonstrated, not asserted. An un-commissioned
+   brainstem stays off the radio entirely (no key ⇒ nothing to authenticate
+   with ⇒ silence is the honest state). Three causes were peeled off getting
+   here, all now laws in `docs/apexnet.md` §10 + `docs/gotchas.md`: a missing
+   antenna, the scan duplicate filter, and connectable advertising silently
+   terminating on connection.
+   **P4d (next): the flash store-and-forward queue** — the remaining half of
+   the charter's original P4 DoD ("a queued msg survives a brainstem power
+   cycle"). The partition and `sequential-storage` are already in place from
+   P4b, `BrainstemStatus.queued` is wired and reporting 0, and P4c gives it
+   somewhere to forward to.
 2. **Cadre review** *(sibling `Cadre-RS`; gated)* — review the Grok 4.5
    12-hour build against the clean-room PRD
    (`~/Downloads/Brainstorms/Cadre-RS/cadre-prd.md`) before anything touches

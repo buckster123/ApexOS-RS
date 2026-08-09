@@ -43,6 +43,43 @@ pub fn decode_frame(wire: &[u8]) -> Result<MeshFrame, Error> {
     Ok(frame)
 }
 
+/// Hard ceiling on a datagram frame. A BLE extended advertisement carries at
+/// most 254 B of AD, and the ApexNET AD structure spends 6 of them on its
+/// header, so anything past this could never have gone out over Tier 2a.
+pub const MAX_DATAGRAM_FRAME: usize = 248;
+
+/// Encode one frame for a **datagram** link: plain `postcard`, nothing else.
+///
+/// Framing is a property of the *link*, not of the frame. A UART is a byte
+/// stream with no boundaries and no integrity, so it needs COBS delimiting
+/// and a CRC32 trailer ([`encode_frame`]). A BLE advertisement is already a
+/// bounded packet the link layer CRC-checks and discards on error — adding
+/// our own delimiter and checksum there would spend scarce advertising bytes
+/// re-solving a solved problem.
+///
+/// The frame itself is identical on both; only the wrapper differs.
+pub fn encode_datagram(frame: &MeshFrame) -> Result<Vec<u8>, Error> {
+    let body = postcard::to_allocvec(frame).map_err(|_| Error::Postcard)?;
+    if body.len() > MAX_DATAGRAM_FRAME {
+        return Err(Error::TooLarge);
+    }
+    Ok(body)
+}
+
+/// Decode one datagram frame. Exact-fit, like every other decode here: a
+/// frame cannot smuggle a rider in trailing bytes.
+pub fn decode_datagram(bytes: &[u8]) -> Result<MeshFrame, Error> {
+    if bytes.len() > MAX_DATAGRAM_FRAME {
+        return Err(Error::TooLarge);
+    }
+    let (frame, rest) =
+        postcard::take_from_bytes::<MeshFrame>(bytes).map_err(|_| Error::Postcard)?;
+    if !rest.is_empty() {
+        return Err(Error::Postcard);
+    }
+    Ok(frame)
+}
+
 /// Receive-side counters (the deframer's half of the v2 §4.3 MUST-6 set;
 /// `tx_frames` / `link_downs` live in the bridge, which owns the port).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

@@ -6,4 +6,6 @@
 //! *plumbing* (peripherals, tasks) lives there.
 
 pub mod counter;
+pub mod neighbors;
+pub mod radio;
 pub mod store;
