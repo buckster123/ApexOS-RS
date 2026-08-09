@@ -443,6 +443,7 @@ pub fn router(state: GatewayState) -> Router {
         // beacon probes THIS instead of pulling a multi-KB /api/capabilities body it
         // discards; future radio-side probes won't hold tokens at all.
         .route("/api/ping", get(ping_handler))
+        .route("/api/connectivity", get(connectivity_handler))
         .fallback(static_handler)
         .with_state(state)
 }
@@ -3867,6 +3868,27 @@ async fn ping_handler(State(state): State<GatewayState>) -> impl IntoResponse {
         .map(|f| f as u64)
         .unwrap_or(0);
     Json(serde_json::json!({ "node_id": *state.node_id, "uptime_s": uptime_s }))
+}
+
+/// GET /api/connectivity — what tier this node believes it is in, and why.
+///
+/// The honesty layer had no surface: the state gated tools and coloured the
+/// ambient line, but nothing outside the process could see it, which makes a
+/// chaos drill blind and a "why did my tool vanish" question unanswerable.
+///
+/// Ungated like `/api/ping`: it reveals strictly less than the capabilities
+/// endpoint already does, and a peer deciding how to reach us needs it before
+/// it holds a token.
+async fn connectivity_handler() -> impl IntoResponse {
+    let state = apexos_core::connectivity::current();
+    Json(serde_json::json!({
+        "state": state.as_str(),
+        // Per-lane health lands when real transports are registered with the
+        // router (docs/apexnet.md §6.1); reporting an empty list is the
+        // honest answer meanwhile, not a placeholder to be mistaken for
+        // "no lanes are up".
+        "transports": Vec::<serde_json::Value>::new(),
+    }))
 }
 
 /// Shared kill switch for the courier's proactive session-0 notices (charter

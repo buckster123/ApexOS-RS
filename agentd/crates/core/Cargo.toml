@@ -5,6 +5,9 @@ edition = "2021"
 
 [dependencies]
 apexos-protocol = { path = "../../../apexos-protocol" }
+# The ApexNET wire types the router carries (docs/apexnet.md §6.1).
+apexos-mesh-proto = { path = "../../../apexos-mesh-proto" }
+async-trait       = "0.1"
 serde      = { workspace = true }
 serde_json = { workspace = true }
 tokio      = { workspace = true }

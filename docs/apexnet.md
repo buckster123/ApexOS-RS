@@ -120,10 +120,14 @@ health, **latched with hysteresis (D7)**. Interplay with what exists:
   edge machine; radio heartbeats (push) mark peers alive on their tier.
   The false-"dark" prompt for radio-only peers becomes "reachable via LoRa
   (minimal)" — a different, honest message.
-- **`PeerLost`** is declared in the protocol but never emitted (dead since the
-  mDNS-poll design it documented was never built) — v3 either claims it for
-  "unreachable on all transports" or deletes it; implementer's call, decided
-  at Phase R, never left ambiguous.
+- **`PeerLost` — RULED (P5b): claimed, meaning "unreachable on every
+  transport".** It stays in the protocol and gains a definition it did not
+  have. Deleting it would be a wire change for no gain, and the fact it names
+  did not exist until a node had more than one lane. The ruling has teeth:
+  a peer that is merely off the LAN is **not** lost — it is reachable on a
+  slower tier, and calling that "lost" is precisely the false alarm this
+  section warns about. `PeerReachability::is_lost()` is the predicate;
+  emission belongs to whoever owns multi-transport liveness (P5c).
 - **Per-peer `status` string in `PeerRecord`** is dead (always `"online"`,
   `set_status` has zero callers) — do NOT overload it; liveness stays in the
   beacon map, transport tier in the new state.
@@ -272,7 +276,9 @@ should consume this roadmap's identity layer rather than invent its own.
 | **P4b — Identity, key, memory** ✅ | Dedicated `apexnet` flash partition; `Provision` payload + `apexos-brainstem-provision`; reserved counter high-water; `BrainstemStatus` telemetry | **Yes** | First-touch commissioning accepted, unsealed re-provision refused, sealed accepted, wrong key refused; identity + counter survive a reset |
 | **P4c — BLE gossip** ✅ | Raw-HCI Tier 2a driver (ext adv + ext scan), sealed heartbeats, neighbour table with per-sender replay windows | **Yes** | Two commissioned boards see each other as neighbours with no cortex attached; two boards on DIFFERENT colony keys, in range, see nothing |
 | **P4d — Store-and-forward** ✅ | Flash outbox on the `apexnet` partition; seal-at-drain, deliver on neighbour appearance, retire on ack | **Yes** | A message queued for an absent peer survived a restart and was delivered, acknowledged and retired when the peer returned |
-| **P5 — Router + honesty** | `MeshTransport` + policy router + ConnectivityState + tool gating + notices + lean `/api/ping` + transport-aware beacon | Sim only | Chaos drill: kill Wi-Fi mid-session → a2a continues over BLE, degraded notice shows, WAN tools absent, artifact lands in outbox; restore → drains |
+| **P5a — Honesty** ✅ | Latched `ConnectivityState`, tool gating, notices, lean `/api/ping` | No | WAN drops → tools vanish + notice; restore → recovers |
+| **P5b — Router** ✅ | `MeshTransport` trait, policy router (class→lane, fan-out, MTU refusal), seen-cache, `PeerLost` ruling, `/api/connectivity`, chaos drill script | Sim only | Router policy proven against mock transports incl. flaky/down/undersized lanes; drill script verifies the degrade+recover edge on a live node |
+| **P5c — Real lanes** | Register `WifiLan` (wrapping today's HTTP mesh paths), `BleGossip` (via the bridge), `Courier` (the outbox) with the router | Yes | Kill Wi-Fi mid-session → a2a continues over BLE, artifact lands in outbox; restore → drains |
 | **P6 — LoRa + digests** | lora-phy + duty-cycle governor (mocked-clock tested) + digest claims + chunk reconciliation + courier gossip goes real | Yes | Overnight digest exchange with Wi-Fi off; morning reconciliation converges; governor provably blocks over-budget TX |
 | **P7 — Fabrica over radio** | D9: evidence demotion on radio transports, router class rules for fanout/report, cross-tier revive | Yes | A W2 batch conducted over BLE-only completes with evidence pulled over a later Tier-1 window |
 | **P8 — Hardening** | Full crypto E2E, replay/forge/nonce suites, backpressure, metrics, 4-node chaos drill, docs | Yes | Suite green → colony may enable under yolo |
