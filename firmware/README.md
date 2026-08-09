@@ -66,6 +66,16 @@ The board persists both and confirms with its own telemetry — the tool trusts
 the board's word, not its own successful write. Re-provisioning a board that
 already holds the key needs `--sealed` (see the acceptance rule below).
 
+**Factory reset** — a board commissioned with the wrong key (a bench key, a
+retired colony) will refuse an unsealed provision forever, which is the rule
+working. Erase its store and it is virgin again:
+
+```bash
+espflash erase-region --port /dev/ttyACM0 0x310000 0x20000   # the apexnet partition
+```
+
+Confirm with the bridge: `sender=0` and a counter restarting from 1.
+
 Serial access needs group membership (`sudo usermod -aG dialout $USER`, then
 re-login). The board enumerates as `/dev/ttyACM*` (native USB-Serial-JTAG,
 `303a:1001`).
