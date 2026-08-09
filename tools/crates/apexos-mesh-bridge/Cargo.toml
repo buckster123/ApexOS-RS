@@ -30,6 +30,10 @@ tokio        = { workspace = true }
 # opens devices by path, so no extra system build dep anywhere.
 tokio-serial = "5.5.0"
 serde_json   = { workspace = true }
+# The cortex link (ApexNET P5c): the bridge dials agentd, mirroring
+# apex-sensor-bridge, so agentd never holds a serial port open.
+tokio-tungstenite = "0.26"
+futures-util      = { workspace = true }
 rand         = { workspace = true }
 # The simulator emits unsealed postcard(PlainPacket) stand-in payloads — the
 # bridge treats ct as opaque; real crypto is the P4 brainstem's job.

@@ -14,6 +14,7 @@ pub mod history_config;
 pub mod compute;
 
 pub mod mesh;
+pub mod mesh_link;
 pub use mesh::{parse_avahi_output, PeerRecord, PeerRegistry, PeerRole};
 pub mod beacon;
 pub use beacon::{new_liveness_map, spawn_beacon_loop, LivenessMap};
@@ -126,6 +127,12 @@ pub struct GatewayState {
     pub history_budget:        Arc<std::sync::atomic::AtomicUsize>,
     /// Shared secret for /sensor-bridge WS connections. Empty = no auth required.
     pub sensor_bridge_token:   Arc<String>,
+    /// Shared secret for /mesh-bridge WS connections (ApexNET P5c). Empty =
+    /// no auth required, matching the sensor-bridge convention.
+    pub mesh_bridge_token:     Arc<String>,
+    /// The radio lane's seam (docs/apexnet.md §6.1). Present whether or not a
+    /// bridge ever connects — no bridge simply reads as "lane down".
+    pub mesh_link:             mesh_link::MeshLink,
     /// Bearer token for all other API + WS routes. Empty = auth disabled.
     /// Set via AGENTD_TOKEN env var; clients pass as "Authorization: Bearer <token>"
     /// or as "?token=<token>" query param (for WebSocket upgrades).
@@ -426,6 +433,7 @@ pub fn router(state: GatewayState) -> Router {
     Router::new()
         .merge(gated)
         .route("/sensor-bridge",   get(sensor_bridge_ws_handler))
+        .route("/mesh-bridge",     get(mesh_bridge_ws_handler))
         // UNgated: the pairing claim is authenticated by the short-lived code itself,
         // not the api_token (the whole point is the caller doesn't have our token yet).
         .route("/api/mesh/pair/claim", post(pair_claim_handler))
@@ -444,6 +452,7 @@ pub fn router(state: GatewayState) -> Router {
         // discards; future radio-side probes won't hold tokens at all.
         .route("/api/ping", get(ping_handler))
         .route("/api/connectivity", get(connectivity_handler))
+        .route("/api/mesh/gossip", post(mesh_gossip_handler))
         .fallback(static_handler)
         .with_state(state)
 }
@@ -773,6 +782,106 @@ async fn sensor_bridge_ws_handler(
     }
     ws.on_upgrade(move |socket| handle_sensor_bridge(socket, state))
        .into_response()
+}
+
+/// `/mesh-bridge` — where `apexos-mesh-bridge` connects in (ApexNET P5c).
+///
+/// Same shape and same auth convention as `/sensor-bridge`: the bridge owns
+/// the serial port and dials agentd, so agentd never holds a device open and
+/// a node without radio hardware simply never sees a connection.
+async fn mesh_bridge_ws_handler(
+    ws:              WebSocketUpgrade,
+    headers:         axum::http::HeaderMap,
+    Query(params):   Query<HashMap<String, String>>,
+    State(state):    State<GatewayState>,
+) -> Response {
+    let expected = state.mesh_bridge_token.as_str();
+    if !expected.is_empty() {
+        let from_header = headers.get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .unwrap_or("");
+        let from_query = params.get("token").map(|s| s.as_str()).unwrap_or("");
+        if from_header != expected && from_query != expected {
+            return (StatusCode::UNAUTHORIZED, "invalid mesh bridge token").into_response();
+        }
+    }
+    ws.on_upgrade(move |socket| handle_mesh_bridge(socket, state)).into_response()
+}
+
+async fn handle_mesh_bridge(socket: WebSocket, state: GatewayState) {
+    use apexos_core::mesh_router::SeenCache;
+    let (mut sink, mut stream) = socket.split();
+    state.mesh_link.link_up();
+    eprintln!("[mesh-bridge] bridge connected");
+
+    // Outbound: whatever the router hands the lane goes to every connected
+    // bridge. A lagging bridge drops frames rather than stalling the router —
+    // gossip is lossy and the next heartbeat is seconds away.
+    let mut outbound = state.mesh_link.subscribe();
+    let tx_task = tokio::spawn(async move {
+        loop {
+            match outbound.recv().await {
+                Ok(bytes) => {
+                    if sink.send(Message::Binary(bytes.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    eprintln!("[mesh-bridge] dropped {n} outbound frames (bridge lagging)");
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Inbound dedup. The same heartbeat can arrive over two bridges once a
+    // node has two radios, and fan-out makes duplicates the norm rather than
+    // the exception (docs/apexnet.md §6.1).
+    let mut seen = SeenCache::new(512);
+    while let Some(Ok(msg)) = stream.next().await {
+        let Message::Binary(bytes) = msg else { continue };
+        let Ok(frame) = apexos_mesh_proto::decode_datagram(&bytes) else {
+            state.mesh_link.note_decode_fail();
+            continue;
+        };
+        if !seen.accept(frame.sender, frame.ctr) {
+            state.mesh_link.note_duplicate();
+            continue;
+        }
+        state.mesh_link.note_rx();
+        absorb_mesh_frame(&state, &frame);
+    }
+
+    tx_task.abort();
+    state.mesh_link.link_down();
+    eprintln!("[mesh-bridge] bridge disconnected");
+}
+
+/// Make sense of a frame that arrived from our own brainstem.
+///
+/// This link is **unsealed by design** (charter §5): it extends the cable
+/// between a board and its Pi, so `ct` is a plain `postcard(PlainPacket)`.
+/// Anything that arrived over the *air* was sealed and opened by the
+/// brainstem before it got here — nothing in this function may be used to
+/// justify trusting a radio payload.
+fn absorb_mesh_frame(state: &GatewayState, frame: &apexos_mesh_proto::MeshFrame) {
+    use apexos_mesh_proto::{Payload, PlainPacket};
+    let Ok((packet, _)) = postcard::take_from_bytes::<PlainPacket>(&frame.ct) else {
+        state.mesh_link.note_decode_fail();
+        return;
+    };
+    if let Payload::BrainstemStatus { node_id, queued, neighbors, ctr_hw } = packet.payload {
+        // The board is the thing with the antenna; this is the only view
+        // agentd has of the air, and it is second-hand on purpose.
+        state.mesh_link.set_brainstem(mesh_link::BrainstemView {
+            node_id,
+            neighbors,
+            queued,
+            counter_high_water: ctr_hw,
+            seen: true,
+        });
+    }
 }
 
 async fn handle_sensor_bridge(socket: WebSocket, state: GatewayState) {
@@ -3879,16 +3988,86 @@ async fn ping_handler(State(state): State<GatewayState>) -> impl IntoResponse {
 /// Ungated like `/api/ping`: it reveals strictly less than the capabilities
 /// endpoint already does, and a peer deciding how to reach us needs it before
 /// it holds a token.
-async fn connectivity_handler() -> impl IntoResponse {
-    let state = apexos_core::connectivity::current();
+async fn connectivity_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    use apexos_core::mesh_router::{MeshTransport, TransportHealth};
+    let tier = apexos_core::connectivity::current();
+    let ble = mesh_link::BleGossipTransport::new(state.mesh_link.clone());
+    let health = |h: TransportHealth| match h {
+        TransportHealth::Up => "up",
+        TransportHealth::Flaky => "flaky",
+        TransportHealth::Down => "down",
+    };
     Json(serde_json::json!({
-        "state": state.as_str(),
-        // Per-lane health lands when real transports are registered with the
-        // router (docs/apexnet.md §6.1); reporting an empty list is the
-        // honest answer meanwhile, not a placeholder to be mistaken for
-        // "no lanes are up".
-        "transports": Vec::<serde_json::Value>::new(),
+        "state": tier.as_str(),
+        "transports": [
+            {
+                "id": ble.id().as_str(),
+                "health": health(ble.health()),
+                "mtu": ble.mtu(),
+            }
+        ],
+        "mesh_link": state.mesh_link.stats(),
     }))
+}
+
+/// POST /api/mesh/gossip — hand the radio a message for another node.
+///
+/// The frame goes down the wired link **unsealed** (charter §5) and the
+/// brainstem takes it from there: a packet addressed to someone else is
+/// queued in its flash outbox, sealed with a fresh counter, and delivered
+/// when that peer is actually on the air (P4d). So this returns "handed to
+/// the radio", not "delivered" — the two are days apart when the peer is a
+/// node someone has to walk to.
+async fn mesh_gossip_handler(
+    State(state): State<GatewayState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use apexos_core::mesh_router::{MeshTransport, SendError};
+    use apexos_mesh_proto::{MeshClass, Payload, PlainPacket, DEFAULT_HOP_LIMIT, WIRE_VERSION};
+
+    let Some(target) = body.get("target").and_then(|v| v.as_u64()) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "target (node id) is required"
+        }))).into_response();
+    };
+    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+
+    let packet = PlainPacket {
+        target: target as u16,
+        hop_limit: DEFAULT_HOP_LIMIT,
+        flags: 0,
+        payload: Payload::A2A { body: text.as_bytes().to_vec() },
+    };
+    let Ok(ct) = postcard::to_allocvec(&packet) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": "encoding failed"
+        }))).into_response();
+    };
+    let frame = apexos_mesh_proto::MeshFrame {
+        ver: WIRE_VERSION,
+        class: MeshClass::Gossip,
+        sender: 0,
+        ctr: 1,
+        ct,
+    };
+
+    let ble = mesh_link::BleGossipTransport::new(state.mesh_link.clone());
+    match ble.send(&frame).await {
+        Ok(receipt) => Json(serde_json::json!({
+            "handed_to": receipt.via.as_str(),
+            "bytes": receipt.bytes,
+            "note": "queued by the brainstem; delivery happens when the peer is on the air",
+        })).into_response(),
+        // No bridge connected is not a server error — it is the honest state
+        // of a node with no radio attached, and the caller should queue or
+        // say so rather than retry.
+        Err(SendError::Unavailable) => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+            "error": "no radio lane — is apexos-mesh-bridge running?",
+        }))).into_response(),
+        Err(SendError::Failed(e)) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+            "error": e,
+        }))).into_response(),
+    }
 }
 
 /// Shared kill switch for the courier's proactive session-0 notices (charter
