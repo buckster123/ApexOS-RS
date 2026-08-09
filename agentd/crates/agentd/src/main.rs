@@ -458,6 +458,13 @@ async fn main() -> anyhow::Result<()> {
         next_session_id:      Arc::clone(&next_session_id),
         history_budget:       Arc::clone(&history_budget),
         sensor_bridge_token,
+        // ApexNET P5c: the radio lane's seam. Its own token, like the sensor
+        // bridge — a bridge that can inject mesh frames is a different trust
+        // grant from one that can inject sensor readings.
+        mesh_bridge_token: std::sync::Arc::new(
+            std::env::var("MESH_BRIDGE_TOKEN").unwrap_or_default(),
+        ),
+        mesh_link: apexos_gateway::mesh_link::MeshLink::new(),
         api_token,
         soul_path:            soul_path.clone(),
         policy_arc:           Arc::clone(&policy_arc),

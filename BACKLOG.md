@@ -225,7 +225,20 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    terminating on connection.
 Next: **P5c — register real lanes**.
 
-   **P5b SHIPPED (2026-08-09) — the policy router.** `apexos-core::mesh_router`:
+   **P5c SHIPPED (2026-08-09) — agentd meets the radio.** `/mesh-bridge` WS
+   (the bridge dials agentd, sensor-bridge pattern; own token), inbound frames
+   deduped through the seen-cache, `BrainstemStatus` absorbed so agentd can see
+   its board's view of the air, `BleGossipTransport` registered as a real lane,
+   `/api/connectivity` reporting lane health + brainstem view, and
+   `POST /api/mesh/gossip`. **Proven end to end**: HTTP → agentd → lane →
+   bridge → UART → brainstem outbox → sealed radio → peer (`tx_frames=1`,
+   `neighbors=1`); with no bridge the send is an honest **503**, not a 500.
+   Residual → **P5d**: register `WifiLan` (today's HTTP mesh paths) and
+   `Courier` (the outbox) with the router, and route a2a by class rather than
+   per-tool; plus a systemd unit + install.sh wiring for the bridge (it is
+   still run by hand).
+
+      **P5b SHIPPED (2026-08-09) — the policy router.** `apexos-core::mesh_router`:
    the `MeshTransport` trait, `TransportId` cost ranking, and a router that
    fans `Critical` out on every healthy lane (the seen-cache is what makes
    that safe), gives `Gossip`/`Digest` the cheapest *solid* lane over a
