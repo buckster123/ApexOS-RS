@@ -5,14 +5,14 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{header, StatusCode},
     middleware::Next,
-    response::IntoResponse,
+    response::{IntoResponse, sse::{Event, KeepAlive, Sse}},
     routing::{delete, get, post},
     Json, Router,
 };
 use cerebro::{
     models::AssociativeLink,
     storage::ListFilter,
-    types::{AgentId, LinkType, MemoryId, MemoryType, VisibilityScope},
+    types::{AgentId, LinkType, MemoryId, MemoryType, Visibility, VisibilityScope},
     CerebroCortex,
 };
 use chrono::Utc;
@@ -78,6 +78,31 @@ fn scope_from(agent_id: Option<&str>) -> VisibilityScope {
     }
 }
 
+fn parse_visibility_opt(v: Option<&str>) -> Result<Option<Visibility>> {
+    match v {
+        None => Ok(None),
+        Some(s) => match s.to_lowercase().as_str() {
+            "private" => Ok(Some(Visibility::Private)),
+            "shared"  => Ok(Some(Visibility::Shared)),
+            "thread"  => Ok(Some(Visibility::Thread)),
+            other => Err(anyhow::anyhow!("unknown visibility '{other}' (private|shared|thread)")),
+        },
+    }
+}
+
+/// Best-effort audit write for API-surface mutations (Lucida U1b).
+async fn audit(brain: &Brain, agent: Option<&str>, action: &str, memory_id: Option<&str>, details: Option<&str>) {
+    if let Err(e) = brain.storage.read().await.sqlite
+        .log_audit_event(agent, action, memory_id, details).await
+    {
+        tracing::warn!("api audit write failed for {action}: {e}");
+    }
+}
+
+/// Which skull are you inside? Set once in main() from the resolved config.
+static DB_LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+
 /// CB-012: canonicalize a session priority to uppercase, matching the MCP
 /// `normalize_priority` (dispatch.rs) so a `priority:<p>` tag written here is
 /// findable by an MCP `session_recall` priority filter (which compares against
@@ -111,7 +136,6 @@ struct RememberReq {
     tags:        Option<Vec<String>>,
     salience:    Option<f64>,
     agent_id:    Option<String>,
-    #[allow(dead_code)]
     visibility:  Option<String>,
 }
 
@@ -132,9 +156,10 @@ struct AssociateReq {
 
 #[derive(Deserialize)]
 struct UpdateMemoryReq {
-    content:  Option<String>,
-    tags:     Option<Vec<String>>,
-    salience: Option<f64>,
+    content:    Option<String>,
+    tags:       Option<Vec<String>>,
+    salience:   Option<f64>,
+    visibility: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -284,9 +309,11 @@ async fn remember(
     let mt: Option<MemoryType> = req.memory_type
         .and_then(|s| serde_json::from_value(Value::String(s)).ok());
     let scope = scope_from(req.agent_id.as_deref());
-    let node  = brain.remember(
-        req.content, mt, req.tags, req.salience.map(|f| f as f32), scope,
+    let vis   = parse_visibility_opt(req.visibility.as_deref())?;
+    let node  = brain.remember_with_visibility(
+        req.content, mt, req.tags, req.salience.map(|f| f as f32), scope, vis,
     ).await?;
+    audit(&brain, req.agent_id.as_deref(), "remember", Some(&node.id.0), None).await;
     Ok(Json(serde_json::to_value(&node)?))
 }
 
@@ -372,13 +399,23 @@ async fn update_memory(
     if let Some(c) = req.content  { node.content  = c; }
     if let Some(t) = req.tags     { node.tags      = t; }
     if let Some(s) = req.salience { node.salience  = s as f32; }
-    storage.sqlite.update_memory(&node).await?;
+    if let Some(vis) = parse_visibility_opt(req.visibility.as_deref())? {
+        if vis == Visibility::Private && node.agent_id.is_none() {
+            return Err(anyhow::anyhow!(
+                "refusing to privatize an owner-less memory (it would be visible to no one)"
+            ).into());
+        }
+        node.visibility = vis;
+    }
+    storage.sqlite.update_memory_noted(&node, q.agent_id.as_deref(), None).await?;
     // CB-006: mirror the MCP update path — re-embed when content changed so the
     // vector index does not point at the pre-edit text (sqlite.update_memory only
     // refreshes the content column + FTS5 trigger, never the embedding/vec0 row).
     if content_changed {
         storage.vector.embed_and_store(&node.id, &node.content).await?;
     }
+    drop(storage);
+    audit(&brain, q.agent_id.as_deref(), "update_memory", Some(&id), None).await;
     Ok(Json(serde_json::to_value(&node)?))
 }
 
@@ -387,8 +424,12 @@ async fn delete_memory(
     Path(id): Path<String>,
     State(brain): State<Brain>,
 ) -> AppResult {
-    let ok = brain.storage.read().await.sqlite
+    // R-08: coordinator wrapper (write guard) so the graph evicts the node too.
+    let ok = brain.storage.write().await
         .delete_memory(&MemoryId(id.clone()), &VisibilityScope::global()).await?;
+    if ok {
+        audit(&brain, None, "delete_memory", Some(&id), None).await;
+    }
     Ok(Json(json!({ "deleted": ok })))
 }
 
@@ -420,6 +461,8 @@ async fn associate(
         traversal_count: 0,
     };
     brain.associate(src, tgt, link).await?;
+    audit(&brain, None, "associate", Some(&req.source_id),
+        Some(&format!("→ {}", req.target_id))).await;
     Ok(Json(json!({ "status": "ok" })))
 }
 
@@ -842,8 +885,11 @@ async fn restore_trash(
     Path(memory_id): Path<String>,
     State(brain): State<Brain>,
 ) -> AppResult {
-    let ok = brain.storage.read().await.sqlite
-        .restore_memory(&MemoryId(memory_id), &VisibilityScope::global()).await?;
+    let ok = brain.storage.write().await
+        .restore_memory(&MemoryId(memory_id.clone()), &VisibilityScope::global()).await?;
+    if ok {
+        audit(&brain, None, "restore_memory", Some(&memory_id), None).await;
+    }
     Ok(Json(json!({ "restored": ok })))
 }
 
@@ -851,8 +897,11 @@ async fn purge_trash(
     Path(memory_id): Path<String>,
     State(brain): State<Brain>,
 ) -> AppResult {
-    let ok = brain.storage.read().await.sqlite
-        .purge_memory(&MemoryId(memory_id), &VisibilityScope::global()).await?;
+    let ok = brain.storage.write().await
+        .purge_memory(&MemoryId(memory_id.clone()), &VisibilityScope::global()).await?;
+    if ok {
+        audit(&brain, None, "purge_memory", Some(&memory_id), None).await;
+    }
     Ok(Json(json!({ "purged": ok })))
 }
 
@@ -860,6 +909,10 @@ async fn purge_all_trash(
     State(brain): State<Brain>,
 ) -> AppResult {
     let count = brain.storage.read().await.sqlite.purge_all_deleted(&VisibilityScope::global()).await?;
+    if count > 0 {
+        audit(&brain, None, "purge_all_deleted", None,
+            Some(&format!("{count} purged"))).await;
+    }
     Ok(Json(json!({ "purged": count })))
 }
 
@@ -868,7 +921,11 @@ async fn bulk_delete(
     Json(req): Json<BulkDeleteReq>,
 ) -> AppResult {
     let ids: Vec<MemoryId> = req.ids.into_iter().map(MemoryId).collect();
-    let count = brain.storage.read().await.sqlite.bulk_delete(&ids, &VisibilityScope::global()).await?.len();
+    let count = brain.storage.write().await
+        .bulk_delete(&ids, &VisibilityScope::global()).await?;
+    if count > 0 {
+        audit(&brain, None, "bulk_delete", None, Some(&format!("{count} deleted"))).await;
+    }
     Ok(Json(json!({ "deleted": count })))
 }
 
@@ -937,6 +994,280 @@ async fn dream_status(
 // Main
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// Lucida observatory — graph export, layout, SSE audit, embedded UI
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct GraphExportQuery {
+    agent_id: Option<String>,
+    cap:      Option<usize>,
+    /// RFC3339 instant to project decay to (Lucida U6 time-lapse).
+    at:       Option<String>,
+}
+
+fn resolve_projection(
+    at: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> anyhow::Result<(chrono::DateTime<Utc>, bool)> {
+    match at {
+        None => Ok((now, false)),
+        Some(s) => {
+            let t = chrono::DateTime::parse_from_rfc3339(s)
+                .map_err(|e| anyhow::anyhow!("bad ?at= (want RFC3339): {e}"))?
+                .with_timezone(&Utc);
+            Ok((t.max(now), true))
+        }
+    }
+}
+
+/// Every visual channel the field needs, one round-trip.
+async fn graph_export(
+    Query(q): Query<GraphExportQuery>,
+    State(brain): State<Brain>,
+) -> AppResult {
+    use std::collections::HashSet;
+    let scope = scope_from(q.agent_id.as_deref());
+    let cap   = q.cap.unwrap_or(4000).clamp(1, 20_000);
+    let now   = Utc::now();
+    let (t, projected) = resolve_projection(q.at.as_deref(), now)?;
+
+    let storage = brain.storage.read().await;
+    let mut nodes = storage.sqlite.list_memories_scoped(
+        &scope,
+        &ListFilter { limit: cap + 1, ..Default::default() },
+    ).await?;
+    let truncated = nodes.len() > cap;
+    nodes.truncate(cap);
+    let embedded_ids = storage.sqlite.list_embedded_ids().await?;
+
+    let node_wire: Vec<Value> = nodes.iter().map(|n| {
+        let activation = cerebro::activation::base_level_activation(
+            &n.access_times, t, cerebro::config::ACTR_DECAY_RATE,
+        );
+        let glow = cerebro::activation::recall_probability(
+            activation, cerebro::config::ACTR_RETRIEVAL_THRESHOLD, cerebro::config::ACTR_NOISE,
+        );
+        let elapsed_days = (t - n.strength.last_review.unwrap_or(n.created_at))
+            .num_seconds().max(0) as f32 / 86_400.0;
+        let retr = cerebro::activation::retrievability(elapsed_days, n.strength.stability);
+        json!({
+            "id":            n.id.0,
+            "memory_type":   n.memory_type,
+            "layer":         n.layer,
+            "salience":      round3(n.salience),
+            "tags":          n.tags,
+            "agent_id":      n.agent_id.as_ref().map(|a| a.0.clone()),
+            "visibility":    n.visibility,
+            "content_head":  head_chars(&n.content, 200),
+            "content_chars": n.content.chars().count(),
+            "created_at":    n.created_at.to_rfc3339(),
+            "access_count":  n.access_count,
+            "activation":    round3(glow),
+            "retrievability": round3(retr),
+            "valence":       n.emotional_valence,
+            "intensity":     round3(n.emotional_intensity),
+            "embedded":      embedded_ids.contains(&n.id.0),
+            "reviewed":      n.strength.last_review.is_some(),
+        })
+    }).collect();
+
+    let ids: HashSet<&str> = nodes.iter().map(|n| n.id.0.as_str()).collect();
+    let links = storage.sqlite.list_all_links().await?;
+    let edge_wire: Vec<Value> = links.iter()
+        .filter(|l| ids.contains(l.source_id.0.as_str()) && ids.contains(l.target_id.0.as_str()))
+        .map(|l| json!({
+            "source":           l.source_id.0,
+            "target":           l.target_id.0,
+            "link_type":        l.link_type,
+            "weight":           round3(l.weight),
+            "effective_weight": round3(l.effective_weight(t, cerebro::config::LINK_DECAY_HALFLIFE_DAYS)),
+            "traversal_count":  l.traversal_count,
+            "last_traversed":   l.last_traversed.map(|ts| ts.to_rfc3339()),
+        }))
+        .collect();
+
+    Ok(Json(json!({
+        "nodes":        node_wire,
+        "edges":        edge_wire,
+        "truncated":    truncated,
+        "generated_at": now.to_rfc3339(),
+        "projected_at": projected.then(|| t.to_rfc3339()),
+    })))
+}
+
+/// Top-2 PCA of the (mean-centered) embedding matrix via power iteration.
+fn pca_2d(embeddings: &[(MemoryId, Vec<f32>)]) -> Vec<(MemoryId, f32, f32)> {
+    let n = embeddings.len();
+    if n == 0 { return vec![]; }
+    let dim = embeddings[0].1.len();
+    if n == 1 || dim == 0 {
+        return embeddings.iter().map(|(id, _)| (id.clone(), 0.0, 0.0)).collect();
+    }
+
+    let mut mean = vec![0.0f32; dim];
+    for (_, e) in embeddings {
+        for (m, v) in mean.iter_mut().zip(e) { *m += v; }
+    }
+    for m in &mut mean { *m /= n as f32; }
+    let centered: Vec<Vec<f32>> = embeddings.iter()
+        .map(|(_, e)| e.iter().zip(&mean).map(|(v, m)| v - m).collect())
+        .collect();
+
+    let principal = |rows: &[Vec<f32>]| -> Vec<f32> {
+        let mut v: Vec<f32> = (0..dim).map(|i| 1.0 + (i as f32) * 1e-3).collect();
+        for _ in 0..60 {
+            let mut w = vec![0.0f32; dim];
+            for r in rows {
+                let dot: f32 = r.iter().zip(&v).map(|(a, b)| a * b).sum();
+                for (wi, ri) in w.iter_mut().zip(r) { *wi += dot * ri; }
+            }
+            let norm = w.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm < 1e-12 { break; }
+            for x in &mut w { *x /= norm; }
+            v = w;
+        }
+        v
+    };
+
+    let pc1 = principal(&centered);
+    let deflated: Vec<Vec<f32>> = centered.iter().map(|r| {
+        let dot: f32 = r.iter().zip(&pc1).map(|(a, b)| a * b).sum();
+        r.iter().zip(&pc1).map(|(a, p)| a - dot * p).collect()
+    }).collect();
+    let pc2 = principal(&deflated);
+
+    let mut coords: Vec<(MemoryId, f32, f32)> = embeddings.iter().zip(&centered)
+        .map(|((id, _), r)| {
+            let x: f32 = r.iter().zip(&pc1).map(|(a, b)| a * b).sum();
+            let y: f32 = r.iter().zip(&pc2).map(|(a, b)| a * b).sum();
+            (id.clone(), x, y)
+        })
+        .collect();
+
+    let max_x = coords.iter().map(|c| c.1.abs()).fold(1e-9f32, f32::max);
+    let max_y = coords.iter().map(|c| c.2.abs()).fold(1e-9f32, f32::max);
+    for c in &mut coords {
+        c.1 /= max_x;
+        c.2 /= max_y;
+    }
+    coords
+}
+
+async fn layout_inner(brain: Brain, force: bool) -> AppResult {
+    let storage = brain.storage.read().await;
+    let (mut rows, mut stamp) = storage.sqlite.get_layout().await?;
+    let embedded = storage.sqlite.count_embedded().await?;
+    let stale = force || (embedded > 0 && rows.len() * 5 < embedded * 4);
+    if stale {
+        let embeddings = storage.sqlite.list_embeddings().await?;
+        rows = pca_2d(&embeddings);
+        storage.sqlite.replace_layout(&rows).await?;
+        stamp = Some(Utc::now().to_rfc3339());
+    }
+    let coords: serde_json::Map<String, Value> = rows.into_iter()
+        .map(|(id, x, y)| (id.0, json!([round3(x), round3(y)])))
+        .collect();
+    Ok(Json(json!({
+        "coords":      coords,
+        "count":       coords.len(),
+        "embedded":    embedded,
+        "computed_at": stamp,
+    })))
+}
+
+async fn graph_layout(State(brain): State<Brain>) -> AppResult {
+    layout_inner(brain, false).await
+}
+
+async fn graph_layout_recompute(State(brain): State<Brain>) -> AppResult {
+    layout_inner(brain, true).await
+}
+
+async fn meta() -> AppResult {
+    Ok(Json(json!({
+        "db_path": DB_LABEL.get().map(String::as_str).unwrap_or("unknown"),
+        "version": env!("CARGO_PKG_VERSION"),
+    })))
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    since:   Option<i64>,
+    poll_ms: Option<u64>,
+}
+
+async fn audit_since(
+    Path(id): Path<i64>,
+    State(brain): State<Brain>,
+) -> AppResult {
+    let rows = brain.storage.read().await.sqlite.list_audit_since(id, 200).await?;
+    Ok(Json(json!({ "rows": rows })))
+}
+
+/// GET /events — Live lens SSE tail of the audit log.
+async fn events(
+    Query(q): Query<EventsQuery>,
+    State(brain): State<Brain>,
+) -> impl IntoResponse {
+    let poll = std::time::Duration::from_millis(q.poll_ms.unwrap_or(1000).clamp(250, 5000));
+
+    let stream = async_stream::stream! {
+        let mut cursor: i64 = match q.since {
+            Some(s) => s,
+            None => brain.storage.read().await.sqlite.max_audit_id().await.unwrap_or(0),
+        };
+        let mut tick = tokio::time::interval(poll);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let batch = brain.storage.read().await.sqlite
+                .list_audit_since(cursor, 200).await;
+            match batch {
+                Ok(rows) if !rows.is_empty() => {
+                    if let Some(last) = rows.last().and_then(|r| r["id"].as_i64()) {
+                        cursor = last;
+                    }
+                    let data = serde_json::to_string(&rows)
+                        .unwrap_or_else(|_| "[]".to_string());
+                    yield Ok::<_, std::convert::Infallible>(
+                        Event::default().event("audit").data(data));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("/events poll failed: {e}");
+                }
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// The observatory itself — three embedded files, one binary.
+async fn ui_index() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+     include_str!("../../../ui-web/index.html"))
+}
+async fn ui_css() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+     include_str!("../../../ui-web/style.css"))
+}
+async fn ui_js() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+     include_str!("../../../ui-web/app.js"))
+}
+
+async fn dream_reports(
+    Query(q): Query<LimitQuery>,
+    State(brain): State<Brain>,
+) -> AppResult {
+    let limit = q.limit.clamp(1, 200);
+    let rows = brain.storage.read().await.sqlite.list_dream_reports(limit).await?;
+    Ok(Json(json!({ "reports": rows })))
+}
+
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -945,9 +1276,20 @@ async fn main() -> Result<()> {
         .init();
 
     let config = cerebro::config::Config::from_env()?;
+    let _ = DB_LABEL.set(config.db_path.display().to_string());
     let brain: Brain = Arc::new(CerebroCortex::new(config).await?);
 
     let app = Router::new()
+        // Lucida observatory (embedded ui-web + field data)
+        .route("/",                get(ui_index))
+        .route("/style.css",       get(ui_css))
+        .route("/app.js",          get(ui_js))
+        .route("/graph/export",    get(graph_export))
+        .route("/graph/layout",    get(graph_layout).post(graph_layout_recompute))
+        .route("/events",          get(events))
+        .route("/audit/since/{id}", get(audit_since))
+        .route("/meta",            get(meta))
+        .route("/dream/reports",   get(dream_reports))
         // Core
         .route("/health",          get(health))
         .route("/stats",           get(stats))
@@ -1052,7 +1394,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("cerebro-api listening on {addr}");
     if !api_token.is_empty() {
-        info!("cerebro-api dashboard: http://{addr}/?token=<AGENTD_TOKEN>  (bearer token required)");
+        info!("Lucida observatory: http://{addr}/?token=<AGENTD_TOKEN>  (bearer token required)");
     }
     axum::serve(listener, app).await?;
     Ok(())

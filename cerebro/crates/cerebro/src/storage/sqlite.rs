@@ -634,6 +634,98 @@ impl SqliteStore {
         Ok(out)
     }
 
+    // -- graph_layout: the cached 2D semantic projection (Lucida U1) ---------
+
+    /// Every live memory's stored text embedding, decoded — the projection
+    /// input. (f32 LE blobs; empty when the embedder is disabled.)
+    pub async fn list_embeddings(&self) -> Result<Vec<(MemoryId, Vec<f32>)>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, embedding FROM memories \
+             WHERE embedding IS NOT NULL AND deleted_at IS NULL",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((MemoryId(r.get::<_, String>(0)?), r.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, blob) = row?;
+            out.push((id, crate::storage::vector::blob_to_vec(&blob)));
+        }
+        Ok(out)
+    }
+
+    /// Count of live embedded memories — the layout-staleness denominator.
+    pub async fn count_embedded(&self) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memories \
+             WHERE embedding IS NOT NULL AND deleted_at IS NULL",
+            [], |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// Ids of embedded live memories — the graph export's per-node `embedded`
+    /// flag (Lucida U6: a rim star that is merely awaiting a layout recompute
+    /// must not be labeled "no embedding").
+    pub async fn list_embedded_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id FROM memories WHERE embedding IS NOT NULL AND deleted_at IS NULL",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = std::collections::HashSet::new();
+        for r in rows {
+            out.insert(r?);
+        }
+        Ok(out)
+    }
+
+    /// Replace the whole cached layout in one transaction (a projection is
+    /// global — axes shift together, so partial updates would lie).
+    pub async fn replace_layout(&self, coords: &[(MemoryId, f32, f32)]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM graph_layout", [])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO graph_layout (memory_id, x, y, computed_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (id, x, y) in coords {
+                stmt.execute(params![id.0, *x as f64, *y as f64, now])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The cached layout, plus its computed_at stamp (None when empty).
+    pub async fn get_layout(&self) -> Result<(Vec<(MemoryId, f32, f32)>, Option<String>)> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT memory_id, x, y, computed_at FROM graph_layout",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                MemoryId(r.get::<_, String>(0)?),
+                r.get::<_, f64>(1)? as f32,
+                r.get::<_, f64>(2)? as f32,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        let mut stamp: Option<String> = None;
+        for row in rows {
+            let (id, x, y, at) = row?;
+            stamp = Some(at);
+            out.push((id, x, y));
+        }
+        Ok((out, stamp))
+    }
+
     /// Candidates sharing at least one of `tags` (JSON-quoted match — Python's
     /// unquoted LIKE also matched substrings, "rust" hitting "trust"; quoted is
     /// strictly tighter). Scope-filtered so private memories of other agents
@@ -2266,6 +2358,45 @@ impl SqliteStore {
         Ok(serde_json::json!({ "total_events": total, "by_action": by_action }))
     }
 
+    /// Newest audit rowid, or 0 on an empty log — the Live lens's starting
+    /// cursor (Lucida U3: stream only what happens AFTER connect).
+    pub async fn max_audit_id(&self) -> Result<i64> {
+        let conn = self.conn.lock().await;
+        let id: Option<i64> =
+            conn.query_row("SELECT MAX(id) FROM audit_log", [], |r| r.get(0))?;
+        Ok(id.unwrap_or(0))
+    }
+
+    /// Audit rows strictly after `after_id`, oldest first, capped — the SSE
+    /// tail's poll step. Rowid-cursor (not timestamp) so a burst of writes in
+    /// the same second can never be skipped or replayed.
+    pub async fn list_audit_since(
+        &self,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, agent_id, action, memory_id, details \
+             FROM audit_log WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after_id, limit as i64], |r| {
+            Ok(serde_json::json!({
+                "id":        r.get::<_, i64>(0)?,
+                "timestamp": r.get::<_, String>(1)?,
+                "agent_id":  r.get::<_, Option<String>>(2)?,
+                "action":    r.get::<_, String>(3)?,
+                "memory_id": r.get::<_, Option<String>>(4)?,
+                "details":   r.get::<_, Option<String>>(5)?,
+            }))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     // -----------------------------------------------------------------------
     // Retention (CB-021) — bound the three otherwise-forever tables
     // -----------------------------------------------------------------------
@@ -2520,6 +2651,41 @@ impl SqliteStore {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Dream reports, newest first — the Dream observatory's timeline
+    /// (Lucida U4). Same wire shape per row as `get_last_dream_report`.
+    pub async fn list_dream_reports(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, agent_id, started_at, ended_at, phases, metadata \
+             FROM dream_reports ORDER BY started_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, agent_id, started_at, ended_at, phases_json, metadata_json) = row?;
+            out.push(serde_json::json!({
+                "id":         id,
+                "agent_id":   agent_id,
+                "started_at": started_at,
+                "ended_at":   ended_at,
+                "phases":     serde_json::from_str::<serde_json::Value>(&phases_json)
+                                  .unwrap_or(serde_json::Value::Array(vec![])),
+                "metadata":   serde_json::from_str::<serde_json::Value>(&metadata_json)
+                                  .unwrap_or(serde_json::Value::Null),
+            }));
+        }
+        Ok(out)
+    }
 }
 
 const SCHEMA_SQL: &str = r#"
@@ -2649,6 +2815,18 @@ CREATE TABLE IF NOT EXISTS vision_embeddings (
     image_path  TEXT,
     created_at  TEXT NOT NULL,
     FOREIGN KEY (memory_id) REFERENCES memories(id)
+);
+
+-- Cached 2D semantic projection of memory embeddings (Lucida U1). Written by
+-- cerebro-api's /graph/layout (PCA over memories.embedding); the field's star
+-- positions. ON DELETE CASCADE: layout rows are pure derivation, so a purge
+-- must never trip over them (the R-06 lesson, applied at birth).
+CREATE TABLE IF NOT EXISTS graph_layout (
+    memory_id   TEXT PRIMARY KEY,
+    x           REAL NOT NULL,
+    y           REAL NOT NULL,
+    computed_at TEXT NOT NULL,
+    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
 );
 
 -- FTS5 virtual table for keyword search (FTS5 fallback when vector search unavailable)
