@@ -3578,6 +3578,21 @@ fn web_host(base: &str) -> String {
     host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port).to_string()
 }
 
+/// Percent-encode a query-component value (RFC 3986 unreserved pass-through).
+/// Keeps Lucida `?token=` intact through `xdg-open` / browser URL parsing.
+fn percent_encode_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 fn ws_to_http(ws_url: &str) -> String {
     // Strip any query string first (e.g. "?token=…" appended for WS auth),
     // otherwise the trailing "/ws" is no longer at the end and survives,
@@ -7295,17 +7310,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Web launcher (Tier D): point the dashboard tiles at the real agentd host
     // (not localhost), so the URL is usable from any device on the LAN. Full-URL
-    // env overrides win. Cerebro URL is the Lucida observatory (:8765); append
-    // ?token= so EventSource/SSE can auth (browser can't set Authorization on
-    // a typed URL — same contract as cerebro-api's query-token auth).
+    // env overrides win. Cerebro URL is the Lucida observatory (:8765). Append
+    // ?token= (percent-encoded) so the first paint can park it in sessionStorage
+    // for API/SSE Bearer auth — the shell HTML/CSS/JS themselves are public.
     {
         let host = web_host(&http_base);
         let mut cerebro = std::env::var("CEREBRO_WEB_URL").ok().filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("http://{host}:8765"));
         if let Ok(t) = std::env::var("AGENTD_TOKEN") {
             if !t.is_empty() && !cerebro.contains("token=") {
+                let enc = percent_encode_component(&t);
                 let sep = if cerebro.contains('?') { '&' } else { '?' };
-                cerebro = format!("{cerebro}{sep}token={t}");
+                cerebro = format!("{cerebro}{sep}token={enc}");
             }
         }
         let sensorhead = std::env::var("SENSORHEAD_URL").ok().filter(|s| !s.is_empty())
@@ -9983,7 +9999,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_open_url(move |url| {
         let u = url.to_string();
         if u.is_empty() { return; }
-        notify(ToastKind::Info, format!("Opening {u}…"));
+        // Never toast the raw token (Lucida URLs carry ?token=).
+        let shown = redact_ws_url(&u);
+        notify(ToastKind::Info, format!("Opening {shown}…"));
         let prog = std::env::var("BROWSER").ok().filter(|s| !s.is_empty())
             .unwrap_or_else(|| "xdg-open".into());
         // Run + reap on the blocking pool so we neither block the UI nor leave a zombie.
@@ -9991,7 +10009,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match std::process::Command::new(&prog).arg(&u).spawn() {
                 Ok(mut child) => { let _ = child.wait(); }
                 Err(_) => notify(ToastKind::Warn,
-                    format!("No browser here — open {u} on another device")),
+                    format!("No browser here — open {shown} on another device")),
             }
         });
     });
