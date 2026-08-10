@@ -14,7 +14,7 @@ xAI’s API is **OpenAI Chat Completions–compatible**. ApexOS reuses `OaiProvi
 | Default URL | `https://api.x.ai/v1` (auto-pinned on backend switch) |
 | Default model | `grok-4.5` |
 | Transport | `POST {base}/chat/completions` + SSE |
-| Auth | `Authorization: Bearer …` via the shared OAI key arc |
+| Auth | `Authorization: Bearer …` from the **xai** slot of `OaiKeyRing` |
 
 There is **no** separate `xai.rs` client in v1. A future Responses-API client stays open if we need
 reasoning-summary streaming into the thinking rail; Chat Completions already covers agent tool loops.
@@ -24,20 +24,33 @@ reasoning-summary streaming into the thinking rail; Chat Completions already cov
 ```bash
 # /etc/agentd/env (or Settings → INFERENCE BACKEND → xai)
 AGENTD_BACKEND=xai
-XAI_API_KEY=xai-...          # or OAI_API_KEY=
+XAI_API_KEY=xai-...          # xAI slot only — does NOT fight OPENROUTER_API_KEY
+# OPENROUTER_API_KEY=...     # can stay set forever; unused while backend=xai
 # AGENTD_MODEL=grok-4.5      # default
 # AGENTD_XAI_REASONING_EFFORT=low   # default for grok-4.5*
 ```
 
-Settings: chip **xai** → paste key in the OAI key field → pick a model from the live `/api/models` list.
+Settings: chip **xai** → paste key in the key field (saves the **xai** ring slot) → pick a model from the live `/api/models` list.
 
-**Pre-named workaround** (still works): `AGENTD_BACKEND=oai` + `AGENTD_OAI_BASE_URL=https://api.x.ai/v1`.
+**Pre-named workaround** (still works): `AGENTD_BACKEND=oai` + `AGENTD_OAI_BASE_URL=https://api.x.ai/v1` + put the key in the **oai** slot.
+
+## Key ring (coexistence)
+
+`OaiKeyRing` holds three independent Bearer slots:
+
+| Slot | Backend | Env | File |
+|------|---------|-----|------|
+| `oai` | `oai` / `vllm` / custom | `OAI_API_KEY` | `.oai_api_key` |
+| `openrouter` | `openrouter` | `OPENROUTER_API_KEY` | `.openrouter_api_key` |
+| `xai` | `xai` | `XAI_API_KEY` | `.xai_api_key` |
+
+Selection is **by live backend at request time** — no first-wins env chain. Switching backends never swaps keys; each slot keeps its value.
 
 ## Keys vs Imaginarium
 
 | Consumer | Where the key lives | Env |
 |----------|---------------------|-----|
-| **agentd LLM** (`backend=xai`) | `/etc/agentd/env` or Settings → `.oai_api_key` | `OAI_API_KEY` / `OPENROUTER_API_KEY` / **`XAI_API_KEY`** (first non-empty) |
+| **agentd LLM** (`backend=xai`) | `/etc/agentd/env` or Settings → `.xai_api_key` | **`XAI_API_KEY`** (agentd LLM slot) |
 | **Imaginarium gen** | `/etc/imaginarium/env` only | `XAI_API_KEY` |
 
 - Two independent consumers, two files. Same key *value* may be duplicated; never auto-copied.
@@ -72,7 +85,7 @@ Unknown values omit the field (API default). Non-Grok models never receive the f
 | Route arm | `agentd/crates/agent/src/routing.rs`, `council.rs` |
 | Wire client | `agentd/crates/agent/src/oai.rs` |
 | Live switch + URL pin + family model reset | `gateway` `POST /api/backend` |
-| Key load aliases | `agentd` `load_oai_api_key` |
+| Key ring | `apexos_agent::OaiKeyRing`; boot `load_oai_key_ring`; `POST /api/keys` per slot |
 | Settings chips | `ui-slint/.../settings_view.slint` |
 
 ## Adding another named OAI cloud backend
@@ -80,6 +93,6 @@ Unknown values omit the field (API default). Non-Grok models never receive the f
 1. Add to `KNOWN_BACKENDS`, `default_model_for`, `default_url_for`
 2. OAI match arms in `routing.rs` + `council.rs`
 3. Auto-pin in `set_backend_handler` (`openrouter | xai | …`)
-4. Optional env key alias in `load_oai_api_key`
-5. Settings chip + fixed-endpoint UX
+4. Add a slot on `OaiKeyRing` + env/file load (do **not** first-wins collapse)
+5. Settings chip + fixed-endpoint UX; save key to that slot
 6. `docs/env-vars.md` + this recipe

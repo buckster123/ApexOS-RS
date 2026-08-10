@@ -416,7 +416,13 @@ export component SettingsView {
                             }
                             if key-input.text == "": Text {
                                 x: 10px;
-                                text: root.oai-key-set ? "API key (set ✓ — paste to replace)" : "API key (sk-or-…)";
+                                text: root.oai-key-set
+                                    ? (root.backend == "xai" ? "xAI key (set ✓ — paste to replace)"
+                                        : root.backend == "openrouter" ? "OpenRouter key (set ✓ — paste to replace)"
+                                        : "OAI key (set ✓ — paste to replace)")
+                                    : (root.backend == "xai" ? "xAI API key (console.x.ai)"
+                                        : root.backend == "openrouter" ? "OpenRouter API key (sk-or-…)"
+                                        : "OAI API key");
                                 color: Palette.text-dim;
                                 font-size: 11px;
                                 vertical-alignment: center;

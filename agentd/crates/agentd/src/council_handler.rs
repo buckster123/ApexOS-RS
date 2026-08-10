@@ -20,7 +20,7 @@ pub fn spawn_council_handler(
     bcast:           broadcast::Sender<Event>,
     bus:             BusHandle,
     anthropic_key:   Arc<RwLock<String>>,
-    oai_api_key:     Arc<RwLock<String>>,
+    oai_keys:        Arc<RwLock<apexos_agent::OaiKeyRing>>,
     oai_base_url:    Arc<RwLock<String>>,
     backend_arc:     Arc<RwLock<String>>,
     model_arc:       Arc<RwLock<String>>,
@@ -89,7 +89,7 @@ pub fn spawn_council_handler(
 
             // Clone arcs for the spawned task
             let ant_key   = Arc::clone(&anthropic_key);
-            let oai_key   = Arc::clone(&oai_api_key);
+            let oai_keys  = Arc::clone(&oai_keys);
             let oai_url   = Arc::clone(&oai_base_url);
             let bus_c     = bus.clone();
             let bcast_c   = bcast.clone();
@@ -157,7 +157,7 @@ pub fn spawn_council_handler(
                     max_rounds,
                     consensus_threshold,
                     ant_key,
-                    oai_key,
+                    oai_keys,
                     oai_url,
                     default_backend,
                     default_model,

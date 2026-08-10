@@ -914,6 +914,7 @@ fn is_secret_path(canon: &Path) -> bool {
         || s == "/etc/shadow" || s == "/etc/gshadow"
         || s.contains("/.ssh/") || s.ends_with("/.ssh")
         || s.ends_with(".api_key") || s.ends_with(".oai_api_key")
+        || s.ends_with(".openrouter_api_key") || s.ends_with(".xai_api_key")
         || (s.starts_with("/proc/") && s.ends_with("/environ")) // /proc/<pid>/environ
 }
 

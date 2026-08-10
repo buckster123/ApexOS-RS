@@ -8,3 +8,6 @@
 
 # Local Cargo overrides (e.g. enterprise paths → private EE)
 .cargo/config.toml
+
+# local embedding model cache (never commit)
+.fastembed_cache/

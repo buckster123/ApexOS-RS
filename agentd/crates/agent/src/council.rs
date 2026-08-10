@@ -7,7 +7,7 @@ use apexos_core::{
 };
 use crate::provider::{Chunk, Provider};
 use crate::anthropic::AnthropicProvider;
-use crate::oai::OaiProvider;
+use crate::oai::{OaiKeyRing, OaiProvider};
 
 // ── Native agent personas (council-mode: concise deliberation persona) ────────
 
@@ -91,17 +91,21 @@ fn resolve_agents(
 // ── Ephemeral per-agent provider ──────────────────────────────────────────────
 
 fn make_provider(
-    agent:        &CouncilAgent,
+    agent:         &CouncilAgent,
     anthropic_key: &str,
-    oai_api_key:  &str,
-    oai_base_url: &str,
+    oai_keys:      &OaiKeyRing,
+    oai_base_url:  &str,
 ) -> Box<dyn Provider> {
     let model = Arc::new(RwLock::new(agent.model.clone()));
     match agent.backend.as_str() {
         "ollama" | "vllm" | "openrouter" | "oai" | "xai" => {
             let base_url = Arc::new(RwLock::new(oai_base_url.to_owned()));
-            let key      = Arc::new(RwLock::new(oai_api_key.to_owned()));
-            Box::new(OaiProvider::new(base_url, key, model))
+            // Ephemeral ring with only this agent's slot filled — no cross-slot bleed.
+            let mut ring = OaiKeyRing::default();
+            ring.set_for_backend(&agent.backend, oai_keys.for_backend(&agent.backend).to_owned());
+            let keys = Arc::new(RwLock::new(ring));
+            let backend = Arc::new(RwLock::new(agent.backend.clone()));
+            Box::new(OaiProvider::new(base_url, keys, backend, model))
         }
         _ => {
             let key = Arc::new(RwLock::new(anthropic_key.to_owned()));
@@ -274,7 +278,7 @@ pub async fn run_council(
     max_rounds:          u32,
     consensus_threshold: f32,
     anthropic_key:       Arc<RwLock<String>>,
-    oai_api_key:         Arc<RwLock<String>>,
+    oai_keys:            Arc<RwLock<OaiKeyRing>>,
     oai_base_url:        Arc<RwLock<String>>,
     default_backend:     String,
     default_model:       String,
@@ -286,7 +290,7 @@ pub async fn run_council(
 
     // Read shared key arcs once (they don't change mid-council)
     let ant_key     = anthropic_key.read().await.clone();
-    let oai_key     = oai_api_key.read().await.clone();
+    let oai_keys    = oai_keys.read().await.clone();
     let oai_url     = oai_base_url.read().await.clone();
 
     // Emit CouncilStarted
@@ -327,7 +331,7 @@ pub async fn run_council(
         // Spawn parallel tasks — one per agent
         let mut handles = Vec::new();
         for agent in agents.iter() {
-            let provider = make_provider(agent, &ant_key, &oai_key, &oai_url);
+            let provider = make_provider(agent, &ant_key, &oai_keys, &oai_url);
             let hist = vec![Message::User {
                 content: vec![ContentBlock::Text { text: round_user_text.clone() }],
             }];
@@ -374,7 +378,7 @@ pub async fn run_council(
     // Synthesize using the first agent's provider
     let synthesis = if !history.is_empty() {
         let first = &agents[0];
-        let provider = make_provider(first, &ant_key, &oai_key, &oai_url);
+        let provider = make_provider(first, &ant_key, &oai_keys, &oai_url);
         synthesize(&topic, &history, provider.as_ref()).await
     } else {
         "Council produced no responses.".to_owned()

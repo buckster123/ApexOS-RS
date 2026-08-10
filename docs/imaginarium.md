@@ -40,9 +40,10 @@ token — never the gen key. That audit acceptance test holds **structurally** f
 image/video.
 
 **Separate consumer:** if the node LLM backend is `xai` (Grok chat via
-`OaiProvider`), agentd may hold its *own* `XAI_API_KEY` / `OAI_API_KEY` for
-completions — same trust model as Anthropic. Two files, two consumers; do not
-auto-copy from imaginarium → agentd. See `docs/xai-provider.md`.
+`OaiProvider`), agentd may hold its *own* `XAI_API_KEY` in the LLM key-ring
+slot (independent of OpenRouter / generic OAI keys) — same trust model as
+Anthropic. Two files, two consumers; do not auto-copy from imaginarium → agentd.
+See `docs/xai-provider.md`.
 
 ## Provisioning
 

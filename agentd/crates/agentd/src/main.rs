@@ -81,21 +81,43 @@ fn load_api_key() -> String {
     String::new()
 }
 
-fn load_oai_api_key() -> String {
-    // Prefer OAI_API_KEY; OPENROUTER_API_KEY / XAI_API_KEY are aliases for the
-    // named cloud OAI backends (openrouter / xai). First non-empty wins.
-    for var in ["OAI_API_KEY", "OPENROUTER_API_KEY", "XAI_API_KEY"] {
-        if let Ok(k) = std::env::var(var) {
-            if !k.is_empty() { return k; }
+/// Load one OAI-compat key slot: env first, then its dedicated secret file.
+fn load_key_slot(env_var: &str, default_file: &str, file_env: &str) -> String {
+    if let Ok(k) = std::env::var(env_var) {
+        let k = k.trim().to_string();
+        if !k.is_empty() {
+            return k;
         }
     }
-    let path = std::env::var("AGENTD_OAI_KEY_FILE")
-        .unwrap_or_else(|_| "/var/lib/agentd/.oai_api_key".into());
+    let path = std::env::var(file_env).unwrap_or_else(|_| default_file.into());
     if let Ok(k) = std::fs::read_to_string(&path) {
         let k = k.trim().to_string();
-        if !k.is_empty() { return k; }
+        if !k.is_empty() {
+            return k;
+        }
     }
     String::new()
+}
+
+/// Independent slots — openrouter / xai / generic oai coexist (no first-wins chain).
+fn load_oai_key_ring() -> apexos_agent::OaiKeyRing {
+    apexos_agent::OaiKeyRing {
+        oai: load_key_slot(
+            "OAI_API_KEY",
+            "/var/lib/agentd/.oai_api_key",
+            "AGENTD_OAI_KEY_FILE",
+        ),
+        openrouter: load_key_slot(
+            "OPENROUTER_API_KEY",
+            "/var/lib/agentd/.openrouter_api_key",
+            "AGENTD_OPENROUTER_KEY_FILE",
+        ),
+        xai: load_key_slot(
+            "XAI_API_KEY",
+            "/var/lib/agentd/.xai_api_key",
+            "AGENTD_XAI_KEY_FILE",
+        ),
+    }
 }
 
 #[tokio::main]
@@ -109,8 +131,19 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("[agentd] ANTHROPIC_API_KEY not set — enter via browser UI at :8787");
     }
     let api_key_arc = Arc::new(RwLock::new(api_key_str));
-    let oai_api_key_str = load_oai_api_key();
-    let oai_api_key_arc = Arc::new(RwLock::new(oai_api_key_str));
+    let oai_keys = load_oai_key_ring();
+    {
+        let mut parts = Vec::new();
+        if oai_keys.slot_set("oai") { parts.push("oai"); }
+        if oai_keys.slot_set("openrouter") { parts.push("openrouter"); }
+        if oai_keys.slot_set("xai") { parts.push("xai"); }
+        if parts.is_empty() {
+            eprintln!("[agentd] no OAI-compat keys (OAI/OPENROUTER/XAI) — set via Settings or env");
+        } else {
+            eprintln!("[agentd] OAI key slots set: {}", parts.join(", "));
+        }
+    }
+    let oai_keys_arc = Arc::new(RwLock::new(oai_keys));
     // Backend/model/URL resolve through the persisted operator choice first (Settings
     // → POST /api/backend|model → backend_config.json, file-wins-on-restart like
     // voice/sensor config), then env, then backend-aware defaults. One resolution,
@@ -392,7 +425,7 @@ async fn main() -> anyhow::Result<()> {
         let b = backend_arc.clone();
         let u = oai_base_url_arc.clone();
         let k = api_key_arc.clone();
-        let ok = oai_api_key_arc.clone();
+        let ok = oai_keys_arc.clone();
         let c = cache_arc.clone();
         Arc::new(move |model: String| RoutingProvider::new(
             b.clone(), u.clone(), k.clone(), ok.clone(),
@@ -445,7 +478,7 @@ async fn main() -> anyhow::Result<()> {
         bus:                  handle.clone(),
         bcast:                bcast.clone(),
         api_key:              Arc::clone(&api_key_arc),
-        oai_api_key:          Arc::clone(&oai_api_key_arc),
+        oai_keys:             Arc::clone(&oai_keys_arc),
         model:                Arc::clone(&model_arc),
         cache:                Arc::clone(&cache_arc),
         backend:              Arc::clone(&backend_arc),
@@ -595,7 +628,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&backend_arc),
             Arc::clone(&oai_base_url_arc),
             Arc::clone(&api_key_arc),
-            Arc::clone(&oai_api_key_arc),
+            Arc::clone(&oai_keys_arc),
             Arc::clone(&model_arc),
             Arc::clone(&cache_arc),
         ),
@@ -762,7 +795,7 @@ async fn main() -> anyhow::Result<()> {
         bcast.clone(),
         handle.clone(),
         Arc::clone(&api_key_arc),
-        Arc::clone(&oai_api_key_arc),
+        Arc::clone(&oai_keys_arc),
         Arc::clone(&oai_base_url_arc),
         Arc::clone(&backend_arc),
         Arc::clone(&model_arc),
@@ -787,7 +820,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&backend_arc),
         Arc::clone(&oai_base_url_arc),
         Arc::clone(&api_key_arc),
-        Arc::clone(&oai_api_key_arc),
+        Arc::clone(&oai_keys_arc),
         Arc::clone(&model_arc),
         Arc::clone(&cache_arc),
     ));
