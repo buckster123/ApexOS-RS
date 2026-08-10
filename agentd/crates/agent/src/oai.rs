@@ -7,25 +7,94 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Per-cloud-backend Bearer keys for OpenAI-compatible endpoints.
+///
+/// OpenRouter, xAI, and a generic custom OAI slot **coexist** — no first-wins
+/// env chain. Selection is by live backend name at request time.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OaiKeyRing {
+    /// Generic / custom OAI + vLLM (and unused for local ollama).
+    pub oai: String,
+    pub openrouter: String,
+    pub xai: String,
+}
+
+impl OaiKeyRing {
+    /// Which ring slot a backend name uses.
+    pub fn slot_for_backend(backend: &str) -> &'static str {
+        match backend {
+            "openrouter" => "openrouter",
+            "xai" => "xai",
+            _ => "oai", // ollama | vllm | oai | anything else OAI-shaped
+        }
+    }
+
+    /// Bearer for this backend. Empty string = no Authorization header (ollama).
+    pub fn for_backend(&self, backend: &str) -> &str {
+        match Self::slot_for_backend(backend) {
+            "openrouter" => self.openrouter.as_str(),
+            "xai" => self.xai.as_str(),
+            _ => self.oai.as_str(),
+        }
+    }
+
+    /// Write one slot (names: `oai` | `openrouter` | `xai`). Unknown → `oai`.
+    pub fn set_slot(&mut self, slot: &str, key: String) {
+        match slot {
+            "openrouter" => self.openrouter = key,
+            "xai" => self.xai = key,
+            _ => self.oai = key,
+        }
+    }
+
+    pub fn set_for_backend(&mut self, backend: &str, key: String) {
+        self.set_slot(Self::slot_for_backend(backend), key);
+    }
+
+    pub fn slot_set(&self, slot: &str) -> bool {
+        !match slot {
+            "openrouter" => self.openrouter.is_empty(),
+            "xai" => self.xai.is_empty(),
+            _ => self.oai.is_empty(),
+        }
+    }
+
+    pub fn backend_key_set(&self, backend: &str) -> bool {
+        !self.for_backend(backend).is_empty()
+    }
+}
+
 /// OpenAI-compatible provider — covers Ollama, vllm, OpenRouter, xAI/Grok, and any
 /// OAI-compatible REST endpoint.  Set AGENTD_BACKEND + AGENTD_OAI_BASE_URL.
+///
+/// Keys are a live [`OaiKeyRing`]: the Bearer is chosen from the **current**
+/// `backend` arc each request (openrouter / xai / oai slots never overwrite each other).
 pub struct OaiProvider {
     http:     reqwest::Client,
     base_url: Arc<RwLock<String>>, // live-swappable e.g. "http://localhost:11434/v1"
-    api_key:  Arc<RwLock<String>>, // empty for Ollama/vllm; Bearer token for OpenRouter
+    keys:     Arc<RwLock<OaiKeyRing>>,
+    backend:  Arc<RwLock<String>>, // selects which ring slot supplies the Bearer
     model:    Arc<RwLock<String>>,
 }
 
 impl OaiProvider {
     pub fn new(
         base_url: Arc<RwLock<String>>,
-        api_key: Arc<RwLock<String>>,
+        keys: Arc<RwLock<OaiKeyRing>>,
+        backend: Arc<RwLock<String>>,
         model: Arc<RwLock<String>>,
     ) -> Self {
-        Self { http: build_http_client(), base_url, api_key, model }
+        Self {
+            http: build_http_client(),
+            base_url,
+            keys,
+            backend,
+            model,
+        }
     }
 
     pub fn base_url_arc(&self) -> Arc<RwLock<String>> { Arc::clone(&self.base_url) }
+    pub fn keys_arc(&self) -> Arc<RwLock<OaiKeyRing>> { Arc::clone(&self.keys) }
 }
 
 #[async_trait]
@@ -36,7 +105,11 @@ impl Provider for OaiProvider {
         tools: &[ToolSpec],
         system: Option<&str>,
     ) -> anyhow::Result<ChunkStream> {
-        let api_key  = self.api_key.read().await.clone();
+        let backend  = self.backend.read().await.clone();
+        let api_key  = {
+            let ring = self.keys.read().await;
+            ring.for_backend(&backend).to_owned()
+        };
         let model    = self.model.read().await.clone();
         let base_url = self.base_url.read().await.clone();
         let body = build_body(&model, history, tools, system);
@@ -484,5 +557,28 @@ mod tests {
         // Non-Grok models must never receive the field.
         assert_eq!(xai_reasoning_effort_for("qwen3:27b", None), None);
         assert_eq!(xai_reasoning_effort_for("grok-4.3", None), None);
+    }
+
+    #[test]
+    fn key_ring_slots_do_not_shadow_each_other() {
+        let mut ring = OaiKeyRing {
+            oai: "oai-key".into(),
+            openrouter: "or-key".into(),
+            xai: "xai-key".into(),
+        };
+        assert_eq!(ring.for_backend("openrouter"), "or-key");
+        assert_eq!(ring.for_backend("xai"), "xai-key");
+        assert_eq!(ring.for_backend("oai"), "oai-key");
+        assert_eq!(ring.for_backend("vllm"), "oai-key");
+        assert_eq!(ring.for_backend("ollama"), "oai-key");
+        // Empty xai does NOT fall through to openrouter/oai — coexistence, not first-wins.
+        ring.xai.clear();
+        assert_eq!(ring.for_backend("xai"), "");
+        assert_eq!(ring.for_backend("openrouter"), "or-key");
+        assert!(ring.backend_key_set("openrouter"));
+        assert!(!ring.backend_key_set("xai"));
+        assert_eq!(OaiKeyRing::slot_for_backend("xai"), "xai");
+        assert_eq!(OaiKeyRing::slot_for_backend("openrouter"), "openrouter");
+        assert_eq!(OaiKeyRing::slot_for_backend("ollama"), "oai");
     }
 }

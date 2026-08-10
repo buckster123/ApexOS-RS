@@ -11,7 +11,7 @@ pub use cache::{CacheConfig, CacheTtl};
 pub use usage::UsageStats;
 pub use provider::{Chunk, ChunkStream, Provider};
 pub use anthropic::AnthropicProvider;
-pub use oai::OaiProvider;
+pub use oai::{OaiKeyRing, OaiProvider};
 pub use routing::RoutingProvider;
 pub use turn::{TurnEngine, run_turn};
 pub use council::run_council;

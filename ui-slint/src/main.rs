@@ -10204,6 +10204,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // ── save-oai-key callback ─────────────────────────────────────────────────
+    // Writes the active backend's key-ring slot (oai | openrouter | xai) so cloud
+    // keys coexist — no more overwriting OpenRouter when pasting an xAI key.
     let rt_h_key    = rt.handle().clone();
     let client_key  = Arc::clone(&http_client);
     let base_key    = http_base.clone();
@@ -10213,15 +10215,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = Arc::clone(&client_key);
         let base   = base_key.clone();
         let ui_w   = ui_weak_key.clone();
+        // Read the live Settings backend so we hit the right ring slot.
+        let backend = ui_w.upgrade()
+            .map(|ui| ui.get_settings_backend().to_string())
+            .unwrap_or_else(|| "oai".into());
+        let slot = match backend.as_str() {
+            "openrouter" => "openrouter",
+            "xai" => "xai",
+            _ => "oai", // ollama/vllm/custom
+        };
         rt_h_key.spawn(async move {
+            let body = serde_json::json!({ slot: k });
             let ok = client.post(format!("{base}/api/keys"))
-                .json(&serde_json::json!({"oai": k}))
+                .json(&body)
                 .timeout(std::time::Duration::from_secs(8))
                 .send().await
                 .map(|r| r.status().is_success())
                 .unwrap_or(false);
-            if ok { notify(ToastKind::Success, "API key saved"); }
-            else  { notify(ToastKind::Error, "Failed to save key"); }
+            if ok {
+                notify(ToastKind::Success, format!("{slot} API key saved"));
+            } else {
+                notify(ToastKind::Error, "Failed to save key");
+            }
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = ui_w.upgrade() {
                     if ok { ui.set_settings_oai_key_set(true); }
@@ -10736,6 +10751,42 @@ fn dispatch_event(
                     // Streaming text → APEX is speaking.
                     ui.set_face_state("speaking".into());
                     update_last_agent_message(&delta);
+                    bump_scroll(&ui);
+                }
+            })
+            .ok();
+        }
+
+        // Provider / turn failures (bad key, 4xx, etc.) — must not be silent.
+        // agentd emits Error then TurnComplete; without this arm the chat just goes idle.
+        Event::Error { message, .. } => {
+            let msg = if message.is_empty() {
+                "turn failed (no detail)".to_string()
+            } else {
+                message
+            };
+            let toast_msg = if msg.len() > 160 {
+                format!("{}…", &msg[..160])
+            } else {
+                msg.clone()
+            };
+            notify(ToastKind::Error, toast_msg);
+            let w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    push_message(MessageItem {
+                        role: "agent".into(),
+                        text: format!("⚠ {msg}").into(),
+                        streaming: false,
+                        call_id: "".into(),
+                        tool_name: "".into(),
+                        tool_args: "".into(),
+                        tool_output: "".into(),
+                        tool_status: "".into(),
+                        awaiting_approval: false,
+                    });
+                    ui.set_agent_busy(false);
+                    ui.set_face_state("idle".into());
                     bump_scroll(&ui);
                 }
             })

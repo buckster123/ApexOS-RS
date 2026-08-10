@@ -106,7 +106,8 @@ pub struct GatewayState {
     /// Anthropic API key — set via env or browser UI key-entry flow
     pub api_key:               Arc<RwLock<String>>,
     /// OAI-compatible key (OpenRouter / Together / etc.) — separate from Anthropic key
-    pub oai_api_key:           Arc<RwLock<String>>,
+    /// OpenAI-compat key ring (oai / openrouter / xai slots — coexist, no first-wins).
+    pub oai_keys:              Arc<RwLock<apexos_agent::OaiKeyRing>>,
     pub model:                 Arc<RwLock<String>>,
     /// Prompt-cache policy (Anthropic) — live-tunable from the Settings UI via /api/cache.
     pub cache:                 Arc<RwLock<apexos_agent::CacheConfig>>,
@@ -967,16 +968,29 @@ async fn static_handler(
 // ── API routes ────────────────────────────────────────────────────────────────
 
 async fn status_handler(State(state): State<GatewayState>) -> impl IntoResponse {
-    let key_set     = !state.api_key.read().await.is_empty();
-    let oai_key_set = !state.oai_api_key.read().await.is_empty();
-    let model       = state.model.read().await.clone();
+    let key_set = !state.api_key.read().await.is_empty();
+    let backend = state.backend.read().await.clone();
+    let oai_key_set = state.oai_keys.read().await.backend_key_set(&backend);
+    let model = state.model.read().await.clone();
     let policy_mode = state.policy_mode.read().await.clone();
     Json(serde_json::json!({
         "api_key_set":     key_set,
-        "oai_key_set":     oai_key_set,
+        "oai_key_set":     oai_key_set, // active backend's OAI-compat slot
         "model":           model,
         "policy_mode":     policy_mode,
     }))
+}
+
+/// Secret-file path for one OAI key-ring slot.
+fn oai_slot_key_path(slot: &str) -> String {
+    match slot {
+        "openrouter" => std::env::var("AGENTD_OPENROUTER_KEY_FILE")
+            .unwrap_or_else(|_| "/var/lib/agentd/.openrouter_api_key".into()),
+        "xai" => std::env::var("AGENTD_XAI_KEY_FILE")
+            .unwrap_or_else(|_| "/var/lib/agentd/.xai_api_key".into()),
+        _ => std::env::var("AGENTD_OAI_KEY_FILE")
+            .unwrap_or_else(|_| "/var/lib/agentd/.oai_api_key".into()),
+    }
 }
 
 async fn set_policy_handler(
@@ -1058,9 +1072,17 @@ fn write_secret_file(path: &str, contents: &str) -> std::io::Result<()> {
 }
 
 async fn get_keys_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let ring = state.oai_keys.read().await;
+    let backend = state.backend.read().await.clone();
     Json(serde_json::json!({
         "anthropic_set": !state.api_key.read().await.is_empty(),
-        "oai_set":       !state.oai_api_key.read().await.is_empty(),
+        // Back-compat: "oai_set" = active backend's OAI-compat slot is non-empty.
+        "oai_set":       ring.backend_key_set(&backend),
+        "keys_set": {
+            "oai":        ring.slot_set("oai"),
+            "openrouter": ring.slot_set("openrouter"),
+            "xai":        ring.slot_set("xai"),
+        },
     }))
 }
 
@@ -1083,15 +1105,18 @@ async fn set_keys_handler(
             }
         }
     }
-    if let Some(key) = body["oai"].as_str() {
-        let key = key.trim().to_string();
-        if !key.is_empty() {
-            *state.oai_api_key.write().await = key.clone();
-            let path = std::env::var("AGENTD_OAI_KEY_FILE")
-                .unwrap_or_else(|_| "/var/lib/agentd/.oai_api_key".into());
+    // Per-slot cloud keys — openrouter / xai / oai never overwrite each other.
+    for slot in ["oai", "openrouter", "xai"] {
+        if let Some(key) = body[slot].as_str() {
+            let key = key.trim().to_string();
+            if key.is_empty() {
+                continue;
+            }
+            state.oai_keys.write().await.set_slot(slot, key.clone());
+            let path = oai_slot_key_path(slot);
             if let Err(e) = write_secret_file(&path, &key) {
-                eprintln!("[gateway] persist oai key to {path} failed: {e}");
-                errors.push(format!("oai: {e}"));
+                eprintln!("[gateway] persist {slot} key to {path} failed: {e}");
+                errors.push(format!("{slot}: {e}"));
             }
         }
     }
@@ -1198,7 +1223,10 @@ async fn get_models_handler(State(state): State<GatewayState>) -> impl IntoRespo
 
     // OAI-compatible backend: query {base_url}/models for live model list
     let models_url = format!("{}/models", oai_base.trim_end_matches('/'));
-    let api_key = state.oai_api_key.read().await.clone();
+    let api_key = {
+        let ring = state.oai_keys.read().await;
+        ring.for_backend(&backend).to_owned()
+    };
 
     let mut req = client.get(&models_url);
     if !api_key.is_empty() {
@@ -1263,13 +1291,22 @@ async fn thermal_frame_handler() -> impl IntoResponse {
 }
 
 async fn get_backend_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    let backend = state.backend.read().await.clone();
+    let ring = state.oai_keys.read().await;
     Json(serde_json::json!({
-        "backend":      state.backend.read().await.clone(),
+        "backend":      backend.clone(),
         "oai_base_url": state.oai_base_url.read().await.clone(),
         "model":        state.model.read().await.clone(),
         "backends":     backend_config::KNOWN_BACKENDS,
         "anthropic_key_set": !state.api_key.read().await.is_empty(),
-        "oai_key_set":       !state.oai_api_key.read().await.is_empty(),
+        // Active backend's OAI-compat slot (Settings "key set" indicator).
+        "oai_key_set":       ring.backend_key_set(&backend),
+        "keys_set": {
+            "oai":        ring.slot_set("oai"),
+            "openrouter": ring.slot_set("openrouter"),
+            "xai":        ring.slot_set("xai"),
+        },
+        "key_slot": apexos_agent::OaiKeyRing::slot_for_backend(&backend),
     }))
 }
 
