@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// OpenAI-compatible provider — covers Ollama, vllm, OpenRouter, and any
+/// OpenAI-compatible provider — covers Ollama, vllm, OpenRouter, xAI/Grok, and any
 /// OAI-compatible REST endpoint.  Set AGENTD_BACKEND + AGENTD_OAI_BASE_URL.
 pub struct OaiProvider {
     http:     reqwest::Client,
@@ -231,7 +231,38 @@ fn build_body(model: &str, history: &[Message], tools: &[ToolSpec], system: Opti
         body["tool_choice"] = Value::String("auto".into());
     }
 
+    // Grok 4.5 reasoning defaults to "high" server-side and cannot be disabled.
+    // For agent tool-loops that is too slow/expensive; prefer low unless the
+    // operator opts up via AGENTD_XAI_REASONING_EFFORT. Only attach on grok-4.5*
+    // so pure Ollama / OpenRouter bodies stay clean.
+    if let Some(effort) = xai_reasoning_effort_for(
+        model,
+        std::env::var("AGENTD_XAI_REASONING_EFFORT").ok().as_deref(),
+    ) {
+        body["reasoning_effort"] = Value::String(effort.into());
+    }
+
     body
+}
+
+/// Resolve xAI reasoning effort for a model id, if any should be sent.
+/// Returns `None` for non-Grok-4.5 models (do not pollute other OAI backends).
+/// `env_effort` is the raw `AGENTD_XAI_REASONING_EFFORT` value (if set); when
+/// absent, defaults to `"low"`. Pure — unit-tested without mutating process env.
+fn xai_reasoning_effort_for(model: &str, env_effort: Option<&str>) -> Option<&'static str> {
+    let m = model.trim().to_ascii_lowercase();
+    // Alias forms: grok-4.5, grok-4.5-latest, dated pins that start with grok-4.5
+    if !m.starts_with("grok-4.5") {
+        return None;
+    }
+    let effort = env_effort.unwrap_or("low").trim().to_ascii_lowercase();
+    match effort.as_str() {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        // Unknown value → omit and let the API default (high) rather than fail the request.
+        _ => None,
+    }
 }
 
 // ── SSE stream parser ─────────────────────────────────────────────────────────
@@ -441,5 +472,17 @@ mod tests {
         assert_eq!(parts[0]["text"], "what is this?");
         assert_eq!(parts[1]["type"], "image_url");
         assert_eq!(parts[1]["image_url"]["url"], "data:image/jpeg;base64,QUJD");
+    }
+
+    #[test]
+    fn xai_reasoning_effort_defaults_low_for_grok_45() {
+        assert_eq!(xai_reasoning_effort_for("grok-4.5", None), Some("low"));
+        assert_eq!(xai_reasoning_effort_for("grok-4.5-latest", None), Some("low"));
+        assert_eq!(xai_reasoning_effort_for("grok-4.5", Some("high")), Some("high"));
+        assert_eq!(xai_reasoning_effort_for("grok-4.5", Some("medium")), Some("medium"));
+        assert_eq!(xai_reasoning_effort_for("grok-4.5", Some("nope")), None);
+        // Non-Grok models must never receive the field.
+        assert_eq!(xai_reasoning_effort_for("qwen3:27b", None), None);
+        assert_eq!(xai_reasoning_effort_for("grok-4.3", None), None);
     }
 }

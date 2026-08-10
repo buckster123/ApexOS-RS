@@ -10144,7 +10144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── set-backend callback ──────────────────────────────────────────────────
     // Chip tap → POST /api/backend (live next turn, persisted server-side). The
-    // server pins openrouter's canonical URL itself; a full settings refetch then
+    // server pins openrouter/xai canonical URLs itself; a full settings refetch then
     // pulls the new backend's model catalog into the picker.
     let rt_h_be    = rt.handle().clone();
     let client_be  = Arc::clone(&http_client);

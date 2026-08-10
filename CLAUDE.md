@@ -232,6 +232,7 @@ Load only the relevant doc when entering a subsystem.
 | `docs/usb-workspace.md` | USB exo-workspace — marker-gated mount, eject, prep |
 | `docs/occipital.md` | Web cortex integration — registration, deploy, policy |
 | `docs/imaginarium.md` | Image/video-gen node — provisioning, MCP proxy, key isolation |
+| `docs/xai-provider.md` | xAI/Grok as LLM backend — OAI path, keys vs imaginarium, reasoning_effort |
 | `docs/sonus.md` | Music-gen sibling — provisioning, no-daemon key isolation, python cutover |
 | `docs/fabrica.md` | **Fabrica charter** — workboard→Fabrica, worker tier, Mandala Mode, code regime (LOCKED) |
 | `docs/fabrica-skill.md` | Conducting craft — batches, mandalas, the doctrine; the living-skill seed (M1a) |

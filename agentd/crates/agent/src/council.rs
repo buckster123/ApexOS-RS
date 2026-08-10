@@ -98,7 +98,7 @@ fn make_provider(
 ) -> Box<dyn Provider> {
     let model = Arc::new(RwLock::new(agent.model.clone()));
     match agent.backend.as_str() {
-        "ollama" | "vllm" | "openrouter" | "oai" => {
+        "ollama" | "vllm" | "openrouter" | "oai" | "xai" => {
             let base_url = Arc::new(RwLock::new(oai_base_url.to_owned()));
             let key      = Arc::new(RwLock::new(oai_api_key.to_owned()));
             Box::new(OaiProvider::new(base_url, key, model))

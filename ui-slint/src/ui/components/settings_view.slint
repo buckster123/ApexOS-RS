@@ -23,7 +23,7 @@ export component SettingsView {
     in property <string>         current-model: "";
     in property <bool>           api-key-set: false;
     in property <[ModelItem]>    models;
-    // Inference backend (anthropic / openrouter / ollama / custom OAI endpoint),
+    // Inference backend (anthropic / openrouter / xai / ollama / custom OAI endpoint),
     // live-swapped + persisted via /api/backend; endpoints from /api/compute/discover.
     in property <string>         backend: "anthropic";
     in property <string>         oai-base-url: "";
@@ -304,10 +304,10 @@ export component SettingsView {
                     }
 
                     HorizontalLayout {
-                        spacing: 6px;
+                        spacing: 5px;
                         alignment: start;
-                        for opt in ["anthropic", "openrouter", "ollama", "custom"]: Rectangle {
-                            width: 92px;
+                        for opt in ["anthropic", "openrouter", "xai", "ollama", "custom"]: Rectangle {
+                            width: 78px;
                             height: 32px;
                             border-radius: Palette.radius;
                             background: (root.backend == opt || (opt == "custom" && (root.backend == "oai" || root.backend == "vllm")))
@@ -331,14 +331,19 @@ export component SettingsView {
                         }
                     }
 
-                    // Endpoint URL — editable for local/custom backends; openrouter
-                    // is canonical (server pins it), anthropic doesn't use one.
+                    // Endpoint URL — editable for local/custom backends; openrouter/xai
+                    // are canonical (server pins them), anthropic doesn't use one.
                     if root.backend == "openrouter": Text {
                         text: "endpoint: openrouter.ai/api/v1 · key " + (root.oai-key-set ? "set ✓" : "NOT SET — enter below");
                         color: root.oai-key-set ? Palette.text-dim : Palette.warning;
                         font-size: 10px;
                     }
-                    if root.backend != "anthropic" && root.backend != "openrouter": HorizontalLayout {
+                    if root.backend == "xai": Text {
+                        text: "endpoint: api.x.ai/v1 · key " + (root.oai-key-set ? "set ✓" : "NOT SET — enter below");
+                        color: root.oai-key-set ? Palette.text-dim : Palette.warning;
+                        font-size: 10px;
+                    }
+                    if root.backend != "anthropic" && root.backend != "openrouter" && root.backend != "xai": HorizontalLayout {
                         spacing: 6px;
                         Rectangle {
                             height: 32px;
@@ -502,7 +507,7 @@ export component SettingsView {
 
                     // Filter — an OAI catalog (OpenRouter: hundreds) needs narrowing;
                     // Rust filters the cached full list and repopulates `models`.
-                    if root.models.length >= 13 || root.backend == "openrouter": Rectangle {
+                    if root.models.length >= 13 || root.backend == "openrouter" || root.backend == "xai": Rectangle {
                         height: 32px;
                         border-radius: Palette.radius;
                         background: Palette.surface;

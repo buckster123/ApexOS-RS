@@ -82,8 +82,9 @@ fn load_api_key() -> String {
 }
 
 fn load_oai_api_key() -> String {
-    // Prefer OAI_API_KEY; OPENROUTER_API_KEY is an alias for convenience
-    for var in ["OAI_API_KEY", "OPENROUTER_API_KEY"] {
+    // Prefer OAI_API_KEY; OPENROUTER_API_KEY / XAI_API_KEY are aliases for the
+    // named cloud OAI backends (openrouter / xai). First non-empty wins.
+    for var in ["OAI_API_KEY", "OPENROUTER_API_KEY", "XAI_API_KEY"] {
         if let Ok(k) = std::env::var(var) {
             if !k.is_empty() { return k; }
         }

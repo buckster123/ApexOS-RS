@@ -58,7 +58,7 @@ export component AppWindow inherits Window {
     // this device's auto-login default; set/cleared via the Settings LOGIN section.
     in-out property <string>         settings-login-user-name: "";
     in-out property <bool>           settings-login-is-default: false;
-    // Inference backend selection (anthropic/openrouter/ollama/oai), live-swapped +
+    // Inference backend selection (anthropic/openrouter/xai/ollama/oai), live-swapped +
     // persisted via /api/backend; discovered LAN endpoints via /api/compute/discover.
     in-out property <string>         settings-backend: "anthropic";
     in-out property <string>         settings-oai-url: "";

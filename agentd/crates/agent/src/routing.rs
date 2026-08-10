@@ -57,7 +57,7 @@ impl Provider for RoutingProvider {
     ) -> anyhow::Result<ChunkStream> {
         let backend = self.backend.read().await.clone();
         match backend.as_str() {
-            "ollama" | "vllm" | "openrouter" | "oai" =>
+            "ollama" | "vllm" | "openrouter" | "oai" | "xai" =>
                 self.oai.messages_stream(history, tools, system).await,
             _ =>
                 self.anthropic.messages_stream(history, tools, system).await,

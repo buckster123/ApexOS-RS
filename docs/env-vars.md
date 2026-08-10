@@ -57,12 +57,13 @@
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `AGENTD_BACKEND` | `anthropic` | LLM provider — `anthropic` \| `openrouter` \| `ollama` \| `vllm` \| `oai` (unknown values are forced back to `anthropic`). **Seed-only** — a Settings/`POST /api/backend` choice persists to `AGENTD_BACKEND_CONFIG` and wins on restart |
-| `AGENTD_MODEL` | per-backend | model id. Unset → backend default. Seed-only; the boot-resolved value is what a vast hot-swap reverts to |
-| `AGENTD_OAI_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compat endpoint for the non-anthropic backends; switching to `openrouter` auto-pins `https://openrouter.ai/api/v1`. Seed-only |
+| `AGENTD_BACKEND` | `anthropic` | LLM provider — `anthropic` \| `openrouter` \| `xai` \| `ollama` \| `vllm` \| `oai` (unknown values are forced back to `anthropic`). **Seed-only** — a Settings/`POST /api/backend` choice persists to `AGENTD_BACKEND_CONFIG` and wins on restart |
+| `AGENTD_MODEL` | per-backend | model id. Unset → backend default (`xai` → `grok-4.5`). Seed-only; the boot-resolved value is what a vast hot-swap reverts to |
+| `AGENTD_OAI_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compat endpoint for the non-anthropic backends; switching to `openrouter` auto-pins `https://openrouter.ai/api/v1`, `xai` auto-pins `https://api.x.ai/v1`. Seed-only |
 | `AGENTD_BACKEND_CONFIG` | `/var/lib/agentd/backend_config.json` | the persisted backend/model/URL selection (file-wins-on-restart; delete to return to env control) |
 | `ANTHROPIC_API_KEY` | unset | Anthropic key; env wins over `AGENTD_KEY_FILE`. Also read by cerebro's dream engine and the Anthropic vision tier. Boot-file flag for install.sh (write-if-nonempty seed, existing key preserved + live-verified) |
-| `OAI_API_KEY` / `OPENROUTER_API_KEY` | unset | bearer key for the OpenAI-compat backends — read in that preference order, first non-empty wins, then the key file. `POST /api/keys {oai}` sets it live + persists |
+| `OAI_API_KEY` / `OPENROUTER_API_KEY` / `XAI_API_KEY` | unset | bearer key for the OpenAI-compat backends — read in that preference order, first non-empty wins, then the key file. `POST /api/keys {oai}` sets it live + persists. **`XAI_API_KEY` in agentd is for the LLM backend only** — Imaginarium gen still keeps its own copy in `/etc/imaginarium/env` (see `docs/xai-provider.md`) |
+| `AGENTD_XAI_REASONING_EFFORT` | `low` | when model is `grok-4.5*` only: chat-completions `reasoning_effort` (`low`\|`medium`\|`high`). Server default is high; we pin low for agent tool-loops. Unknown values omit the field (API default). No effect on non-Grok models |
 | `AGENTD_CACHE` | `1` | (Anthropic only) `0`/`false`/`off`/`no` disables prompt caching entirely. On = cache system+tools prefix + (by default) the conversation |
 | `AGENTD_CACHE_CONVERSATION` | `1` | (Anthropic only) off = cache only the stable prefix, not the growing transcript (the big 1M-giga-session win when on). No effect when `AGENTD_CACHE=0` |
 | `AGENTD_CACHE_TTL` | `1h` | (Anthropic only) cache TTL. `1h`/`1hr`/`hour`/`3600` → 1h (write premium 2×) — survives human pauses and wakeup gaps; every ApexOS mode is gappy, so this is the economical choice (field-measured 2026-07-25: at `5m`, human-paced sessions read ~0 from cache). **Any other set value → 5m** (write 1.25×) — unset keeps 1h, garbage yields 5m |

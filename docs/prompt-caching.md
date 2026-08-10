@@ -106,9 +106,10 @@ And in `turn.rs`: `inject_ambient_appends_clock_to_last_user_turn`,
   tens of seconds to become readable, so the first request after a cold write may re-write once more;
   and the TTL clock refreshes on every read, so an active session never expires mid-conversation.
   ≤ 4 breakpoints per request.
-- **OpenAI / Ollama** — automatic prefix caching, no markers to set. The *same* stable-prefix
+- **OpenAI / Ollama / xAI (Grok)** — automatic prefix caching, no markers to set. The *same* stable-prefix
   discipline is exactly what triggers it, so everything above still applies; you just don't place
-  breakpoints by hand.
+  breakpoints by hand. xAI bills a cheaper cached-input rate when the prefix hits; keep soul/tools
+  byte-stable (see `docs/xai-provider.md`).
 
 ---
 
