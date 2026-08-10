@@ -34,10 +34,15 @@ own posture), so nothing needs redesigning.
 
 ### Key isolation (the load-bearing property)
 
-`XAI_API_KEY` lives **only** in `/etc/imaginarium/env` (0600, read by systemd for
-`imaginarium.service`). agentd, the MCP proxy child, and the UI hold only the
-LAN token. The audit's acceptance test — *"no xAI key required inside the ApexOS
-process"* — holds **structurally**, not by discipline.
+The **gen** `XAI_API_KEY` lives **only** in `/etc/imaginarium/env` (0600, read by
+systemd for `imaginarium.service`). The MCP proxy child and UI hold only the LAN
+token — never the gen key. That audit acceptance test holds **structurally** for
+image/video.
+
+**Separate consumer:** if the node LLM backend is `xai` (Grok chat via
+`OaiProvider`), agentd may hold its *own* `XAI_API_KEY` / `OAI_API_KEY` for
+completions — same trust model as Anthropic. Two files, two consumers; do not
+auto-copy from imaginarium → agentd. See `docs/xai-provider.md`.
 
 ## Provisioning
 

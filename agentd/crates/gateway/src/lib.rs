@@ -110,7 +110,7 @@ pub struct GatewayState {
     pub model:                 Arc<RwLock<String>>,
     /// Prompt-cache policy (Anthropic) — live-tunable from the Settings UI via /api/cache.
     pub cache:                 Arc<RwLock<apexos_agent::CacheConfig>>,
-    /// Active inference backend — live-swappable: "anthropic" | "ollama" | "vllm" | "openrouter"
+    /// Active inference backend — live-swappable: "anthropic" | "openrouter" | "xai" | "ollama" | "vllm" | "oai"
     pub backend:               Arc<RwLock<String>>,
     /// Base URL for OAI-compatible backends — live-swappable
     pub oai_base_url:          Arc<RwLock<String>>,
@@ -1329,24 +1329,33 @@ async fn set_backend_handler(
         .as_str()
         .map(|u| u.trim().to_string())
         .filter(|u| !u.is_empty());
-    // openrouter has exactly one canonical endpoint — switching to it without an
-    // explicit URL must not leave the arc pointing at ollama's localhost default.
+    // Named cloud OAI backends have exactly one canonical endpoint — switching
+    // without an explicit URL must not leave the arc at ollama's localhost default.
     let url = match (&explicit_url, backend.as_str()) {
-        (Some(u), _)         => Some(u.clone()),
-        (None, "openrouter") => Some(backend_config::default_url_for("openrouter").to_string()),
-        (None, _)            => None,
+        (Some(u), _) => Some(u.clone()),
+        (None, "openrouter" | "xai") => {
+            Some(backend_config::default_url_for(&backend).to_string())
+        }
+        (None, _) => None,
     };
 
-    *state.backend.write().await = backend;
+    *state.backend.write().await = backend.clone();
     if let Some(url) = url {
         *state.oai_base_url.write().await = url;
     }
 
-    // Optionally update the model when switching backends
+    // Explicit model in the body always wins; otherwise, if the live model is empty
+    // or clearly the wrong family for this backend (e.g. claude-* against xai), pin
+    // the per-backend default so the next turn isn't stranded on a foreign model id.
     if let Some(model) = body["model"].as_str() {
         let model = model.trim().to_string();
         if !model.is_empty() {
             *state.model.write().await = model;
+        }
+    } else {
+        let current = state.model.read().await.clone();
+        if backend_config::model_family_mismatch(&backend, &current) {
+            *state.model.write().await = backend_config::default_model_for(&backend).to_string();
         }
     }
 

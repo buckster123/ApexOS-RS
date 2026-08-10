@@ -6,8 +6,8 @@
 //! revert) sees one consistent resolved config.
 //!
 //! Pure precedence, per field: persisted (non-empty) > env (non-empty) > default.
-//! Defaults are backend-aware — notably `openrouter` gets its canonical base URL, so
-//! selecting the openrouter backend can never strand requests at the ollama localhost
+//! Defaults are backend-aware — notably `openrouter` and `xai` get their canonical
+//! base URLs, so selecting either can never strand requests at the ollama localhost
 //! default (the footgun the curl-era swap had).
 
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BackendConfig {
     #[serde(default)]
-    pub backend: String, // anthropic | openrouter | ollama | vllm | oai
+    pub backend: String, // anthropic | openrouter | xai | ollama | vllm | oai
     #[serde(default)]
     pub model: String,
     #[serde(default)]
@@ -24,7 +24,8 @@ pub struct BackendConfig {
 
 /// The closed set POST /api/backend accepts. Anything else is a typo that would
 /// silently fall through RoutingProvider's `_ => anthropic` arm — reject it instead.
-pub const KNOWN_BACKENDS: &[&str] = &["anthropic", "openrouter", "ollama", "vllm", "oai"];
+pub const KNOWN_BACKENDS: &[&str] =
+    &["anthropic", "openrouter", "xai", "ollama", "vllm", "oai"];
 
 pub fn backend_valid(s: &str) -> bool {
     KNOWN_BACKENDS.contains(&s)
@@ -35,16 +36,35 @@ pub fn default_model_for(backend: &str) -> &'static str {
     match backend {
         "ollama" | "vllm" => "qwen3:27b",
         "openrouter"      => "qwen/qwen3-70b-a3b",
+        "xai"             => "grok-4.5",
         _                 => "claude-sonnet-4-6",
     }
 }
 
-/// Per-backend default OAI base URL. openrouter has exactly one canonical endpoint;
-/// every local backend defaults to ollama's port (vllm/oai operators set theirs).
+/// Per-backend default OAI base URL. openrouter and xai each have one canonical
+/// endpoint; every local backend defaults to ollama's port (vllm/oai operators set theirs).
 pub fn default_url_for(backend: &str) -> &'static str {
     match backend {
         "openrouter" => "https://openrouter.ai/api/v1",
+        "xai"        => "https://api.x.ai/v1",
         _            => "http://localhost:11434/v1",
+    }
+}
+
+/// True when `model` clearly belongs to a different provider family than `backend`.
+/// Used on backend switch so a stranded `claude-*` id never hits api.x.ai (and vice versa).
+pub fn model_family_mismatch(backend: &str, model: &str) -> bool {
+    let m = model.trim();
+    if m.is_empty() {
+        return true;
+    }
+    let m = m.to_ascii_lowercase();
+    match backend {
+        "anthropic" => m.starts_with("grok-") || m.contains('/'), // openrouter-style slug
+        "xai" => m.starts_with("claude-") || m.contains('/'),
+        "openrouter" => m.starts_with("claude-") || m.starts_with("grok-"),
+        "ollama" | "vllm" | "oai" => m.starts_with("claude-"),
+        _ => false,
     }
 }
 
@@ -159,5 +179,23 @@ mod tests {
         };
         let s = serde_json::to_string(&c).unwrap();
         assert_eq!(serde_json::from_str::<BackendConfig>(&s).unwrap(), c);
+    }
+
+    #[test]
+    fn fresh_node_xai_defaults() {
+        let c = resolve_boot("xai", "", "", None);
+        assert_eq!(c.backend, "xai");
+        assert_eq!(c.model, "grok-4.5");
+        assert_eq!(c.oai_base_url, "https://api.x.ai/v1");
+    }
+
+    #[test]
+    fn model_family_mismatch_detects_stranded_ids() {
+        assert!(model_family_mismatch("xai", "claude-sonnet-4-6"));
+        assert!(model_family_mismatch("xai", "qwen/qwen3-70b"));
+        assert!(!model_family_mismatch("xai", "grok-4.5"));
+        assert!(model_family_mismatch("anthropic", "grok-4.5"));
+        assert!(!model_family_mismatch("anthropic", "claude-opus-4-8"));
+        assert!(model_family_mismatch("xai", ""));
     }
 }
