@@ -36,13 +36,16 @@ there (`sw.js` and `icon.svg` were added for the PWA; `index.html`/`app.js`/
 A human client never holds the machine `AGENTD_TOKEN`; it logs in for a short-lived
 **session token** (agent-identity.md slice 3e). The PWA implements exactly that:
 
-1. `GET /api/auth/profiles` (UNgated) → `{users:[{id,name,has_pin}], default_user}`.
-2. **Default-skip:** an open `default_user` auto-logs-in (zero-tap); a PIN default
-   jumps straight to the keypad.
-3. Tile tap → open profile one-taps; a PIN profile opens the keypad (lockout-aware —
-   `{locked, retry_after_secs}`).
-4. `POST /api/auth/login {user_id, pin}` → `{ok, token, agent_id, expires_in}`.
-5. Token → `localStorage` (`apexos_token`), used as `Authorization: Bearer` on gated
+1. `GET /api/auth/profiles` (UNgated) → `{users, default_user, setup_required, login_open}`.
+   An unclaimed node (`setup_required`) hides profiles on the LAN.
+2. **First boot:** loopback shows a claim form (`POST /api/auth/setup {pin}`). LAN
+   stays closed until the owner PIN is set.
+3. **Default-skip:** an open `default_user` auto-logs-in (zero-tap) only after the
+   node is claimed; a PIN default jumps straight to the keypad.
+4. Tile tap → open profile one-taps **on loopback only**; a PIN profile opens the
+   keypad (lockout-aware — `{locked, retry_after_secs}`).
+5. `POST /api/auth/login {user_id, pin}` → `{ok, token, agent_id, role, expires_in}`.
+6. Token → `localStorage` (`apexos_token`), used as `Authorization: Bearer` on gated
    REST and **`?token=`** on the WS. `GET /api/auth/me` re-validates a stored token
    on load (agentd clears in-memory tokens on restart → falls back to the login
    screen). `POST /api/auth/logout` revokes.
