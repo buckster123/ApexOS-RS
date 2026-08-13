@@ -1,10 +1,10 @@
 # Daemon self-update loop — design (mk3)
 
 > **Status: IMPLEMENTED — all slices (1–5 + 3.1/3.2/3.3) LANDED.** The loop is complete:
-> build → test → review → swap → health → confirm/rollback, plus probation for latent
+> review → isolated `--locked` build → attest → swap → health → confirm/rollback, plus probation for latent
 > crashes. Hardware-proven on apex2: a real self-update CONFIRMED end-to-end, and a real
 > live auto-rollback recovered cleanly. Local drill (`apexos-self-update-drill.sh`) green
-> across 34 assertions (watchdog state machine + probation). Remaining = on-rig drills
+> across 43 assertions (watchdog state machine + probation). Remaining = on-rig drills
 > (power-loss; latent-crash) + the live LLM-review path, validated opportunistically.
 > The one self-modification that *leaves the process model* — so it carries the
 > most safety machinery. Seeded by APEX's own wishlist proposal (`apex-forge-wishlist.md`,
@@ -85,23 +85,22 @@ deploy), so the privileged code is fixed and auditable, never agent-authored.
 The edit/commit of the *source* is the existing git layer (PR #117 tools, with
 `AGENTD_GIT_ROOTS=/opt/ApexOS-RS`). The agent edits source, commits it, then calls:
 
-`apply_daemon_update(commit, reason, test_cmd)`
+`apply_daemon_update(commit, reason)`
 
 | # | Stage (where) | Gate | On failure → end state |
 |---|---------------|------|------------------------|
 | 0 | **Preconditions** (tool) | clean git tree at `commit`; no update already in flight (lockfile); disk + toolchain ok | abort, plain tool error → **live daemon untouched** |
-| 1 | **Staging build** (tool) | `cargo build --release -p agentd` into a *staging* path — **never over the live binary** | build error returned to APEX → **untouched** |
-| 2 | **Tests** (tool) | `cargo test -p agentd` **and** the caller's `test_cmd` | test failure returned → **untouched** |
-| 3 | **Adversarial review** (✅ slice 4) | a fresh-context LLM (own `RoutingProvider`) reviews the diff being swapped in: "could this brick boot / health / rollback? is it reversible? does it touch the update machinery itself?" → final `VERDICT: SAFE\|BLOCK`. **Fail-closed** (unparseable/unavailable → block); empty diff → trivially safe (no call); `AGENTD_SELF_UPDATE_REVIEW=0` to skip. Single reviewer v1, `review_diff` is the N-way-panel seam | review veto returned → **untouched** |
-| 4 | **Pre-swap commit** (tool) | `session_save()` + `store_intention("resuming after self-update: <reason>")`; copy the built binary to `$UPDATE_DIR/agentd.staged`; write `request.json` (sha256, target/prev commit, deadline — **no staged path**) | if the write fails, abort → **untouched** |
+| 1 | **Adversarial review** (✅ slice 4) | a fresh-context LLM reviews the **source diff** *before* any cargo of that tree: "could this brick boot / health / rollback?" → `VERDICT: SAFE\|BLOCK`. **Fail-closed**; empty diff → trivially safe; `AGENTD_SELF_UPDATE_REVIEW=0` to skip | review veto returned → **untouched** |
+| 2 | **Isolated locked build** (tool) | detached worktree of the SHA (read-only src, scrubbed env); `cargo test --locked -p agentd` then `cargo build --release --locked -p agentd` into a target dir **outside** the live repo. **No caller `test_cmd`** | test/build error → **untouched** |
+| 3 | **Attest + pre-swap commit** (tool) | hash the isolated binary, copy to `$UPDATE_DIR/agentd.staged`, re-hash (must match), `session_save()` + resume intention, write `request.json` (**no staged path**) | if attest/write fails, abort → **untouched** |
 | 5 | **Swap** (watchdog, root) | consume **only** `$UPDATE_DIR/agentd.staged` (reject symlink / non-regular / wrong-owner / empty sha); `cp agentd → agentd.prev`; copy+rehash+atomic `mv` into `/usr/local/bin/agentd`; `systemctl restart agentd` | mv/restart fails → restore `agentd.prev` → **known-good** |
 | 6 | **Health probe** (watchdog) | poll `health.json` ≤ `TIMEOUT`: `status=healthy ∧ commit=target ∧ booted_at≥swap_ts` | timeout / agentd inactive → **rollback to `agentd.prev`** → known-good |
 | 7 | **Probation** (✅ slice 5) | `agentd.service` `StartLimitIntervalSec=300`/`Burst=5` → on a post-confirm crash-loop, `OnFailure=apexos-rollback.service` restores `agentd.prev` — but ONLY if a `confirmed.json` is recent (≤ `APEXOS_PROBATION_WINDOW`, 600s) + `agentd.prev` exists; else no-op (not our regression). Anti-loop: the confirm marker is consumed, so one probation rollback per update max | crash-loop in window → **rollback** → known-good |
 
-**Stages 0–4 cannot harm the running daemon** — they're all pre-swap, so the vast
+**Stages 0–3 cannot harm the running daemon** — they're all pre-swap, so the vast
 majority of bad changes die here while agentd keeps serving. Only a change that
-builds, tests, and survives review reaches the swap, where the watchdog + kept
-binary make even a bad boot recoverable.
+survives review *and* a `--locked` isolated build reaches the swap, where the
+watchdog + kept binary make even a bad boot recoverable.
 
 ## The watchdog (the survivor)
 
@@ -202,9 +201,9 @@ agent continuity across reboots gives the *updater* its result channel.
 
 | Failure | Caught by | End state |
 |---------|-----------|-----------|
-| Source won't compile | stage 1 (staging build) | live daemon untouched |
-| Compiles, tests fail | stage 2 | untouched |
-| Compiles + passes tests but semantically dangerous | stage 3 (LLM review) | untouched |
+| Source is semantically dangerous | stage 1 (LLM review, before cargo) | live daemon untouched |
+| Isolated `--locked` test/build fails | stage 2 | untouched |
+| Built bytes don't match the staged copy | stage 3 (attest) | untouched |
 | Slips review, new binary won't boot | stage 6 (health timeout) → rollback | `agentd.prev` |
 | Boots but listeners/plugins broken | stage 6 (health gate fails) → rollback | `agentd.prev` |
 | Boots healthy, crashes 3 min later | stage 7 (StartLimit `OnFailure`) | `agentd.prev` |
@@ -225,13 +224,14 @@ agent continuity across reboots gives the *updater* its result channel.
    on the same branch, which the staging build relies on).
 3. **`apply_daemon_update` tool** — ✅ IMPLEMENTED (slice 3, `agentd/crates/agentd/src/self_update.rs`):
    a virtual tool dispatched by the supervisor to a handler in main.rs over a
-   dedicated mpsc (like `propose_evolution`). Gates 0–2 + 4 (review = slice 4).
-   **v1 build mechanism:** the requested `commit` must equal the repo's current HEAD
-   and the tree must be clean — agentd then builds it *in place* (`cargo build
-   --release -p agentd` in `AGENTD_SELF_UPDATE_REPO`, default the agentd-owned
-   `/var/lib/agentd/self-update/ApexOS-RS`; see Deployability below),
-   reusing the repo's incremental target cache. (Arbitrary-commit worktree builds
-   are a future enhancement.) On success it stages the binary (+x), sha256s it,
+   dedicated mpsc (like `propose_evolution`). Gates: review → isolated `--locked`
+   build → attest (finding 4). **v1 build mechanism:** the requested `commit` must
+   equal the repo's current HEAD and the tree must be clean. agentd then reviews
+   the source diff and builds a **detached worktree of that SHA** (`cargo test
+   --locked` + `cargo build --release --locked -p agentd`) into a target dir
+   *outside* the live checkout (default `<repo>/../isolated-target`; never
+   `<repo>/target`). There is no caller `test_cmd`. On success it attests the
+   isolated binary (hash, copy to `$UPDATE_DIR/agentd.staged`, re-hash),
    `session_save`s + drops a resume intention, and writes `request.json`. Gate
    failures + `dry_run` return a normal tool result; success returns a best-effort
    "filed" ack (the process is replaced — real outcome via the marker). Policy:
@@ -273,7 +273,7 @@ outcome marker. All flat JSON in `/var/lib/agentd/update/`:
 Tool-side env (agentd): `AGENTD_SELF_UPDATE_REPO` (build checkout, default
 `/var/lib/agentd/self-update/ApexOS-RS` — APEX's own clone) · `AGENTD_CARGO`
 (cargo binary the agentd user can run; default `cargo` on PATH) ·
-`AGENTD_SELF_UPDATE_TARGET` (optional `CARGO_TARGET_DIR`) ·
+`AGENTD_SELF_UPDATE_TARGET` (optional isolated `CARGO_TARGET_DIR`; ignored if it sits inside the live repo) ·
 `AGENTD_SELF_UPDATE_BUILD_TIMEOUT` (build+test ceiling, default 1800s) ·
 `AGENTD_SELF_UPDATE_TIMEOUT` (health-probe seconds written into the request,
 default 120) · `AGENTD_SELF_UPDATE_REVIEW` (`0` skips the stage-3 review; default on).
@@ -301,7 +301,7 @@ Three things `agentd` needs, and how this slice makes them configurable:
 |------|------------------------------------------|
 | A repo it can read + commit + build | **agentd-owned clone**, default `AGENTD_SELF_UPDATE_REPO=/var/lib/agentd/self-update/ApexOS-RS` — APEX's *own* evolution repo, in its sandbox, distinct from the operator's `/opt` clone so the two never fight over git ownership. Add it to `AGENTD_GIT_ROOTS` so the git tools can commit to it. |
 | A cargo it can run | `AGENTD_CARGO` → a cargo binary the agentd user can execute (else `cargo` on PATH). |
-| A writable build target | `AGENTD_SELF_UPDATE_TARGET` → `CARGO_TARGET_DIR` (else `<repo>/target`). |
+| A writable build target | Isolated `CARGO_TARGET_DIR` **outside** the live checkout (default `<repo>/../isolated-target`). `AGENTD_SELF_UPDATE_TARGET` overrides only if it does not sit inside the repo — the live `<repo>/target` is the finding-4 poison hole. |
 
 **Toolchain — resolved to (B), agentd's own** (we weighed: **(A)** a shared
 `/opt/rust` used by both operator + agent — one toolchain but re-architects how
@@ -363,8 +363,8 @@ On-hardware drills (apex2), driven by hand-writing a `request.json` — no agent
   ```
 - **Power-loss drill** — kill power mid-swap; assert next boot reconciles via the
   orphaned `request.json` (the `.path` unit re-fires; phase file resumes correctly).
-- **Dry-run mode** — `apply_daemon_update(..., dry_run=true)` runs gates 0–3 and
-  reports, without writing a request.
+- **Dry-run mode** — `apply_daemon_update(..., dry_run=true)` runs review + the
+  isolated `--locked` build and reports, without writing a request.
 - **Latent-crash drill** — a binary that boots healthy then exits after 60 s;
   assert the `StartLimit`/`OnFailure` probation rollback fires. *(Probation logic is
   drill-covered locally — `apexos-self-update-drill.sh` P1/P1b/P2/P3; the on-rig

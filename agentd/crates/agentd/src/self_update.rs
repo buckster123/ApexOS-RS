@@ -8,21 +8,27 @@
 //! boundary.
 //!
 //! ```text
-//! apply_daemon_update(commit, reason, test_cmd?, dry_run?)
+//! apply_daemon_update(commit, reason, dry_run?)
 //!  0. preconditions  repo is a clean git tree · commit == HEAD · cargo present · not in-flight
-//!  1. staging build  cargo build --release -p agentd   (in repo; never over the live binary)
-//!  2. tests          cargo test -p agentd  +  caller test_cmd
-//!  3. adversarial review  slice 4 (shipped): a reviewer model examines the diff; its verdict gates the swap
-//!  4. pre-swap commit  session_save() + store_intention("resuming…") · write request.json
+//!  1. adversarial review  source diff only — BEFORE any cargo of that tree (finding 4)
+//!  2. isolated locked build  detached worktree of the SHA, read-only src, scrubbed env,
+//!                            `cargo test --locked -p agentd` then
+//!                            `cargo build --release --locked -p agentd`
+//!                            into a target dir that is NOT the live repo's target/
+//!  3. attest + request     hash the isolated binary, copy to $UPDATE_DIR/agentd.staged,
+//!                          re-hash, write request.json
 //! ```
 //!
-//! Result semantics: gate failures (0–2) and `dry_run` return a NORMAL tool result
+//! There is NO caller `test_cmd`. A model-supplied `sh -c` ran after the staging
+//! build and could replace `target/release/agentd` before review hashed it.
+//!
+//! Result semantics: gate failures (0–3) and `dry_run` return a NORMAL tool result
 //! (the daemon is untouched). On success the process is replaced before a return
 //! could arrive, so the real outcome is delivered ASYNC via Cerebro + the
 //! watchdog's `confirmed.json`/`rolled-back.json` marker on the next boot. The
 //! pre-swap result here is a best-effort "filed" ack.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -105,24 +111,23 @@ pub fn apply_daemon_update_spec() -> ToolSpec {
         description:
             "Rebuild and swap in a new agentd (this daemon's own binary) from a committed git \
              ref, guarded by the self-update watchdog. PRE-SWAP gates run while the daemon keeps \
-             serving: clean-tree/HEAD-match preconditions, a staging `cargo build --release -p \
-             agentd` (never over the live binary), then `cargo test -p agentd` plus any caller \
-             `test_cmd`, then a fresh-context adversarial review of the diff being swapped in. \
-             Only if all pass is a swap request filed; a root watchdog then backs up \
-             the current binary, swaps, restarts, and health-checks — rolling back automatically \
-             to the known-good binary if the new one doesn't come up healthy. The `commit` must \
-             be the repo's current HEAD (commit your source first). SUCCESS RETURNS NOTHING \
-             SYNCHRONOUSLY — the process is replaced; the real outcome arrives on the next boot \
-             via Cerebro and /var/lib/agentd/update/{confirmed,rolled-back}.json. Use \
-             dry_run=true to run the build+test gates and report without swapping."
+             serving: clean-tree/HEAD-match preconditions, a fresh-context adversarial review of \
+             the source diff, then `cargo test --locked` + `cargo build --release --locked` in a \
+             detached read-only checkout of that SHA (scrubbed env; never the live repo's \
+             target/). There is no extra shell hook. Only if all pass is a swap request filed; \
+             a root watchdog then backs up the current binary, swaps, restarts, and health-checks \
+             — rolling back automatically to the known-good binary if the new one doesn't come \
+             up healthy. The `commit` must be the repo's current HEAD (commit your source first). \
+             SUCCESS RETURNS NOTHING SYNCHRONOUSLY — the process is replaced; the real outcome \
+             arrives on the next boot via Cerebro and /var/lib/agentd/update/{confirmed,rolled-back}.json. \
+             Use dry_run=true to run the review+locked-build gates and report without swapping."
                 .into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "commit":   { "type": "string", "description": "Git commit SHA to build (must be the repo's current HEAD)." },
                 "reason":   { "type": "string", "description": "Why this update — recorded in the resume intention + outcome marker." },
-                "test_cmd": { "type": "string", "description": "Optional extra test command, run as `sh -c` in the repo after the built-in tests." },
-                "dry_run":  { "type": "boolean", "description": "Run the build+test gates and report, WITHOUT filing a swap request. Default false." }
+                "dry_run":  { "type": "boolean", "description": "Run the review+locked-build gates and report, WITHOUT filing a swap request. Default false." }
             },
             "required": ["commit", "reason"]
         }),
@@ -187,13 +192,217 @@ async fn git(dir: &PathBuf, args: &[&str]) -> Result<String, String> {
 
 /// Run cargo (`AGENTD_CARGO` or `cargo`) in `dir` with the optional shared
 /// `CARGO_TARGET_DIR`. Inherits the agentd process env (so a deploy-set
-/// `CARGO_HOME`/`RUSTUP_HOME`/`PATH` reach the build).
+/// `CARGO_HOME`/`RUSTUP_HOME`/`PATH` reach the build). Used only for the
+/// `--version` precondition — the attested build goes through `run_cmd_scrubbed`.
 async fn run_cargo(dir: &PathBuf, args: &[&str], timeout: Duration) -> Result<String, String> {
     let envs: Vec<(&str, String)> = match cargo_target_dir() {
         Some(t) => vec![("CARGO_TARGET_DIR", t)],
         None => vec![],
     };
     run_cmd(dir, &cargo_bin(), args, timeout, &envs).await
+}
+
+fn cargo_test_args() -> &'static [&'static str] {
+    &["test", "--locked", "-p", "agentd"]
+}
+
+fn cargo_build_args() -> &'static [&'static str] {
+    &["build", "--release", "--locked", "-p", "agentd"]
+}
+
+fn is_full_git_sha(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Detached source tree for the attested build. Name is derived from the SHA
+/// so a hostile `commit` string cannot pick the path.
+fn isolated_src_dir(resolved: &str) -> PathBuf {
+    let tag: String = resolved.chars().filter(|c| c.is_ascii_hexdigit()).take(12).collect();
+    update_dir().join(format!("src-{tag}"))
+}
+
+/// CARGO_TARGET_DIR for the attested build. Never the live repo's `target/` —
+/// a concurrent `run_command` could replace `release/agentd` there after cargo
+/// returns (finding 4). An explicit `AGENTD_SELF_UPDATE_TARGET` is honored only
+/// if it sits *outside* the live checkout.
+fn isolated_target_dir(repo: &Path) -> PathBuf {
+    if let Some(t) = cargo_target_dir() {
+        let p = PathBuf::from(t);
+        if !p.starts_with(repo) {
+            return p;
+        }
+    }
+    repo.parent()
+        .map(|p| p.join("isolated-target"))
+        .unwrap_or_else(|| update_dir().join("isolated-target"))
+}
+
+/// Env keys cargo/rustup actually need. Everything else (AGENTD_TOKEN, API
+/// keys, sensor tokens, …) stays out of `build.rs` / proc-macros.
+const CARGO_ENV_ALLOW: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "TERM",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "RUSTUP_IO_THREADS",
+    "CARGO_BUILD_JOBS",
+    "CARGO_INCREMENTAL",
+    "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+    "CARGO_PROFILE_RELEASE_LTO",
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+];
+
+fn collect_scrubbed_env(target_dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for key in CARGO_ENV_ALLOW {
+        if let Ok(v) = std::env::var(key) {
+            if !v.is_empty() {
+                out.push(((*key).to_string(), v));
+            }
+        }
+    }
+    out.push(("CARGO_TARGET_DIR".into(), target_dir.display().to_string()));
+    out.push(("CARGO_TERM_COLOR".into(), "never".into()));
+    out
+}
+
+/// Like `run_cmd` but `env_clear()`s first — the isolated cargo/test path.
+async fn run_cmd_scrubbed(
+    dir: &Path,
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    envs: &[(String, String)],
+) -> Result<String, String> {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_clear();
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let child = cmd.spawn().map_err(|e| format!("spawn `{program}` failed: {e}"))?;
+    let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return Err(format!("`{program}` wait failed: {e}")),
+        Err(_) => return Err(format!("`{program} {}` timed out after {}s", args.join(" "), timeout.as_secs())),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() {
+        Ok(format!("{stdout}{stderr}"))
+    } else {
+        let combined = format!("{stdout}\n{stderr}");
+        Err(tail(&combined, 4000))
+    }
+}
+
+fn set_tree_readonly(root: &Path, readonly: bool) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(root)?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    if meta.is_dir() {
+        for ent in std::fs::read_dir(root)? {
+            set_tree_readonly(&ent?.path(), readonly)?;
+        }
+    }
+    let mut perms = std::fs::symlink_metadata(root)?.permissions();
+    perms.set_readonly(readonly);
+    std::fs::set_permissions(root, perms)
+}
+
+async fn cleanup_isolated_src(repo: &Path, dest: &Path) {
+    let _ = set_tree_readonly(dest, false);
+    if let Some(s) = dest.to_str() {
+        let _ = git(&repo.to_path_buf(), &["worktree", "remove", "--force", s]).await;
+    }
+    let _ = std::fs::remove_dir_all(dest);
+}
+
+/// Detached checkout of `resolved` that the live working tree cannot mutate.
+/// Prefer `git worktree --detach`; fall back to `clone --local --no-hardlinks`
+/// so we never share inodes with the live tree.
+async fn prepare_isolated_checkout(repo: &PathBuf, resolved: &str) -> Result<PathBuf, String> {
+    if !is_full_git_sha(resolved) {
+        return Err(format!("refusing isolated checkout of non-sha `{resolved}`"));
+    }
+    let dest = isolated_src_dir(resolved);
+    cleanup_isolated_src(repo, &dest).await;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir isolated src parent: {e}"))?;
+    }
+    let dest_s = dest.to_str().ok_or_else(|| "isolated src path is not utf-8".to_string())?;
+    match git(repo, &["worktree", "add", "--detach", dest_s, resolved]).await {
+        Ok(_) => {}
+        Err(wt_err) => {
+            cleanup_isolated_src(repo, &dest).await;
+            if let Err(e) = run_cmd(
+                repo,
+                "git",
+                &["clone", "--local", "--no-hardlinks", ".", dest_s],
+                Duration::from_secs(120),
+                &[],
+            )
+            .await
+            {
+                return Err(format!("isolated checkout failed (worktree: {wt_err}; clone: {e})"));
+            }
+            git(&dest, &["checkout", "--detach", resolved]).await.map_err(|e| {
+                format!("isolated clone checkout {resolved} failed: {e}")
+            })?;
+        }
+    }
+    let got = git(&dest, &["rev-parse", "HEAD"]).await?;
+    if got != resolved {
+        cleanup_isolated_src(repo, &dest).await;
+        return Err(format!("isolated HEAD {got} != requested {resolved}"));
+    }
+    if !dest.join("Cargo.lock").is_file() {
+        cleanup_isolated_src(repo, &dest).await;
+        return Err("isolated checkout has no Cargo.lock — --locked build refused".into());
+    }
+    set_tree_readonly(&dest, true).map_err(|e| format!("make isolated src read-only: {e}"))?;
+    Ok(dest)
+}
+
+fn attest_and_stage(built: &PathBuf, staged: &PathBuf) -> Result<String, String> {
+    let sha_built = sha256_file(built)?;
+    if sha_built.len() != 64 || !sha_built.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("sha256 of built binary looks wrong: {sha_built}"));
+    }
+    stage_binary(built, staged).map_err(|e| e.to_string())?;
+    let sha_staged = sha256_file(staged)?;
+    if sha_staged != sha_built {
+        let _ = std::fs::remove_file(staged);
+        return Err(format!("staged sha {sha_staged} != built sha {sha_built}"));
+    }
+    Ok(sha_staged)
 }
 
 /// Whether an update is already in flight: a `request.json` (watchdog will pick it
@@ -203,9 +412,9 @@ fn in_flight() -> bool {
     d.join("request.json").exists() || d.join("update.lock").exists()
 }
 
-// ── stage 3: adversarial review ────────────────────────────────────────────────
+// ── adversarial review (stage 1 of the run — source only) ─────────────────────
 
-/// Stage-3 review toggle. ON by default; `AGENTD_SELF_UPDATE_REVIEW=0` skips it
+/// Review toggle. ON by default; `AGENTD_SELF_UPDATE_REVIEW=0` skips it
 /// (a fully-trusted pipeline, or a node with no model configured).
 fn review_enabled() -> bool {
     !matches!(
@@ -343,7 +552,8 @@ async fn run_update(
 ) {
     let commit = args.get("commit").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-    let test_cmd = args.get("test_cmd").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    // `test_cmd` is intentionally unread (finding 4): a caller `sh -c` ran after
+    // the staging build and could replace target/release/agentd before review.
     let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
 
     if commit.is_empty() || reason.is_empty() {
@@ -387,6 +597,11 @@ async fn run_update(
             format!("commit {commit} ({resolved}) is not the repo HEAD ({head}); check it out first (v1 builds HEAD in place)")).await;
         return;
     }
+    if !is_full_git_sha(&resolved) {
+        emit(bus, session, call_id, false,
+            format!("resolved commit {resolved} is not a 40-char git sha")).await;
+        return;
+    }
     if run_cargo(&repo, &["--version"], Duration::from_secs(30)).await.is_err() {
         emit(bus, session, call_id, false, format!(
             "cargo not runnable (tried `{}`) — the agentd user needs a build toolchain. \
@@ -402,42 +617,9 @@ async fn run_update(
     // From here, every exit path must clear the lock.
     let clear_lock = || { let _ = std::fs::remove_file(update_dir().join("update.lock")); };
 
-    // ── stage 1: staging build (never over the live binary) ─────────────────────
-    if let Err(e) = run_cargo(&repo, &["build", "--release", "-p", "agentd"], build_timeout()).await {
-        clear_lock();
-        emit(bus, session, call_id, false, format!("STAGE 1 build failed (daemon untouched):\n{e}")).await;
-        return;
-    }
-    // Built binary lives under CARGO_TARGET_DIR (if set) else <repo>/target.
-    let target_root = cargo_target_dir().map(PathBuf::from).unwrap_or_else(|| repo.join("target"));
-    let built = target_root.join("release/agentd");
-    if !built.exists() {
-        clear_lock();
-        emit(bus, session, call_id, false, format!("build reported success but {} is missing", built.display())).await;
-        return;
-    }
-
-    // ── stage 2: tests ──────────────────────────────────────────────────────────
-    if let Err(e) = run_cargo(&repo, &["test", "-p", "agentd"], build_timeout()).await {
-        clear_lock();
-        emit(bus, session, call_id, false, format!("STAGE 2 `cargo test -p agentd` failed (daemon untouched):\n{e}")).await;
-        return;
-    }
-    if let Some(tc) = &test_cmd {
-        if let Err(e) = run_cmd(&repo, "sh", &["-c", tc], build_timeout(), &[]).await {
-            clear_lock();
-            emit(bus, session, call_id, false, format!("STAGE 2 test_cmd failed (daemon untouched):\n{e}")).await;
-            return;
-        }
-    }
-
-    // ── stage 3: adversarial review (slice 4) ───────────────────────────────────
-    // A fresh-context LLM reviews the diff being swapped in for brick/rollback risk
-    // before any request is filed. FAIL-CLOSED: an unparseable verdict or a review
-    // it couldn't run blocks the swap (don't replace a binary you couldn't vet) —
-    // an empty diff (same-commit rebuild) is trivially safe, no LLM call. Disable
-    // with AGENTD_SELF_UPDATE_REVIEW=0. Single reviewer for v1; review_diff is the
-    // seam for an N-way refute panel later.
+    // ── stage 1: adversarial review (source only — no cargo of this tree yet) ──
+    // FAIL-CLOSED: unparseable/unavailable → block. Empty diff (same-commit
+    // rebuild) is trivially safe. `AGENTD_SELF_UPDATE_REVIEW=0` skips.
     if review_enabled() {
         let diff = collect_diff(&repo, build_commit(), &resolved).await;
         match review_diff(reviewer, &resolved, &reason, &diff).await {
@@ -445,32 +627,73 @@ async fn run_update(
             ReviewVerdict::Block(why) => {
                 clear_lock();
                 emit(bus, session, call_id, false,
-                    format!("STAGE 3 review BLOCKED (daemon untouched): {why}")).await;
+                    format!("STAGE 1 review BLOCKED (daemon untouched): {why}")).await;
                 return;
             }
         }
     }
 
-    // ── dry-run: report without filing a swap ───────────────────────────────────
-    if dry_run {
+    // ── stage 2: isolated --locked test + release build ─────────────────────────
+    let src = match prepare_isolated_checkout(&repo, &resolved).await {
+        Ok(p) => p,
+        Err(e) => {
+            clear_lock();
+            emit(bus, session, call_id, false,
+                format!("STAGE 2 isolated checkout failed (daemon untouched): {e}")).await;
+            return;
+        }
+    };
+    let target_root = isolated_target_dir(&repo);
+    if let Err(e) = std::fs::create_dir_all(&target_root) {
+        cleanup_isolated_src(&repo, &src).await;
         clear_lock();
-        emit(bus, session, call_id, true,
-            format!("DRY RUN ok — build + tests{} passed for {commit}. No swap requested.",
-                if review_enabled() { " + review" } else { "" })).await;
+        emit(bus, session, call_id, false, format!("STAGE 2 mkdir target failed: {e}")).await;
+        return;
+    }
+    let cargo_envs = collect_scrubbed_env(&target_root);
+    if let Err(e) = run_cmd_scrubbed(&src, &cargo_bin(), cargo_test_args(), build_timeout(), &cargo_envs).await {
+        cleanup_isolated_src(&repo, &src).await;
+        clear_lock();
+        emit(bus, session, call_id, false,
+            format!("STAGE 2 `cargo test --locked -p agentd` failed (daemon untouched):\n{e}")).await;
+        return;
+    }
+    if let Err(e) = run_cmd_scrubbed(&src, &cargo_bin(), cargo_build_args(), build_timeout(), &cargo_envs).await {
+        cleanup_isolated_src(&repo, &src).await;
+        clear_lock();
+        emit(bus, session, call_id, false,
+            format!("STAGE 2 `cargo build --release --locked -p agentd` failed (daemon untouched):\n{e}")).await;
+        return;
+    }
+    let built = target_root.join("release/agentd");
+    if !built.exists() {
+        cleanup_isolated_src(&repo, &src).await;
+        clear_lock();
+        emit(bus, session, call_id, false, format!("build reported success but {} is missing", built.display())).await;
         return;
     }
 
-    // ── stage 4: pre-swap commit (Cerebro continuity + the request) ─────────────
-    let staged = update_dir().join("agentd.staged");
-    if let Err(e) = stage_binary(&built, &staged) {
+    // ── dry-run: report without filing a swap ───────────────────────────────────
+    if dry_run {
+        cleanup_isolated_src(&repo, &src).await;
         clear_lock();
-        emit(bus, session, call_id, false, format!("failed to stage built binary: {e}")).await;
+        emit(bus, session, call_id, true,
+            format!("DRY RUN ok — review + locked isolated build passed for {commit}. No swap requested.")).await;
         return;
     }
-    let sha = match sha256_file(&staged) {
+
+    // ── stage 3: attest the isolated artifact + file the request ────────────────
+    let staged = update_dir().join("agentd.staged");
+    let sha = match attest_and_stage(&built, &staged) {
         Ok(s) => s,
-        Err(e) => { clear_lock(); emit(bus, session, call_id, false, format!("sha256 of staged failed: {e}")).await; return; }
+        Err(e) => {
+            cleanup_isolated_src(&repo, &src).await;
+            clear_lock();
+            emit(bus, session, call_id, false, format!("STAGE 3 attest/stage failed (daemon untouched): {e}")).await;
+            return;
+        }
     };
+    cleanup_isolated_src(&repo, &src).await;
 
     // Continuity: the agent re-orients from these on the far side (new or rolled-back).
     save_resume_state(proxy, &reason, &commit).await;
@@ -497,7 +720,7 @@ async fn run_update(
     match write_request(&req) {
         Ok(()) => {
             emit(bus, session, call_id, true, format!(
-                "Gates passed (build + tests). Swap request filed for {commit}; the watchdog will \
+                "Gates passed (review + locked isolated build). Swap request filed for {commit}; the watchdog will \
                  back up the current binary, swap, restart, and health-check — rolling back \
                  automatically if it doesn't come up healthy. This process is being replaced now; \
                  the outcome will appear on the next boot via Cerebro and \
@@ -608,6 +831,152 @@ mod tests {
         let req = &s.input_schema["required"];
         assert!(req.as_array().unwrap().iter().any(|v| v == "commit"));
         assert!(req.as_array().unwrap().iter().any(|v| v == "reason"));
+        assert!(
+            s.input_schema["properties"].get("test_cmd").is_none(),
+            "test_cmd is a swap-the-binary primitive and must stay out of the spec"
+        );
+    }
+
+    #[test]
+    fn cargo_invocations_are_locked_and_source_controlled() {
+        assert!(cargo_test_args().contains(&"--locked"));
+        assert!(cargo_build_args().contains(&"--locked"));
+        assert!(cargo_build_args().contains(&"--release"));
+        assert!(!cargo_test_args().iter().any(|a| *a == "-c" || *a == "sh"));
+        assert!(!cargo_build_args().iter().any(|a| *a == "-c" || *a == "sh"));
+    }
+
+    #[test]
+    fn full_git_sha_is_strict() {
+        assert!(is_full_git_sha("0123456789abcdef0123456789abcdef01234567"));
+        assert!(!is_full_git_sha("0123456789abcdef")); // short
+        assert!(!is_full_git_sha("HEAD"));
+        assert!(!is_full_git_sha("../etc/passwd"));
+        assert!(!is_full_git_sha(&"g".repeat(40)));
+    }
+
+    #[test]
+    fn scrubbed_env_drops_secrets_and_forces_target() {
+        std::env::set_var("AGENTD_TOKEN", "secret-token");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
+        std::env::set_var("OPENAI_API_KEY", "sk-x");
+        let envs = collect_scrubbed_env(Path::new("/tmp/isolated-target"));
+        let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!keys.contains(&"AGENTD_TOKEN"));
+        assert!(!keys.contains(&"ANTHROPIC_API_KEY"));
+        assert!(!keys.contains(&"OPENAI_API_KEY"));
+        assert!(keys.contains(&"CARGO_TARGET_DIR"));
+        assert_eq!(
+            envs.iter().find(|(k, _)| k == "CARGO_TARGET_DIR").map(|(_, v)| v.as_str()),
+            Some("/tmp/isolated-target")
+        );
+        std::env::remove_var("AGENTD_TOKEN");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn isolated_target_refuses_live_repo_target() {
+        let repo = Path::new("/var/lib/agentd/self-update/ApexOS-RS");
+        std::env::remove_var("AGENTD_SELF_UPDATE_TARGET");
+        let def = isolated_target_dir(repo);
+        assert!(!def.starts_with(repo), "default target must sit outside the live checkout");
+        std::env::set_var("AGENTD_SELF_UPDATE_TARGET", "/var/lib/agentd/self-update/ApexOS-RS/target");
+        let rejected = isolated_target_dir(repo);
+        assert!(!rejected.starts_with(repo));
+        std::env::set_var("AGENTD_SELF_UPDATE_TARGET", "/var/lib/agentd/self-update/isolated-target");
+        assert_eq!(
+            isolated_target_dir(repo),
+            PathBuf::from("/var/lib/agentd/self-update/isolated-target")
+        );
+        std::env::remove_var("AGENTD_SELF_UPDATE_TARGET");
+    }
+
+    #[test]
+    fn readonly_tree_rejects_writes() {
+        let d = std::env::temp_dir().join(format!("apex-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("x");
+        std::fs::write(&f, "a").unwrap();
+        set_tree_readonly(&d, true).unwrap();
+        assert!(std::fs::write(&f, "b").is_err(), "readonly tree must reject writes");
+        set_tree_readonly(&d, false).unwrap();
+        std::fs::write(&f, "b").unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn attest_rejects_hash_mismatch() {
+        let d = std::env::temp_dir().join(format!("apex-attest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::env::set_var("AGENTD_UPDATE_DIR", d.to_str().unwrap());
+        let built = d.join("built");
+        let staged = d.join("agentd.staged");
+        std::fs::write(&built, b"good-bytes").unwrap();
+        let sha = attest_and_stage(&built, &staged).unwrap();
+        assert_eq!(sha.len(), 64);
+        assert_eq!(std::fs::read(&staged).unwrap(), b"good-bytes");
+        std::env::remove_var("AGENTD_UPDATE_DIR");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn isolated_checkout_pins_sha_and_ignores_later_edits() {
+        let tmp = std::env::temp_dir().join(format!("apex-iso-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("repo");
+        let update = tmp.join("update");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&update).unwrap();
+        let git_ok = |args: &[&str]| {
+            let st = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?} failed");
+        };
+        git_ok(&["init"]);
+        git_ok(&["config", "user.email", "t@t"]);
+        git_ok(&["config", "user.name", "t"]);
+        git_ok(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("Cargo.lock"), "# lock\n").unwrap();
+        std::fs::write(repo.join("file"), "v1").unwrap();
+        git_ok(&["add", "."]);
+        git_ok(&["-c", "commit.gpgsign=false", "commit", "-m", "v1"]);
+        let sha = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert!(is_full_git_sha(&sha), "test repo HEAD not a full sha: {sha}");
+
+        std::env::set_var("AGENTD_UPDATE_DIR", update.to_str().unwrap());
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let dest = rt.block_on(prepare_isolated_checkout(&repo, &sha)).expect("isolated checkout");
+        assert_eq!(std::fs::read_to_string(dest.join("file")).unwrap(), "v1");
+        std::fs::write(repo.join("file"), "EVIL").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("file")).unwrap(),
+            "v1",
+            "isolated tree must not see later live-repo edits"
+        );
+        assert!(std::fs::write(dest.join("file"), "nope").is_err(), "isolated src is read-only");
+        rt.block_on(cleanup_isolated_src(&repo, &dest));
+        std::env::remove_var("AGENTD_UPDATE_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
