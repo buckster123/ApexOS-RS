@@ -169,7 +169,9 @@ struct IdState { users: Vec<UserRow>, agents: Vec<AgentRow>, selected: String, p
     /// True when the wizard is acting as the LOGIN screen (no AGENTD_TOKEN in env →
     /// the desktop/PWA path): profiles come from /api/auth/profiles and a pick/OK
     /// mints a session token via /api/auth/login + re-execs. See agent-identity.md 3e.
-    login: bool }
+    login: bool,
+    /// True when this login is the first-boot owner-PIN claim (`/api/auth/setup`).
+    setup: bool }
 impl IdState { fn new() -> Self { Self::default() } }
 
 /// Re-exec this binary with `AGENTD_TOKEN` set to the freshly-minted session token,
@@ -184,6 +186,43 @@ fn reexec_with_token(token: &str) -> std::io::Error {
         .args(std::env::args().skip(1))
         .env("AGENTD_TOKEN", token)
         .exec()
+}
+
+/// First-boot claim: set the owner PIN from loopback, then login as owner.
+async fn do_setup_then_login(
+    client:  &reqwest::Client,
+    base:    &str,
+    pin:     String,
+    ui_w:    slint::Weak<AppWindow>,
+) {
+    let body = serde_json::json!({ "pin": pin });
+    let resp = client.post(format!("{base}/api/auth/setup"))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await;
+    match resp {
+        Ok(r) => {
+            let v = r.json::<Value>().await.unwrap_or(Value::Null);
+            if v["ok"].as_bool().unwrap_or(false) {
+                do_login(client, base, "owner".into(), pin, ui_w).await;
+                return;
+            }
+            let msg = v["error"].as_str().unwrap_or("Could not set owner PIN").to_string();
+            let m = msg.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    ID_STATE.with(|s| s.borrow_mut().pin.clear());
+                    ui.set_identity_pin_filled(0);
+                    ui.set_identity_pin_error(true);
+                    ui.set_identity_pin_message(m.into());
+                }
+            }).ok();
+            notify(ToastKind::Error, msg);
+        }
+        Err(e) => {
+            notify(ToastKind::Error, format!("Setup unreachable: {e}"));
+        }
+    }
 }
 
 /// Slice-3e login: POST profile+PIN to the ungated `/api/auth/login`. On success,
@@ -8911,15 +8950,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         has_pin: u["has_pin"].as_bool().unwrap_or(false),
                     }).collect()).unwrap_or_default();
 
+                    let setup_required = v["setup_required"].as_bool().unwrap_or(false);
+                    let login_open = v["login_open"].as_bool().unwrap_or(true);
+
                     // Auto-skip (slice 3e): if a default profile is set, an OPEN one
                     // logs in with zero taps; a PIN one jumps straight to the keypad.
+                    // Never auto-skip while the node is unclaimed.
                     let default_user = v["default_user"].as_str().map(|s| s.to_string());
                     let default_profile = default_user.as_ref()
                         .and_then(|du| users.iter().find(|u| &u.id == du).cloned());
-                    if let Some(dp) = default_profile.as_ref().filter(|u| !u.has_pin) {
-                        // Re-execs on success; only RETURNS on failure → fall through
-                        // and show the picker so the user isn't stranded.
-                        do_login(&client, &base, dp.id.clone(), String::new(), ui_w.clone()).await;
+                    if !setup_required {
+                        if let Some(dp) = default_profile.as_ref().filter(|u| !u.has_pin) {
+                            do_login(&client, &base, dp.id.clone(), String::new(), ui_w.clone()).await;
+                        }
                     }
                     let pin_default = default_profile.filter(|u| u.has_pin);
 
@@ -8931,20 +8974,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }).collect();
                         ID_STATE.with(|s| {
                             let mut s = s.borrow_mut();
-                            s.users = users; s.login = true;
-                            if let Some(pd) = &pin_default { s.selected = pd.id.clone(); }
+                            s.users = users; s.login = true; s.setup = setup_required && login_open;
+                            if setup_required && login_open {
+                                s.selected = "owner".to_string();
+                            } else if let Some(pd) = &pin_default {
+                                s.selected = pd.id.clone();
+                            }
                         });
                         ID_USERS.with(|m| { if let Some(model) = m.borrow().as_ref() { model.set_vec(user_defs); } });
                         ui.set_identity_pin_filled(0);
                         ui.set_identity_pin_error(false);
-                        ui.set_identity_pin_message("".into());
-                        // PIN default → pre-selected keypad (step 1, ‹ Back returns to
-                        // the picker); otherwise the profile picker (step 0).
-                        if let Some(pd) = pin_default {
-                            ui.set_identity_selected_name(pd.name.into());
+                        if setup_required && !login_open {
+                            ui.set_identity_pin_message("Claim this node on the device.".into());
+                            ui.set_identity_step(0);
+                        } else if setup_required {
+                            ui.set_identity_selected_name("Owner".into());
+                            ui.set_identity_pin_message("Set an owner PIN to claim this node".into());
                             ui.set_identity_step(1);
                         } else {
-                            ui.set_identity_step(0);
+                            ui.set_identity_pin_message("".into());
+                            if let Some(pd) = pin_default {
+                                ui.set_identity_selected_name(pd.name.into());
+                                ui.set_identity_step(1);
+                            } else {
+                                ui.set_identity_step(0);
+                            }
                         }
                         ui.set_identity_wizard_open(true);
                     }).ok();
@@ -9009,7 +9063,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     rt_h.spawn(async move {
                         // Login mode (3e): mint a session token + re-exec instead of verify.
                         if login {
-                            do_login(&client, &base, user_id, pin, ui_w2).await;
+                            let setup = ID_STATE.with(|s| s.borrow().setup);
+                            if setup {
+                                do_setup_then_login(&client, &base, pin, ui_w2).await;
+                            } else {
+                                do_login(&client, &base, user_id, pin, ui_w2).await;
+                            }
                             return;
                         }
                         let body = serde_json::json!({ "user_id": user_id, "pin": pin });

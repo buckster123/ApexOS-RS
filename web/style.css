@@ -78,6 +78,15 @@ button { font-family:inherit; cursor:pointer; color:var(--text); background:none
 .link-btn { margin-top:18px; color:var(--text-dim); font-size:13px; padding:8px; }
 .link-btn:hover { color:var(--text); }
 .login-err { text-align:center; color:var(--danger); font-size:13px; min-height:18px; margin-top:14px; }
+.setup { display:flex; flex-direction:column; gap:10px; }
+.setup-copy { color:var(--text-dim); font-size:13px; text-align:center; margin:0 0 6px; }
+.setup-pin {
+  width:100%; background:var(--surface-hi); border:1px solid var(--border);
+  border-radius:var(--radius); color:var(--text-bright); font:inherit;
+  padding:12px 14px; letter-spacing:0.2em;
+}
+.setup-pin:focus { outline:none; border-color:var(--primary); }
+.setup-go { width:100%; padding:12px; border-radius:var(--radius); background:var(--primary-dim); }
 
 /* ── App shell ──────────────────────────────────────────────────────────── */
 .app { display:flex; flex-direction:column; height:100%; }
