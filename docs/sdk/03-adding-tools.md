@@ -84,6 +84,11 @@ let candidates: Vec<&str> = path_keys.iter().filter_map(|k| call.args[*k].as_str
    - `workspace` → `workspace_decision(path)` (`policy.rs:136`)
    - **no rule found → `Ask`** (unknown tool is the safe default — `policy.rs:129`).
 
+**Tool names are unique.** A plugin that advertises `read_file` / `remember` /
+a virtual name (`goal_create`, `propose_evolution`, …) is **rejected at
+registration** — it does not inherit that name's policy and does not skip the
+identity/workspace stamps. Pick a name that is not already owned.
+
 **For a new tool:** the supervisor feeds the policy engine **every** path-typed argument
 (`path`, `output_path`, `dest`, `destination`, `target`, `to` — the `path_keys` list,
 `supervisor.rs:379`), and the `workspace` rule Asks if **any** of them falls outside the

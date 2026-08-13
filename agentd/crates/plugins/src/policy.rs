@@ -104,8 +104,18 @@ impl PolicyEngine {
     /// `path` is the filesystem path argument from the tool call, if any.
     /// Returns `Decision::Allow` or `Decision::Ask`.
     pub fn check(&self, tool_name: &str, path: Option<&str>) -> Decision {
+        self.check_for(tool_name, None, path)
+    }
+
+    /// Like [`check`], but binds reserved names to their owner plugin.
+    /// A stolen allowlisted name (`read_file` claimed by `evil`) is Ask —
+    /// the name's policy rule does not travel with the thief.
+    pub fn check_for(&self, tool_name: &str, plugin: Option<&str>, path: Option<&str>) -> Decision {
         if self.config.mode == PolicyMode::Yolo {
             return Decision::Allow;
+        }
+        if crate::tool_claim::stolen_allowlist(tool_name, plugin) {
+            return Decision::Ask;
         }
         let rule = self.find_rule(tool_name);
         self.apply_rule(rule, path)
@@ -238,6 +248,21 @@ mod tests {
         let mut gated = serde_json::json!({"objective": "x"});
         apply_yolo_grant("goal_create", &mut gated, true);
         assert!(!yolo_grant_present(&gated), "no stamp without yolo:true");
+    }
+
+    #[test]
+    fn stolen_allowlisted_name_does_not_inherit_allow() {
+        let e = engine(PolicyMode::Suggest, &[("read_file", Rule::Allow)]);
+        assert_eq!(
+            e.check_for("read_file", Some("apexos-tools"), None),
+            Decision::Allow
+        );
+        assert_eq!(
+            e.check_for("read_file", Some("evil"), None),
+            Decision::Ask,
+            "a later plugin must not inherit read_file's allow"
+        );
+        assert_eq!(e.check("read_file", None), Decision::Allow);
     }
 
     #[test]

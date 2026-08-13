@@ -4,7 +4,8 @@
 > review was stopped at the operator's request after the findings below were
 > verified. Wave 1 (PR #355): findings 1, 3, SA-15, SA-16.
 > Wave 2 (PR #356): finding 14.
-> Wave 3 (this tree): finding 9.
+> Wave 3 (PR #357): finding 9.
+> Wave 4 (this tree): finding 10.
 
 ## Ranked findings
 

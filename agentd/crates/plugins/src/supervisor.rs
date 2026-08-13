@@ -9,6 +9,7 @@ use crate::mcp::McpClient;
 use crate::policy::{
     apply_yolo_grant, requests_yolo_elevation, Decision, PolicyEngine, PolicyMode,
 };
+use crate::tool_claim::{claim_tool_name, stamps_agent_id, stamps_workspace};
 use crate::vast::{VastState, VastPhase, VastInstance, vastai, load_recipes};
 
 /// Process-global monotonic source of `EvolutionId`s. Each proposed evolution
@@ -538,10 +539,13 @@ impl Supervisor {
                         }
 
                         let (mut decision, node_yolo) = {
+                            let plugin = self.tool_registry.get(&call.tool).map(|p| p.0.as_str());
                             let pol = self.policy.read().await;
                             let d = if candidates.is_empty() {
-                                pol.check(&call.tool, None)
-                            } else if candidates.iter().any(|p| pol.check(&call.tool, Some(p.as_str())) == Decision::Ask) {
+                                pol.check_for(&call.tool, plugin, None)
+                            } else if candidates.iter().any(|p| {
+                                pol.check_for(&call.tool, plugin, Some(p.as_str())) == Decision::Ask
+                            }) {
                                 Decision::Ask
                             } else {
                                 Decision::Allow
@@ -2283,7 +2287,7 @@ impl Supervisor {
                 // model typed (it can forget, typo, or — multi-agent — spoof).
                 // Resolved from the calling session's binding (else the node
                 // default). See docs/agent-identity.md (slices 1 & 3b).
-                if pid.0 == "cerebro" {
+                if stamps_agent_id(&pid.0, &call.tool) {
                     let agent_id = apexos_core::resolve_agent_id(&self.session_bindings, session);
                     stamp_agent_id(&mut call.args, &agent_id);
                     // Spawn provenance (H6 residual, apex1): a memory MINTED by an
@@ -2294,7 +2298,7 @@ impl Supervisor {
                     if apexos_core::is_spawn_session(session.0) {
                         stamp_spawn_provenance(&mut call.args, &call.tool);
                     }
-                } else if pid.0 == "apexos-tools" {
+                } else if stamps_workspace(&pid.0, &call.tool) {
                     // System-stamp the caller's workspace so the shared (single)
                     // tool process confines this call's FS ops to the per-agent
                     // root. Always stamped (APEX → the node base), so a model
@@ -2391,13 +2395,37 @@ impl Supervisor {
         let client = Arc::new(McpClient::attach(&mut child).await?);
         client.initialize().await?;
         let tools = client.list_tools().await?;
+        let advertised = tools.len();
 
-        for spec in &tools {
-            self.tool_registry.insert(spec.name.clone(), plugin_id.clone());
+        let mut accepted = Vec::new();
+        for spec in tools {
+            match claim_tool_name(&spec.name, &plugin_id.0, &self.tool_registry) {
+                Ok(()) => {
+                    self.tool_registry
+                        .insert(spec.name.clone(), plugin_id.clone());
+                    accepted.push(spec);
+                }
+                Err(reason) => {
+                    eprintln!(
+                        "[supervisor] plugin '{}' tool '{}' rejected: {reason}",
+                        plugin_id.0, spec.name
+                    );
+                }
+            }
         }
 
-        eprintln!("[supervisor] plugin '{}' up — {} tools", plugin_id.0, tools.len());
-        self.bus.emit(Event::PluginUp { plugin: plugin_id.clone(), tools }).await;
+        eprintln!(
+            "[supervisor] plugin '{}' up — {} tools ({} advertised)",
+            plugin_id.0,
+            accepted.len(),
+            advertised
+        );
+        self.bus
+            .emit(Event::PluginUp {
+                plugin: plugin_id.clone(),
+                tools: accepted,
+            })
+            .await;
 
         let id_w = plugin_id.clone();
         tokio::spawn(async move {
