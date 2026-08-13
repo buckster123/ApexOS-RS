@@ -20,11 +20,19 @@ use serde_json::Value;
 // tokio_tungstenite's Message used below.
 use apexos_protocol::{Event, GoalState, SensorReading, WorkerState};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+/// Approval nonces keyed by stringified ActionId. The server mints these on
+/// `ApprovalPending`; a `user_approval` without the matching nonce is ignored.
+fn approval_nonces() -> &'static Mutex<HashMap<String, u64>> {
+    static MAP: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 // ── Thread-local model access ─────────────────────────────────────────────────
 thread_local! {
@@ -7517,13 +7525,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(row) = find_tool_row(call_id.as_str()) {
             update_tool_row(row, |item| item.awaiting_approval = false);
         }
-        // Event::UserApproval { session, action: ActionId, granted } — gateway injects session.
-        // call_id is the stringified action-id; parse it back to the bare number agentd expects.
+        // Event::UserApproval — gateway injects session. call_id is the
+        // stringified action-id; nonce was stored from ApprovalPending.
         let action: u64 = call_id.as_str().parse().unwrap_or(0);
+        let nonce = approval_nonces()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(call_id.as_str())
+            .unwrap_or(0);
         let payload = serde_json::json!({
             "type": "user_approval",
             "action": action,
-            "granted": true
+            "granted": true,
+            "nonce": nonce
         })
         .to_string();
         tx_approve.send(payload).ok();
@@ -7538,10 +7552,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
         let action: u64 = call_id.as_str().parse().unwrap_or(0);
+        let nonce = approval_nonces()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(call_id.as_str())
+            .unwrap_or(0);
         let payload = serde_json::json!({
             "type": "user_approval",
             "action": action,
-            "granted": false
+            "granted": false,
+            "nonce": nonce
         })
         .to_string();
         tx_reject.send(payload).ok();
@@ -11087,7 +11107,11 @@ fn dispatch_event(
             .ok();
         }
 
-        Event::ApprovalPending { call, .. } => {
+        Event::ApprovalPending { call, nonce, .. } => {
+            approval_nonces()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(call.id.0.to_string(), nonce);
             // Work Board: the turn is blocked awaiting approval → a card in NEEDS APPROVAL.
             {
                 let cid = call.id.0.to_string();

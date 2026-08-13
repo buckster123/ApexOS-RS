@@ -131,7 +131,7 @@ The **core Bus** is the hub. Everything is fan-out via a `broadcast::Sender<Even
         ├──► UI renders tool_card
         └──► apexos-plugins Supervisor::run (supervisor.rs:367 → dispatch_tool :558) consumes it
                  PolicyEngine.check(tool,path)  →  Allow | Ask
-                   Ask → emit ApprovalPending ──► UI buttons ──► {type:user_approval, action:<id>}
+                   Ask → emit ApprovalPending{nonce} ──► UI buttons ──► {type:user_approval, action:<id>, nonce}
                    Allow → dispatch_tool:
                        virtual tool → channel (rollback_tx/schedule_tx/council_tx) or async work
                        real tool    → ToolProxy/McpClient.call_tool over stdio

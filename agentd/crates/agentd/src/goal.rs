@@ -307,7 +307,7 @@ pub fn spawn_goal_driver(
                         // silently — surfaced on the board; a human approves + goal_resume.
                         // (A goal-scoped-yolo goal never lands here — the supervisor
                         // auto-approves its session before any ApprovalPending is emitted.)
-                        Ok(Event::ApprovalPending { session, call }) => {
+                        Ok(Event::ApprovalPending { session, call, .. }) => {
                             let parked = block_on_approval(&goals, &bus, session.0, &call.tool).await;
                             if parked { save_goals(&goals, &goals_path).await; }
                         }

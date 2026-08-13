@@ -263,7 +263,7 @@ function onEvent(m) {
       updateToolCard(m.call, m.output);
       break;
     case 'approval_pending':
-      addApprovalCard(m.call);
+      addApprovalCard(m.call, m.nonce);
       setBusy(true);
       break;
     case 'turn_complete':
@@ -370,7 +370,7 @@ function updateToolCard(callId, output) {
   scroll(false);
 }
 
-function addApprovalCard(call) {
+function addApprovalCard(call, nonce) {
   S.openBubble = null;
   const card = buildToolCard(call);
   card.classList.add('open');
@@ -379,7 +379,7 @@ function addApprovalCard(call) {
   const yes = document.createElement('button'); yes.className = 'btn-approve'; yes.textContent = '✓ Approve';
   const no = document.createElement('button'); no.className = 'btn-reject'; no.textContent = '✕ Reject';
   const decide = (granted) => {
-    send({ type: 'user_approval', action: call.id, granted });
+    send({ type: 'user_approval', action: call.id, granted, nonce: nonce || 0 });
     row.remove();
     card._status.className = 'tool-status ' + (granted ? 'running' : 'err');
     card._status.textContent = granted ? '···' : 'rejected';

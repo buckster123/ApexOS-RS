@@ -44,9 +44,7 @@ impl SystemState {
             }
 
             Event::UserCancel { session } => {
-                // Cascade is driven by the task manager walking `spawned`;
-                // state just records intent if a status flag is added later.
-                let _ = session;
+                self.pending_approvals.retain(|_, s| s != session);
             }
 
             // ── agent streaming (transient UI deltas, not accumulated here) ─
@@ -55,7 +53,7 @@ impl SystemState {
             // ── tool flow ──────────────────────────────────────────────────
             Event::ToolRequested { .. } => {}
 
-            Event::ApprovalPending { session, call } => {
+            Event::ApprovalPending { session, call, .. } => {
                 self.pending_approvals.insert(call.id, *session);
             }
 
@@ -63,16 +61,13 @@ impl SystemState {
                 self.pending_approvals.remove(action);
             }
 
-            Event::ToolResult {
-                session,
-                call,
-                output,
-            } => {
-                let _ = (session, call, output);
+            Event::ToolResult { call, .. } => {
+                self.pending_approvals.remove(call);
             }
 
             // ── multi-agent routing hook ───────────────────────────────────
             Event::TurnComplete { session } => {
+                self.pending_approvals.retain(|_, s| s != session);
                 if let Some(ctx) = self.sessions.get(session) {
                     if let Some(_parent) = ctx.parent {
                         // task manager delivers child's final output as a
@@ -253,13 +248,41 @@ mod tests {
         s.apply(&Event::ApprovalPending {
             session: SessionId(1),
             call,
+            nonce: 9,
         });
         assert_eq!(s.pending_approvals.len(), 1);
         s.apply(&Event::UserApproval {
             session: SessionId(1),
             action: ActionId(7),
             granted: true,
+            nonce: 9,
         });
+        assert!(s.pending_approvals.is_empty());
+    }
+
+    #[test]
+    fn cancel_and_turn_complete_drop_session_approvals() {
+        let mut s = SystemState::default();
+        let call = |id| ToolCall {
+            id: ActionId(id),
+            tool: "run_command".into(),
+            args: serde_json::json!({}),
+            needs_approval: true,
+        };
+        s.apply(&Event::ApprovalPending {
+            session: SessionId(1),
+            call: call(1),
+            nonce: 1,
+        });
+        s.apply(&Event::ApprovalPending {
+            session: SessionId(2),
+            call: call(2),
+            nonce: 2,
+        });
+        s.apply(&Event::UserCancel { session: SessionId(1) });
+        assert!(!s.pending_approvals.contains_key(&ActionId(1)));
+        assert!(s.pending_approvals.contains_key(&ActionId(2)));
+        s.apply(&Event::TurnComplete { session: SessionId(2) });
         assert!(s.pending_approvals.is_empty());
     }
 

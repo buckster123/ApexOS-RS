@@ -34,6 +34,40 @@ struct Plugin {
 struct PendingApproval {
     session: SessionId,
     call:    ToolCall,
+    nonce:   u64,
+}
+
+/// Non-zero CSPRNG nonce. Zero is reserved for "missing" on the wire.
+fn mint_approval_nonce() -> u64 {
+    loop {
+        let n: u64 = rand::random();
+        if n != 0 {
+            return n;
+        }
+    }
+}
+
+/// Take a pending entry only when session and nonce both match. A mismatch
+/// leaves the entry in the map (a guessed ActionId must not consume it).
+fn take_matching_approval(
+    map: &mut HashMap<ActionId, PendingApproval>,
+    session: SessionId,
+    action: ActionId,
+    nonce: u64,
+) -> Option<PendingApproval> {
+    match map.get(&action) {
+        Some(p) if p.session == session && p.nonce != 0 && p.nonce == nonce => {
+            map.remove(&action)
+        }
+        _ => None,
+    }
+}
+
+fn purge_session_approvals(
+    map: &mut HashMap<ActionId, PendingApproval>,
+    session: SessionId,
+) {
+    map.retain(|_, p| p.session != session);
 }
 
 pub enum SupervisorCmd {
@@ -320,6 +354,25 @@ impl Supervisor {
         self.rehearse_tx = Some(tx);
     }
 
+    async fn park_for_approval(&mut self, session: SessionId, call: ToolCall) {
+        let nonce = mint_approval_nonce();
+        self.pending_approvals.insert(
+            call.id,
+            PendingApproval {
+                session,
+                call: call.clone(),
+                nonce,
+            },
+        );
+        self.bus
+            .emit(Event::ApprovalPending {
+                session,
+                call,
+                nonce,
+            })
+            .await;
+    }
+
     /// Wires the scheduler channel so schedule_* tools route to the scheduler task.
     pub fn set_schedule_tx(&mut self, tx: mpsc::Sender<(SessionId, ActionId, String, serde_json::Value)>) {
         self.schedule_tx = Some(tx);
@@ -477,11 +530,7 @@ impl Supervisor {
                                         call.tool, session);
                                     self.dispatch_tool(session, call);
                                 } else {
-                                    self.pending_approvals.insert(
-                                        call.id,
-                                        PendingApproval { session, call: call.clone() },
-                                    );
-                                    self.bus.emit(Event::ApprovalPending { session, call }).await;
+                                    self.park_for_approval(session, call).await;
                                 }
                                 continue;
                             }
@@ -525,17 +574,15 @@ impl Supervisor {
                             Decision::Ask => {
                                 eprintln!("[policy] approval required: '{}' (session {:?})",
                                     call.tool, session);
-                                self.pending_approvals.insert(
-                                    call.id,
-                                    PendingApproval { session, call: call.clone() },
-                                );
-                                self.bus.emit(Event::ApprovalPending { session, call }).await;
+                                self.park_for_approval(session, call).await;
                             }
                         }
                     }
 
-                    Ok(Event::UserApproval { session, action, granted }) => {
-                        if let Some(pending) = self.pending_approvals.remove(&action) {
+                    Ok(Event::UserApproval { session, action, granted, nonce }) => {
+                        if let Some(pending) =
+                            take_matching_approval(&mut self.pending_approvals, session, action, nonce)
+                        {
                             if granted {
                                 eprintln!("[policy] approved: '{}' (session {:?})",
                                     pending.call.tool, pending.session);
@@ -548,7 +595,7 @@ impl Supervisor {
                                 let bus = self.bus.clone();
                                 tokio::spawn(async move {
                                     bus.emit(Event::ToolResult {
-                                        session,
+                                        session: pending.session,
                                         call: action,
                                         output: ToolOutput {
                                             ok:      false,
@@ -561,7 +608,26 @@ impl Supervisor {
                                     }).await;
                                 });
                             }
+                        } else {
+                            eprintln!(
+                                "[policy] ignored approval action={:?} session={:?} \
+                                 (missing, wrong session, or bad nonce)",
+                                action, session
+                            );
                         }
+                    }
+
+                    Ok(Event::UserCancel { session }) => {
+                        purge_session_approvals(&mut self.pending_approvals, session);
+                    }
+
+                    Ok(Event::TurnComplete { session }) => {
+                        purge_session_approvals(&mut self.pending_approvals, session);
+                    }
+
+                    Ok(Event::ToolResult { call, .. }) => {
+                        // Timeout / external completion must not leave a live grant.
+                        self.pending_approvals.remove(&call);
                     }
 
                     Ok(_) => {}
@@ -3124,6 +3190,62 @@ async fn mesh_agent_spawn(node: &str, prompt: &str, system: Option<&str>, timeou
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn approval_take_requires_session_and_nonce() {
+        let call = ToolCall {
+            id: ActionId(7),
+            tool: "run_command".into(),
+            args: serde_json::json!({}),
+            needs_approval: true,
+        };
+        let mut map = HashMap::new();
+        map.insert(
+            ActionId(7),
+            PendingApproval {
+                session: SessionId(1),
+                call,
+                nonce: 99,
+            },
+        );
+        assert!(
+            take_matching_approval(&mut map, SessionId(2), ActionId(7), 99).is_none(),
+            "wrong session must not consume"
+        );
+        assert!(map.contains_key(&ActionId(7)));
+        assert!(
+            take_matching_approval(&mut map, SessionId(1), ActionId(7), 0).is_none(),
+            "zero nonce must not consume"
+        );
+        assert!(
+            take_matching_approval(&mut map, SessionId(1), ActionId(7), 1).is_none(),
+            "wrong nonce must not consume"
+        );
+        assert!(map.contains_key(&ActionId(7)));
+        let taken = take_matching_approval(&mut map, SessionId(1), ActionId(7), 99).unwrap();
+        assert_eq!(taken.nonce, 99);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn approval_purge_is_session_scoped() {
+        let mk = |id, session, nonce| PendingApproval {
+            session: SessionId(session),
+            call: ToolCall {
+                id: ActionId(id),
+                tool: "run_command".into(),
+                args: serde_json::json!({}),
+                needs_approval: true,
+            },
+            nonce,
+        };
+        let mut map = HashMap::new();
+        map.insert(ActionId(1), mk(1, 10, 1));
+        map.insert(ActionId(2), mk(2, 11, 2));
+        purge_session_approvals(&mut map, SessionId(10));
+        assert!(!map.contains_key(&ActionId(1)));
+        assert!(map.contains_key(&ActionId(2)));
+    }
 
     #[test]
     fn spawn_provenance_stamps_mint_calls_only() {

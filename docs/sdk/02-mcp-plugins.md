@@ -412,8 +412,9 @@ the supervisor checks policy before it ever calls you (`supervisor.rs:384-403`).
 
 - **Approval gate.** Before dispatch, `PolicyEngine.check(tool_name, path)`
   (`policy.rs:106`) returns `Allow` or `Ask`. On `Ask`, the supervisor emits
-  `ApprovalPending`, holds your call, and only dispatches after a matching
-  `UserApproval { granted: true }` arrives (`supervisor.rs:420-441`). On deny it
+  `ApprovalPending` (with a session-bound nonce), holds your call, and only
+  dispatches after a matching `UserApproval { granted: true, nonce }` from the
+  **same session** arrives. On deny it
   short-circuits to a `ToolResult { ok: false, content: "denied by user" }` and
   never calls you.
 - **How rules match your tool.** Rules in `config/policy.toml` key on the tool name,

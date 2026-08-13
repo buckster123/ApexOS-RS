@@ -34,7 +34,7 @@ stringify it for the row key; don't expect a flat `call_id`.
 | `turn_complete` | — | clear busy, TTS if enabled |
 | `tool_requested` | `call: {id, tool, args, needs_approval}` | push tool block (status=running) |
 | `tool_result` | `call: <id>, output: {ok, content}` | update block by `call`; ok→done, !ok→error |
-| `approval_pending` | `call: {id, tool, args}` | show approve/reject buttons |
+| `approval_pending` | `call: {id, tool, args}`, `nonce: u64` | show approve/reject; echo `nonce` on `user_approval` |
 | `sensor_reading` | `reading: {kind, …}` | update IAQ / thermal state |
 | `sensor_alert` | `{node_id, kind, value, threshold, sensor_id}` | GLOBAL — one per persistence-filtered sustained event; the `ui_reflex` trigger |
 | `wake_triggered` | — | flash wake indicator |
@@ -52,9 +52,12 @@ with the same `{text?, images:[…]}` body (PWA / phone camera / curl).
 {"type": "user_prompt", "text": "what is this?",
  "images": [{"path": "screenshots/latest.png"}, {"b64": "<base64>", "media_type": "image/jpeg"}]}
 ```
-Send approval (`action` = the numeric `ToolCall.id`; **not** `call_id`/`approved`):
+Send approval (`action` = the numeric `ToolCall.id`; **not** `call_id`/`approved`).
+`nonce` is the capability from the matching `approval_pending` — a missing or
+wrong nonce, or a session that is not the pending call's session, is ignored
+and does **not** consume the pending entry:
 ```json
-{"type": "user_approval", "action": 5, "granted": true}
+{"type": "user_approval", "action": 5, "granted": true, "nonce": 881726453012}
 ```
 Cancel a turn (agentd `cascade_cancel` aborts it but emits no `TurnComplete`,
 so the UI must also clear its own busy + pending tool cards):
