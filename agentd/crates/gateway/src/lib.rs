@@ -1,9 +1,10 @@
 use axum::{
     Json, Router, middleware,
     extract::{
-        Path, Query, Request, State,
+        ConnectInfo, Path, Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    Extension,
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -19,7 +20,7 @@ pub use mesh::{parse_avahi_output, PeerRecord, PeerRegistry, PeerRole};
 pub mod beacon;
 pub use beacon::{new_liveness_map, spawn_beacon_loop, LivenessMap};
 pub mod session_auth;
-pub use session_auth::{SessionAuth, SessionStore};
+pub use session_auth::{AuthRole, RequestAuth, SessionAuth, SessionStore};
 mod sensor_ingress;
 use sensor_ingress::SensorIngress;
 use serde::{Deserialize, Serialize};
@@ -270,14 +271,16 @@ impl PinLockout {
 
 /// Check Bearer token on all gated routes.
 /// Accepts "Authorization: Bearer <token>" header or "?token=<token>" query param.
-/// No-op when AGENTD_TOKEN is unset (empty string).
+/// No-op when AGENTD_TOKEN is unset (empty string) — treated as Admin (tests/dev).
+/// Inserts [`RequestAuth`] so `require_admin` and handlers can see the role.
 async fn require_token(
     State(state): State<GatewayState>,
-    req: Request,
+    mut req: Request,
     next: middleware::Next,
 ) -> Response {
     let token = state.api_token.as_str();
     if token.is_empty() {
+        req.extensions_mut().insert(RequestAuth::Admin);
         return next.run(req).await;
     }
     let from_header = req.headers()
@@ -286,6 +289,7 @@ async fn require_token(
         .and_then(|s| s.strip_prefix("Bearer "))
         .unwrap_or("");
     if tokens_match(from_header, token) {
+        req.extensions_mut().insert(RequestAuth::Admin);
         return next.run(req).await;
     }
     // URL-decode the ?token= value so percent-encoded tokens compare correctly.
@@ -296,6 +300,7 @@ async fn require_token(
     let from_query = percent_encoding::percent_decode_str(from_query_raw)
         .decode_utf8_lossy();
     if tokens_match(&from_query, token) {
+        req.extensions_mut().insert(RequestAuth::Admin);
         return next.run(req).await;
     }
     // Not the admin token — accept a valid minted human-login session token
@@ -303,15 +308,39 @@ async fn require_token(
     // direct lookup over 256-bit opaque tokens, so no constant-time compare needed.
     if !from_header.is_empty() || !from_query.is_empty() {
         let now = std::time::Instant::now();
-        let ok = {
+        let session = {
             let s = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-            s.verify(from_header, now).is_some() || s.verify(from_query.as_ref(), now).is_some()
+            s.verify(from_header, now).cloned().or_else(|| s.verify(from_query.as_ref(), now).cloned())
         };
-        if ok {
+        if let Some(auth) = session {
+            req.extensions_mut().insert(RequestAuth::Session(auth));
             return next.run(req).await;
         }
     }
     (StatusCode::UNAUTHORIZED, "invalid or missing token").into_response()
+}
+
+/// Privileged REST: admin token or an Owner-role session. Guest session tokens
+/// stay on /ws + their own sessions (finding 2).
+async fn require_admin(req: Request, next: middleware::Next) -> Response {
+    match req.extensions().get::<RequestAuth>() {
+        Some(auth) if auth.is_privileged() => next.run(req).await,
+        Some(_) => (StatusCode::FORBIDDEN, "owner or admin token required").into_response(),
+        None => (StatusCode::UNAUTHORIZED, "invalid or missing token").into_response(),
+    }
+}
+
+fn request_is_admin_token(state: &GatewayState, headers: &axum::http::HeaderMap) -> bool {
+    let token = state.api_token.as_str();
+    if token.is_empty() {
+        return false;
+    }
+    let from_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    tokens_match(from_header, token)
 }
 
 /// Constant-time token comparison. Length is checked first (lengths are not
@@ -327,32 +356,22 @@ fn tokens_match(provided: &str, expected: &str) -> bool {
 }
 
 pub fn router(state: GatewayState) -> Router {
-    // All API + WS routes are gated by the bearer token middleware.
-    // /sensor-bridge has its own SENSOR_BRIDGE_TOKEN scheme — kept outside.
-    // Static fallback (dashboard HTML/JS) is public — no secrets in those files.
-    let gated = Router::new()
+    // Human-session routes: any valid admin or session token.
+    let user_gated = Router::new()
         .route("/ws",              get(ws_handler))
-        .route("/terminal-ws",     get(terminal_ws_handler))
         .route("/api/status",      get(status_handler))
-        .route("/api/key",         post(set_key_handler))
-        .route("/api/keys",        get(get_keys_handler).post(set_keys_handler))
-        .route("/api/model",       get(get_model_handler).post(set_model_handler))
+        .route("/api/model",       get(get_model_handler))
         .route("/api/models",      get(get_models_handler))
-        .route("/api/cache",       get(get_cache_handler).post(set_cache_handler))
-        .route("/api/history",     get(get_history_handler).post(set_history_handler))
+        .route("/api/cache",       get(get_cache_handler))
+        .route("/api/history",     get(get_history_handler))
         .route("/api/usage",       get(get_usage_handler))
         .route("/api/thermal/frame", get(thermal_frame_handler))
-        .route("/api/backend",     get(get_backend_handler).post(set_backend_handler))
-        .route("/api/compute/discover", get(compute_discover_handler))
-        .route("/api/policy",         post(set_policy_handler))
-        .route("/api/policy/rules",   get(get_policy_rules_handler))
-        .route("/api/soul",           get(get_soul_handler).post(set_soul_handler))
-        .route("/api/power",              post(power_handler))
+        .route("/api/backend",     get(get_backend_handler))
+        .route("/api/soul",           get(get_soul_handler))
         .route("/api/evolution/history",  get(evolution_history_handler))
         .route("/api/evolution/stats",    get(evolution_stats_handler))
         .route("/api/sessions",           get(sessions_handler))
         .route("/api/sessions/active",    get(active_sessions_handler))
-        .route("/api/sessions/export",    post(session_export_handler))
         .route("/api/events/recent",      get(events_recent_handler))
         .route("/api/sessions/{id}",            delete(session_delete_handler))
         .route("/api/sessions/{id}/archive",     post(session_archive_handler))
@@ -370,11 +389,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/workspace/rename",      post(workspace_rename_handler))
         .route("/api/workspace/move",        post(workspace_move_handler))
         .route("/api/workspace/copy",        post(workspace_copy_handler))
-        .route("/api/media/eject",        post(media_eject_handler))
-        .route("/api/media/plugged",      post(media_plugged_handler))
         .route("/api/media/candidates",   get(media_candidates_handler))
-        .route("/api/media/prep",         post(media_prep_handler))
-        .route("/api/run",                post(run_command_handler))
         .route("/api/snapshot",           get(snapshot_handler))
         .route("/api/sonus/files",        get(sonus_files_handler))
         .route("/api/sonus/stream",       get(sonus_stream_handler))
@@ -386,33 +401,19 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/wake",               post(wake_handler))
         .route("/api/speak",              post(speak_handler))
         .route("/api/tts",                post(tts_handler))
-        .route("/api/council",               get(council_list_handler).post(council_start_handler))
+        .route("/api/council",               get(council_list_handler))
         .route("/api/council/{id}",          get(council_detail_handler))
-        .route("/api/council/{id}/butt-in",  post(council_butt_in_handler))
         .route("/api/capabilities",       get(capabilities_handler))
-        .route("/api/sensors/config",     get(sensor_config_get_handler).post(sensor_config_post_handler))
-        .route("/api/voice",              get(get_voice_handler).post(set_voice_handler))
+        .route("/api/sensors/config",     get(sensor_config_get_handler))
+        .route("/api/voice",              get(get_voice_handler))
         .route("/api/imaginarium",        get(imaginarium_reach_handler))
-        .route("/api/spawn",              post(spawn_handler))
-        .route("/api/worker/fanout",      post(worker_fanout_handler))
-        .route("/api/worker/query",       post(worker_query_handler))
-        .route("/api/worker/cancel",      post(worker_cancel_mesh_handler))
-        .route("/api/worker/report",      post(worker_report_mesh_handler).layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)))
-        .route("/api/mesh/file",          post(mesh_file_handler).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
-        .route("/api/courier/manifest",   post(courier_manifest_handler))
-        .route("/api/courier/receipt",    post(courier_receipt_handler))
         .route("/api/courier/status",     get(courier_status_handler))
-        .route("/api/mesh/memory",        post(mesh_memory_handler).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
-        .route("/api/mesh/recall",        post(mesh_recall_handler))
         .route("/api/mesh/nodes",         get(mesh_nodes_handler))
-        .route("/api/mesh/peers",         get(mesh_peers_get_handler).post(mesh_peers_post_handler))
-        .route("/api/mesh/peers/{id}",    delete(mesh_peers_delete_handler))
+        .route("/api/mesh/peers",         get(mesh_peers_get_handler))
         .route("/api/mesh/inbox",         get(mesh_inbox_handler))
         .route("/api/mesh/inbox/read",    post(mesh_inbox_read_handler))
-        .route("/api/mesh/pair/start",    post(pair_start_handler))
         .route("/api/mesh/pair/status",   get(pair_status_handler))
-        .route("/api/mesh/pair/redeem",   post(pair_redeem_handler))
-        .route("/api/vast/recipes",       get(vast_recipes_handler).post(vast_recipes_save_handler))
+        .route("/api/vast/recipes",       get(vast_recipes_handler))
         .route("/api/vast/status",        get(vast_status_handler))
         .route("/api/vast/offers",        get(vast_offers_handler))
         .route("/api/vast/hf-search",     get(vast_hf_search_handler))
@@ -425,30 +426,69 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/notes/write",        post(notes_write_handler))
         .route("/api/sketch",             post(sketch_save_handler))
         .route("/api/sketch/latest",      get(sketch_latest_handler))
+        .route("/api/auth/logout",        post(auth_logout_handler))
+        .route("/api/auth/me",            get(auth_me_handler))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
+
+    // Privileged REST: AGENTD_TOKEN or an Owner-role session. Guest tokens 403.
+    // Layers: require_token (outer) then require_admin.
+    let admin_gated = Router::new()
+        .route("/terminal-ws",     get(terminal_ws_handler))
+        .route("/api/key",         post(set_key_handler))
+        .route("/api/keys",        get(get_keys_handler).post(set_keys_handler))
+        .route("/api/model",       post(set_model_handler))
+        .route("/api/cache",       post(set_cache_handler))
+        .route("/api/history",     post(set_history_handler))
+        .route("/api/backend",     post(set_backend_handler))
+        .route("/api/compute/discover", get(compute_discover_handler))
+        .route("/api/policy",         post(set_policy_handler))
+        .route("/api/policy/rules",   get(get_policy_rules_handler))
+        .route("/api/soul",           post(set_soul_handler))
+        .route("/api/power",              post(power_handler))
+        .route("/api/sessions/export",    post(session_export_handler))
+        .route("/api/media/eject",        post(media_eject_handler))
+        .route("/api/media/plugged",      post(media_plugged_handler))
+        .route("/api/media/prep",         post(media_prep_handler))
+        .route("/api/run",                post(run_command_handler))
+        .route("/api/council",               post(council_start_handler))
+        .route("/api/council/{id}/butt-in",  post(council_butt_in_handler))
+        .route("/api/sensors/config",     post(sensor_config_post_handler))
+        .route("/api/voice",              post(set_voice_handler))
+        .route("/api/spawn",              post(spawn_handler))
+        .route("/api/worker/fanout",      post(worker_fanout_handler))
+        .route("/api/worker/query",       post(worker_query_handler))
+        .route("/api/worker/cancel",      post(worker_cancel_mesh_handler))
+        .route("/api/worker/report",      post(worker_report_mesh_handler).layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)))
+        .route("/api/mesh/file",          post(mesh_file_handler).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
+        .route("/api/courier/manifest",   post(courier_manifest_handler))
+        .route("/api/courier/receipt",    post(courier_receipt_handler))
+        .route("/api/mesh/memory",        post(mesh_memory_handler).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
+        .route("/api/mesh/recall",        post(mesh_recall_handler))
+        .route("/api/mesh/peers",         post(mesh_peers_post_handler))
+        .route("/api/mesh/peers/{id}",    delete(mesh_peers_delete_handler))
+        .route("/api/mesh/pair/start",    post(pair_start_handler))
+        .route("/api/mesh/pair/redeem",   post(pair_redeem_handler))
+        .route("/api/vast/recipes",       post(vast_recipes_save_handler))
         .route("/api/identities",         get(identities_list_handler))
         .route("/api/identities/user",    post(identities_create_user_handler))
         .route("/api/identities/agent",   post(identities_create_agent_handler))
         .route("/api/identities/verify",  post(identities_verify_pin_handler))
-        .route("/api/auth/logout",        post(auth_logout_handler))
         .route("/api/auth/default",       post(auth_default_handler))
-        .route("/api/auth/me",            get(auth_me_handler))
+        .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new()
-        .merge(gated)
+        .merge(user_gated)
+        .merge(admin_gated)
         .route("/sensor-bridge",   get(sensor_bridge_ws_handler))
         .route("/mesh-bridge",     get(mesh_bridge_ws_handler))
         // UNgated: the pairing claim is authenticated by the short-lived code itself,
         // not the api_token (the whole point is the caller doesn't have our token yet).
         .route("/api/mesh/pair/claim", post(pair_claim_handler))
-        // UNgated: human login (slice 3e) — authenticated by the profile PIN itself,
-        // not the api_token (the whole point is the human client doesn't have it). An
-        // open profile mints a token with no secret (LAN-trusted one-tap); a PIN
-        // profile is gated + guess-lockout-guarded. Mints the session token clients
-        // then use as Bearer for every gated route above.
+        // UNgated: human login — PIN (or loopback-only open guest after claim).
+        // LAN is closed until the owner profile has a PIN (finding 2).
         .route("/api/auth/login", post(auth_login_handler))
-        // UNgated: the minimal profile list (id/name/has_pin) the login screen needs
-        // before the client holds any token. PINs/agents stay behind /api/identities.
+        .route("/api/auth/setup", post(auth_setup_handler))
         .route("/api/auth/profiles", get(auth_profiles_handler))
         // UNgated: the lean liveness ping (ApexNET §6.2/D8) — ~40 B of node_id +
         // uptime, nothing mDNS discovery doesn't already broadcast on this LAN. The
@@ -566,6 +606,9 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
     // never-prompted id must find its (empty) entry instead of silently keeping
     // the old session. (First UserPrompt used to be the only creator.)
     state.histories.lock().await.entry(SessionId(session_id)).or_default();
+    if let Some(a) = &auth {
+        session_auth::write_session_owner(&state.sessions_dir, session_id, &a.user_id);
+    }
 
     // Initial bind (slice 3e): an authenticated human's first session resolves to
     // one of THEIR agents (their default) up front — so a guest can't act as APEX
@@ -629,6 +672,7 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
     let persona_sessions = state.persona_sessions.clone();  // G5 tier-2 — per-session persona
     let next_session_id = state.next_session_id.clone();   // for `hello{new:true}` (start a fresh chat)
     let identities = state.identities.clone();              // slice 3e — agent-bind gate
+    let sessions_dir = state.sessions_dir.clone();          // finding 2 — resume ownership
     let conn_auth = auth.clone();                           // this socket's human session (if any)
     let bound_w = bound_sessions.clone();
     let read = tokio::spawn(async move {
@@ -655,14 +699,25 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
                         let mut lock = histories.lock().await;
                         match resume {
                             Some(s) if lock.contains_key(&s) => {
-                                session_id = s.0;
-                                lock.get(&s).cloned().unwrap_or_default()
+                                let allowed = match &conn_auth {
+                                    None => true,
+                                    Some(a) => session_auth::session_visible_to(&sessions_dir, s.0, a),
+                                };
+                                if allowed {
+                                    session_id = s.0;
+                                    lock.get(&s).cloned().unwrap_or_default()
+                                } else {
+                                    lock.get(&SessionId(session_id)).cloned().unwrap_or_default()
+                                }
                             }
                             _ if want_new => {
                                 // Fresh chat: a new id from the shared atomic, empty
                                 // history — registered at mint like the connect path.
                                 session_id = next_session_id.fetch_add(1, Ordering::SeqCst);
                                 lock.insert(SessionId(session_id), Vec::new());
+                                if let Some(a) = &conn_auth {
+                                    session_auth::write_session_owner(&sessions_dir, session_id, &a.user_id);
+                                }
                                 vec![]
                             }
                             _ => vec![], // keep current session_id
@@ -1519,11 +1574,15 @@ async fn set_cache_handler(
 /// GET /api/history — the live window budget plus per-session "window in use"
 /// estimates (top 5 by size), so trim behavior stops being invisible. Bands are
 /// the trim's own math: fires past `trim_trigger`, cuts to `trim_target`.
-async fn get_history_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+async fn get_history_handler(
+    State(state): State<GatewayState>,
+    Extension(auth): Extension<RequestAuth>,
+) -> impl IntoResponse {
     let budget = state.history_budget.load(Ordering::Relaxed);
     let mut sessions: Vec<(u64, usize)> = {
         let lock = state.histories.lock().await;
         lock.iter()
+            .filter(|(sid, _)| session_ok(&state.sessions_dir, sid.0, &auth))
             .map(|(sid, h)| (sid.0, apexos_core::history::estimate_history(h)))
             .collect()
     };
@@ -1728,9 +1787,13 @@ async fn evolution_stats_handler(State(state): State<GatewayState>) -> impl Into
 
 /// GET /api/sessions/active — sessions currently loaded in memory (this daemon run).
 /// Returns session_id + message_count so agents can choose a target for send_to_agent.
-async fn active_sessions_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+async fn active_sessions_handler(
+    State(state): State<GatewayState>,
+    Extension(auth): Extension<RequestAuth>,
+) -> impl IntoResponse {
     let histories = state.histories.lock().await;
     let mut sessions: Vec<serde_json::Value> = histories.iter()
+        .filter(|(sid, _)| session_ok(&state.sessions_dir, sid.0, &auth))
         .map(|(sid, hist)| serde_json::json!({
             "session_id":    sid.0,
             "message_count": hist.len(),
@@ -1962,9 +2025,13 @@ fn a2a_prompt_text(from: Option<&str>, origin_session: Option<u64>, message: &st
 /// desktop UI).
 async fn session_message_handler(
     State(state): State<GatewayState>,
+    Extension(auth): Extension<RequestAuth>,
     Path(id):     Path<u64>,
     Json(body):   Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if !session_ok(&state.sessions_dir, id, &auth) {
+        return Json(serde_json::json!({ "ok": false, "error": "not your session" }));
+    }
     let message = match body["message"].as_str() {
         Some(s) if !s.trim().is_empty() => s.to_string(),
         _ => return Json(serde_json::json!({ "ok": false, "error": "missing message" })),
@@ -2134,9 +2201,13 @@ async fn prepare_user_images(raw: &[serde_json::Value]) -> Vec<apexos_core::Imag
 /// camera upload / curl all use this; images run through the vision shim first.
 async fn session_image_handler(
     State(state): State<GatewayState>,
+    Extension(auth): Extension<RequestAuth>,
     Path(id):     Path<u64>,
     Json(body):   Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if !session_ok(&state.sessions_dir, id, &auth) {
+        return Json(serde_json::json!({ "ok": false, "error": "not your session" }));
+    }
     let text = body["text"].as_str().unwrap_or("").to_string();
     let raw: Vec<serde_json::Value> = if let Some(arr) = body["images"].as_array() {
         arr.clone()
@@ -2154,7 +2225,10 @@ async fn session_image_handler(
     Json(serde_json::json!({ "ok": true, "session_id": id, "images": n }))
 }
 
-async fn sessions_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+async fn sessions_handler(
+    State(state): State<GatewayState>,
+    Extension(auth): Extension<RequestAuth>,
+) -> impl IntoResponse {
     use apexos_core::{ContentBlock, Message};
     use tokio::fs;
 
@@ -2169,6 +2243,7 @@ async fn sessions_handler(State(state): State<GatewayState>) -> impl IntoRespons
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
         let id: u64 = match path.file_stem().and_then(|s| s.to_str())
             .and_then(|s| s.parse().ok()) { Some(n) => n, None => continue };
+        if !session_ok(&state.sessions_dir, id, &auth) { continue; }
 
         let last_active = entry.metadata().await.ok()
             .and_then(|m| m.modified().ok())
@@ -2218,6 +2293,13 @@ fn session_file(sessions_dir: &std::path::Path, id: u64) -> PathBuf {
     sessions_dir.join(format!("{id}.jsonl"))
 }
 
+fn session_ok(dir: &std::path::Path, id: u64, auth: &RequestAuth) -> bool {
+    match auth {
+        RequestAuth::Admin => true,
+        RequestAuth::Session(a) => session_auth::session_visible_to(dir, id, a),
+    }
+}
+
 /// DELETE /api/sessions/:id — remove a session's transcript and drop its in-memory
 /// history. Irreversible (the UI confirms first); the cerebro-consolidate step
 /// — extract useful info before deletion — is the safety net (next slice). The
@@ -2225,10 +2307,14 @@ fn session_file(sessions_dir: &std::path::Path, id: u64) -> PathBuf {
 /// scheduled tasks, so deleting it is never what the user means.
 async fn session_delete_handler(
     State(state): State<GatewayState>,
+    Extension(auth): Extension<RequestAuth>,
     Path(id):     Path<u64>,
 ) -> impl IntoResponse {
     if id == 0 {
         return Json(serde_json::json!({ "ok": false, "error": "the root session (0) cannot be deleted" }));
+    }
+    if !session_ok(&state.sessions_dir, id, &auth) {
+        return Json(serde_json::json!({ "ok": false, "error": "not your session" }));
     }
     let removed = tokio::fs::remove_file(session_file(&state.sessions_dir, id)).await.is_ok();
     state.histories.lock().await.remove(&SessionId(id));
@@ -2240,10 +2326,14 @@ async fn session_delete_handler(
 /// the in-memory history. Recoverable: the file is preserved, just hidden.
 async fn session_archive_handler(
     State(state): State<GatewayState>,
+    Extension(auth): Extension<RequestAuth>,
     Path(id):     Path<u64>,
 ) -> impl IntoResponse {
     if id == 0 {
         return Json(serde_json::json!({ "ok": false, "error": "the root session (0) cannot be archived" }));
+    }
+    if !session_ok(&state.sessions_dir, id, &auth) {
+        return Json(serde_json::json!({ "ok": false, "error": "not your session" }));
     }
     let archive_dir = state.sessions_dir.join("archive");
     if let Err(e) = tokio::fs::create_dir_all(&archive_dir).await {
@@ -2267,8 +2357,12 @@ async fn session_archive_handler(
 /// call over a long transcript can take a while, but never hangs the socket).
 async fn session_consolidate_handler(
     State(state): State<GatewayState>,
+    Extension(auth): Extension<RequestAuth>,
     Path(id):     Path<u64>,
 ) -> impl IntoResponse {
+    if !session_ok(&state.sessions_dir, id, &auth) {
+        return Json(serde_json::json!({ "ok": false, "error": "not your session" }));
+    }
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if state.consolidate_tx.send(ConsolidateReq { session_id: id, reply: reply_tx }).await.is_err() {
         return Json(serde_json::json!({ "ok": false, "error": "consolidation worker unavailable" }));
@@ -4712,20 +4806,18 @@ struct LoginBody {
     pin: String,
 }
 
-/// POST /api/auth/login — profile (+ optional PIN) → a minted session token.
+/// POST /api/auth/login — profile (+ PIN) → a minted session token.
 ///
-/// UNGATED (authenticated by the PIN itself, mirroring `/api/mesh/pair/claim`): the
-/// whole point is the human client does NOT have the node's `AGENTD_TOKEN`. An open
-/// (PIN-less) profile mints a token with no secret — the decided LAN-trusted one-tap
-/// auth-weight; a PIN profile is verified and guarded by the shared per-user guess
-/// lockout. On success the client uses the returned token as the Bearer for every
-/// gated route (and `?token=` on the WS).
+/// UNGATED (authenticated by the PIN itself). LAN login is closed until the
+/// owner profile has a PIN (finding 2). After claim, a PIN-less profile may
+/// one-tap only on loopback. Owner one-tap is gone — use `/api/auth/setup`.
 async fn auth_login_handler(
     State(state): State<GatewayState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body):   Json<LoginBody>,
 ) -> impl IntoResponse {
     let now = std::time::Instant::now();
-    // Locked out from too many bad guesses? Refuse without revealing validity.
+    let loopback = session_auth::is_loopback_addr(&addr);
     {
         let lk = state.pin_lockouts.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(remaining) = lk.get(&body.user_id).and_then(|l| l.locked_for(now)) {
@@ -4734,16 +4826,21 @@ async fn auth_login_handler(
             }))).into_response();
         }
     }
-    // Resolve the profile + verify. An open profile (no PIN) always verifies; an
-    // unknown user fails (and still counts toward the lockout, so it can't be used
-    // to probe which profiles exist without rate-limiting).
-    let (exists, ok, agent_id) = {
+    let (exists, ok, agent_id, has_pin, claimed) = {
         let ids = state.identities.read().await;
+        let claimed = ids.owner_claimed();
         match ids.user(&body.user_id) {
-            Some(u) => (true, u.verify_pin(&body.pin), u.default_agent.clone().unwrap_or_default()),
-            None    => (false, false, String::new()),
+            Some(u) => (true, u.verify_pin(&body.pin), u.default_agent.clone().unwrap_or_default(), u.has_pin(), claimed),
+            None    => (false, false, String::new(), false, claimed),
         }
     };
+    if exists && !session_auth::login_permitted(claimed, loopback, has_pin) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "ok": false,
+            "setup_required": !claimed,
+            "error": if claimed { "pin_required" } else { "owner_setup_required" },
+        }))).into_response();
+    }
     let locked = {
         let mut lk = state.pin_lockouts.lock().unwrap_or_else(|e| e.into_inner());
         let entry = lk.entry(body.user_id.clone()).or_default();
@@ -4755,14 +4852,15 @@ async fn auth_login_handler(
             "ok": false, "locked": locked.is_some(), "retry_after_secs": locked,
         }))).into_response();
     }
-    // Mint + store the session token (sweeping abandoned ones first).
+    let auth = SessionAuth::new(body.user_id.clone(), agent_id.clone());
+    let role = auth.role.as_str();
     let token = session_auth::gen_session_token();
     {
         let mut s = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
         s.sweep(now);
         s.insert(
             token.clone(),
-            SessionAuth { user_id: body.user_id.clone(), agent_id: agent_id.clone() },
+            auth,
             now,
             std::time::Duration::from_secs(session_auth::SESSION_TTL_SECS),
         );
@@ -4771,8 +4869,60 @@ async fn auth_login_handler(
         "ok": true,
         "token": token,
         "user_id": body.user_id,
-        "agent_id": agent_id,                 // the user's default agent ("" → client picks)
+        "agent_id": agent_id,
+        "role": role,
         "expires_in": session_auth::SESSION_TTL_SECS,
+    }))).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct SetupBody {
+    pin: String,
+}
+
+/// POST /api/auth/setup — claim the node by setting the owner PIN.
+/// Allowed from loopback or with the admin token, and only while unclaimed.
+async fn auth_setup_handler(
+    State(state): State<GatewayState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<SetupBody>,
+) -> impl IntoResponse {
+    let loopback = session_auth::is_loopback_addr(&addr);
+    let admin = request_is_admin_token(&state, &headers);
+    let claimed = state.identities.read().await.owner_claimed();
+    if !session_auth::setup_permitted(claimed, loopback, admin) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            "ok": false,
+            "setup_required": !claimed,
+            "error": if claimed { "already_claimed" } else { "owner_setup_required" },
+        }))).into_response();
+    }
+    if !apexos_core::valid_owner_pin(&body.pin) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "ok": false, "error": "pin must be 4-8 digits",
+        }))).into_response();
+    }
+    {
+        let mut ids = state.identities.write().await;
+        ids.seed_defaults("/etc/agentd/soul.md");
+        match ids.user_mut(apexos_core::DEFAULT_USER_ID) {
+            Some(u) => u.set_pin(&body.pin),
+            None => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                    "ok": false, "error": "owner profile missing",
+                }))).into_response();
+            }
+        }
+        if let Err(e) = ids.save(&apexos_core::Identities::default_path()) {
+            eprintln!("[identity] persist owner PIN failed: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                "ok": false, "error": "persist failed",
+            }))).into_response();
+        }
+    }
+    (StatusCode::OK, Json(serde_json::json!({
+        "ok": true, "user_id": apexos_core::DEFAULT_USER_ID,
     }))).into_response()
 }
 
@@ -4796,14 +4946,33 @@ async fn auth_logout_handler(
 /// profile. UNGATED: the login screen needs it *before* the client holds any token.
 /// Deliberately minimal — no agents, no PIN hashes; the full registry stays behind
 /// the token-gated `/api/identities`.
-async fn auth_profiles_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+async fn auth_profiles_handler(
+    State(state): State<GatewayState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let loopback = session_auth::is_loopback_addr(&addr);
+    let admin = request_is_admin_token(&state, &headers);
     let ids = state.identities.read().await;
+    let setup_required = !ids.owner_claimed();
+    // Unclaimed + LAN + no admin token: do not leak profile names.
+    if setup_required && !loopback && !admin {
+        return Json(serde_json::json!({
+            "users": [],
+            "default_user": serde_json::Value::Null,
+            "setup_required": true,
+            "login_open": false,
+        }));
+    }
     let users: Vec<serde_json::Value> = ids.users.iter().map(|u| serde_json::json!({
         "id": u.id, "name": u.name, "has_pin": u.has_pin(),
     })).collect();
-    // `default_user` (slice 3e) drives login-screen auto-skip — the picker isn't a
-    // secret, so this stays on the same UNgated endpoint the login screen reads.
-    Json(serde_json::json!({ "users": users, "default_user": ids.default_user }))
+    Json(serde_json::json!({
+        "users": users,
+        "default_user": ids.default_user,
+        "setup_required": setup_required,
+        "login_open": true,
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -4851,6 +5020,7 @@ async fn auth_me_handler(
             };
             Json(serde_json::json!({
                 "user_id": auth.user_id, "name": name, "agent_id": auth.agent_id,
+                "role": auth.role.as_str(),
             }))
         }
         None => Json(serde_json::json!({ "user_id": serde_json::Value::Null })),
@@ -6428,7 +6598,11 @@ fn gw_parse_silence(text: &str, duration_s: f64) -> (f64, f64) {
 
 pub async fn serve(state: GatewayState, addr: SocketAddr) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router(state)).await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

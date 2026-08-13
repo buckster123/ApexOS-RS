@@ -88,10 +88,26 @@ async function showLogin() {
     return;
   }
   const users = (data && data.users) || [];
+  const setupRequired = !!(data && data.setup_required);
+  if (setupRequired && data && data.login_open === false) {
+    $('login-sub').textContent = 'This node is not claimed.';
+    $('setup').classList.add('hidden');
+    $('profiles').classList.add('hidden');
+    $('login-err').textContent = 'Set the owner PIN on the device (or with the admin token). LAN login is closed.';
+    return;
+  }
+  if (setupRequired && data && data.login_open) {
+    $('login-sub').textContent = 'Claim this node';
+    $('setup').classList.remove('hidden');
+    $('profiles').classList.add('hidden');
+    return;
+  }
+  $('setup').classList.add('hidden');
+  $('profiles').classList.remove('hidden');
   renderProfiles(users);
 
   // Default-profile auto-skip (slice 3e): an open default logs in zero-tap; a PIN
-  // default jumps straight to the keypad.
+  // default jumps straight to the keypad. Never auto-skip an unclaimed owner.
   const def = data && data.default_user;
   if (def) {
     const u = users.find((x) => x.id === def);
@@ -158,6 +174,32 @@ function pinKey(k) {
   $('login-err').textContent = '';
 }
 
+async function claimNode() {
+  const a = ($('setup-pin').value || '').trim();
+  const b = ($('setup-pin2').value || '').trim();
+  $('login-err').textContent = '';
+  if (a !== b) { $('login-err').textContent = 'PINs do not match.'; return; }
+  if (!/^[0-9]{4,8}$/.test(a)) { $('login-err').textContent = 'PIN must be 4–8 digits.'; return; }
+  let res;
+  try {
+    const r = await fetch('/api/auth/setup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin: a }),
+    });
+    res = await r.json();
+    if (!r.ok || !(res && res.ok)) {
+      $('login-err').textContent = (res && res.error) === 'owner_setup_required'
+        ? 'Claim this node from the device itself.'
+        : ((res && res.error) || 'Could not set PIN.');
+      return;
+    }
+  } catch (_) {
+    $('login-err').textContent = 'Setup failed — node unreachable.';
+    return;
+  }
+  return login('owner', a);
+}
+
 async function login(userId, pin) {
   $('login-err').textContent = '';
   let res;
@@ -180,6 +222,8 @@ async function login(userId, pin) {
   if (res && res.locked) {
     const secs = res.retry_after_secs || 60;
     $('login-err').textContent = `Too many attempts — locked for ${secs}s.`;
+  } else if (res && res.setup_required) {
+    $('login-err').textContent = 'This node is not claimed. Set the owner PIN on the device.';
   } else {
     $('login-err').textContent = pin ? 'Wrong PIN.' : 'Sign-in failed.';
   }
@@ -661,6 +705,7 @@ function wireUI() {
     b.onclick = () => pinKey(b.dataset.k);
   });
   $('pin-cancel').onclick = () => { S.pinUser = null; S.pinBuf = ''; showProfiles(); $('login-err').textContent = ''; };
+  $('setup-go').onclick = claimNode;
 
   // Composer
   const ta = $('input');

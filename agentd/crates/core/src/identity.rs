@@ -133,7 +133,8 @@ impl User {
         self.pin_salt = None;
     }
 
-    /// Verify a PIN (constant-time). An open profile (no PIN) always verifies.
+    /// Verify a PIN (constant-time). An open profile (no PIN) always verifies
+    /// (used only after the LAN/loopback gate has already run).
     pub fn verify_pin(&self, pin: &str) -> bool {
         match (&self.pin_hash, &self.pin_salt) {
             (Some(hash), Some(salt)) => {
@@ -209,6 +210,12 @@ impl Identities {
         self.agents.iter().filter(|a| a.owner == owner).collect()
     }
 
+    /// The node is claimed once the seeded owner profile has a PIN. Until then,
+    /// LAN login is closed (finding 2).
+    pub fn owner_claimed(&self) -> bool {
+        self.user(DEFAULT_USER_ID).is_some_and(|u| u.has_pin())
+    }
+
     /// Ensure the default owner user + the built-in APEX agent exist (idempotent).
     /// APEX's soul is the existing soul.md (`apex_soul_file`). Returns true if
     /// anything was added, so the caller knows to persist.
@@ -251,6 +258,13 @@ pub fn gen_salt() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
     to_hex(&bytes)
+}
+
+/// Owner-claim / login PIN: 4–8 ASCII digits. Low entropy is expected; lockout
+/// is the real gate. Rejects empty / non-digit so setup cannot mint a no-op PIN.
+pub fn valid_owner_pin(pin: &str) -> bool {
+    let n = pin.len();
+    (4..=8).contains(&n) && pin.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Salted PIN hash: hex(sha256(salt || pin)).
@@ -371,6 +385,17 @@ mod tests {
     }
 
     #[test]
+    fn owner_pin_shape() {
+        assert!(valid_owner_pin("1337"));
+        assert!(valid_owner_pin("12345678"));
+        assert!(!valid_owner_pin(""));
+        assert!(!valid_owner_pin("12"));
+        assert!(!valid_owner_pin("123456789"));
+        assert!(!valid_owner_pin("12ab"));
+        assert!(!valid_owner_pin("12 34"));
+    }
+
+    #[test]
     fn pin_hash_verify_and_salting() {
         let mut u = User {
             id: "andre".into(),
@@ -404,6 +429,9 @@ mod tests {
         assert!(!ids.seed_defaults("/etc/agentd/soul.md")); // nothing added second time
         assert_eq!(ids.users.len(), 1);
         assert_eq!(ids.agents.len(), 1);
+        assert!(!ids.owner_claimed(), "seeded owner has no PIN");
+        ids.user_mut(DEFAULT_USER_ID).unwrap().set_pin("1337");
+        assert!(ids.owner_claimed());
         let apex = ids.agent(DEFAULT_AGENT_ID).expect("APEX seeded");
         assert_eq!(apex.owner, DEFAULT_USER_ID);
         assert_eq!(apex.soul_file, "/etc/agentd/soul.md");
