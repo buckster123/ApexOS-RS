@@ -159,7 +159,8 @@ the cell — geometry, budget, barriers, closure — never leaves the conducting
 `WorkerStateChanged` is global, so the work board and the Mandalas window follow along.
 
 **Sensors.** `apex-sensor-bridge` (separate process) → WS push to `/sensor-bridge`
-(`SENSOR_BRIDGE_TOKEN` auth — its own gate, separate from the API token) →
+(`SENSOR_BRIDGE_TOKEN` auth — its own gate, minted by install.sh; the handler
+deserializes `SensorIngress` / `sensor_reading` only) →
 `Event::SensorReading` on the bus →
 broadcast to UI sensor view / dashboard **and** persisted by the store log writer.
 A threshold-crossing that survives agentd's persistence filter additionally emits the
@@ -344,12 +345,15 @@ installed.
   already-deployed Pi.
 - The **single genuinely solid network control** is the bind/auth gate in `main.rs`: the
   gateway defaults to `127.0.0.1:8787`, `AGENTD_BIND` overrides, and it **hard-bails** on a
-  non-loopback bind if `AGENTD_TOKEN` is unset. The token gates `/ws`, `/terminal-ws`, and
+  non-loopback bind if `AGENTD_TOKEN` or `SENSOR_BRIDGE_TOKEN` is unset. The API token gates `/ws`, `/terminal-ws`, and
   all `/api/*` (Bearer header or `?token=`) — `require_token` also accepts a **minted human
   session token** (`POST /api/auth/login`, in-memory, 24 h); the login pair
   (`/api/auth/login` + `GET /api/auth/profiles`) and the mesh pairing claim are
   deliberately ungated (authenticated by the profile PIN / the short-lived code itself).
-  `/sensor-bridge` is ungated but does its own `SENSOR_BRIDGE_TOKEN` query check; static
+  `/sensor-bridge` is outside the API middleware and uses its own
+  `SENSOR_BRIDGE_TOKEN` (header, `?token=` fallback); install.sh mints it and a
+  non-loopback bind refuses to start if it is empty. The handler accepts only a
+  `SensorIngress` (`sensor_reading`) — never the full `Event` enum. Static
   files are an ungated whitelist.
 - `apexos-rs-ui` runs as **root** with a device allowlist — `drmSetMaster` +
   `drmModePageFlip` require DRM master, and on a seatless Pi only root wins reliably. The

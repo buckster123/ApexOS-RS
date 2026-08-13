@@ -123,16 +123,15 @@ pub fn goal_create_spec() -> ToolSpec {
                       toward `objective` on its own dedicated session — one gated turn per step — \
                       until you call goal_step{done} or the step budget runs out. Progress shows \
                       live on the Work Board (🗂). Returns immediately with the goal_id; the run \
-                      proceeds in the background. Set `yolo:true` to let THIS goal auto-approve its \
-                      own ask-gated tools (run_command, git_push, …) so it runs unattended even when \
-                      global approval is on — scoped strictly to this goal; cancel it any time with \
-                      goal_cancel.".into(),
+                      proceeds in the background. Set `yolo:true` to *request* unattended ask-tool \
+                      auto-approve for THIS goal only — the operator must approve that elevation \
+                      (it is never granted from the argument alone). cancel with goal_cancel.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "objective": { "type": "string",  "description": "What the goal should accomplish." },
                 "max_steps": { "type": "integer", "description": "Hard ceiling on turns (default 12, max 100)." },
-                "yolo":      { "type": "boolean", "description": "Auto-approve this goal's OWN ask-gated tools so it runs unattended (default false). Scoped to this goal's session only — never widens approval for root chat or other goals." }
+                "yolo":      { "type": "boolean", "description": "Request unattended auto-approve of this goal's OWN ask-gated tools (default false). Requires operator approval — the model cannot grant this itself. Scoped to this goal's session only." }
             },
             "required": ["objective"]
         }),
@@ -469,7 +468,9 @@ async fn create_goal(
     let max_steps = args["max_steps"].as_u64()
         .map(|n| (n as u32).clamp(1, MAX_STEPS_CEIL))
         .unwrap_or(DEFAULT_MAX_STEPS);
-    let yolo = args["yolo"].as_bool().unwrap_or(false);
+    // Model-supplied yolo:true is a request. The supervisor stamps
+    // __yolo_granted only after a human approval (or while the node is in yolo).
+    let yolo = apexos_plugins::yolo_grant_present(&args);
 
     let gid = next_goal_id.fetch_add(1, Ordering::SeqCst);
     let sid = next_session_id.fetch_add(1, Ordering::SeqCst);
@@ -833,6 +834,16 @@ mod tests {
         assert_eq!(back.objective, "ship it");
         assert_eq!(back.episode.as_deref(), Some("ep_x"));
         assert!(back.yolo);
+    }
+
+    #[test]
+    fn create_args_yolo_true_is_not_a_grant() {
+        // The model can write yolo:true (and even forge __yolo_granted); only
+        // the supervisor-stamped grant after approval arms the session.
+        assert!(!apexos_plugins::yolo_grant_present(&serde_json::json!({"yolo": true})));
+        assert!(apexos_plugins::yolo_grant_present(
+            &serde_json::json!({"yolo": true, "__yolo_granted": true})
+        ));
     }
 
     #[test]

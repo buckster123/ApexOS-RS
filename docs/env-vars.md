@@ -179,7 +179,7 @@ Notes: `GIT_COMMIT` is **compile-time** (`option_env!`, stamped by build.rs) —
 |-----|---------|---------|
 | `SENSORHEAD_URL` | gateway `http://localhost:8080` · bridge unset (polling off) · UI `http://{agentd-host}:8080` | the external Python SensorHead. Three independent readers; the bridge only polls `<url>/api/environment` when set. Commented in the bridge unit — the operator adds it (install.sh prints a reminder) |
 | `SENSOR_BRIDGE_HOST` | `localhost:8787` | gateway host:port the bridge connects to (`ws://{host}/sensor-bridge` — scheme/path hardcoded) |
-| `SENSOR_BRIDGE_TOKEN` | `""` | bridge WS auth token — sent in the `Authorization` header, never the URL. agentd reads the same name to validate |
+| `SENSOR_BRIDGE_TOKEN` | **minted by install.sh** | Bearer token for `/sensor-bridge`, sent in the `Authorization` header (never the URL). agentd reads the same name. **Empty = no auth** (loopback bench only); a non-loopback `AGENTD_BIND` **refuses to start** if this is unset. The socket deserializes `sensor_reading` only — never the rest of the `Event` enum |
 | `SENSOR_NODE_ID` | hostname | node id stamped on every reading |
 | `SENSOR_INTERVAL_SECS` | `30` | seconds between reading pushes (unclamped — `0` busy-loops; don't) |
 | `SENSOR_CPU_TEMP_THRESHOLD` | `85.0` °C | CPU-temp alert threshold — the `standard`-profile baseline; the live sensitivity profile adjusts per reading |

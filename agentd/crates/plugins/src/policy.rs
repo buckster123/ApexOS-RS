@@ -162,6 +162,32 @@ impl PolicyEngine {
     }
 }
 
+/// Model-supplied `goal_create{yolo:true}` is a *request*. The grant is this
+/// stamp, applied only after a human approval (or while the node is already
+/// in yolo mode). Never honor the bare `yolo` argument as authority.
+pub const YOLO_GRANT_KEY: &str = "__yolo_granted";
+
+/// True when this call asks to arm goal-scoped yolo.
+pub fn requests_yolo_elevation(tool: &str, args: &serde_json::Value) -> bool {
+    tool == "goal_create" && args.get("yolo").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+pub fn yolo_grant_present(args: &serde_json::Value) -> bool {
+    args.get(YOLO_GRANT_KEY).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// Strip any model-supplied grant key, then stamp only if `approved`.
+pub fn apply_yolo_grant(tool: &str, args: &mut serde_json::Value, approved: bool) {
+    if let Some(obj) = args.as_object_mut() {
+        obj.remove(YOLO_GRANT_KEY);
+    }
+    if approved && requests_yolo_elevation(tool, args) {
+        if let Some(obj) = args.as_object_mut() {
+            obj.insert(YOLO_GRANT_KEY.to_string(), serde_json::Value::Bool(true));
+        }
+    }
+}
+
 /// Pattern `"prefix.*"` matches any `"prefix.<something>"`.
 fn matches_wildcard(pattern: &str, tool: &str) -> bool {
     if pattern == tool {
@@ -190,6 +216,28 @@ mod tests {
             rules: rules.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn yolo_elevation_is_goal_create_true_only() {
+        assert!(requests_yolo_elevation("goal_create", &serde_json::json!({"yolo": true})));
+        assert!(!requests_yolo_elevation("goal_create", &serde_json::json!({"yolo": false})));
+        assert!(!requests_yolo_elevation("goal_create", &serde_json::json!({})));
+        assert!(!requests_yolo_elevation("goal_create", &serde_json::json!({"yolo": "true"})));
+        assert!(!requests_yolo_elevation("goal_resume", &serde_json::json!({"yolo": true})));
+        assert!(!requests_yolo_elevation("run_command", &serde_json::json!({"yolo": true})));
+    }
+
+    #[test]
+    fn yolo_grant_ignores_model_key_until_stamped() {
+        let mut args = serde_json::json!({"yolo": true, "__yolo_granted": true});
+        apply_yolo_grant("goal_create", &mut args, false);
+        assert!(!yolo_grant_present(&args), "model-supplied grant must be stripped");
+        apply_yolo_grant("goal_create", &mut args, true);
+        assert!(yolo_grant_present(&args));
+        let mut gated = serde_json::json!({"objective": "x"});
+        apply_yolo_grant("goal_create", &mut gated, true);
+        assert!(!yolo_grant_present(&gated), "no stamp without yolo:true");
     }
 
     #[test]

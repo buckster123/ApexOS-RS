@@ -6,7 +6,9 @@ use std::process::Stdio;
 use apexos_core::{ActionId, BusHandle, Event, EvolutionId, EvolutionProposal, PluginId, SessionId, ToolCall, ToolOutput};
 use crate::config::{PluginConfig, RestartPolicy};
 use crate::mcp::McpClient;
-use crate::policy::{Decision, PolicyEngine};
+use crate::policy::{
+    apply_yolo_grant, requests_yolo_elevation, Decision, PolicyEngine, PolicyMode,
+};
 use crate::vast::{VastState, VastPhase, VastInstance, vastai, load_recipes};
 
 /// Process-global monotonic source of `EvolutionId`s. Each proposed evolution
@@ -381,15 +383,15 @@ impl Supervisor {
         loop {
             tokio::select! {
                 result = bus_rx.recv() => match result {
-                    Ok(Event::ToolRequested { session, call }) => {
+                    Ok(Event::ToolRequested { session, mut call }) => {
                         // Inspect every path-typed arg, not just `path`, so a
                         // workspace-rule tool can't smuggle a write past the gate
                         // via `output_path`/`dest`/etc. Most-restrictive wins:
                         // Ask if ANY candidate path would Ask under the rule.
                         let path_keys = ["path", "output_path", "dest", "destination", "target", "to"];
-                        let candidates: Vec<&str> = path_keys
+                        let candidates: Vec<String> = path_keys
                             .iter()
-                            .filter_map(|k| call.args[*k].as_str())
+                            .filter_map(|k| call.args[*k].as_str().map(str::to_owned))
                             .collect();
 
                         // ── Enterprise tool-gate (feature = "enterprise") ─────────
@@ -414,7 +416,7 @@ impl Supervisor {
                             let path_opts: Vec<Option<&str>> = if candidates.is_empty() {
                                 vec![None]
                             } else {
-                                candidates.iter().map(|p| Some(*p)).collect()
+                                candidates.iter().map(|p| Some(p.as_str())).collect()
                             };
                             let mut ee_deny: Option<(String, Option<String>)> = None;
                             let mut ee_ask: Option<String> = None;
@@ -460,12 +462,15 @@ impl Supervisor {
                             }
                             if let Some(reason) = ee_ask {
                                 // Force the civilian path into Ask (approval queue).
-                                // Goal-yolo may still auto-approve below.
+                                // Goal-yolo may still auto-approve below — except
+                                // yolo *elevation* (goal_create{yolo:true}), which
+                                // is always a human grant.
                                 eprintln!(
                                     "[policy:ee] ASK '{}': {reason} (session {:?})",
                                     call.tool, session
                                 );
-                                let goal_yolo = self.goal_yolo.as_ref().is_some_and(|set|
+                                let yolo_elevation = requests_yolo_elevation(&call.tool, &call.args);
+                                let goal_yolo = !yolo_elevation && self.goal_yolo.as_ref().is_some_and(|set|
                                     apexos_core::goal_session_is_yolo(set, session.0));
                                 if goal_yolo {
                                     eprintln!("[policy] goal-yolo auto-approve (ee-ask): '{}' (session {:?})",
@@ -483,25 +488,33 @@ impl Supervisor {
                             // EE Execute → fall through to civilian PolicyEngine.
                         }
 
-                        let decision = {
+                        let (mut decision, node_yolo) = {
                             let pol = self.policy.read().await;
-                            if candidates.is_empty() {
+                            let d = if candidates.is_empty() {
                                 pol.check(&call.tool, None)
-                            } else if candidates.iter().any(|p| pol.check(&call.tool, Some(p)) == Decision::Ask) {
+                            } else if candidates.iter().any(|p| pol.check(&call.tool, Some(p.as_str())) == Decision::Ask) {
                                 Decision::Ask
                             } else {
                                 Decision::Allow
-                            }
+                            };
+                            (d, pol.config.mode == PolicyMode::Yolo)
                         };
-                        // Goal-scoped yolo: a goal launched with yolo:true auto-approves
-                        // its OWN ask tools — dispatch instead of parking, scoped strictly
-                        // to that goal's session (never root/another session). Fails closed
-                        // on a poisoned lock. (goal-driver-design.md #3)
+                        // Arming goal-scoped yolo is a human grant, not a model
+                        // argument. `goal_create` stays allow; yolo:true is Ask
+                        // unless the node is already in yolo mode.
+                        let yolo_elevation = requests_yolo_elevation(&call.tool, &call.args);
+                        if yolo_elevation && !node_yolo {
+                            decision = Decision::Ask;
+                        }
+                        // Goal-scoped yolo: a granted yolo goal auto-approves its
+                        // OWN ask tools — never the elevation call itself.
                         let goal_yolo = decision == Decision::Ask
+                            && !yolo_elevation
                             && self.goal_yolo.as_ref().is_some_and(|set|
                                 apexos_core::goal_session_is_yolo(set, session.0));
                         match decision {
                             Decision::Allow => {
+                                apply_yolo_grant(&call.tool, &mut call.args, node_yolo);
                                 self.dispatch_tool(session, call);
                             }
                             Decision::Ask if goal_yolo => {
@@ -526,7 +539,9 @@ impl Supervisor {
                             if granted {
                                 eprintln!("[policy] approved: '{}' (session {:?})",
                                     pending.call.tool, pending.session);
-                                self.dispatch_tool(pending.session, pending.call);
+                                let mut call = pending.call;
+                                apply_yolo_grant(&call.tool, &mut call.args, true);
+                                self.dispatch_tool(pending.session, call);
                             } else {
                                 eprintln!("[policy] denied: '{}' (session {:?})",
                                     pending.call.tool, pending.session);

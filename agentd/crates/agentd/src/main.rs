@@ -287,9 +287,20 @@ async fn main() -> anyhow::Result<()> {
     let histories: Arc<Mutex<HashMap<SessionId, Vec<Message>>>> =
         Arc::new(Mutex::new(initial_histories));
 
-    let sensor_bridge_token = Arc::new(
-        std::env::var("SENSOR_BRIDGE_TOKEN").unwrap_or_default()
-    );
+    let sensor_bridge_token = {
+        let t = std::env::var("SENSOR_BRIDGE_TOKEN").unwrap_or_default();
+        if t.is_empty() {
+            // Loopback bench is fine without one; a LAN bind is refused below.
+            // install.sh mints this into /etc/agentd/env so the bridge unit
+            // (same EnvironmentFile) and agentd share it on the next restart.
+            eprintln!(
+                "[sensor-bridge] WARNING: SENSOR_BRIDGE_TOKEN is empty — /sensor-bridge \
+                 accepts any connection. Fine on loopback; a non-loopback bind will refuse \
+                 to start without one."
+            );
+        }
+        Arc::new(t)
+    };
     let api_token = Arc::new(
         std::env::var("AGENTD_TOKEN").unwrap_or_default()
     );
@@ -491,7 +502,7 @@ async fn main() -> anyhow::Result<()> {
         histories:            Arc::clone(&histories),
         next_session_id:      Arc::clone(&next_session_id),
         history_budget:       Arc::clone(&history_budget),
-        sensor_bridge_token,
+        sensor_bridge_token:  Arc::clone(&sensor_bridge_token),
         // ApexNET P5c: the radio lane's seam. Its own token, like the sensor
         // bridge — a bridge that can inject mesh frames is a different trust
         // grant from one that can inject sensor readings.
@@ -511,7 +522,7 @@ async fn main() -> anyhow::Result<()> {
             std::sync::Arc::new(t)
         },
         mesh_link: apexos_gateway::mesh_link::MeshLink::new(),
-        api_token,
+        api_token:            Arc::clone(&api_token),
         soul_path:            soul_path.clone(),
         policy_arc:           Arc::clone(&policy_arc),
         council_start_tx,
@@ -545,11 +556,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let gw_bind = std::env::var("AGENTD_BIND").unwrap_or_else(|_| "127.0.0.1:8787".into());
     let gw_addr: std::net::SocketAddr = gw_bind.parse()?;
-    if api_token_empty && !gw_addr.ip().is_loopback() {
-        anyhow::bail!(
-            "refusing to bind {gw_addr} without AGENTD_TOKEN — set a token or bind 127.0.0.1"
-        );
-    }
+    check_lan_bind_tokens(gw_addr, api_token.as_str(), sensor_bridge_token.as_str())?;
     tokio::spawn(async move {
         if let Err(e) = serve(gw_state, gw_addr).await {
             eprintln!("[gateway] error: {e}");
@@ -4306,6 +4313,31 @@ fn vast_swap_target(event: &Event, def: &VastRevertDefaults) -> Option<Inference
     }
 }
 
+/// F036 + sensor-bridge LAN interlock. A non-loopback bind is only safe when
+/// both the API token and the sensor-bridge token are set. An empty sensor
+/// token used to let any LAN client inject the full `Event` enum.
+fn check_lan_bind_tokens(
+    addr: std::net::SocketAddr,
+    api_token: &str,
+    sensor_token: &str,
+) -> anyhow::Result<()> {
+    if addr.ip().is_loopback() {
+        return Ok(());
+    }
+    if api_token.is_empty() {
+        anyhow::bail!(
+            "refusing to bind {addr} without AGENTD_TOKEN — set a token or bind 127.0.0.1"
+        );
+    }
+    if sensor_token.is_empty() {
+        anyhow::bail!(
+            "refusing to bind {addr} without SENSOR_BRIDGE_TOKEN — /sensor-bridge would \
+             accept any LAN client. Set a token or bind 127.0.0.1"
+        );
+    }
+    Ok(())
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -4314,6 +4346,24 @@ mod tests {
     use apexos_core::{ContentBlock, Message};
 
     // ── nightly dream_run timeout resolver ───────────────────────────────────
+    #[test]
+    fn lan_bind_allows_loopback_without_tokens() {
+        let loopback: std::net::SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        check_lan_bind_tokens(loopback, "", "").unwrap();
+        let v6: std::net::SocketAddr = "[::1]:8787".parse().unwrap();
+        check_lan_bind_tokens(v6, "", "").unwrap();
+    }
+
+    #[test]
+    fn lan_bind_refuses_missing_api_or_sensor_token() {
+        let lan: std::net::SocketAddr = "0.0.0.0:8787".parse().unwrap();
+        let api_err = check_lan_bind_tokens(lan, "", "sensor").unwrap_err().to_string();
+        assert!(api_err.contains("AGENTD_TOKEN"), "{api_err}");
+        let sensor_err = check_lan_bind_tokens(lan, "api", "").unwrap_err().to_string();
+        assert!(sensor_err.contains("SENSOR_BRIDGE_TOKEN"), "{sensor_err}");
+        check_lan_bind_tokens(lan, "api", "sensor").unwrap();
+    }
+
     #[test]
     fn dream_timeout_defaults_and_floor() {
         use std::time::Duration;

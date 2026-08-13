@@ -8,7 +8,7 @@
 //!
 //! Env vars:
 //!   SENSOR_BRIDGE_HOST   (default: localhost:8787)
-//!   SENSOR_BRIDGE_TOKEN  (default: empty)
+//!   SENSOR_BRIDGE_TOKEN  (default: empty — loopback bench only; install.sh mints)
 //!   SENSOR_NODE_ID       (default: hostname)
 //!   SENSOR_INTERVAL_SECS (default: 30)
 //!   SENSORHEAD_URL       (optional: http://localhost:8080 — enables BME688 + MLX90640 polling)
@@ -279,6 +279,13 @@ fn run(url: &str, token: &str, node_id: &str, interval: Duration, sensorhead: Op
 fn main() {
     let host         = std::env::var("SENSOR_BRIDGE_HOST").unwrap_or_else(|_| "localhost:8787".into());
     let token        = std::env::var("SENSOR_BRIDGE_TOKEN").unwrap_or_default();
+    if token.is_empty() {
+        eprintln!(
+            "[apex-sensor-bridge] WARNING: SENSOR_BRIDGE_TOKEN is empty — a LAN-bound \
+             agentd will refuse this connection (and refuse to start). install.sh mints \
+             the token into /etc/agentd/env."
+        );
+    }
     let node_id      = std::env::var("SENSOR_NODE_ID").unwrap_or_else(|_| hostname());
     let sensorhead_url = std::env::var("SENSORHEAD_URL").ok();
     let interval_secs = std::env::var("SENSOR_INTERVAL_SECS")

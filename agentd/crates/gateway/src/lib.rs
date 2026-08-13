@@ -20,6 +20,8 @@ pub mod beacon;
 pub use beacon::{new_liveness_map, spawn_beacon_loop, LivenessMap};
 pub mod session_auth;
 pub use session_auth::{SessionAuth, SessionStore};
+mod sensor_ingress;
+use sensor_ingress::SensorIngress;
 use serde::{Deserialize, Serialize};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -126,7 +128,8 @@ pub struct GatewayState {
     /// Per-session history window budget (rough tokens; 0 = trimming off) —
     /// live-tunable from Settings via /api/history, read by the router per turn.
     pub history_budget:        Arc<std::sync::atomic::AtomicUsize>,
-    /// Shared secret for /sensor-bridge WS connections. Empty = no auth required.
+    /// Shared secret for /sensor-bridge WS connections. Empty = no auth
+    /// (loopback bench only). A non-loopback bind refuses to start if empty.
     pub sensor_bridge_token:   Arc<String>,
     /// Shared secret for /mesh-bridge WS connections (ApexNET P5c). Empty =
     /// no auth required, matching the sensor-bridge convention.
@@ -777,7 +780,7 @@ async fn sensor_bridge_ws_handler(
             .and_then(|s| s.strip_prefix("Bearer "))
             .unwrap_or("");
         let from_query = params.get("token").map(|s| s.as_str()).unwrap_or("");
-        if from_header != expected && from_query != expected {
+        if !tokens_match(from_header, expected) && !tokens_match(from_query, expected) {
             return (StatusCode::UNAUTHORIZED, "invalid sensor bridge token").into_response();
         }
     }
@@ -890,8 +893,9 @@ async fn handle_sensor_bridge(socket: WebSocket, state: GatewayState) {
     eprintln!("[sensor-bridge] node connected");
     while let Some(Ok(msg)) = stream.next().await {
         if let Message::Text(text) = msg {
-            match serde_json::from_str::<Event>(&text) {
-                Ok(event) => {
+            match SensorIngress::parse(&text) {
+                Ok(ingress) => {
+                    let event = ingress.into_event();
                     if let Event::SensorReading { ref node_id, ref reading, .. } = event {
                         eprintln!("[sensor-bridge] {node_id}: {reading:?}");
                     }

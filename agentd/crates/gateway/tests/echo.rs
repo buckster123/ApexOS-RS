@@ -327,3 +327,90 @@ async fn idle_sessions_register_at_mint_and_empty_resume_switches() {
     ws.send(Message::Text(r#"{"type":"hello","resume_session":1}"#.into())).await.unwrap();
     assert_eq!(recv_session_init(&mut ws).await, 1, "empty-session resume did not switch");
 }
+
+fn temp_reading() -> &'static str {
+    r#"{"type":"sensor_reading","node_id":"pi","timestamp":1,"reading":{"kind":"temperature","celsius":41.5,"sensor_id":"cpu_thermal"}}"#
+}
+
+async fn recv_bus_event(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> Event {
+    tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timed out waiting for bus event")
+        .expect("broadcast closed")
+}
+
+#[tokio::test]
+async fn sensor_bridge_accepts_reading_and_drops_internal_events() {
+    let (bus_actor, handle, bcast) = Bus::new(SystemState::default());
+    tokio::spawn(bus_actor.run());
+    let mut rx = bcast.subscribe();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = make_state(handle, bcast);
+    tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+
+    let (mut ws, _) = connect_async(format!("ws://{}/sensor-bridge", addr))
+        .await
+        .unwrap();
+
+    // The original hole: these deserialized as Event and hit the bus.
+    ws.send(Message::Text(
+        r#"{"type":"tool_requested","session":1,"call":{"id":1,"name":"run_command","args":{"cmd":"id"}}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        r#"{"type":"user_approval","session":1,"action":1,"granted":true}"#.into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(temp_reading().into())).await.unwrap();
+
+    let event = recv_bus_event(&mut rx).await;
+    assert!(
+        matches!(
+            event,
+            Event::SensorReading { ref node_id, .. } if node_id == "pi"
+        ),
+        "sensor socket leaked a non-reading event: {event:?}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(80), rx.recv())
+            .await
+            .is_err(),
+        "sensor socket emitted more than the one reading"
+    );
+}
+
+#[tokio::test]
+async fn sensor_bridge_token_is_required_when_set() {
+    let (bus_actor, handle, bcast) = Bus::new(SystemState::default());
+    tokio::spawn(bus_actor.run());
+    let mut rx = bcast.subscribe();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut state = make_state(handle, bcast);
+    state.sensor_bridge_token = Arc::new("s3cret-bridge".into());
+    tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+
+    let no_token = connect_async(format!("ws://{}/sensor-bridge", addr)).await;
+    assert!(no_token.is_err(), "empty token must be rejected when a token is configured");
+
+    let wrong = connect_async(format!("ws://{}/sensor-bridge?token=nope", addr)).await;
+    assert!(wrong.is_err(), "wrong query token must be rejected");
+
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = format!("ws://{}/sensor-bridge", addr)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().insert(
+        "Authorization",
+        "Bearer s3cret-bridge".parse().unwrap(),
+    );
+    let (mut ws, _) = connect_async(req).await.expect("valid bearer must connect");
+    ws.send(Message::Text(temp_reading().into())).await.unwrap();
+    let event = recv_bus_event(&mut rx).await;
+    assert!(matches!(event, Event::SensorReading { .. }));
+}

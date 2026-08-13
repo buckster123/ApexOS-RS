@@ -1835,10 +1835,10 @@ fi
 
 # MESH_BRIDGE_TOKEN — auth for /mesh-bridge (ApexNET P5c). MUST be seeded here:
 # the bind below is 0.0.0.0, and that is only safe because every route is
-# token-gated. /mesh-bridge has its own scheme (like /sensor-bridge) and treats
-# an EMPTY token as "no auth" — which on a LAN-bound node would let anyone
-# connect as a bridge, read every outbound mesh frame, and make the radio lane
-# report itself healthy. Minted, not defaulted.
+# token-gated. /mesh-bridge has its own scheme and treats an EMPTY token as
+# "no auth" — which on a LAN-bound node would let anyone connect as a bridge,
+# read every outbound mesh frame, and make the radio lane report itself
+# healthy. Minted, not defaulted.
 if ! grep -q "^MESH_BRIDGE_TOKEN=" "$ENV_FILE" 2>/dev/null; then
   _mbt=$(openssl rand -hex 24 2>/dev/null || true)
   [[ -n "$_mbt" ]] || _mbt=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
@@ -1846,16 +1846,30 @@ if ! grep -q "^MESH_BRIDGE_TOKEN=" "$ENV_FILE" 2>/dev/null; then
   ok "mesh-bridge token minted (pass it to apexos-mesh-bridge as MESH_BRIDGE_TOKEN)"
 fi
 
+# SENSOR_BRIDGE_TOKEN — auth for /sensor-bridge. Same empty-token-means-no-auth
+# scheme as /mesh-bridge, but an unauthenticated sensor socket used to
+# deserialize the full Event enum (ToolRequested + UserApproval = LAN-to-shell).
+# Minted into the shared env file so apex-sensor-bridge (EnvironmentFile) and
+# agentd pick it up together on the next restart. agentd refuses a non-loopback
+# bind while this is absent.
+if ! grep -q "^SENSOR_BRIDGE_TOKEN=" "$ENV_FILE" 2>/dev/null; then
+  _sbt=$(openssl rand -hex 24 2>/dev/null || true)
+  [[ -n "$_sbt" ]] || _sbt=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  printf 'SENSOR_BRIDGE_TOKEN=%s\n' "$_sbt" >> "$ENV_FILE"
+  ok "sensor-bridge token minted (apex-sensor-bridge reads it from this env file)"
+fi
+
 # AGENTD_BIND — default the gateway to the LAN (0.0.0.0) so mesh peers can reach
 # this node. A mesh listener on loopback is never useful for multi-node operation
 # (it silently breaks inbound a2a / pairing — the peer connects out but nothing
-# routes back). Safe here because a token is ALWAYS generated above: every /api +
-# /ws route is bearer-gated, and agentd's F036 gate refuses a non-loopback bind
-# without a token. The agentd *code* default stays loopback (protects a token-less
-# raw `cargo run`); install.sh is the layer that guarantees a token, so it's where
-# the LAN default belongs. Seed-if-absent: an operator who pinned 127.0.0.1 for a
-# deliberately-private node is preserved, and an already-deployed loopback-only
-# node gains LAN reach on its next `apexos-update`.
+# routes back). Safe here because tokens are ALWAYS generated above: every /api +
+# /ws route is bearer-gated, SENSOR_BRIDGE_TOKEN gates /sensor-bridge, and
+# agentd's bind gate refuses a non-loopback bind without AGENTD_TOKEN *and*
+# SENSOR_BRIDGE_TOKEN. The agentd *code* default stays loopback (protects a
+# token-less raw `cargo run`); install.sh is the layer that guarantees tokens,
+# so it's where the LAN default belongs. Seed-if-absent: an operator who pinned
+# 127.0.0.1 for a deliberately-private node is preserved, and an already-deployed
+# loopback-only node gains LAN reach on its next `apexos-update`.
 if ! grep -q "^AGENTD_BIND=" "$ENV_FILE" 2>/dev/null; then
   write_env_key "AGENTD_BIND" "0.0.0.0:8787"
   ok "AGENTD_BIND=0.0.0.0:8787 (mesh-reachable; token-gated)"

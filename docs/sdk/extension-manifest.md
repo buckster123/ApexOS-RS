@@ -311,8 +311,8 @@ alone never authorizes), refused when `AGENTD_MESH_WORKERS=0`).
 ### Key environment variables
 
 `AGENTD_WS` (`ws://localhost:8787/ws`) · `AGENTD_BIND` (`127.0.0.1:8787`;
-non-loopback requires `AGENTD_TOKEN`) · `AGENTD_TOKEN` (gates `/ws` via `?token=`
-and `/api/*` via Bearer) · `SENSOR_BRIDGE_TOKEN` · `AGENTD_TOOL_RESULT_TIMEOUT_SECS`
+non-loopback requires `AGENTD_TOKEN` **and** `SENSOR_BRIDGE_TOKEN`) · `AGENTD_TOKEN` (gates `/ws` via `?token=`
+and `/api/*` via Bearer) · `SENSOR_BRIDGE_TOKEN` (own `/sensor-bridge` gate; minted) · `AGENTD_TOOL_RESULT_TIMEOUT_SECS`
 (1800) · `AGENTD_WORKSPACE` (workspace root for the `workspace` rule) ·
 `CEREBRO_EMBED_MODEL` (`""`→FTS5-only ~23 MB) · `SLINT_BACKEND` /
 `SLINT_FULLSCREEN` · `AGENTD_WORKER_CAP` (worker admission cap; ≥1 wins over

@@ -940,7 +940,7 @@ fn confine(path: &str, write: bool) -> Result<PathBuf, String> {
                 workspace.display(),
                 path.display(),
             ),
-            Denied::Secret(p) => format!("reading {} is blocked (sensitive)", p.display()),
+            Denied::Secret(p) => format!("access to {} is blocked (sensitive)", p.display()),
             Denied::OutsideReadAllowlist(p) => format!(
                 "reading {} is outside the workspace and the read allowlist",
                 p.display(),
@@ -1659,11 +1659,11 @@ fn list_dir(args: &Value) -> Value {
     };
 
     let mut entries = Vec::new();
-    collect_dir(&path.to_string_lossy(), recursive, 0, &mut entries);
+    collect_dir(&path, recursive, 0, &mut entries);
     tool_ok(json!(entries))
 }
 
-fn collect_dir(path: &str, recursive: bool, depth: usize, out: &mut Vec<Value>) {
+fn collect_dir(path: &std::path::Path, recursive: bool, depth: usize, out: &mut Vec<Value>) {
     if depth > 3 {
         return;
     }
@@ -1672,24 +1672,44 @@ fn collect_dir(path: &str, recursive: bool, depth: usize, out: &mut Vec<Value>) 
         Err(_) => return,
     };
     for entry in read.flatten() {
-        let meta = entry.metadata().ok();
-        let kind = meta.as_ref().map(|m| if m.is_dir() { "dir" } else { "file" }).unwrap_or("unknown");
-        let size = meta.as_ref().and_then(|m| if m.is_file() { Some(m.len()) } else { None });
+        // file_type / symlink_metadata do not follow — a nested symlink must
+        // not recurse outside the confined root (SA-15).
+        let ft = entry.file_type().ok();
+        let is_symlink = ft.as_ref().is_some_and(|t| t.is_symlink());
+        let is_dir = ft.as_ref().is_some_and(|t| t.is_dir());
+        let meta = fs::symlink_metadata(entry.path()).ok();
+        let kind = if is_symlink {
+            "symlink"
+        } else if is_dir {
+            "dir"
+        } else {
+            "file"
+        };
+        let size = meta.as_ref().and_then(|m| {
+            if m.file_type().is_file() {
+                Some(m.len())
+            } else {
+                None
+            }
+        });
         let modified = meta.as_ref()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
 
+        let child = entry.path();
         let mut entry_json = json!({
-            "name": entry.path().to_string_lossy(),
+            "name": child.to_string_lossy(),
             "kind": kind,
         });
         if let Some(s) = size { entry_json["size"] = json!(s); }
         if let Some(m) = modified { entry_json["modified"] = json!(m); }
         out.push(entry_json);
 
-        if recursive && kind == "dir" {
-            collect_dir(&entry.path().to_string_lossy(), true, depth + 1, out);
+        if recursive && is_dir && !is_symlink {
+            if confine(&child.to_string_lossy(), false).is_ok() {
+                collect_dir(&child, true, depth + 1, out);
+            }
         }
     }
 }
@@ -3431,6 +3451,9 @@ mod tests {
         // Secret-exfil vectors are never readable (the bug this fix closes).
         assert!(confine("/proc/self/environ", false).is_err());
         assert!(confine("/etc/shadow", false).is_err());
+        // A secret *inside* the workspace is still denied (SA-16).
+        assert!(confine("/tmp/node.api_key", false).is_err());
+        assert!(confine("/tmp/node.api_key", true).is_err());
 
         // Read allowlist: the EDK on-hand inventory is readable though it lives
         // outside the workspace — but it is NOT writable (writes stay ws-only).
@@ -3446,6 +3469,34 @@ mod tests {
         std::env::remove_var("AGENTD_READ_ROOTS");
 
         std::env::remove_var("AGENTD_WORKSPACE");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_dir_does_not_follow_nested_symlinks() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let pid = std::process::id();
+        let ws = std::env::temp_dir().join(format!("apexos-listdir-{pid}"));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(ws.join("ok")).unwrap();
+        fs::write(ws.join("ok/note.txt"), "x").unwrap();
+        std::os::unix::fs::symlink("/etc", ws.join("escape")).unwrap();
+        std::env::set_var("AGENTD_WORKSPACE", &ws);
+
+        let res = list_dir(&json!({
+            "path": ws.to_string_lossy(),
+            "recursive": true,
+        }));
+        let txt = res["content"][0]["text"].as_str().unwrap_or("");
+        assert!(txt.contains("escape"), "symlink entry should be listed: {txt}");
+        assert!(txt.contains("symlink"), "symlink must be tagged, not followed: {txt}");
+        assert!(
+            !txt.contains("passwd") && !txt.contains("/etc/"),
+            "must not recurse through a symlink to /etc: {txt}"
+        );
+
+        std::env::remove_var("AGENTD_WORKSPACE");
+        let _ = fs::remove_dir_all(&ws);
     }
 
     #[test]

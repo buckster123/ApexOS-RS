@@ -155,7 +155,7 @@ into the typed `Event` (and logs any undecodable frame) instead of string-matchi
     read CPU temp (sysfs) / SensorHead HTTP (BME688, MLX90640)
         │  WS push, SENSOR_BRIDGE_TOKEN auth
         ▼
-  gateway /sensor-bridge handle_sensor_bridge (lib.rs:769, ungated route + own token check)
+  gateway /sensor-bridge handle_sensor_bridge (own token + SensorIngress only)
         │  emit Event::SensorReading
         ▼
   core Bus  ──broadcast──┬──► UI /ws subscribers (sensor_view, dashboard)

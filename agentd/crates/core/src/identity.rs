@@ -310,10 +310,11 @@ pub fn worker_model_for(models: &WorkerModels, session_id: u64) -> Option<String
 // ── Per-session goal autonomy (goal-scoped yolo) ────────────────────────────
 
 /// Process-wide set of goal session ids running with **goal-scoped yolo**
-/// (`goal_create{yolo:true}`) — their OWN `ask`-gated tools auto-approve. The goal
-/// driver inserts a session on create and removes it on a terminal outcome; the
-/// supervisor's approval gate consults it so a *trusted* goal runs unattended
-/// **without** flipping global yolo — scoped strictly to that one goal's session,
+/// (`goal_create{yolo:true}` after a human grant) — their OWN `ask`-gated tools
+/// auto-approve. The goal driver inserts a session on create and removes it on a
+/// terminal outcome; the supervisor's approval gate consults it so a *granted*
+/// goal runs unattended **without** flipping global yolo — scoped strictly to
+/// that one goal's session,
 /// never root or another session. Co-located with [`SessionBindings`] as the other
 /// process-wide per-session runtime map; a `std::sync::Mutex` (not tokio) so the
 /// synchronous decision path checks it with a tiny lock→contains→drop.
