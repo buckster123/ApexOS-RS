@@ -31,12 +31,16 @@ pub struct PeerRecord {
     pub role:    PeerRole,
     #[serde(default = "online")]
     pub status:  String,
-    /// This peer's AGENTD_TOKEN, used as the Bearer credential for cross-node
-    /// a2a (send_to_agent → peer's token-gated /api/sessions/{id}/message).
-    /// A secret — persisted to peers.toml (0600) but REDACTED out of the
-    /// /api/mesh/peers JSON the UI/PWA reads (see mesh_peers_get_handler).
+    /// Outbound mesh credential — what we present when calling this peer.
+    /// Minted by the peer for us during pairing. Never the node AGENTD_TOKEN
+    /// (finding 6). Persisted to peers.toml (0600); redacted from the JSON API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token:   Option<String>,
+    /// Inbound mesh credential — what this peer must present when calling us.
+    /// We mint it; they store it as their outbound `token`. Distinct from
+    /// `token` so a stolen outbound secret cannot impersonate us to ourselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound_token: Option<String>,
 }
 
 fn online() -> String { "online".into() }
@@ -65,6 +69,24 @@ impl PeerRegistry {
 
     pub fn contains(&self, node_id: &str) -> bool {
         self.peers.iter().any(|p| p.node_id == node_id)
+    }
+
+    /// Which registered peer minted `token` as their inbound credential.
+    /// Scans with constant-time compare so a timing side-channel cannot
+    /// enumerate which peer a token belongs to.
+    pub fn peer_id_for_inbound_token(&self, token: &str) -> Option<String> {
+        if token.is_empty() {
+            return None;
+        }
+        use subtle::ConstantTimeEq;
+        let mut found = None;
+        for p in &self.peers {
+            let Some(t) = p.inbound_token.as_deref() else { continue };
+            if t.len() == token.len() && t.as_bytes().ct_eq(token.as_bytes()).into() {
+                found = Some(p.node_id.clone());
+            }
+        }
+        found
     }
 
     pub fn add(&mut self, record: PeerRecord) -> std::io::Result<()> {
@@ -100,6 +122,9 @@ impl PeerRegistry {
             if let Some(ref tok) = p.token {
                 out.push_str(&format!("token   = {:?}\n", tok));
             }
+            if let Some(ref tok) = p.inbound_token {
+                out.push_str(&format!("inbound_token = {:?}\n", tok));
+            }
         }
         // Atomic write (temp + rename) when the dir is writable; fall back to an
         // in-place write when it isn't. /etc/agentd is root-owned (the auth-token
@@ -132,15 +157,76 @@ impl PeerRegistry {
 // ── Mesh pairing (kiosk-friendly onboarding) ────────────────────────────────────
 //
 // To pair node A ↔ B without hand-typing a 64-char token (and without a phone),
-// B shows a short code; A redeems it to exchange tokens. The offer lives in
-// memory only — never persisted — and is single-use, expiring, and locks out
-// after too many bad guesses.
+// B shows a short code; A redeems it. Each side mints a 256-bit mesh credential
+// for the other (never AGENTD_TOKEN). B callbacks A's advertised URL
+// (`/api/mesh/pair/confirm`, nonce-bound) before disclosing a token. The offer
+// lives in memory only — never persisted — and is single-use, expiring, and
+// locks out after too many bad guesses.
 
 /// One active pairing offer (one per node at a time).
 pub struct Pairing {
     pub code:       String,
     pub expires_at: std::time::Instant,
     pub attempts:   u8,
+}
+
+/// Inserted on a request authenticated by a per-peer inbound mesh token.
+#[derive(Clone, Debug)]
+pub struct MeshPeerAuth {
+    pub node_id: String,
+}
+
+/// In-flight redeem on the initiator — `pair/confirm` must echo this nonce
+/// (proves the remote answered at the claimed URL) before we store them.
+pub struct RedeemFlight {
+    pub peer_http:  String,
+    pub nonce:      String,
+    pub expires_at: std::time::Instant,
+}
+
+/// 256-bit mesh credential (64 hex). Same source as session tokens.
+pub fn gen_mesh_token() -> String {
+    use std::io::Read;
+    let mut buf = [0u8; 32];
+    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf));
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn is_mesh_token_shape(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Rewrite `ws://`/`wss://` to http(s). Rejects anything that is not a
+/// host:port HTTP URL — redeem must never POST secrets at a caller-chosen
+/// `file:` / empty / garbage target.
+pub fn mesh_http_base(ws_url: &str) -> Option<String> {
+    let s = ws_url.trim();
+    let http = if let Some(rest) = s.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else if let Some(rest) = s.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if s.starts_with("http://") || s.starts_with("https://") {
+        s.to_string()
+    } else {
+        return None;
+    };
+    let rest = http
+        .strip_prefix("https://")
+        .or_else(|| http.strip_prefix("http://"))?;
+    let host = rest.split('/').next().unwrap_or("");
+    if host.is_empty() || host.contains('@') || host.contains(' ') {
+        return None;
+    }
+    Some(http.trim_end_matches('/').to_string())
+}
+
+/// Refuse to persist the node admin token as a mesh credential.
+pub fn is_node_admin_token(candidate: &str, admin: &str) -> bool {
+    if candidate.is_empty() || admin.is_empty() || candidate.len() != admin.len() {
+        return false;
+    }
+    use subtle::ConstantTimeEq;
+    candidate.as_bytes().ct_eq(admin.as_bytes()).into()
 }
 
 /// Pairing-code lifetime and the bad-guess lockout (which invalidates the code).
@@ -344,6 +430,7 @@ mod tests {
             role:    PeerRole::Full,
             status:  "online".into(),
             token:   None,
+            inbound_token: None,
         });
 
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap(); // restore for cleanup
@@ -364,23 +451,51 @@ mod tests {
         let path = dir.join("peers.toml");
 
         let mut reg = PeerRegistry { peers: vec![], path: path.clone() };
+        let inbound = "aa".repeat(32);
         reg.add(PeerRecord {
             node_id: "ApexOS-RS".into(),
             ws_url:  "ws://192.168.0.158:8787".into(),
             role:    PeerRole::Full,
             status:  "online".into(),
             token:   Some("deadbeef-secret".into()),
+            inbound_token: Some(inbound.clone()),
         }).unwrap();
 
         let loaded = PeerRegistry::load(&path);
         assert_eq!(loaded.peers.len(), 1);
         assert_eq!(loaded.peers[0].token.as_deref(), Some("deadbeef-secret"),
                    "token must round-trip through peers.toml");
+        assert_eq!(loaded.peers[0].inbound_token.as_deref(), Some(inbound.as_str()),
+                   "inbound_token must round-trip");
+        assert_eq!(loaded.peer_id_for_inbound_token(&inbound).as_deref(), Some("ApexOS-RS"));
+        assert_eq!(loaded.peer_id_for_inbound_token("nope"), None);
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "peers.toml holds secrets — must be owner-only");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mesh_http_base_accepts_ws_and_rejects_garbage() {
+        assert_eq!(mesh_http_base("ws://192.168.0.9:8787"), Some("http://192.168.0.9:8787".into()));
+        assert_eq!(mesh_http_base("wss://n.example:443/"), Some("https://n.example:443".into()));
+        assert_eq!(mesh_http_base("http://192.168.0.9:8787"), Some("http://192.168.0.9:8787".into()));
+        assert_eq!(mesh_http_base("file:///etc/passwd"), None);
+        assert_eq!(mesh_http_base("ws://user:pass@evil"), None);
+        assert_eq!(mesh_http_base(""), None);
+        assert_eq!(mesh_http_base("not-a-url"), None);
+    }
+
+    #[test]
+    fn mesh_token_shape_and_admin_reject() {
+        let t = gen_mesh_token();
+        assert!(is_mesh_token_shape(&t));
+        assert!(!is_mesh_token_shape("peer-token"));
+        assert!(!is_mesh_token_shape(""));
+        assert!(is_node_admin_token("secret", "secret"));
+        assert!(!is_node_admin_token("secret", "other"));
+        assert!(!is_node_admin_token("secret", ""));
     }
 
     #[test]

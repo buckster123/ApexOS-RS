@@ -41,9 +41,11 @@ Grounding for the plan — several roadmap items are closer than the agents assu
 
 - **Discovery** — mDNS browse (`avahi-browse _apexos._tcp`) + advertise (static avahi service file).
   Every node both advertises and browses (symmetric). See the mesh-discovery gotcha in docs/gotchas.md.
-- **Trust** — cross-node calls are **per-peer bearer-token-gated** (the pairing exchange stores each
-  peer's `AGENTD_TOKEN`). Not mTLS, but a peer needs the token. The LAN bind (`AGENTD_BIND=0.0.0.0`)
-  is safe *because* of the token (F036).
+- **Trust** — cross-node calls are **per-peer bearer-token-gated**. Pairing mints a
+  256-bit mesh credential for that peer (never `AGENTD_TOKEN`); the claimer must
+  answer a callback at their advertised URL before either side discloses a token.
+  Inbound mesh tokens authenticate the peer identity and do **not** grant `/api/run`.
+  The LAN bind (`AGENTD_BIND=0.0.0.0`) is safe *because* of the token (F036).
 - **a2a messaging** — `send_to_agent(node=…)` proxies to a peer's token-gated
   `POST /api/sessions/{id}/message`. Per-peer-session-routed + globally notified (#143), and
   **reply-session-continuous** (2026-07-15): the sender's supervisor auto-stamps `origin_session`
