@@ -6,7 +6,8 @@
 > Wave 2 (PR #356): finding 14.
 > Wave 3 (PR #357): finding 9.
 > Wave 4 (PR #358): finding 10.
-> Wave 5 (this tree): finding 5.
+> Wave 5 (PR #359): finding 5.
+> Wave 6 (this tree): finding 4.
 
 ## Ranked findings
 

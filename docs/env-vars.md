@@ -153,10 +153,10 @@ agentd side (consumed by the daemon's own self-update loop):
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `AGENTD_SELF_UPDATE_REPO` | `/var/lib/agentd/self-update/ApexOS-RS` | the agentd-owned checkout it self-builds from (provisioner-seeded) |
-| `AGENTD_SELF_UPDATE_TARGET` | unset (cargo default) | explicit CARGO_TARGET_DIR for the staging build |
+| `AGENTD_SELF_UPDATE_TARGET` | `<repo>/../isolated-target` | isolated `CARGO_TARGET_DIR` for the attested `--locked` build; ignored if the path sits inside the live self-update repo |
 | `AGENTD_SELF_UPDATE_BUILD_TIMEOUT` | `1800` | ceiling on the on-node cargo build + tests |
 | `AGENTD_SELF_UPDATE_TIMEOUT` | `120` | health-probe seconds written into `request.json` for the watchdog |
-| `AGENTD_SELF_UPDATE_REVIEW` | on | stage-3 adversarial diff review gate; `0`/`false`/`no` skips it |
+| `AGENTD_SELF_UPDATE_REVIEW` | on | pre-build adversarial diff review gate; `0`/`false`/`no` skips it |
 | `AGENTD_CARGO` | `cargo` (PATH) | cargo binary for the self-build (provisioner seeds the agentd-owned toolchain path) |
 | `AGENTD_UPDATE_DIR` | `/var/lib/agentd/update` | request/health/state dir shared with the root watchdog |
 | `CARGO_HOME` / `RUSTUP_HOME` | `/var/lib/agentd/.cargo` / `.rustup` | agentd-owned toolchain roots (seeded by the self-update provisioner) |

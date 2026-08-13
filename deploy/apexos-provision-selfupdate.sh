@@ -75,7 +75,7 @@ echo "✓ wired $ENV_FILE"
 #    real apply_daemon_update is incremental, not a 20-min cold build. Non-fatal:
 #    the env is wired regardless so the failure is visible + retryable.
 echo "→ warm build (first compile is slow; this is the real option-B validation)…"
-if as_agentd bash -c "cd '$SU_REPO' && '$CARGO_BIN' build --release -p agentd"; then
+if as_agentd bash -c "cd '$SU_REPO' && CARGO_TARGET_DIR='$SU_DIR/isolated-target' '$CARGO_BIN' build --release --locked -p agentd"; then
   echo "✓ warm build OK — agentd CAN self-compile"
   WARM_OK=1
 else

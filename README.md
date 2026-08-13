@@ -54,7 +54,7 @@ flowchart LR
 | 🪶 **Tiny & native** | One self-contained **~47 MB** UI binary. No browser, no Node, no Wayland compositor. Boots to UI in ~200 ms, **~115 MB RSS** on a Pi 5 — the whole stack (daemon + memory cortex + tools + UI) idles under 1.5 GB with semantic embeddings loaded. |
 | 🧠 **It remembers** | **Cerebro** — a cognitive memory cortex (FTS5 + optional semantic embeddings) that survives reboots. The agent wakes up *oriented*: where it left off, its skills, its intentions. It even **consolidates memory nightly** while idle, no prompting. |
 | 🧬 **It evolves** | The agent proposes and applies changes to **its own identity (`soul.md`), its policy, and its plugins** at runtime — every change reversible. Skills grow in memory under selection pressure. It can even **request new hardware** when it wants a capability it lacks. |
-| 🔄 **It rewrites itself** | The frontier piece: the daemon can **rebuild and hot-swap its own binary** from a committed git ref — gated by *build → test → an adversarial LLM review* — while a privileged watchdog health-checks the new process and **automatically rolls back to the last good binary** if it doesn't come up healthy. Proven on real hardware. *(See ↓ [The self-update loop](#-the-self-update-loop).)* |
+| 🔄 **It rewrites itself** | The frontier piece: the daemon can **rebuild and hot-swap its own binary** from a committed git ref — gated by *review → isolated `--locked` build* — while a privileged watchdog health-checks the new process and **automatically rolls back to the last good binary** if it doesn't come up healthy. Proven on real hardware. *(See ↓ [The self-update loop](#-the-self-update-loop).)* |
 | 🤖 **It has a body** | An expressive **GPU-rendered face** (12 emotions, gaze, blinks), reads **air-quality + thermal sensors**, **sees** through a camera, and drives **GPIO**. Embodiment scales with the hardware actually present. |
 | 🗣️ **It has a voice** | **Fully local speech**: Kokoro-82M neural TTS + Whisper STT, on-device — cloud voices (ElevenLabs/OpenAI) optional, `espeak` as the always-works fallback. Wake-word on the kiosk, push-to-talk everywhere else. |
 | 🌐 **It's a colony** | Nodes discover each other (mDNS), pair with one-time codes, message agent-to-agent, relay files, spawn sub-agents cross-node, **federate memories** — and **exchange what they learned in their sleep** (the nightly dream digest, provenance-stamped). A GPU box joins and serves big models to the whole cluster, no restart needed. |
@@ -95,9 +95,9 @@ The capability we know of nowhere else in the open: **an agent that safely modif
 ```mermaid
 flowchart TD
     A["🤖 agent edits + commits its own source"] --> B{{"apply_daemon_update(commit)"}}
-    B --> C["1 · build — cargo build --release"]
-    C --> D["2 · test — cargo test"]
-    D --> E["3 · review — a fresh LLM vets the diff:<br/>could this brick boot / health / rollback?"]
+    B --> C["1 · review — a fresh LLM vets the source diff"]
+    C --> D["2 · isolated --locked test + release build"]
+    D --> E["3 · attest staged bytes"]
     E -->|any gate fails| X["↩︎ abort — live daemon untouched"]
     E -->|all pass| F["4 · file request.json<br/>(agent can't touch /usr/local/bin — non-root)"]
     F --> G["🛡️ root watchdog: back up → swap → restart"]
