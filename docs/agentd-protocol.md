@@ -64,10 +64,13 @@ so the UI must also clear its own busy + pending tool cards):
 ```json
 {"type": "user_cancel"}
 ```
-The gateway injects `session` into every inbound (frontend→gateway) frame before
-deserializing into `Event`, so frontends omit it. A frame that fails to
-deserialize **on the gateway** is still silently dropped — wrong field names =
-no error. **Outbound (gateway→UI) the ui-slint client now deserializes into the
+Inbound frames deserialize as `ClientEvent` (`user_prompt` / `user_approval` /
+`user_cancel` / `hello` / `set_persona`) — **not** the full `Event` enum. The
+gateway stamps the socket's session onto prompt/approval/cancel before they
+become internal events; a client-supplied `session` is ignored. A frame that
+fails to deserialize **on the gateway** is still silently dropped — wrong field
+names = no error. Internal variants (`tool_requested`, `spawn_agent`, …) are
+rejected at the type tag. **Outbound (gateway→UI) the ui-slint client now deserializes into the
 shared `apexos-protocol::Event` and logs any undecodable frame** (no longer the
 hand-rolled `["field"].as_str()` matching that vanished on a rename). Both sides
 share the same `Event` types via the `apexos-protocol` crate. **The gateway

@@ -212,12 +212,11 @@ everything. You only edit a consumer to make the daemon *act* on the event.
 the gateway already relays it. On the client, add a case to your inbound
 dispatch keyed on `"type": "battery_status"`.
 
-**Inbound** (client → daemon): the gateway read task
-takes the raw frame, **injects `frame["session"] = session_id`**,
-then `serde_json::from_value::<Event>(frame)`. So:
-- the client **omits** `session` (the gateway sets it to the socket's session);
-- the frame must otherwise deserialize cleanly into your variant or it is
-  **silently dropped** (the `if let Ok(event)` has no `else`).
+**Inbound** (client → daemon): `/ws` deserializes `ClientEvent`, not `Event`.
+Add the intent to `ClientEvent` and translate it to an internal `Event` after
+the gateway stamps the socket session. A frame that is not a `ClientEvent`
+variant is **silently dropped**. Do not add a frontend intent to `Event` and
+hope the socket will accept it.
 
 For the Slint UI specifically, the inbound dispatch + any new `VecModel` row type
 live in `ui-slint/src/main.rs` and `ui-slint/src/ui/types.slint` (the Slint struct
@@ -334,7 +333,8 @@ This is the exact handshake — and it **differs from CLAUDE.md** (see Gotchas).
    ```json
    {"type": "user_prompt", "text": "hello"}
    ```
-   Omit `session` — the gateway injects it. It may also carry `images`
+   Omit `session` — the gateway stamps the socket session (`ClientEvent` has
+   no session field; a supplied one is ignored). It may also carry `images`
    (`UserPrompt.images`, `apexos-protocol/src/lib.rs:237`): each `{path}` or
    `{b64, media_type}` ref is shimmed through `vision::prepare` (decode →
    downscale ≤`VISION_MAX_EDGE` → re-encode) before the event.
@@ -422,10 +422,13 @@ a message shape. Capability is gated downstream:
   deserializes a dedicated `SensorIngress` type — `sensor_reading` only, never
   the full `Event` enum. A new ingest endpoint accepting untrusted bytes
   should follow that pattern, not widen `/ws` and not `from_str::<Event>`.
+  `/ws` itself deserializes `ClientEvent` only (prompt / approval / cancel /
+  hello / persona) and stamps the socket session before those become `Event`s.
 
 - **Silent-drop is a safety feature *and* a footgun.** A malformed inbound frame
-  is dropped, not errored (the no-`else` `if let Ok(event)` in the gateway read task) — a malicious client can't crash the
-  daemon with garbage, but you also get no feedback when a field name is wrong.
+  is dropped, not errored (`from_str::<ClientEvent>` fail → continue) — a
+  malicious client can't crash the daemon with garbage, but you also get no
+  feedback when a field name is wrong.
   Test new inbound variants with a real round-trip, not by eyeballing.
 
 **For agents self-extending at runtime:** you cannot add an `Event` variant at
@@ -441,7 +444,7 @@ protocol tables in the same commit.
 
 ## Reference
 
-### Inbound events (frontend → daemon) — client omits `session`
+### Inbound events (frontend → daemon) — `ClientEvent` only; client omits `session`
 
 | `type` | Fields (client sends) | Effect |
 |--------|-----------------------|--------|
