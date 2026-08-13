@@ -129,11 +129,12 @@ The **broadcast bus is the backbone**. `core::Bus` is the hub: an mpsc inbox
 (`BusHandle::emit`) feeds `Bus::run`, which applies `SystemState::apply` and fans out via a
 `broadcast::Sender`. Subscribers: gateway WS write tasks (every connected UI/browser), the
 supervisor (tools), the agent router (turns), the evolution applier, the store log writer,
-the goal and worker drivers, and the scheduler/council handlers. **A frame that fails `Event` deserialization in the
-gateway is silently dropped** — wrong field names produce no error, just nothing.
+the goal and worker drivers, and the scheduler/council handlers. **A frame that fails `ClientEvent` deserialization in the
+gateway is silently dropped** — wrong field names produce no error, just nothing. Internal
+`Event` variants are not in `ClientEvent` and cannot be injected over `/ws`.
 
-**Chat turn.** UI sends `{type:user_prompt}` → gateway `/ws` read task injects `session`,
-deserializes to `Event::UserPrompt`, `bus.emit` → `Bus::run` applies state and rebroadcasts
+**Chat turn.** UI sends `{type:user_prompt}` → gateway `/ws` read task decodes
+`ClientEvent::UserPrompt`, stamps the socket session, `bus.emit(Event::UserPrompt)` → `Bus::run` applies state and rebroadcasts
 → `spawn_agent_router` matches `UserPrompt`, appends to session history, spawns `root_turn`
 → `run_turn` streams from the `RoutingProvider`, emitting `Event::AgentText` deltas back
 onto the bus → gateway relays to all sockets.

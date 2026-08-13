@@ -3,7 +3,8 @@
 > Scope: current working tree, reviewed in the requested priority order. The
 > review was stopped at the operator's request after the findings below were
 > verified. Wave 1 (PR #355): findings 1, 3, SA-15, SA-16.
-> Wave 2 (this tree): finding 14.
+> Wave 2 (PR #356): finding 14.
+> Wave 3 (this tree): finding 9.
 
 ## Ranked findings
 

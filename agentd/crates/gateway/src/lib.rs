@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{broadcast, Mutex, RwLock};
-use apexos_core::{ActionId, BusHandle, Event, Message as CoreMessage, SessionId};
+use apexos_core::{ActionId, BusHandle, ClientEvent, Event, Message as CoreMessage, SessionId};
 use apexos_plugins::{PolicyEngine, Rule, VastState, VastPhase, load_recipes};
 use tokio::sync::mpsc;
 
@@ -621,7 +621,8 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
         }
     });
 
-    // Read task: handle hello frames (session resume) and relay everything else as Events.
+    // Read task: decode ClientEvent only (prompt/approval/cancel/hello/persona).
+    // The full Event enum is outbound; a client cannot mint ToolRequested etc.
     let bus      = state.bus.clone();
     let histories = state.histories.clone();
     let session_bindings = state.session_bindings.clone();
@@ -635,16 +636,21 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
         let mut session_id = session_id;   // mutable — updated by hello
 
         while let Some(Ok(msg)) = stream.next().await {
-            if let Message::Text(text) = msg {
-                let val: serde_json::Value = match serde_json::from_str(&text) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if val["type"].as_str() == Some("hello") {
+            let Message::Text(text) = msg else { continue };
+            let client: ClientEvent = match serde_json::from_str(&text) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            match client {
+                ClientEvent::Hello {
+                    resume_session,
+                    new: want_new,
+                    persona,
+                    agent_id,
+                } => {
                     // Resume an existing session, start a brand-new one (`new:true`,
                     // the "+ New chat" button), or (neither) keep the current session.
-                    let resume = val["resume_session"].as_u64().map(SessionId);
-                    let want_new = val["new"].as_bool().unwrap_or(false);
+                    let resume = resume_session.map(SessionId);
                     let hist = {
                         let mut lock = histories.lock().await;
                         match resume {
@@ -659,7 +665,7 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
                                 lock.insert(SessionId(session_id), Vec::new());
                                 vec![]
                             }
-                            _ => vec![],  // keep current session_id
+                            _ => vec![], // keep current session_id
                         }
                     };
                     // Keep the write task's per-session event filter in sync with
@@ -668,9 +674,9 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
                     // G5 tier-2: a hello may carry the active persona, so a fresh /
                     // resumed session starts in the right voice (the live switch goes
                     // through `set_persona` below). Absent → leave it to the default.
-                    if let Some(p) = val["persona"].as_str().filter(|s| !s.is_empty()) {
+                    if !persona.is_empty() {
                         if let Ok(mut m) = persona_sessions.lock() {
-                            m.insert(SessionId(session_id), p.to_string());
+                            m.insert(SessionId(session_id), persona);
                         }
                     }
                     // Bind this session to the chosen agent identity (multi-agent
@@ -681,7 +687,7 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
                     // agent THEY own — a disallowed/blank request resolves to their
                     // own default agent, so a guest can never inherit APEX. The
                     // admin / token-less path is trusted and binds whatever it asks.
-                    let requested = val["agent_id"].as_str().unwrap_or("");
+                    let requested = agent_id.as_str();
                     let sid = SessionId(session_id);
                     match &conn_auth {
                         Some(a) => {
@@ -694,11 +700,15 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
                                 match to_bind {
                                     Some(agent) => {
                                         m.insert(sid, agent);
-                                        if let Ok(mut b) = bound_w.lock() { b.insert(sid); }
+                                        if let Ok(mut b) = bound_w.lock() {
+                                            b.insert(sid);
+                                        }
                                     }
                                     // Nothing the user may bind → clear any stale
                                     // binding so this session resolves to the default.
-                                    None => { m.remove(&sid); }
+                                    None => {
+                                        m.remove(&sid);
+                                    }
                                 }
                             }
                         }
@@ -707,38 +717,57 @@ async fn handle_socket(socket: WebSocket, state: GatewayState, auth: Option<Sess
                                 if let Ok(mut m) = session_bindings.lock() {
                                     m.insert(sid, requested.to_string());
                                 }
-                                if let Ok(mut b) = bound_w.lock() { b.insert(sid); }
+                                if let Ok(mut b) = bound_w.lock() {
+                                    b.insert(sid);
+                                }
                             }
                         }
                     }
                     let _ = prio_tx.send(make_session_init(session_id, &hist)).await;
-                } else if val["type"].as_str() == Some("set_persona") {
+                }
+                ClientEvent::SetPersona { persona } => {
                     // G5 tier-2: a live persona switch — update this session's voice
                     // WITHOUT touching the session (no re-init), so the chat view isn't
                     // cleared the way a `hello` would. Empty persona clears it (→ default).
-                    let p = val["persona"].as_str().unwrap_or("");
                     if let Ok(mut m) = persona_sessions.lock() {
-                        if p.is_empty() { m.remove(&SessionId(session_id)); }
-                        else { m.insert(SessionId(session_id), p.to_string()); }
-                    }
-                } else {
-                    // Regular frame — inject WS-bound session_id and emit as Event.
-                    let mut frame = val;
-                    frame["session"] = serde_json::json!(session_id);
-                    // A user_prompt may carry raw image refs (path|b64). Shim them
-                    // through the vision downscaler here so UserPrompt.images is the
-                    // prepared {media_type,data} form the event deserializes into.
-                    if frame.get("type").and_then(|v| v.as_str()) == Some("user_prompt") {
-                        if let Some(raw) = frame.get("images").and_then(|v| v.as_array()).cloned() {
-                            if !raw.is_empty() {
-                                let prepared = prepare_user_images(&raw).await;
-                                frame["images"] = serde_json::to_value(prepared).unwrap_or_default();
-                            }
+                        if persona.is_empty() {
+                            m.remove(&SessionId(session_id));
+                        } else {
+                            m.insert(SessionId(session_id), persona);
                         }
                     }
-                    if let Ok(event) = serde_json::from_value::<Event>(frame) {
-                        bus.emit(event).await;
-                    }
+                }
+                ClientEvent::UserPrompt { text, images } => {
+                    let images = if images.is_empty() {
+                        vec![]
+                    } else {
+                        prepare_user_images(&images).await
+                    };
+                    bus.emit(Event::UserPrompt {
+                        session: SessionId(session_id),
+                        text,
+                        images,
+                    })
+                    .await;
+                }
+                ClientEvent::UserApproval {
+                    action,
+                    granted,
+                    nonce,
+                } => {
+                    bus.emit(Event::UserApproval {
+                        session: SessionId(session_id),
+                        action,
+                        granted,
+                        nonce,
+                    })
+                    .await;
+                }
+                ClientEvent::UserCancel => {
+                    bus.emit(Event::UserCancel {
+                        session: SessionId(session_id),
+                    })
+                    .await;
                 }
             }
         }

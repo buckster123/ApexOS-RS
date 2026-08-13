@@ -1,8 +1,9 @@
 //! # apexos-protocol
 //!
-//! The wire contract shared across the ApexOS-RS workspace: the `Event` enum and
-//! every type that crosses the agentd WebSocket / a2a boundary (IDs, `ToolCall`,
-//! `ContentBlock`, `SensorReading`, `EvolutionProposal`, …).
+//! The wire contract shared across the ApexOS-RS workspace: the `Event` enum,
+//! the inbound-only `ClientEvent` enum (`/ws`), and every type that crosses the
+//! agentd WebSocket / a2a boundary (IDs, `ToolCall`, `ContentBlock`,
+//! `SensorReading`, `EvolutionProposal`, …).
 //!
 //! Extracted from `apexos-core` so the Slint UI (and any other frontend) can
 //! **deserialize into the same types agentd serializes from** — protocol drift
@@ -297,6 +298,47 @@ pub struct CouncilAgentDef {
     pub backend: Option<String>,  // "anthropic" | "ollama" | ... — inherits system default if None
     pub model:   Option<String>,
     pub color:   Option<String>,  // hex for UI
+}
+
+// ── Inbound client intents (`/ws` only) ─────────────────────────────────────
+//
+// The browser/UI socket used to `from_value::<Event>`, which accepted
+// ToolRequested / SpawnAgent / AgentMessage / … and emitted them onto the bus
+// with whatever session/parent the client wrote. This enum is the only type
+// `/ws` deserializes; the gateway stamps the socket session before translating
+// prompt/approval/cancel into [`Event`].
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientEvent {
+    UserPrompt {
+        #[serde(default)]
+        text: String,
+        /// Raw `{path}` / `{b64}` refs — the gateway shims these before emit.
+        #[serde(default)]
+        images: Vec<serde_json::Value>,
+    },
+    UserApproval {
+        action: ActionId,
+        granted: bool,
+        #[serde(default)]
+        nonce: u64,
+    },
+    UserCancel,
+    Hello {
+        #[serde(default)]
+        resume_session: Option<u64>,
+        #[serde(default)]
+        new: bool,
+        #[serde(default)]
+        persona: String,
+        #[serde(default)]
+        agent_id: String,
+    },
+    SetPersona {
+        #[serde(default)]
+        persona: String,
+    },
 }
 
 // ── The central event enum ──────────────────────────────────────────────────
@@ -767,6 +809,48 @@ mod tests {
                 assert_eq!(call.args["path"], "x");
             }
             other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_event_accepts_intents_and_rejects_internal_variants() {
+        assert!(matches!(
+            serde_json::from_str::<ClientEvent>(r#"{"type":"user_prompt","text":"hi"}"#).unwrap(),
+            ClientEvent::UserPrompt { ref text, .. } if text == "hi"
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientEvent>(
+                r#"{"type":"user_approval","action":5,"granted":true,"nonce":9}"#
+            )
+            .unwrap(),
+            ClientEvent::UserApproval { action, granted, nonce } if action == ActionId(5) && granted && nonce == 9
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientEvent>(r#"{"type":"user_cancel"}"#).unwrap(),
+            ClientEvent::UserCancel
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientEvent>(r#"{"type":"hello","new":true,"persona":"mom"}"#)
+                .unwrap(),
+            ClientEvent::Hello { new: true, ref persona, .. } if persona == "mom"
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientEvent>(r#"{"type":"set_persona","persona":"apex"}"#)
+                .unwrap(),
+            ClientEvent::SetPersona { ref persona } if persona == "apex"
+        ));
+        for hostile in [
+            r#"{"type":"tool_requested","session":1,"call":{"id":1,"tool":"run_command","args":{}}}"#,
+            r#"{"type":"tool_result","session":1,"call":1,"output":{"ok":true,"content":"x"}}"#,
+            r#"{"type":"spawn_agent","parent":1,"call_id":1,"prompt":"x"}"#,
+            r#"{"type":"agent_message","from":"a","to":"b","body":"hi","msg_id":1}"#,
+            r#"{"type":"sensor_reading","node_id":"x","timestamp":1,"reading":{"kind":"temperature","celsius":1.0,"sensor_id":"t"}}"#,
+            r#"{"type":"plugin_up","plugin":"x","tools":[]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ClientEvent>(hostile).is_err(),
+                "must reject internal event: {hostile}"
+            );
         }
     }
 

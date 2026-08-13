@@ -154,7 +154,7 @@ Full contract with examples: **`docs/agentd-protocol.md`**. The load-bearing min
 
 - On connect the **gateway pushes** `session_init` (client sends nothing first). `hello{resume_session}` restores, `hello{new:true}` mints; `hello` may carry `agent_id` (gated) + `persona`.
 - Outbound frames are the raw `Event` enum (shared `apexos-protocol` types) — tool fields nest under `call`, IDs serialize as **bare numbers**. Key events: `agent_text{delta}`, `turn_complete`, `tool_requested{call}`, `tool_result{call, output}`, `approval_pending{call}`, `sensor_reading`.
-- Inbound: `user_prompt{text, images?}`, `user_approval{action, granted, nonce}` (action = numeric ToolCall id; `nonce` from `approval_pending`), `user_cancel` (emits no TurnComplete — UI clears its own busy state). Gateway injects `session` into every inbound frame; undecodable frames are silently dropped.
+- Inbound is `ClientEvent` only (`user_prompt`, `user_approval`, `user_cancel`, `hello`, `set_persona`) — never the full `Event` enum. Gateway stamps the socket session onto prompt/approval/cancel before they become internal events. Undecodable frames are silently dropped.
 - The gateway write task filters outbound per-socket: session-scoped stream reaches only the bound socket, global/status events (sensors, mesh, council…) reach every client. Clients never filter.
 
 ---
@@ -178,7 +178,7 @@ The full ledger is **`docs/gotchas.md`** — grep it for your subsystem; entries
 - **Sensors/voice/vision**: SensorHead is external Python · persistence filter + sensitivity profiles · `SensorAlert` pairing · TTS/STT are workspace-excluded sidecars (ort decoupling) · client-side audio on desktop · camera/audio groups
 - **FS/safety**: confinement lives in the tool (`apexos-confine`) · git roots · USB exo-workspace under the workspace · eject via root systemd unit, never sudo (`NoNewPrivileges`)
 - **Adaptive UI**: tool-family idiom (no protocol changes) · latch etiquette (human always wins) · mutation cap · drag guard · reflex trigger mirror · geometry seed deferral
-- **Protocol**: `apexos-protocol` + `apexos-mesh-proto` no_std — run BOTH test gates on each; `Map<K,V>` alias, never bare `HashMap`; mesh-proto framing/types are frozen+append-only (postcard is positional)
+- **Protocol**: `apexos-protocol` + `apexos-mesh-proto` no_std — run BOTH test gates on each; `Map<K,V>` alias, never bare `HashMap`; mesh-proto framing/types are frozen+append-only (postcard is positional); `/ws` inbound is `ClientEvent`, never `from_str::<Event>`
 - **Welfare seams**: trim markers, substrate notices, honest tool-failure signals are **correctness fixes** — never strip them to save tokens
 
 ---
