@@ -166,6 +166,8 @@ pub struct GatewayState {
     pub sensor_config_path: PathBuf,
     /// Active mesh pairing offer (in-memory only, never persisted). See mesh::Pairing.
     pub pairing:           Arc<std::sync::Mutex<Option<mesh::Pairing>>>,
+    /// In-flight redeem (nonce + claimed URL). `pair/confirm` must echo the nonce.
+    pub redeem_flight:     Arc<std::sync::Mutex<Option<mesh::RedeemFlight>>>,
     /// Own node_id (hostname) — used by discovery loop to avoid self-bootstrap
     pub node_id:           Arc<String>,
     /// Mesh a2a routing: peer node_id → the session on THIS node that holds that
@@ -320,6 +322,23 @@ async fn require_token(
     (StatusCode::UNAUTHORIZED, "invalid or missing token").into_response()
 }
 
+fn bearer_from_req(req: &Request) -> (String, String) {
+    let from_header = req.headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string();
+    let from_query_raw = req.uri().query().unwrap_or("")
+        .split('&')
+        .find_map(|p| p.strip_prefix("token="))
+        .unwrap_or("");
+    let from_query = percent_encoding::percent_decode_str(from_query_raw)
+        .decode_utf8_lossy()
+        .into_owned();
+    (from_header, from_query)
+}
+
 /// Privileged REST: admin token or an Owner-role session. Guest session tokens
 /// stay on /ws + their own sessions (finding 2).
 async fn require_admin(req: Request, next: middleware::Next) -> Response {
@@ -341,6 +360,46 @@ fn request_is_admin_token(state: &GatewayState, headers: &axum::http::HeaderMap)
         .and_then(|s| s.strip_prefix("Bearer "))
         .unwrap_or("");
     tokens_match(from_header, token)
+}
+
+/// Peer-facing mesh routes: admin token, human session, OR a per-peer inbound
+/// mesh token. A mesh token is NOT accepted by `require_token` (so it cannot
+/// reach `/api/run`). Inserts `RequestAuth` for admin/session so session
+/// ownership still applies to UI posts.
+async fn require_mesh_or_admin(
+    State(state): State<GatewayState>,
+    req: Request,
+    next: middleware::Next,
+) -> Response {
+    let token = state.api_token.as_str();
+    let (from_header, from_query) = bearer_from_req(&req);
+    if token.is_empty()
+        || tokens_match(&from_header, token)
+        || tokens_match(&from_query, token)
+    {
+        let mut req = req;
+        req.extensions_mut().insert(RequestAuth::Admin);
+        return next.run(req).await;
+    }
+    let now = std::time::Instant::now();
+    let session = {
+        let s = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        s.verify(&from_header, now).cloned().or_else(|| s.verify(&from_query, now).cloned())
+    };
+    if let Some(auth) = session {
+        let mut req = req;
+        req.extensions_mut().insert(RequestAuth::Session(auth));
+        return next.run(req).await;
+    }
+    let presented = if !from_header.is_empty() { from_header.as_str() } else { from_query.as_str() };
+    let peer = state.peer_registry.try_read().ok()
+        .and_then(|reg| reg.peer_id_for_inbound_token(presented));
+    if let Some(node_id) = peer {
+        let mut req = req;
+        req.extensions_mut().insert(mesh::MeshPeerAuth { node_id });
+        return next.run(req).await;
+    }
+    (StatusCode::UNAUTHORIZED, "invalid or missing token").into_response()
 }
 
 /// Constant-time token comparison. Length is checked first (lengths are not
@@ -376,7 +435,6 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/sessions/{id}",            delete(session_delete_handler))
         .route("/api/sessions/{id}/archive",     post(session_archive_handler))
         .route("/api/sessions/{id}/consolidate", post(session_consolidate_handler))
-        .route("/api/sessions/{id}/message", post(session_message_handler))
         .route("/api/sessions/{id}/image",   post(session_image_handler))
         .route("/api/workspace/images",      get(workspace_images_handler))
         .route("/api/workspace/texts",       get(workspace_texts_handler))
@@ -454,16 +512,6 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/council/{id}/butt-in",  post(council_butt_in_handler))
         .route("/api/sensors/config",     post(sensor_config_post_handler))
         .route("/api/voice",              post(set_voice_handler))
-        .route("/api/spawn",              post(spawn_handler))
-        .route("/api/worker/fanout",      post(worker_fanout_handler))
-        .route("/api/worker/query",       post(worker_query_handler))
-        .route("/api/worker/cancel",      post(worker_cancel_mesh_handler))
-        .route("/api/worker/report",      post(worker_report_mesh_handler).layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)))
-        .route("/api/mesh/file",          post(mesh_file_handler).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
-        .route("/api/courier/manifest",   post(courier_manifest_handler))
-        .route("/api/courier/receipt",    post(courier_receipt_handler))
-        .route("/api/mesh/memory",        post(mesh_memory_handler).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
-        .route("/api/mesh/recall",        post(mesh_recall_handler))
         .route("/api/mesh/peers",         post(mesh_peers_post_handler))
         .route("/api/mesh/peers/{id}",    delete(mesh_peers_delete_handler))
         .route("/api/mesh/pair/start",    post(pair_start_handler))
@@ -477,14 +525,32 @@ pub fn router(state: GatewayState) -> Router {
         .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
+    // Peer-facing mesh POSTs: admin / session / per-peer inbound mesh token.
+    // Mesh tokens are NOT valid on `gated` (so they cannot hit /api/run).
+    let mesh_in = Router::new()
+        .route("/api/sessions/{id}/message", post(session_message_handler))
+        .route("/api/spawn",              post(spawn_handler))
+        .route("/api/worker/fanout",      post(worker_fanout_handler))
+        .route("/api/worker/query",       post(worker_query_handler))
+        .route("/api/worker/cancel",      post(worker_cancel_mesh_handler))
+        .route("/api/worker/report",      post(worker_report_mesh_handler).layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)))
+        .route("/api/mesh/file",          post(mesh_file_handler).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
+        .route("/api/courier/manifest",   post(courier_manifest_handler))
+        .route("/api/courier/receipt",    post(courier_receipt_handler))
+        .route("/api/mesh/memory",        post(mesh_memory_handler).layer(axum::extract::DefaultBodyLimit::max(256 * 1024)))
+        .route("/api/mesh/recall",        post(mesh_recall_handler))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_mesh_or_admin));
+
     Router::new()
         .merge(user_gated)
         .merge(admin_gated)
+        .merge(mesh_in)
         .route("/sensor-bridge",   get(sensor_bridge_ws_handler))
         .route("/mesh-bridge",     get(mesh_bridge_ws_handler))
         // UNgated: the pairing claim is authenticated by the short-lived code itself,
         // not the api_token (the whole point is the caller doesn't have our token yet).
         .route("/api/mesh/pair/claim", post(pair_claim_handler))
+        .route("/api/mesh/pair/confirm", post(pair_confirm_handler))
         // UNgated: human login — PIN (or loopback-only open guest after claim).
         // LAN is closed until the owner profile has a PIN (finding 2).
         .route("/api/auth/login", post(auth_login_handler))
@@ -2025,23 +2091,35 @@ fn a2a_prompt_text(from: Option<&str>, origin_session: Option<u64>, message: &st
 /// desktop UI).
 async fn session_message_handler(
     State(state): State<GatewayState>,
-    Extension(auth): Extension<RequestAuth>,
+    mesh_peer: Option<Extension<mesh::MeshPeerAuth>>,
+    auth: Option<Extension<RequestAuth>>,
     Path(id):     Path<u64>,
     Json(body):   Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if !session_ok(&state.sessions_dir, id, &auth) {
-        return Json(serde_json::json!({ "ok": false, "error": "not your session" }));
+    // Mesh peers may inject a2a (session 0 or an explicit reply id). Human
+    // callers still cannot write into someone else's session.
+    if mesh_peer.is_none() {
+        let Some(Extension(auth)) = auth else {
+            return Json(serde_json::json!({ "ok": false, "error": "not your session" }));
+        };
+        if !session_ok(&state.sessions_dir, id, &auth) {
+            return Json(serde_json::json!({ "ok": false, "error": "not your session" }));
+        }
     }
     let message = match body["message"].as_str() {
         Some(s) if !s.trim().is_empty() => s.to_string(),
         _ => return Json(serde_json::json!({ "ok": false, "error": "missing message" })),
     };
-    // Provenance: only honour `from` when it names a peer we've actually paired with
-    // (bounds session allocation to the trusted registry — a tokened-but-buggy caller
-    // can't spam new sessions with arbitrary labels).
-    let from = match body["from"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(f) if state.peer_registry.read().await.contains(f) => Some(f.to_string()),
-        _ => None,
+    // Provenance: a mesh-token caller is the registered peer that minted the
+    // inbound token — body.from is ignored so they cannot impersonate another
+    // peer. Admin/session callers still honour a registered `from` (UI / tools).
+    let from = if let Some(Extension(auth)) = mesh_peer {
+        Some(auth.node_id)
+    } else {
+        match body["from"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(f) if state.peer_registry.read().await.contains(f) => Some(f.to_string()),
+            _ => None,
+        }
     };
 
     // Decide the landing session.
@@ -4561,7 +4639,8 @@ async fn mesh_peers_get_handler(State(state): State<GatewayState>) -> impl IntoR
 }
 
 /// POST /api/mesh/peers — add or update a peer.
-/// Body: { node_id, ws_url, role?, token? }  (token = the peer's AGENTD_TOKEN, for a2a)
+/// Body: { node_id, ws_url, role?, token? }  (token = outbound mesh credential,
+/// never the node AGENTD_TOKEN).
 async fn mesh_peers_post_handler(
     State(state): State<GatewayState>,
     Json(body):   Json<serde_json::Value>,
@@ -4580,6 +4659,9 @@ async fn mesh_peers_post_handler(
         _        => PeerRole::Full,
     };
     let token_in = body["token"].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+    if token_in.as_deref().is_some_and(|t| mesh::is_node_admin_token(t, state.api_token.as_str())) {
+        return Json(serde_json::json!({ "ok": false, "error": "refusing to store the node admin token as a mesh credential" }));
+    }
 
     let result = {
         let mut registry = state.peer_registry.write().await;
@@ -4587,7 +4669,9 @@ async fn mesh_peers_post_handler(
         // ws_url/status-only re-add from REFRESH shouldn't wipe the a2a credential).
         let token = token_in.or_else(|| registry.peers.iter()
             .find(|p| p.node_id == node_id).and_then(|p| p.token.clone()));
-        let record = PeerRecord { node_id: node_id.clone(), ws_url: ws_url.clone(), role, status: "online".into(), token };
+        let inbound_token = registry.peers.iter()
+            .find(|p| p.node_id == node_id).and_then(|p| p.inbound_token.clone());
+        let record = PeerRecord { node_id: node_id.clone(), ws_url: ws_url.clone(), role, status: "online".into(), token, inbound_token };
         registry.add(record)
     };
 
@@ -5070,24 +5154,25 @@ async fn pair_status_handler(State(state): State<GatewayState>) -> impl IntoResp
     }
 }
 
-/// POST /api/mesh/pair/claim — UNAUTHENTICATED, gated by the short-lived code. A peer
-/// presents the code + its own creds; we register it reciprocally and hand back ours.
+/// POST /api/mesh/pair/claim — UNAUTHENTICATED, gated by the short-lived code.
+/// Never accepts or returns AGENTD_TOKEN. Callbacks to the claimer's URL
+/// (`/api/mesh/pair/confirm`) before disclosing a minted mesh credential.
 async fn pair_claim_handler(
     State(state): State<GatewayState>,
     Json(body):   Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let code      = body["code"].as_str().unwrap_or_default().to_string();
-    let req_node  = body["node_id"].as_str().unwrap_or_default().to_string();
-    let req_url   = body["ws_url"].as_str().unwrap_or_default().to_string();
-    let req_token = body["token"].as_str().unwrap_or_default().to_string();
-    if code.is_empty() || req_node.is_empty() || req_url.is_empty() {
+    let code     = body["code"].as_str().unwrap_or_default().to_string();
+    let req_node = body["node_id"].as_str().unwrap_or_default().trim().to_string();
+    let req_url  = body["ws_url"].as_str().unwrap_or_default().trim().to_string();
+    let nonce    = body["nonce"].as_str().unwrap_or_default().trim().to_string();
+    if code.is_empty() || req_node.is_empty() || req_url.is_empty() || nonce.is_empty() {
         return (StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "ok": false, "error": "missing fields" })));
     }
-    // Security is the code itself: single-use, 5-min expiry, lockout after
-    // PAIR_MAX_ATTEMPTS bad guesses. (No subnet guard — would block legit
-    // cross-subnet/VPN mesh nodes; discovery already has its own opt-out one.)
-    // Validate + consume under the lock.
+    let Some(peer_http) = mesh::mesh_http_base(&req_url) else {
+        return (StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": "invalid ws_url" })));
+    };
     let ok = {
         let mut p = state.pairing.lock().unwrap();
         match p.as_mut() {
@@ -5105,25 +5190,97 @@ async fn pair_claim_handler(
         return (StatusCode::FORBIDDEN,
                 Json(serde_json::json!({ "ok": false, "error": "invalid or expired code" })));
     }
-    // Register the requester reciprocally, with the token THEY gave us.
+    // Prove the claimer answers at ws_url. They mint OUR outbound token there.
+    // A caller-supplied `token` in the claim body is ignored (finding 6).
+    let confirm = serde_json::json!({
+        "node_id": state.node_id.as_str(),
+        "ws_url":  own_ws_url(),
+        "nonce":   nonce,
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{peer_http}/api/mesh/pair/confirm"))
+        .json(&confirm)
+        .timeout(std::time::Duration::from_secs(8))
+        .send().await;
+    let outbound = match resp {
+        Ok(r) if r.status().is_success() => {
+            let v: serde_json::Value = r.json().await.unwrap_or_default();
+            v["token"].as_str().unwrap_or("").to_string()
+        }
+        _ => String::new(),
+    };
+    if !mesh::is_mesh_token_shape(&outbound)
+        || mesh::is_node_admin_token(&outbound, state.api_token.as_str())
+    {
+        return (StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "ok": false, "error": "peer did not confirm with a mesh token" })));
+    }
+    let inbound = mesh::gen_mesh_token();
     {
         let mut registry = state.peer_registry.write().await;
         let _ = registry.add(PeerRecord {
             node_id: req_node, ws_url: req_url, role: PeerRole::Full,
-            status: "online".into(), token: Some(req_token),
+            status: "online".into(),
+            token: Some(outbound),
+            inbound_token: Some(inbound.clone()),
         });
     }
-    // Hand back OUR creds so they can store us.
     (StatusCode::OK, Json(serde_json::json!({
         "ok":      true,
         "node_id": state.node_id.as_str(),
         "ws_url":  own_ws_url(),
-        "token":   state.api_token.as_str(),
+        "token":   inbound,
     })))
 }
 
+/// POST /api/mesh/pair/confirm — the claimer answers here to prove they own
+/// the URL they advertised. Authenticated by the in-flight redeem nonce.
+async fn pair_confirm_handler(
+    State(state): State<GatewayState>,
+    Json(body):   Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let nonce = body["nonce"].as_str().unwrap_or_default().to_string();
+    let peer_node = body["node_id"].as_str().unwrap_or_default().trim().to_string();
+    let peer_url = body["ws_url"].as_str().unwrap_or_default().trim().to_string();
+    if nonce.is_empty() || peer_node.is_empty() {
+        return (StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": "missing fields" })));
+    }
+    let ok = {
+        let mut f = state.redeem_flight.lock().unwrap();
+        match f.as_ref() {
+            Some(flight) if flight.expires_at > std::time::Instant::now() && flight.nonce == nonce => {
+                *f = None;
+                true
+            }
+            _ => false,
+        }
+    };
+    if !ok {
+        return (StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "ok": false, "error": "no matching redeem" })));
+    }
+    let inbound = mesh::gen_mesh_token();
+    if !peer_url.is_empty() {
+        let mut registry = state.peer_registry.write().await;
+        let outbound = registry.peers.iter()
+            .find(|p| p.node_id == peer_node)
+            .and_then(|p| p.token.clone());
+        let _ = registry.add(PeerRecord {
+            node_id: peer_node,
+            ws_url: peer_url,
+            role: PeerRole::Full,
+            status: "online".into(),
+            token: outbound,
+            inbound_token: Some(inbound.clone()),
+        });
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true, "token": inbound })))
+}
+
 /// POST /api/mesh/pair/redeem — this node's UI hands us a discovered peer's ws_url +
-/// the code shown on it; we claim it (presenting OUR creds) and store the peer.
+/// the code shown on it. We claim with a nonce (never AGENTD_TOKEN); the peer
+/// callbacks `/confirm` before either side discloses a minted mesh token.
 async fn pair_redeem_handler(
     State(state): State<GatewayState>,
     Json(body):   Json<serde_json::Value>,
@@ -5133,32 +5290,65 @@ async fn pair_redeem_handler(
     if peer_ws.is_empty() || code.is_empty() {
         return Json(serde_json::json!({ "ok": false, "error": "missing ws_url or code" }));
     }
-    let http_base = peer_ws.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1);
+    let Some(http_base) = mesh::mesh_http_base(&peer_ws) else {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid ws_url" }));
+    };
+    let self_ws = body["self_ws_url"].as_str()
+        .map(str::trim).filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(own_ws_url);
+    if mesh::mesh_http_base(&self_ws).is_none() {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid self_ws_url" }));
+    }
+    let nonce = mesh::gen_mesh_token();
+    {
+        let mut f = state.redeem_flight.lock().unwrap();
+        *f = Some(mesh::RedeemFlight {
+            peer_http: http_base.clone(),
+            nonce: nonce.clone(),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(30),
+        });
+    }
     let claim = serde_json::json!({
         "code":    code,
         "node_id": state.node_id.as_str(),
-        "ws_url":  own_ws_url(),
-        "token":   state.api_token.as_str(),
+        "ws_url":  self_ws,
+        "nonce":   nonce,
     });
     let resp = reqwest::Client::new()
         .post(format!("{http_base}/api/mesh/pair/claim"))
         .json(&claim)
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
         .send().await;
+    // Clear a leftover flight if claim never confirmed.
+    {
+        let mut f = state.redeem_flight.lock().unwrap();
+        if f.as_ref().is_some_and(|fl| fl.nonce == nonce) {
+            *f = None;
+        }
+    }
     match resp {
         Ok(r) if r.status().is_success() => {
             let v: serde_json::Value = r.json().await.unwrap_or_default();
             let node = v["node_id"].as_str().unwrap_or_default().to_string();
             let url  = v["ws_url"].as_str().unwrap_or(peer_ws.as_str()).to_string();
-            let tok  = v["token"].as_str().map(|s| s.to_string());
-            if node.is_empty() || tok.is_none() {
-                return Json(serde_json::json!({ "ok": false, "error": "peer returned no credentials" }));
+            let tok  = v["token"].as_str().unwrap_or("").to_string();
+            if node.is_empty()
+                || !mesh::is_mesh_token_shape(&tok)
+                || mesh::is_node_admin_token(&tok, state.api_token.as_str())
+            {
+                return Json(serde_json::json!({ "ok": false, "error": "peer returned no mesh token" }));
             }
             {
                 let mut registry = state.peer_registry.write().await;
+                let inbound = registry.peers.iter()
+                    .find(|p| p.node_id == node)
+                    .and_then(|p| p.inbound_token.clone());
                 let _ = registry.add(PeerRecord {
                     node_id: node.clone(), ws_url: url, role: PeerRole::Full,
-                    status: "online".into(), token: tok,
+                    status: "online".into(),
+                    token: Some(tok),
+                    inbound_token: inbound,
                 });
             }
             Json(serde_json::json!({ "ok": true, "node_id": node }))

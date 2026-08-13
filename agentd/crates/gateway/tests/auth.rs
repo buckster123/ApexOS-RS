@@ -52,6 +52,7 @@ fn make_state(
         sensor_profile:       Arc::new(std::sync::RwLock::new("standard".into())),
         sensor_config_path:   std::path::PathBuf::from("/dev/null"),
         pairing:              Arc::new(std::sync::Mutex::new(None)),
+        redeem_flight:        Arc::new(std::sync::Mutex::new(None)),
         node_id:              Arc::new("test-node".into()),
         mesh_sessions:        Arc::new(std::sync::Mutex::new(HashMap::new())),
         mesh_sessions_path:   PathBuf::from("."),

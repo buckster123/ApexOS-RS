@@ -534,6 +534,7 @@ async fn main() -> anyhow::Result<()> {
         sensor_profile:       Arc::clone(&sensor_profile),
         sensor_config_path:   sensor_config_path.clone(),
         pairing:              Arc::new(std::sync::Mutex::new(None)),
+        redeem_flight:        Arc::new(std::sync::Mutex::new(None)),
         node_id:              Arc::clone(&node_id),
         mesh_sessions:        Arc::clone(&mesh_sessions),
         mesh_sessions_path:   mesh_sessions_path.clone(),

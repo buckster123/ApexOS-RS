@@ -47,6 +47,7 @@ fn make_state(handle: apexos_core::BusHandle, bcast: tokio::sync::broadcast::Sen
         sensor_profile:       Arc::new(std::sync::RwLock::new("standard".into())),
         sensor_config_path:   std::path::PathBuf::from("/dev/null"),
         pairing:              Arc::new(std::sync::Mutex::new(None)),
+        redeem_flight:        Arc::new(std::sync::Mutex::new(None)),
         node_id:              Arc::new("test-node".into()),
         mesh_sessions:        Arc::new(std::sync::Mutex::new(HashMap::new())),
         mesh_sessions_path:   PathBuf::from("."),
@@ -267,38 +268,147 @@ async fn spawn_gateway() -> String {
     format!("http://{addr}")
 }
 
+/// Confirm stub: answers `/api/mesh/pair/confirm` with a minted-shape mesh token.
+async fn spawn_confirm_stub(reply_token: &str) -> String {
+    use axum::{Json, Router, routing::post};
+    let tok = reply_token.to_string();
+    let app = Router::new().route("/api/mesh/pair/confirm", post(move |Json(_b): Json<serde_json::Value>| {
+        let tok = tok.clone();
+        async move { Json(serde_json::json!({ "ok": true, "token": tok })) }
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    format!("http://{addr}")
+}
+
+async fn spawn_authed_gateway(node: &str, admin: &str) -> String {
+    let (bus_actor, handle, bcast) = Bus::new(SystemState::default());
+    tokio::spawn(bus_actor.run());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut state = make_state(handle, bcast);
+    state.node_id = Arc::new(node.into());
+    state.api_token = Arc::new(admin.into());
+    tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    format!("http://{addr}")
+}
+
 #[tokio::test]
-async fn pairing_claim_exchanges_creds_and_is_single_use() {
-    let base = spawn_gateway().await;
+async fn pairing_claim_exchanges_mesh_creds_and_is_single_use() {
+    let admin = "node-admin-secret-token";
+    let base = spawn_authed_gateway("test-node", admin).await;
+    let theirs = "cd".repeat(32);
+    let stub = spawn_confirm_stub(&theirs).await;
     let http = reqwest::Client::new();
 
-    // start → a 6-digit code
     let started: serde_json::Value = http.post(format!("{base}/api/mesh/pair/start"))
+        .bearer_auth(admin)
         .send().await.unwrap().json().await.unwrap();
     let code = started["code"].as_str().unwrap().to_string();
-    assert_eq!(code.len(), 6);
 
-    // claim with the right code → 200 + our node creds, requester registered reciprocally
     let claim = serde_json::json!({
         "code": code, "node_id": "peer-x",
-        "ws_url": "ws://10.0.0.9:8787", "token": "peer-token",
+        "ws_url": stub.replace("http://", "ws://"),
+        "nonce": "ee".repeat(32),
+        "token": admin,
     });
     let resp = http.post(format!("{base}/api/mesh/pair/claim")).json(&claim).send().await.unwrap();
     assert_eq!(resp.status(), 200);
     let claimed: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(claimed["ok"], true);
     assert_eq!(claimed["node_id"], "test-node");
+    let minted = claimed["token"].as_str().unwrap();
+    assert_ne!(minted, admin, "must not export AGENTD_TOKEN");
+    assert_eq!(minted.len(), 64);
+    assert!(minted.chars().all(|c| c.is_ascii_hexdigit()));
 
-    // the requester is now a saved peer (token redacted → has_token:true)
     let peers: serde_json::Value = http.get(format!("{base}/api/mesh/peers"))
+        .bearer_auth(admin)
         .send().await.unwrap().json().await.unwrap();
     assert!(peers["peers"].as_array().unwrap().iter()
         .any(|p| p["node_id"] == "peer-x" && p["has_token"] == true),
-        "requester should be registered with a token");
+        "requester should be registered with a mesh token");
 
-    // same code again → consumed (single-use) → 403
+    // Mesh token can a2a, cannot /api/run.
+    let msg = http.post(format!("{base}/api/sessions/0/message"))
+        .bearer_auth(minted)
+        .json(&serde_json::json!({ "message": "hi", "from": "forged-peer" }))
+        .send().await.unwrap();
+    assert_eq!(msg.status(), 200, "mesh token must reach a2a");
+
+    let run = http.post(format!("{base}/api/run"))
+        .bearer_auth(minted)
+        .json(&serde_json::json!({ "command": "id" }))
+        .send().await.unwrap();
+    assert_eq!(run.status(), 401, "mesh token must not be /api/run");
+
     let again = http.post(format!("{base}/api/mesh/pair/claim")).json(&claim).send().await.unwrap();
     assert_eq!(again.status(), 403, "code must be single-use");
+}
+
+#[tokio::test]
+async fn pairing_redeem_does_not_send_admin_token() {
+    use axum::{Json, Router, routing::post};
+    let seen = Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
+    let seen2 = seen.clone();
+    let app = Router::new().route("/api/mesh/pair/claim", post(move |Json(b): Json<serde_json::Value>| {
+        *seen2.lock().unwrap() = b.clone();
+        async move {
+            Json(serde_json::json!({
+                "ok": true, "node_id": "node-b",
+                "ws_url": "ws://127.0.0.1:9",
+                "token": "ff".repeat(32),
+            }))
+        }
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    let fake_b = format!("ws://{addr}");
+
+    let admin = "admin-must-not-leak";
+    let a = spawn_authed_gateway("node-a", admin).await;
+    let http = reqwest::Client::new();
+    let resp = http.post(format!("{a}/api/mesh/pair/redeem"))
+        .bearer_auth(admin)
+        .json(&serde_json::json!({ "ws_url": fake_b, "code": "123456", "self_ws_url": "ws://127.0.0.1:1" }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = seen.lock().unwrap().clone();
+    assert!(body.get("token").is_none(), "redeem must not send AGENTD_TOKEN: {body}");
+    assert!(body["nonce"].as_str().unwrap().len() == 64);
+}
+
+#[tokio::test]
+async fn pairing_redeem_two_nodes_roundtrip() {
+    let a = spawn_authed_gateway("node-a", "admin-a").await;
+    let b = spawn_authed_gateway("node-b", "admin-b").await;
+    let http = reqwest::Client::new();
+    let started: serde_json::Value = http.post(format!("{b}/api/mesh/pair/start"))
+        .bearer_auth("admin-b").send().await.unwrap().json().await.unwrap();
+    let code = started["code"].as_str().unwrap();
+    let resp = http.post(format!("{a}/api/mesh/pair/redeem"))
+        .bearer_auth("admin-a")
+        .json(&serde_json::json!({
+            "ws_url": b.replace("http://", "ws://"),
+            "self_ws_url": a.replace("http://", "ws://"),
+            "code": code,
+        }))
+        .send().await.unwrap();
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["ok"], true, "redeem: {v}");
+    assert_eq!(v["node_id"], "node-b");
+    for (base, tok, expect) in [(&a, "admin-a", "node-b"), (&b, "admin-b", "node-a")] {
+        let peers: serde_json::Value = http.get(format!("{base}/api/mesh/peers"))
+            .bearer_auth(tok).send().await.unwrap().json().await.unwrap();
+        assert!(peers["peers"].as_array().unwrap().iter()
+            .any(|p| p["node_id"] == expect && p["has_token"] == true),
+            "{base} missing {expect}: {peers}");
+    }
 }
 
 #[tokio::test]
@@ -308,7 +418,7 @@ async fn pairing_claim_wrong_code_rejected() {
     http.post(format!("{base}/api/mesh/pair/start")).send().await.unwrap();
     // "BADCODE" can never equal a 6-digit numeric code → guaranteed rejection.
     let resp = http.post(format!("{base}/api/mesh/pair/claim"))
-        .json(&serde_json::json!({ "code": "BADCODE", "node_id": "x", "ws_url": "ws://10.0.0.9:8787", "token": "t" }))
+        .json(&serde_json::json!({ "code": "BADCODE", "node_id": "x", "ws_url": "ws://10.0.0.9:8787", "nonce": "aa".repeat(32) }))
         .send().await.unwrap();
     assert_eq!(resp.status(), 403);
 }
