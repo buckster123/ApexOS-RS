@@ -93,8 +93,8 @@ The edit/commit of the *source* is the existing git layer (PR #117 tools, with
 | 1 | **Staging build** (tool) | `cargo build --release -p agentd` into a *staging* path — **never over the live binary** | build error returned to APEX → **untouched** |
 | 2 | **Tests** (tool) | `cargo test -p agentd` **and** the caller's `test_cmd` | test failure returned → **untouched** |
 | 3 | **Adversarial review** (✅ slice 4) | a fresh-context LLM (own `RoutingProvider`) reviews the diff being swapped in: "could this brick boot / health / rollback? is it reversible? does it touch the update machinery itself?" → final `VERDICT: SAFE\|BLOCK`. **Fail-closed** (unparseable/unavailable → block); empty diff → trivially safe (no call); `AGENTD_SELF_UPDATE_REVIEW=0` to skip. Single reviewer v1, `review_diff` is the N-way-panel seam | review veto returned → **untouched** |
-| 4 | **Pre-swap commit** (tool) | `session_save()` + `store_intention("resuming after self-update: <reason>")`; write `request.json` (staged path, sha256, target/prev commit, deadline) | if the write fails, abort → **untouched** |
-| 5 | **Swap** (watchdog, root) | verify staged sha256; `cp agentd → agentd.prev`; **atomic** `mv staged → /usr/local/bin/agentd`; `systemctl restart agentd` | mv/restart fails → restore `agentd.prev` → **known-good** |
+| 4 | **Pre-swap commit** (tool) | `session_save()` + `store_intention("resuming after self-update: <reason>")`; copy the built binary to `$UPDATE_DIR/agentd.staged`; write `request.json` (sha256, target/prev commit, deadline — **no staged path**) | if the write fails, abort → **untouched** |
+| 5 | **Swap** (watchdog, root) | consume **only** `$UPDATE_DIR/agentd.staged` (reject symlink / non-regular / wrong-owner / empty sha); `cp agentd → agentd.prev`; copy+rehash+atomic `mv` into `/usr/local/bin/agentd`; `systemctl restart agentd` | mv/restart fails → restore `agentd.prev` → **known-good** |
 | 6 | **Health probe** (watchdog) | poll `health.json` ≤ `TIMEOUT`: `status=healthy ∧ commit=target ∧ booted_at≥swap_ts` | timeout / agentd inactive → **rollback to `agentd.prev`** → known-good |
 | 7 | **Probation** (✅ slice 5) | `agentd.service` `StartLimitIntervalSec=300`/`Burst=5` → on a post-confirm crash-loop, `OnFailure=apexos-rollback.service` restores `agentd.prev` — but ONLY if a `confirmed.json` is recent (≤ `APEXOS_PROBATION_WINDOW`, 600s) + `agentd.prev` exists; else no-op (not our regression). Anti-loop: the confirm marker is consumed, so one probation rollback per update max | crash-loop in window → **rollback** → known-good |
 
@@ -113,11 +113,12 @@ kill it). Algorithm:
 ```sh
 # apexos-self-update.service  (Type=oneshot, User=root), triggered by the .path unit
 req=/var/lib/agentd/update/request.json
-verify sha256(staged) == req.staged_sha256        || exit (leave live daemon as-is)
+# staged path is HARD-CODED ($UPDATE_DIR/agentd.staged) — never from JSON
+verify regular-file + not-symlink + owner==request.json + sha256
 cp /usr/local/bin/agentd /usr/local/bin/agentd.prev   # known-good backup
 record req.prev_commit
 systemctl stop agentd
-mv -f "$staged" /usr/local/bin/agentd             # atomic rename, never cp-in-place
+cp staged → BIN.new; re-hash copy; mv -f BIN.new /usr/local/bin/agentd
 systemctl start agentd
 deadline = now + TIMEOUT
 while now < deadline:
@@ -253,9 +254,11 @@ agentd (slice 3) writes `request.json`; the watchdog consumes it and writes one
 outcome marker. All flat JSON in `/var/lib/agentd/update/`:
 
 ```jsonc
-// request.json — written by agentd after its pre-swap gates pass (stage 4)
-{ "staged": "/var/lib/agentd/update/agentd.staged",  // staged binary (agentd-built)
-  "staged_sha256": "<sha256 of staged>",             // watchdog verifies before swap
+// request.json — written by agentd after its pre-swap gates pass (stage 4).
+// There is NO `staged` path field. The watchdog only ever reads
+// $UPDATE_DIR/agentd.staged (hard-coded). A caller-supplied path was a
+// root `rm -f` primitive.
+{ "staged_sha256": "<64 hex of $UPDATE_DIR/agentd.staged>",  // required; empty is reject
   "target_commit": "<FULL 40-char GIT_COMMIT the staged binary embeds>",  // NOT short/"HEAD" — the tool resolves it; must == the health marker's commit or confirm never matches
   "prev_commit":   "<currently-running commit>",
   "created_at":    <unix>,    // health booted_at must be ≥ this (proves NEW boot)
@@ -351,7 +354,7 @@ On-hardware drills (apex2), driven by hand-writing a `request.json` — no agent
   sha=$(sha256sum /var/lib/agentd/update/agentd.staged | cut -d' ' -f1)
   cur=$(jq -r .commit /var/lib/agentd/update/health.json)
   cat >/var/lib/agentd/update/request.json <<EOF
-  { "staged":"/var/lib/agentd/update/agentd.staged","staged_sha256":"$sha",
+  { "staged_sha256":"$sha",
     "target_commit":"BROKEN","prev_commit":"$cur","created_at":$(date +%s),
     "timeout":120,"reason":"forced-rollback drill" }
   EOF
