@@ -87,9 +87,10 @@ fn cargo_target_dir() -> Option<String> {
 }
 
 /// The request the watchdog consumes (flat JSON — see docs/self-update.md).
+/// The staged binary path is NOT in the contract: the watchdog only ever
+/// reads `$UPDATE_DIR/agentd.staged`.
 #[derive(Debug, Serialize)]
 struct SelfUpdateRequest {
-    staged: String,
     staged_sha256: String,
     target_commit: String,
     prev_commit: String,
@@ -475,7 +476,6 @@ async fn run_update(
     save_resume_state(proxy, &reason, &commit).await;
 
     let req = SelfUpdateRequest {
-        staged: staged.to_string_lossy().to_string(),
         staged_sha256: sha,
         // MUST be the full 40-char sha (`resolved`), NOT the caller's `commit` arg.
         // The health marker reports the full `build.rs git rev-parse HEAD` sha; the
@@ -585,7 +585,6 @@ mod tests {
     #[test]
     fn request_serializes_to_the_watchdog_schema() {
         let r = SelfUpdateRequest {
-            staged: "/var/lib/agentd/update/agentd.staged".into(),
             staged_sha256: "abc".into(),
             target_commit: "deadbeef".into(),
             prev_commit: "cafe".into(),
@@ -594,9 +593,10 @@ mod tests {
             reason: "test".into(),
         };
         let v: serde_json::Value = serde_json::to_value(&r).unwrap();
-        for k in ["staged", "staged_sha256", "target_commit", "prev_commit", "created_at", "timeout", "reason"] {
+        for k in ["staged_sha256", "target_commit", "prev_commit", "created_at", "timeout", "reason"] {
             assert!(v.get(k).is_some(), "missing field {k}");
         }
+        assert!(v.get("staged").is_none(), "staged path must not be in the contract");
         assert_eq!(v["target_commit"], "deadbeef");
         assert_eq!(v["timeout"], 120);
     }

@@ -930,6 +930,8 @@ fi
 
 mkdir -p /etc/agentd /var/lib/agentd/{workspace,events,ui,cerebro/models,update}
 chown -R agentd:agentd /var/lib/agentd
+# Self-update: the watchdog consumes ONLY /var/lib/agentd/update/agentd.staged
+# (hard-coded). request.json must never carry a staged path.
 chmod 750 /var/lib/agentd
 ok "User and directories ready"
 
@@ -1948,8 +1950,9 @@ ok "Services enabled"
 
 # ── Self-update watchdog ────────────────────────────────────────────────────────
 # The privileged (root) half of the daemon self-update loop (docs/self-update.md).
-# agentd (non-root) can only WRITE /var/lib/agentd/update/request.json; the .path
-# unit notices it and runs the watchdog as root to do the binary swap + rollback.
+# agentd (non-root) can only WRITE request.json + agentd.staged in
+# /var/lib/agentd/update/; the .path unit notices request.json and runs the
+# watchdog as root. The watchdog never reads a staged path from the JSON.
 # Pre-installed + fixed here so the privileged code is auditable, never agent-authored.
 hdr "Self-update watchdog"
 install -d /usr/local/lib/apexos

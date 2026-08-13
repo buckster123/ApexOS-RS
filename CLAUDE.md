@@ -169,7 +169,7 @@ Full table: **`docs/env-vars.md`**. Dev-critical: `AGENTD_WS` (default `ws://loc
 
 The full ledger is **`docs/gotchas.md`** — grep it for your subsystem; entries end with explicit "don't do X" invariants. Topic map (grep keys):
 
-- **Build/deploy**: fontconfig + KMS build deps · `text file busy` · low-RAM OOM build guard · verify deploys by *running commit* (`health.json`) · `apexos-update` idempotency (`install.conf`) · policy additive sync (quote-insensitive, validate-before-persist)
+- **Build/deploy**: fontconfig + KMS build deps · `text file busy` · low-RAM OOM build guard · verify deploys by *running commit* (`health.json`) · `apexos-update` idempotency (`install.conf`) · policy additive sync (quote-insensitive, validate-before-persist) · self-update watchdog never trusts a `staged` path from JSON
 - **Slint/UI**: `#[tokio::main]` ban · `invoke_from_event_loop` · `SharedString` · bare `Rectangle` ≠ layout · no key-repeat / no wheel-scroll on linuxkms (→ `ScrollView` pattern) · mono emoji · `touch build.rs`
 - **agentd core**: per-session turn gate · history trim + honest markers · session JSONL append order + `repair_history` · serde `#[derive(Default)]` shadowing trap · prompt-cache byte-stable prefix (never put volatile text in soul/embodiment/priming) · pending approvals are session+nonce bound and purged on cancel/complete/timeout
 - **Identity/memory**: `agent_id` is system-**stamped**, never model-supplied · per-agent workspace stamping · CCBS boot priming · evolution undo snapshots private + H4 snapshot gate · PAC lint gate · `soul_rehearse` · wakeup bounds

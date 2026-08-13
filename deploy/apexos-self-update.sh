@@ -31,6 +31,9 @@ REQ="$UPDATE_DIR/request.json"
 HEALTH="$UPDATE_DIR/health.json"
 STATE="$UPDATE_DIR/state"           # phase marker: BACKED_UP | SWAPPED
 LOCK="$UPDATE_DIR/watchdog.lock"
+# Fixed staging path — NEVER read a `staged` field from request.json. An
+# agentd-supplied path was a root-as-rm primitive (finding 5).
+STAGED="$UPDATE_DIR/agentd.staged"
 POLL_INTERVAL="${APEXOS_SELF_UPDATE_POLL:-2}"
 
 log()  { echo "[self-update] $*"; }
@@ -61,10 +64,32 @@ EOF
 }
 
 # Clear the request + phase so the .path unit can re-fire on the next request, and
-# drop the (now consumed) staged binary.
+# drop the (now consumed) staged binary. Only the hard-coded path is removed —
+# never a caller-selected one.
 finish() {
-  [ -n "${STAGED:-}" ] && rm -f "$STAGED" 2>/dev/null
+  rm -f "$STAGED" 2>/dev/null
   rm -f "$REQ" "$STATE"
+}
+
+is_sha256() {
+  printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{64}$'
+}
+
+# Regular file, not a symlink, same uid as request.json (the agentd user in
+# prod; the drill user in the harness). lstat via -L before -f so we never
+# follow a planted symlink.
+staged_file_ok() {
+  [ -e "$STAGED" ] || return 1
+  [ ! -L "$STAGED" ] || return 1
+  [ -f "$STAGED" ] || return 1
+  # Owner check needs stat (always present in prod). The sed-fallback drill
+  # strips PATH to coreutils used for JSON parse — skip if stat is absent.
+  if command -v stat >/dev/null 2>&1; then
+    _ru=$(stat -c %u "$REQ" 2>/dev/null) || return 1
+    _su=$(stat -c %u "$STAGED" 2>/dev/null) || return 1
+    [ "$_ru" = "$_su" ] || return 1
+  fi
+  return 0
 }
 
 # The running daemon's marker proves the NEW binary booted healthy: status healthy,
@@ -98,8 +123,17 @@ poll_health() {
 
 # Atomic same-directory rename: copy to a temp name on the target filesystem, then
 # rename over the live binary. The binary is never observed half-written.
-swap_in() { # $1=source binary
+# When $2 is a sha256, the COPY is re-hashed so a symlink swap between the
+# pre-check and cp cannot land unattested bytes.
+swap_in() { # $1=source binary  $2=optional expected sha256
   cp -f "$1" "$BIN.new.$$" || return 1
+  if [ -n "${2:-}" ]; then
+    _got=$(sha256sum "$BIN.new.$$" 2>/dev/null | cut -d' ' -f1)
+    if [ "$_got" != "$2" ]; then
+      rm -f "$BIN.new.$$"
+      return 1
+    fi
+  fi
   mv -f "$BIN.new.$$" "$BIN"
 }
 
@@ -131,14 +165,29 @@ fi
 
 [ -f "$REQ" ] || { log "no request.json — nothing to do"; exit 0; }
 
-STAGED=$(jget "$REQ" staged)
+# `staged` in the JSON is ignored on purpose. Path is $STAGED above.
 STAGED_SHA=$(jget "$REQ" staged_sha256)
 TARGET=$(jget "$REQ" target_commit)
 PREVC=$(jget "$REQ" prev_commit)
 CREATED=$(jget "$REQ" created_at)
 TIMEOUT=$(jget "$REQ" timeout)
 [ -n "$TIMEOUT" ] || TIMEOUT=120
-[ -n "$CREATED" ] || CREATED=0
+
+reject() { # $1=log  $2=outcome reason
+  log "$1 — rejecting, daemon untouched"
+  write_outcome rejected.json "$2"
+  finish
+  exit 0
+}
+
+if ! is_sha256 "$STAGED_SHA"; then
+  reject "staged_sha256 missing or not 64 hex" "staged_sha256 required"
+fi
+if [ -z "$TARGET" ]; then
+  reject "target_commit missing" "target_commit required"
+fi
+echo "$CREATED" | grep -Eq '^[0-9]+$' || reject "created_at not numeric" "created_at required"
+echo "$TIMEOUT" | grep -Eq '^[0-9]+$' || reject "timeout not numeric" "timeout required"
 
 PHASE=""
 [ -f "$STATE" ] && PHASE=$(cat "$STATE" 2>/dev/null)
@@ -170,20 +219,14 @@ if [ "$PHASE" = "SWAPPED" ]; then
 fi
 
 # ── stage A: verify staged binary (PRE-SWAP — live daemon untouched on failure) ──
-if [ -z "$STAGED" ] || [ ! -f "$STAGED" ]; then
-  log "staged binary missing ($STAGED) — rejecting, daemon untouched"
-  write_outcome rejected.json "staged binary missing"
-  finish; exit 0
+if ! staged_file_ok; then
+  reject "staged binary missing, symlink, or wrong owner ($STAGED)" "staged binary missing or unsafe"
 fi
-if [ -n "$STAGED_SHA" ]; then
-  actual=$(sha256sum "$STAGED" 2>/dev/null | cut -d' ' -f1)
-  if [ "$actual" != "$STAGED_SHA" ]; then
-    log "sha256 mismatch (want=$STAGED_SHA got=$actual) — rejecting, daemon untouched"
-    write_outcome rejected.json "staged sha256 mismatch"
-    finish; exit 0
-  fi
-  log "staged sha256 verified"
+actual=$(sha256sum "$STAGED" 2>/dev/null | cut -d' ' -f1)
+if [ "$actual" != "$STAGED_SHA" ]; then
+  reject "sha256 mismatch (want=$STAGED_SHA got=$actual)" "staged sha256 mismatch"
 fi
+log "staged sha256 verified"
 
 # ── stage B: back up the current known-good binary (FRESH runs only) ─────────────
 if [ "$PHASE" != "BACKED_UP" ]; then
@@ -198,7 +241,7 @@ fi
 
 # ── stage C: swap (stop → atomic rename → start) + mark SWAPPED ──────────────────
 sctl stop agentd 2>/dev/null
-if ! swap_in "$STAGED"; then
+if ! swap_in "$STAGED" "$STAGED_SHA"; then
   log "swap failed — restoring backup"
   swap_in "$PREV"
   sctl start agentd 2>/dev/null

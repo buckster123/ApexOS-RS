@@ -63,7 +63,6 @@ mkreq(){ # $1=staged_content $2=target $3=sha(optional, else real) $4=timeout
   local sha; sha=${3:-$(sha256sum "$ROOT/update/agentd.staged" | cut -d' ' -f1)}
   cat > "$ROOT/update/request.json" <<EOF
 {
-  "staged": "$ROOT/update/agentd.staged",
   "staged_sha256": "$sha",
   "target_commit": "$2",
   "prev_commit": "oldcommit",
@@ -115,6 +114,53 @@ check "binary still new (no re-swap)" "$(cat "$ROOT/bin/agentd")" "GOOD:newcommi
 check "agentd.prev preserved"    "$(cat "$ROOT/bin/agentd.prev")" "GOOD:oldcommit"
 check "state cleared"            "$(exists "$ROOT/update/state")" no
 
+say "=== Scenario 6a: REJECT (empty sha — no skip-verify) ==="
+reset; printf 'GOOD:oldcommit' > "$ROOT/bin/agentd"
+printf 'EVIL' > "$ROOT/update/agentd.staged"
+cat > "$ROOT/update/request.json" <<EOF
+{ "staged_sha256": "", "target_commit": "newcommit", "prev_commit": "old",
+  "created_at": 1000, "timeout": 5, "reason": "drill" }
+EOF
+run_wd
+check "rejected (empty sha)"     "$(exists "$ROOT/update/rejected.json")" yes
+check "binary UNCHANGED"         "$(cat "$ROOT/bin/agentd")" "GOOD:oldcommit"
+check "no backup made"           "$(exists "$ROOT/bin/agentd.prev")" no
+
+say "=== Scenario 6b: REJECT (staged is a symlink) ==="
+reset; printf 'GOOD:oldcommit' > "$ROOT/bin/agentd"
+printf 'GOOD:newcommit' > "$ROOT/update/real-bin"
+ln -sf "$ROOT/update/real-bin" "$ROOT/update/agentd.staged"
+sha=$(sha256sum "$ROOT/update/real-bin" | cut -d' ' -f1)
+cat > "$ROOT/update/request.json" <<EOF
+{ "staged_sha256": "$sha", "target_commit": "newcommit", "prev_commit": "old",
+  "created_at": 1000, "timeout": 5, "reason": "drill" }
+EOF
+run_wd
+check "rejected (symlink staged)" "$(exists "$ROOT/update/rejected.json")" yes
+check "binary UNCHANGED"          "$(cat "$ROOT/bin/agentd")" "GOOD:oldcommit"
+check "symlink target survived"   "$(cat "$ROOT/update/real-bin")" "GOOD:newcommit"
+
+say "=== Scenario 6c: JSON staged path is IGNORED (cannot rm a caller path) ==="
+reset; printf 'GOOD:oldcommit' > "$ROOT/bin/agentd"
+printf 'KEEPME' > "$ROOT/dont-delete-me"
+printf '%s' "GOOD:newcommit" > "$ROOT/update/agentd.staged"
+sha=$(sha256sum "$ROOT/update/agentd.staged" | cut -d' ' -f1)
+cat > "$ROOT/update/request.json" <<EOF
+{
+  "staged": "$ROOT/dont-delete-me",
+  "staged_sha256": "$sha",
+  "target_commit": "newcommit",
+  "prev_commit": "oldcommit",
+  "created_at": 1000,
+  "timeout": 5,
+  "reason": "drill"
+}
+EOF
+run_wd
+check "confirmed despite hostile staged field" "$(exists "$ROOT/update/confirmed.json")" yes
+check "caller path NOT deleted"                "$(cat "$ROOT/dont-delete-me")" "KEEPME"
+check "binary swapped from hard-coded staged"  "$(cat "$ROOT/bin/agentd")" "GOOD:newcommit"
+
 say "=== Scenario 6: POWER-LOSS RESUME ROLLBACK (SWAPPED + broken new in place) ==="
 reset; printf 'STUCK' > "$ROOT/bin/agentd"; printf 'GOOD:oldcommit' > "$ROOT/bin/agentd.prev"
 echo SWAPPED > "$ROOT/update/state"
@@ -127,7 +173,7 @@ say ""
 say "=== jget sed-fallback regex check (production uses jq; verify the fallback too) ==="
 # Mask jq by trimming PATH to a dir with only the coreutils the fallback needs.
 sedbin=$(mktemp -d)
-for t in grep sed cat date sha256sum cut sh rm mv cp cat printf sleep; do
+for t in grep sed cat date sha256sum cut sh rm mv cp printf sleep stat; do
   p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$sedbin/$t" 2>/dev/null
 done
 reset; printf 'GOOD:oldcommit' > "$ROOT/bin/agentd"; mkreq "GOOD:newcommit" newcommit "" 5
