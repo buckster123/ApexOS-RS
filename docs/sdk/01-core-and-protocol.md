@@ -417,9 +417,11 @@ a message shape. Capability is gated downstream:
 - **The systemd sandbox is the real boundary**, not the event layer. `agentd`
   runs as a jailed `agentd` user (`ProtectSystem=strict`, `ReadWritePaths` limited
   to `/var/lib/agentd /etc/agentd`). A new event can never escalate beyond that
-  jail. `/sensor-bridge` is the one ungated route (own `SENSOR_BRIDGE_TOKEN`); a
-  new ingest endpoint accepting untrusted `Event`s should follow the same
-  pattern, not widen `/ws`.
+  jail. `/sensor-bridge` has its own `SENSOR_BRIDGE_TOKEN` (minted by
+  install.sh; a non-loopback bind refuses to start without one) and
+  deserializes a dedicated `SensorIngress` type — `sensor_reading` only, never
+  the full `Event` enum. A new ingest endpoint accepting untrusted bytes
+  should follow that pattern, not widen `/ws` and not `from_str::<Event>`.
 
 - **Silent-drop is a safety feature *and* a footgun.** A malformed inbound frame
   is dropped, not errored (the no-`else` `if let Ok(event)` in the gateway read task) — a malicious client can't crash the

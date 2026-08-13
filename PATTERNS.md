@@ -183,11 +183,13 @@ distinct causes) is the value.
 Auto-approval that arms for exactly one autonomous goal's session, never a global flag: a shared
 per-session set, armed on goal create, disarmed on any terminal outcome, checked at the approval
 gate — and **failing closed** (a poisoned lock returns false, so a lock error can never silently
-auto-approve).
+auto-approve). Arming is a **human grant**: `goal_create{yolo:true}` is forced-Ask and the
+driver only honors a supervisor-stamped `__yolo_granted`, never the model argument.
 · `GoalYoloSessions` + `goal_session_is_yolo()` in [`agentd/crates/core/src/identity.rs`](agentd/crates/core/src/identity.rs)
   (pure check, tested); consulted at the supervisor's Ask arm
+· grant helpers in [`agentd/crates/plugins/src/policy.rs`](agentd/crates/plugins/src/policy.rs)
 · explained in the goal-scoped-yolo note in [`docs/gotchas.md`](docs/gotchas.md)
-· **Lift:** the session-scoped set + fails-closed check is the reusable core; the safety property *is* the scoping.
+· **Lift:** the session-scoped set + fails-closed check is the reusable core; the safety property *is* the scoping plus a grant that the model cannot mint.
 
 **Additive config sync — repo-follows, user-overrides-win** ✅
 For a seed-if-absent config that users (or the agent itself) evolve at runtime, a three-leg sync on

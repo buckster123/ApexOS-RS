@@ -173,3 +173,17 @@ fn secret_denylist_beats_an_allowed_read_root() {
     });
     assert!(matches!(r, Err(Denied::Secret(_))), "secret must win over the allowlist, got {r:?}");
 }
+
+#[test]
+fn secret_denylist_beats_workspace_containment() {
+    let ws = mktmp("ws");
+    let key = ws.join("node.api_key");
+    std::fs::write(&key, "sk-secret").unwrap();
+    let r = confine_fs(&key, Access::Read, &ws, &[], |p| {
+        p.extension().map(|e| e == "api_key").unwrap_or(false)
+    });
+    assert!(
+        matches!(r, Err(Denied::Secret(_))),
+        "workspace containment must not skip the secret denylist, got {r:?}"
+    );
+}

@@ -11,8 +11,8 @@
 //!   component (a write target that doesn't exist yet) — so a symlink *inside* the
 //!   workspace that points *outside* can't smuggle an escape past a `starts_with`
 //!   check (closes the classic TOCTOU);
-//! - then a containment decision: writes confine to the workspace; reads also accept
-//!   a read-allowlist, minus an always-blocked secret set.
+//! - then a containment decision: secrets are denied first (including inside the
+//!   workspace); writes confine to the workspace; reads also accept a read-allowlist.
 //!
 //! Structured [`Denied`] reasons let the caller render its own messages while this
 //! crate stays generic. See `PATTERNS.md` in the ApexOS-RS repo.
@@ -80,9 +80,10 @@ pub fn canonicalize_lenient(path: &Path) -> Option<PathBuf> {
 }
 
 /// Confine `requested` for `access`. Writes confine to `workspace`; reads also accept
-/// `read_roots` (each canonicalized) minus anything `is_secret` flags. `requested`
-/// should already be workspace-rooted by the caller. Returns the canonical path to
-/// operate on (never the raw request — operate on *this*, not the input).
+/// `read_roots` (each canonicalized). `is_secret` is evaluated **before** any root
+/// is accepted — a workspace (or exo-workspace) `.api_key` / `.ssh` is still denied.
+/// `requested` should already be workspace-rooted by the caller. Returns the
+/// canonical path to operate on (never the raw request — operate on *this*).
 pub fn confine_fs(
     requested: &Path,
     access: Access,
@@ -96,6 +97,9 @@ pub fn confine_fs(
     let canon =
         canonicalize_lenient(requested).ok_or_else(|| Denied::Unresolvable(requested.to_path_buf()))?;
 
+    if is_secret(&canon) {
+        return Err(Denied::Secret(canon));
+    }
     if canon.starts_with(workspace) {
         return Ok(canon);
     }
@@ -105,9 +109,6 @@ pub fn confine_fs(
             path: canon,
         }),
         Access::Read => {
-            if is_secret(&canon) {
-                return Err(Denied::Secret(canon));
-            }
             for root in read_roots {
                 let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
                 if canon.starts_with(&root_canon) {
@@ -209,6 +210,27 @@ mod tests {
             confine_fs(&f, Access::Write, &ws, &roots, |_| false),
             Err(Denied::OutsideWorkspace { .. })
         ));
+    }
+
+    #[test]
+    fn secret_denylist_beats_workspace() {
+        let ws = mktmp("ws");
+        let key = ws.join("service.api_key");
+        fs::write(&key, "sk-secret").unwrap();
+        let r = confine_fs(&key, Access::Read, &ws, &[], |p| {
+            p.extension().map(|e| e == "api_key").unwrap_or(false)
+        });
+        assert!(
+            matches!(r, Err(Denied::Secret(_))),
+            "secret must win over workspace containment, got {r:?}"
+        );
+        let w = confine_fs(&key, Access::Write, &ws, &[], |p| {
+            p.extension().map(|e| e == "api_key").unwrap_or(false)
+        });
+        assert!(
+            matches!(w, Err(Denied::Secret(_))),
+            "secret must also block writes, got {w:?}"
+        );
     }
 
     /// The crown-jewel security property: a symlink *inside* the workspace pointing

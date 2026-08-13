@@ -111,6 +111,8 @@ mode = "suggest"
 # (docs/ideas/goal-driver-design.md). allow — non-destructive: goal_create just kicks
 # off gated turns (every step tool stays individually policy-gated, bounded by
 # max_steps), and goal_step only reports the step outcome (continue/done/blocked).
+# yolo:true is NOT covered by this allow — the supervisor forces Ask so a model
+# cannot mint its own unattended authority.
 "goal_create"      = "allow"
 "goal_step"        = "allow"
 "list_goals"       = "allow"

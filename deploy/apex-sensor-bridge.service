@@ -10,6 +10,8 @@ Group=agentd
 EnvironmentFile=-/etc/agentd/env
 Environment=SENSOR_INTERVAL_SECS=30
 Environment=SENSOR_BRIDGE_HOST=localhost:8787
+# SENSOR_BRIDGE_TOKEN is minted into /etc/agentd/env by install.sh (same file
+# agentd reads). A LAN-bound agentd refuses to start if it is absent.
 ExecStart=/usr/local/bin/apex-sensor-bridge
 Restart=always
 RestartSec=10
