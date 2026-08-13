@@ -60,7 +60,7 @@ serializes a single-field tuple struct **transparently** — as the inner number
 **not** as `{"0": 42}` and **not** as a string. So on the wire:
 
 ```json
-{"type": "user_approval", "session": 42, "action": 5, "granted": true}
+{"type": "user_approval", "session": 42, "action": 5, "granted": true, "nonce": 881726453012}
 ```
 
 `session` and `action` are **bare numbers**. `PluginId(pub String)` likewise
@@ -342,7 +342,7 @@ This is the exact handshake — and it **differs from CLAUDE.md** (see Gotchas).
 5. **Approve/reject a tool** when you receive `approval_pending`. Use the numeric
    `call.id` as `action`, and `granted` (boolean) — **not** `call_id`/`approved`:
    ```json
-   {"type": "user_approval", "action": 5, "granted": true}
+   {"type": "user_approval", "action": 5, "granted": true, "nonce": 881726453012}
    ```
 
 6. **Cancel a turn:**
@@ -448,7 +448,7 @@ protocol tables in the same commit.
 | `hello` | `resume_session: u64?`, `new: bool?`, `agent_id: string?`, `persona: string?` | resume (or mint, with `new:true`) a session; server replies `session_init` with history. `agent_id` = identity bind (gated for session-token humans); `persona` = voice |
 | `set_persona` | `persona: string` | live persona switch — gateway-consumed, never re-emitted as an `Event` |
 | `user_prompt` | `text: string`, `images: [{path}\|{b64, media_type}]?` | start/continue a turn; images are shimmed via `vision::prepare` |
-| `user_approval` | `action: u64` (= `ToolCall.id`), `granted: bool` | resolve a pending approval |
+| `user_approval` | `action: u64` (= `ToolCall.id`), `granted: bool`, `nonce: u64` | resolve a pending approval; nonce from `approval_pending` |
 | `user_cancel` | — | cascade-abort the turn (no `turn_complete` follows) |
 
 ### Outbound events (daemon → frontend), selected — scoped per-socket by `event_session`
@@ -460,7 +460,7 @@ protocol tables in the same commit.
 | `agent_thinking` | `session`, `delta: string` | extended-thinking stream |
 | `tool_requested` | `session`, `call: ToolCall` | `call.id` is a number; stringify for row key |
 | `tool_result` | `session`, `call: u64`, `output: ToolOutput` | `call` is a **bare id**, not a `ToolCall` |
-| `approval_pending` | `session`, `call: ToolCall` | show approve/reject |
+| `approval_pending` | `session`, `call: ToolCall`, `nonce: u64` | show approve/reject; echo `nonce` on `user_approval` |
 | `turn_complete` | `session` | clear busy; TTS if enabled |
 | `plugin_up` / `plugin_down` | `plugin: string`, `tools: ToolSpec[]` / `reason` | tool registry change |
 | `sub_agent_started` | `parent`, `child`, `prompt` | open a child window |

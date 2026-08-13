@@ -306,7 +306,15 @@ pub struct CouncilAgentDef {
 pub enum Event {
     // ── from frontends (intents) ──────────────────────────
     UserPrompt   { session: SessionId, text: String, #[serde(default)] images: Vec<ImageSource> },
-    UserApproval { session: SessionId, action: ActionId, granted: bool },
+    UserApproval {
+        session: SessionId,
+        action: ActionId,
+        granted: bool,
+        /// Capability minted on `ApprovalPending`. Zero = missing (pre-nonce
+        /// client). The supervisor rejects a zero or mismatched nonce.
+        #[serde(default)]
+        nonce: u64,
+    },
     UserCancel   { session: SessionId },
 
     // ── from the agent loop ───────────────────────────────
@@ -321,7 +329,13 @@ pub enum Event {
     PluginDown { plugin: PluginId, reason: String },
 
     // ── from the policy engine ────────────────────────────
-    ApprovalPending { session: SessionId, call: ToolCall },
+    ApprovalPending {
+        session: SessionId,
+        call: ToolCall,
+        /// Random capability the client must echo on `UserApproval`.
+        #[serde(default)]
+        nonce: u64,
+    },
 
     // ── sub-agent routing ─────────────────────────────────
     /// Emitted by the supervisor when agent.spawn is dispatched.
@@ -751,6 +765,30 @@ mod tests {
                 assert_eq!(call.id, ActionId(7));
                 assert_eq!(call.tool, "read_file");
                 assert_eq!(call.args["path"], "x");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approval_nonce_is_additive() {
+        // Pre-nonce clients still deserialize; missing nonce is 0 (rejected
+        // as a grant). New frames carry a non-zero nonce.
+        let old = r#"{"type":"user_approval","session":1,"action":5,"granted":true}"#;
+        match serde_json::from_str::<Event>(old).unwrap() {
+            Event::UserApproval { action, granted, nonce, .. } => {
+                assert_eq!(action, ActionId(5));
+                assert!(granted);
+                assert_eq!(nonce, 0);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        let pending = r#"{"type":"approval_pending","session":1,"nonce":42,
+            "call":{"id":5,"tool":"run_command","args":{},"needs_approval":true}}"#;
+        match serde_json::from_str::<Event>(pending).unwrap() {
+            Event::ApprovalPending { nonce, call, .. } => {
+                assert_eq!(nonce, 42);
+                assert_eq!(call.id, ActionId(5));
             }
             other => panic!("wrong variant: {other:?}"),
         }

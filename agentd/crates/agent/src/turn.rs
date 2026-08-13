@@ -821,7 +821,7 @@ mod tests {
         tokio::spawn(async move {
             while let Ok(event) = rx_sim.recv().await {
                 if let Event::ToolRequested { session, call } = event {
-                    bus_sim.emit(Event::ApprovalPending { session, call }).await;
+                    bus_sim.emit(Event::ApprovalPending { session, call, nonce: 1 }).await;
                 }
             }
         });

@@ -140,8 +140,8 @@ onto the bus → gateway relays to all sockets.
 
 **Tool round-trip.** `run_turn` emits `Event::ToolRequested` → gateway forwards to the UI
 (renders a `tool_card`) **and** the supervisor consumes it; `PolicyEngine.check` decides
-allow/ask. On Ask it emits `ApprovalPending` (UI shows approve/reject, sends
-`{type:user_approval, action:<id>}`). On approval the supervisor calls the stdio MCP plugin
+allow/ask. On Ask it emits `ApprovalPending` with a session-bound nonce (UI shows
+approve/reject, sends `{type:user_approval, action:<id>, nonce}`). On approval the supervisor calls the stdio MCP plugin
 (`apexos-tools` or `cerebro-mcp`) and emits `Event::ToolResult` → `run_turn` awaits the
 matching `ToolResult`, loops, then `TurnComplete`.
 

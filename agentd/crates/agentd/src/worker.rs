@@ -1245,7 +1245,7 @@ pub fn spawn_worker_driver(
                         // the approval, NOT dead — a human can grant it from the board and
                         // the turn proceeds. Mark Blocked (stall-exempt) so the lane tells
                         // the truth; the slot stays held (the turn is still in flight).
-                        Ok(Event::ApprovalPending { session, call }) if apexos_core::is_worker_session(session.0) => {
+                        Ok(Event::ApprovalPending { session, call, .. }) if apexos_core::is_worker_session(session.0) => {
                             if block_on_approval(&mut workers, &bus, session.0, &call.tool).await {
                                 save_workers(&workers, &workers_path);
                             }
