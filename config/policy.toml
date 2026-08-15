@@ -159,6 +159,7 @@ mode = "suggest"
 "cancel_schedule"  = "allow"
 
 # Git tools (apexos-tools) — confined by the tool to the workspace + AGENTD_GIT_ROOTS.
+# Spawns go through git_capture (no hooks / aliases / diff.external — SA-12).
 # Read-only verbs + init/branch/commit are allow (self-confined, like read_file:
 # with no AGENTD_GIT_ROOTS the only git root is the workspace, so an allow commit
 # can only touch the agent's own repo). Publish / tree-rewrite verbs always ask.
