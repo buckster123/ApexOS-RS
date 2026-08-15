@@ -967,16 +967,13 @@ fn confine_io(path: &str, write: bool) -> Result<(Beneath, PathBuf), String> {
 }
 
 // ─── Git tools ────────────────────────────────────────────────────────────────
-// git_* shell out to the system `git` via cmd_capture — argv, never `/bin/sh`, so
-// there is no shell-injection surface; a leading-`-` guard defeats option
-// injection on positional refs/branches/paths. Repos are confined to a "git
-// roots" allowlist (mirrors read_roots): the agent workspace by default, extended
-// by AGENTD_GIT_ROOTS (colon-sep absolute paths, e.g. the agentd source repo for
-// the self-update loop). Policy: read-only verbs + git_init/branch/commit are
-// `allow` (so they MUST self-confine, like read_file — git_roots is the gate);
-// push/checkout/reset/merge (publish or rewrite the tree) are `ask`. With the
-// default (no AGENTD_GIT_ROOTS) the only git root is the workspace, so an `allow`
-// commit can only ever touch the agent's own workspace repo.
+// git_* shell out to the system `git` via git_capture — argv, never `/bin/sh`,
+// with a leading-`-` guard (`git_safe_arg`) against option injection. Every
+// spawn env_clears inherited GIT_* / ~/.gitconfig and `-c`-overrides hooks,
+// aliases of our verbs, diff.external, pager, editor, ssh, gpg (SA-12). Repos
+// are confined by confine_git_repo to git_roots() = workspace + AGENTD_GIT_ROOTS.
+// Policy: read-only + init/branch/commit/worktree are allow; push/checkout/
+// reset/merge are ask.
 
 /// Directories a git op may touch: the workspace + AGENTD_GIT_ROOTS (colon-sep).
 fn git_roots() -> Vec<PathBuf> {
@@ -1014,14 +1011,91 @@ fn git_safe_arg(label: &str, v: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Run `git -C <repo> <args…>` (args exclude the leading `-C <repo>`) and shape
-/// the result. Output is char-capped so a huge diff/log can't blow the context.
+/// `-c` overrides that beat repo `.git/config` for the known exec vectors
+/// (hooks, aliases of our verbs, external diff, pager, editor, ssh, gpg).
+fn git_safe_c_flags() -> Vec<String> {
+    const PAIRS: &[(&str, &str)] = &[
+        ("core.hooksPath", "/dev/null"),
+        ("core.pager", "cat"),
+        ("core.editor", "true"),
+        ("sequence.editor", "true"),
+        ("diff.external", ""),
+        ("diff.tool", ""),
+        ("merge.tool", ""),
+        ("core.fsmonitor", ""),
+        ("core.useBuiltinFSMonitor", "false"),
+        ("interactive.diffFilter", ""),
+        ("filter.lfs.smudge", ""),
+        ("filter.lfs.clean", ""),
+        ("filter.lfs.process", ""),
+        ("commit.gpgsign", "false"),
+        ("gpg.program", "true"),
+        ("core.sshCommand", "ssh"),
+        ("alias.status", ""),
+        ("alias.diff", ""),
+        ("alias.log", ""),
+        ("alias.branch", ""),
+        ("alias.init", ""),
+        ("alias.add", ""),
+        ("alias.commit", ""),
+        ("alias.push", ""),
+        ("alias.checkout", ""),
+        ("alias.reset", ""),
+        ("alias.merge", ""),
+        ("alias.worktree", ""),
+        ("alias.rev-parse", ""),
+    ];
+    let mut out = Vec::with_capacity(PAIRS.len() * 2);
+    for (k, v) in PAIRS {
+        out.push("-c".into());
+        out.push(format!("{k}={v}"));
+    }
+    out
+}
+
+/// Git child env: no inherited GIT_* / pager / ssh wrappers, no system or
+/// global config. HOME is a non-writable dummy so `~/.gitconfig` cannot load.
+fn apply_git_safe_env(cmd: &mut Command) {
+    cmd.env_clear();
+    if let Ok(path) = std::env::var("PATH") {
+        cmd.env("PATH", path);
+    } else {
+        cmd.env("PATH", "/usr/bin:/bin");
+    }
+    cmd.env("HOME", "/nonexistent");
+    cmd.env("LC_ALL", "C");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    cmd.env("GIT_ATTR_NOSYSTEM", "1");
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+}
+
+/// `git -C <repo> <args>` under the safe env + `-c` overrides. Every git
+/// spawn in this file must go through here (SA-12).
+fn git_capture(repo: &Path, args: &[String]) -> (String, String, bool) {
+    let mut full = git_safe_c_flags();
+    full.push("-C".into());
+    full.push(repo.to_string_lossy().into_owned());
+    full.extend(args.iter().cloned());
+    let mut cmd = Command::new("git");
+    apply_git_safe_env(&mut cmd);
+    match cmd.args(&full).output() {
+        Ok(o) => (
+            String::from_utf8_lossy(&o.stdout).to_string(),
+            String::from_utf8_lossy(&o.stderr).to_string(),
+            o.status.success(),
+        ),
+        Err(e) => (String::new(), e.to_string(), false),
+    }
+}
+
+/// Run `git -C <repo> <args…>` and shape the result. Output is char-capped
+/// so a huge diff/log can't blow the context.
 fn run_git(repo: &Path, args: Vec<String>) -> Value {
     let repo_s = repo.to_string_lossy().into_owned();
-    let mut full: Vec<String> = vec!["-C".into(), repo_s.clone()];
-    full.extend(args);
-    let refs: Vec<&str> = full.iter().map(String::as_str).collect();
-    let (out, err, ok) = cmd_capture("git", &refs);
+    let (out, err, ok) = git_capture(repo, &args);
     if !ok {
         return tool_error(format!("git failed: {}", err.trim()));
     }
@@ -1108,11 +1182,7 @@ fn git_commit(args: &Value) -> Value {
         add.extend(paths);
     }
     {
-        let repo_s = repo.to_string_lossy().into_owned();
-        let mut full: Vec<String> = vec!["-C".into(), repo_s];
-        full.extend(add);
-        let refs: Vec<&str> = full.iter().map(String::as_str).collect();
-        let (_, err, ok) = cmd_capture("git", &refs);
+        let (_, err, ok) = git_capture(&repo, &add);
         if !ok {
             return tool_error(format!("git add: {}", err.trim()));
         }
@@ -1211,8 +1281,10 @@ fn git_worktree(args: &Value) -> Value {
             // reachable from here.
             let repo_s = repo.to_string_lossy().into_owned();
             let refq = format!("refs/heads/{branch}");
-            let (_, _, exists) =
-                cmd_capture("git", &["-C", &repo_s, "rev-parse", "--verify", "--quiet", &refq]);
+            let (_, _, exists) = git_capture(
+                &repo,
+                &["rev-parse".into(), "--verify".into(), "--quiet".into(), refq],
+            );
             let dir_s = dir.to_string_lossy().into_owned();
             let mut a: Vec<String> = vec!["worktree".into(), "add".into()];
             if exists {
@@ -3721,6 +3793,85 @@ mod tests {
             inner["output"].as_str().unwrap().contains("first commit"),
             "log missing commit: {inner}"
         );
+
+        std::env::remove_var("AGENTD_WORKSPACE");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn git_tools_do_not_run_repo_hooks_or_aliases() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if !cmd_capture("git", &["--version"]).2 {
+            return;
+        }
+        let pid = std::process::id();
+        let ws = std::env::temp_dir().join(format!("apexos_git_exec_{pid}"));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).unwrap();
+        std::env::set_var("AGENTD_WORKSPACE", &ws);
+        std::env::remove_var("AGENTD_GIT_ROOTS");
+
+        let ok = |r: &Value| r.get("isError").is_none();
+        assert!(ok(&git_init(&json!({}))));
+        fs::write(ws.join("hello.txt"), "hi").unwrap();
+
+        // Plant a pre-commit hook and a status alias that would write PWNED.
+        let hook = ws.join(".git/hooks/pre-commit");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch {}\n", ws.join("PWNED_HOOK").display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = fs::metadata(&hook).unwrap().permissions();
+            p.set_mode(0o755);
+            fs::set_permissions(&hook, p).unwrap();
+        }
+        let _ = cmd_capture(
+            "git",
+            &[
+                "-C",
+                ws.to_str().unwrap(),
+                "config",
+                "alias.status",
+                &format!("!touch {}", ws.join("PWNED_ALIAS").display()),
+            ],
+        );
+        let ext = ws.join("evil-diff.sh");
+        fs::write(
+            &ext,
+            format!(
+                "#!/bin/sh\ntouch {}\nexec cat\n",
+                ws.join("PWNED_DIFF").display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = fs::metadata(&ext).unwrap().permissions();
+            p.set_mode(0o755);
+            fs::set_permissions(&ext, p).unwrap();
+        }
+        let _ = cmd_capture(
+            "git",
+            &[
+                "-C",
+                ws.to_str().unwrap(),
+                "config",
+                "diff.external",
+                ext.to_str().unwrap(),
+            ],
+        );
+
+        assert!(ok(&git_commit(&json!({ "message": "hooked" }))), "commit should ignore pre-commit");
+        assert!(ok(&git_status(&json!({}))), "status should ignore alias");
+        assert!(ok(&git_diff(&json!({}))), "diff should ignore diff.external");
+        assert!(!ws.join("PWNED_HOOK").exists(), "pre-commit hook ran");
+        assert!(!ws.join("PWNED_ALIAS").exists(), "alias.status ran");
+        assert!(!ws.join("PWNED_DIFF").exists(), "diff.external ran");
 
         std::env::remove_var("AGENTD_WORKSPACE");
         let _ = fs::remove_dir_all(&ws);
