@@ -16,7 +16,8 @@
 > Wave 12 (PR #366): finding 13.
 > Wave 13 (PR #367): SA-12.
 > Wave 14 (PR #368): findings 15, SA-7.
-> Wave 15 (this tree): SA-5.
+> Wave 15 (PR #369): SA-5.
+> Wave 16 (this tree): SA-3.
 
 ## Ranked findings
 
@@ -251,6 +252,10 @@ dropping them.
 - **Minimal fix:** Receiver-stamp every federated import
   `visibility:"private"` and regression-test that shared-only recall cannot
   return it until an explicit publish operation.
+- **Fixed (Wave 16):** `federated_remember_args` always sets `visibility:"private"`
+  (sender-supplied visibility is ignored). `share_memory` remains the publish
+  act; `federated_import_stays_private_until_published` covers the recall
+  boundary.
 
 ### SA-4. High — authenticated courier fields can escape paths and misbind receipts
 

@@ -113,7 +113,10 @@ What apex3 improvised with a file, done natively with memory semantics. As built
   (invalid type → auto-classify, salience clamped), and appends the sender's `note` as an
   attributed suffix. Import runs Cerebro `remember` (so the receiver's dedup/classification
   pipeline still applies) via an agentd-side ToolProxy worker — the `ConsolidateReq` seam;
-  DirectCall honors the explicit **node-agent space**, default-private. `federated_at` ≡
+  DirectCall honors the explicit **node-agent space** and receiver-stamps
+  `visibility:"private"` (SA-3 — a missing visibility would default Shared and
+  leak through `shared_only` federated recall). Publish onward is `share_memory`.
+  `federated_at` ≡
   the copy's `created_at`; provenance-as-tags keeps per-origin cleanup one filter away.
 - **Receiver awareness:** a global `Event::MeshMemoryShared{from_node, memory_id, preview}`
   (mirrors `MeshMessage`) so the receiving agent + board know knowledge arrived — silent
@@ -172,7 +175,8 @@ As built (`agentd/crates/agentd/src/dream_digest.rs`):
     consolidation and the colony can't ping-pong an item into amplification.
   - **The window is the dedup** — only this dream's creations qualify; a night's digest
     can't re-send last night's items.
-- **Receiving side:** digests land with provenance, default-private; the *receiving* node's
+- **Receiving side:** digests land with provenance, receiver-stamped private (same SA-3
+  import path); the *receiving* node's
   own next dream folds them in — consolidation stays local, insight travels. The *products*
   of sleep, not the process.
 - **Knobs:** `COLONY_DREAM_DIGEST=0` disables (default ON — it's the point);
