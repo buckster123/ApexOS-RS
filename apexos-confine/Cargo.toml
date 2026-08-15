@@ -2,7 +2,11 @@
 name = "apexos-confine"
 version = "0.1.0"
 edition = "2021"
-description = "Path-confinement primitives — reject `..` traversal, lenient canonicalize (resolve symlinks, tolerate non-existent write targets), and root containment. std only, no ApexOS deps: the FS-sandbox algorithm, liftable on its own."
+description = "Path-confinement primitives — reject `..`, lenient canonicalize, root containment, and openat2 RESOLVE_BENEATH|NO_SYMLINKS IO. No ApexOS deps: the FS-sandbox algorithm, liftable on its own."
 license = "Apache-2.0"
 
 [dependencies]
+# Linux openat2(2) — the check/use close (RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS).
+# The rest of the crate stays std-only; this is the only OS dep.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

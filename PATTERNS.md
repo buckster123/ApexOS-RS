@@ -142,12 +142,13 @@ portable design.
 For allow-listed (no-approval) tools, the *tool process* is the only gate, so confinement can't live
 in the approval layer. The **mechanism** — reject `..` (component-based), lenient-canonicalize
 (resolve symlinks, tolerate non-existent write targets), root containment, read/secret split — is now
-the std-only [`apexos-confine`](apexos-confine/) crate: pure, unit-tested incl. the symlink-escape
-(TOCTOU) case. `apexos-tools` supplies the *policy* (per-agent workspace, read roots, secret denylist)
-and renders the agent-facing strings.
-· [`apexos-confine/`](apexos-confine/) (the algorithm) ← `confine()` / `confine_git_repo()` in [`tools/crates/apexos-tools/`](tools/crates/apexos-tools/)
+the [`apexos-confine`](apexos-confine/) crate: policy via `confine_fs`, IO via `Beneath`
+(`openat2` + `RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS`). Unit-tested incl. the symlink-escape
+and rename-ancestor TOCTOU cases. `apexos-tools` supplies the *policy* (per-agent workspace,
+read roots, secret denylist) and renders the agent-facing strings.
+· [`apexos-confine/`](apexos-confine/) (the algorithm) ← `confine()` / `confine_io()` / `confine_git_repo()` in [`tools/crates/apexos-tools/`](tools/crates/apexos-tools/)
 · explained in the FS/git-confinement notes in [`docs/gotchas.md`](docs/gotchas.md)
-· **Lift:** `cargo add apexos-confine` — std-only, no ApexOS deps. The sandbox algorithm on its own.
+· **Lift:** `cargo add apexos-confine` — std + Linux `libc` for `openat2`. The sandbox algorithm on its own.
 
 **Self-update loop** 🟡
 A daemon that safely rewrites its own binary: a watchdog at the privilege boundary, a health
@@ -337,10 +338,10 @@ depended on without dragging in the whole daemon. The model for every clean seam
 · [`apexos-protocol/`](apexos-protocol/) · **Lift:** `cargo add`-grade. This is what "factored for theft" looks like in code.
 
 **`apexos-confine` — the FS-sandbox algorithm** ✅
-A std-only, zero-ApexOS-dep crate: reject `..`, lenient-canonicalize (`canonicalize_lenient` — judge
+A zero-ApexOS-dep crate: reject `..`, lenient-canonicalize (`canonicalize_lenient` — judge
 a not-yet-existing write target by its deepest *existing* ancestor, symlinks resolved), root
-containment, read/secret split — the path-confinement mechanism on its own, unit-tested incl. the
-symlink-escape (TOCTOU) case. Born from this very smoothing pass.
+containment, read/secret split, and **IO through `openat2(RESOLVE_BENEATH|NO_SYMLINKS)`**
+so a check/use race cannot escape. Unit-tested incl. the symlink-escape and rename-ancestor cases.
 · [`apexos-confine/`](apexos-confine/) · **Lift:** `cargo add apexos-confine`; supply your own policy + messages.
 
 **Workspace-excluded sidecar crates — dependency decoupling by process boundary** ✅

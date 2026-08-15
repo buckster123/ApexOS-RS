@@ -2651,6 +2651,34 @@ fn confine_mesh_source(agent_id: &str, rel: &str) -> Result<std::path::PathBuf, 
     Ok(canon)
 }
 
+/// Like [`confine_mesh_source`] but returns the root fd + relative path so the
+/// caller can `openat2` instead of `std::fs` on a checked pathname.
+fn confine_mesh_io(
+    agent_id: &str,
+    rel: &str,
+) -> Result<(apexos_confine::Beneath, std::path::PathBuf), String> {
+    let p = std::path::Path::new(rel);
+    if p.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err("path traversal (..) is not allowed".to_string());
+    }
+    let root = apexos_core::agent_workspace_root(agent_id);
+    let _ = std::fs::create_dir_all(&root);
+    let root_canon = std::fs::canonicalize(&root).map_err(|e| format!("workspace: {e}"))?;
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root_canon.join(p)
+    };
+    apexos_confine::confine_beneath(
+        &joined,
+        apexos_confine::Access::Read,
+        &root_canon,
+        &[],
+        |_| false,
+    )
+    .map_err(|_| format!("{rel} escapes the workspace"))
+}
+
 /// Send a workspace file to a registered peer's token-gated `/api/mesh/file`.
 /// Raw bytes in the body (binary-safe), remote relative path in the `x-dest` header.
 /// 5 MB cap. Confinement at BOTH ends (source here, dest on the receiver).
@@ -2663,11 +2691,11 @@ async fn mesh_file_send(node: Option<&str>, agent_id: &str, path: &str, dest: Op
     if path.is_empty() {
         return err("mesh_file_send: missing 'path'".into());
     }
-    let abs = match confine_mesh_source(agent_id, path) {
+    let (root, rel) = match confine_mesh_io(agent_id, path) {
         Ok(p)  => p,
         Err(e) => return err(format!("mesh_file_send: {e}")),
     };
-    let bytes = match tokio::fs::read(&abs).await {
+    let bytes = match root.read(&rel) {
         Ok(b)  => b,
         Err(e) => return err(format!("mesh_file_send: read {path}: {e}")),
     };
@@ -2675,7 +2703,7 @@ async fn mesh_file_send(node: Option<&str>, agent_id: &str, path: &str, dest: Op
     if n > 5 * 1024 * 1024 {
         return err(format!("mesh_file_send: {path} is {n} bytes (> 5 MB cap)"));
     }
-    let filename = abs.file_name().and_then(|f| f.to_str()).unwrap_or("file").to_string();
+    let filename = rel.file_name().and_then(|f| f.to_str()).unwrap_or("file").to_string();
     let remote = dest.filter(|d| !d.is_empty()).unwrap_or(&filename).to_string();
 
     let (ws_url, token) = match find_peer(node).await {
@@ -2714,7 +2742,7 @@ async fn mesh_file_send(node: Option<&str>, agent_id: &str, path: &str, dest: Op
                 != apexos_core::connectivity::ConnectivityState::Full
             {
                 let log_dir = crate::courier::log_dir_env();
-                let (abs2, node2, name2) = (abs.clone(), node.to_string(), filename.clone());
+                let (abs2, node2, name2) = (root.display().join(&rel), node.to_string(), filename.clone());
                 let queued = tokio::task::spawn_blocking(move || {
                     crate::courier::queue_artifact(&log_dir, &abs2, &node2, &name2)
                 })

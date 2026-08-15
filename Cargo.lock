@@ -343,6 +343,9 @@ dependencies = [
 [[package]]
 name = "apexos-confine"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "apexos-core"
@@ -380,6 +383,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "apexos-agent",
+ "apexos-confine",
  "apexos-core",
  "apexos-mesh-proto",
  "apexos-plugins",
