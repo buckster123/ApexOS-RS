@@ -27,8 +27,10 @@
 //! `BrainstemStatus` here directly — and must never assume the same of
 //! anything that arrived over the air.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use apexos_core::mesh_router::{
     LatencyClass, MeshTransport, SendError, SendReceipt, TransportHealth, TransportId,
@@ -49,6 +51,76 @@ pub struct BrainstemView {
     pub seen: bool,
 }
 
+/// A2A body ceiling. The brainstem refuses anything over 256 B queued, and
+/// postcard + packet headers eat a few of those; stay well inside one adv.
+pub const GOSSIP_MAX_TEXT: usize = 180;
+/// Don't fill flash: a handful of store-and-forward messages, not a dump.
+pub const GOSSIP_QUEUE_CAP: u16 = 8;
+const GOSSIP_RATE_MAX: usize = 4;
+const GOSSIP_RATE_WINDOW: Duration = Duration::from_secs(10);
+
+/// Why `/api/mesh/gossip` refused the send (SA-11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GossipRefuse {
+    InvalidTarget,
+    Broadcast,
+    SelfTarget,
+    EmptyText,
+    TooLarge,
+    QueueFull,
+    RateLimited,
+}
+
+impl GossipRefuse {
+    pub fn error(self) -> &'static str {
+        match self {
+            GossipRefuse::InvalidTarget => "target must be a unicast radio node id",
+            GossipRefuse::Broadcast => "broadcast gossip is not allowed",
+            GossipRefuse::SelfTarget => "cannot gossip to this node's own radio id",
+            GossipRefuse::EmptyText => "text is required",
+            GossipRefuse::TooLarge => "text exceeds radio gossip bound",
+            GossipRefuse::QueueFull => "brainstem outbox is at quota",
+            GossipRefuse::RateLimited => "gossip rate limited",
+        }
+    }
+}
+
+/// Unicast radio id: not 0 (unprovisioned), not `BROADCAST`, not ourselves.
+pub fn validate_gossip_target(target: u64, self_id: Option<u16>) -> Result<u16, GossipRefuse> {
+    if target == 0 || target > u16::MAX as u64 {
+        return Err(GossipRefuse::InvalidTarget);
+    }
+    let id = target as u16;
+    if id == apexos_mesh_proto::BROADCAST {
+        return Err(GossipRefuse::Broadcast);
+    }
+    if self_id == Some(id) {
+        return Err(GossipRefuse::SelfTarget);
+    }
+    Ok(id)
+}
+
+pub fn validate_gossip_text(text: &str) -> Result<(), GossipRefuse> {
+    if text.is_empty() {
+        return Err(GossipRefuse::EmptyText);
+    }
+    if text.len() > GOSSIP_MAX_TEXT {
+        return Err(GossipRefuse::TooLarge);
+    }
+    Ok(())
+}
+
+fn take_gossip_slot(hits: &mut VecDeque<Instant>, now: Instant) -> bool {
+    while hits.front().is_some_and(|t| now.duration_since(*t) >= GOSSIP_RATE_WINDOW) {
+        hits.pop_front();
+    }
+    if hits.len() >= GOSSIP_RATE_MAX {
+        return false;
+    }
+    hits.push_back(now);
+    true
+}
+
 /// Shared handle to the bridge link. Cloneable, cheap, and safe to hold in
 /// `GatewayState` whether or not a bridge ever connects.
 #[derive(Clone)]
@@ -66,6 +138,8 @@ pub struct MeshLink {
     dup_frames: Arc<AtomicU64>,
     decode_fail: Arc<AtomicU64>,
     brainstem: Arc<std::sync::Mutex<BrainstemView>>,
+    /// Recent `/api/mesh/gossip` admits (SA-11). Shared across clones.
+    gossip_hits: Arc<Mutex<VecDeque<Instant>>>,
 }
 
 impl Default for MeshLink {
@@ -87,6 +161,7 @@ impl MeshLink {
             dup_frames: Arc::new(AtomicU64::new(0)),
             decode_fail: Arc::new(AtomicU64::new(0)),
             brainstem: Arc::new(std::sync::Mutex::new(BrainstemView::default())),
+            gossip_hits: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -132,6 +207,23 @@ impl MeshLink {
 
     pub fn brainstem(&self) -> BrainstemView {
         self.brainstem.lock().map(|g| *g).unwrap_or_default()
+    }
+
+    /// SA-11: admit a radio gossip send. Unicast target, payload bound,
+    /// outbox quota, rate limit. Auth lives on the route (admin only).
+    pub fn admit_gossip(&self, target: u64, text: &str) -> Result<u16, GossipRefuse> {
+        let view = self.brainstem();
+        let self_id = (view.seen && view.node_id != 0).then_some(view.node_id);
+        let id = validate_gossip_target(target, self_id)?;
+        validate_gossip_text(text)?;
+        if view.seen && view.queued >= GOSSIP_QUEUE_CAP {
+            return Err(GossipRefuse::QueueFull);
+        }
+        let mut hits = self.gossip_hits.lock().unwrap_or_else(|e| e.into_inner());
+        if !take_gossip_slot(&mut hits, Instant::now()) {
+            return Err(GossipRefuse::RateLimited);
+        }
+        Ok(id)
     }
 
     pub fn stats(&self) -> serde_json::Value {
@@ -281,5 +373,61 @@ mod tests {
         // The router checks `mtu()` before offering the lane; this asserts
         // the number the router will be checking against.
         assert_eq!(t.mtu(), 248);
+    }
+
+    #[test]
+    fn gossip_target_is_unicast_and_not_self() {
+        assert_eq!(validate_gossip_target(7, None), Ok(7));
+        assert_eq!(
+            validate_gossip_target(0, None),
+            Err(GossipRefuse::InvalidTarget)
+        );
+        assert_eq!(
+            validate_gossip_target(u16::MAX as u64 + 1, None),
+            Err(GossipRefuse::InvalidTarget)
+        );
+        assert_eq!(
+            validate_gossip_target(apexos_mesh_proto::BROADCAST as u64, None),
+            Err(GossipRefuse::Broadcast)
+        );
+        assert_eq!(
+            validate_gossip_target(7, Some(7)),
+            Err(GossipRefuse::SelfTarget)
+        );
+        assert_eq!(validate_gossip_target(7, Some(3)), Ok(7));
+    }
+
+    #[test]
+    fn gossip_text_is_bounded() {
+        assert_eq!(validate_gossip_text(""), Err(GossipRefuse::EmptyText));
+        assert!(validate_gossip_text("hello").is_ok());
+        let big = "x".repeat(GOSSIP_MAX_TEXT + 1);
+        assert_eq!(validate_gossip_text(&big), Err(GossipRefuse::TooLarge));
+        assert!(validate_gossip_text(&"x".repeat(GOSSIP_MAX_TEXT)).is_ok());
+    }
+
+    #[test]
+    fn gossip_admit_enforces_quota_and_rate() {
+        let link = MeshLink::new();
+        assert_eq!(link.admit_gossip(7, "hi").unwrap(), 7);
+        link.set_brainstem(BrainstemView {
+            node_id: 3,
+            queued: GOSSIP_QUEUE_CAP,
+            seen: true,
+            ..Default::default()
+        });
+        assert_eq!(link.admit_gossip(7, "hi"), Err(GossipRefuse::QueueFull));
+        link.set_brainstem(BrainstemView {
+            node_id: 3,
+            queued: 0,
+            seen: true,
+            ..Default::default()
+        });
+        assert_eq!(link.admit_gossip(3, "hi"), Err(GossipRefuse::SelfTarget));
+        // Rate: 3 more after the first succeed, the 5th in-window fails.
+        assert!(link.admit_gossip(7, "a").is_ok());
+        assert!(link.admit_gossip(7, "b").is_ok());
+        assert!(link.admit_gossip(7, "c").is_ok());
+        assert_eq!(link.admit_gossip(7, "d"), Err(GossipRefuse::RateLimited));
     }
 }

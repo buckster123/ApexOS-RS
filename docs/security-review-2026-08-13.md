@@ -20,7 +20,8 @@
 > Wave 16 (PR #370): SA-3.
 > Wave 17 (PR #371): SA-8.
 > Wave 18 (PR #372): SA-9.
-> Wave 19 (this tree): SA-10.
+> Wave 19 (PR #373): SA-10.
+> Wave 20 (this tree): SA-11.
 
 ## Ranked findings
 
@@ -364,6 +365,11 @@ dropping them.
   colony identity.
 - **Minimal fix:** Put gossip behind a scoped mesh/admin credential and enforce
   registered targets, payload bounds, queue quotas, and rate limits.
+- **Fixed (Wave 20):** `POST /api/mesh/gossip` is admin/owner-only (mesh-peer
+  tokens refused — they would recreate the oracle). Unicast targets only
+  (not 0 / broadcast / self). Text ≤180 B, brainstem outbox quota 8, 4
+  admits / 10 s. Firmware outbox still seal-at-drain; the HTTP door was
+  the LAN signing path.
 
 ### SA-12. Critical — allowlisted Git tools execute repository-controlled commands
 

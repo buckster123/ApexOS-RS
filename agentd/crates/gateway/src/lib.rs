@@ -536,6 +536,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/mesh/peers/{id}",    delete(mesh_peers_delete_handler))
         .route("/api/mesh/pair/start",    post(pair_start_handler))
         .route("/api/mesh/pair/redeem",   post(pair_redeem_handler))
+        .route("/api/mesh/gossip",        post(mesh_gossip_handler))
         .route("/api/vast/recipes",       post(vast_recipes_save_handler))
         .route("/api/identities",         get(identities_list_handler))
         .route("/api/identities/user",    post(identities_create_user_handler))
@@ -582,7 +583,6 @@ pub fn router(state: GatewayState) -> Router {
         // discards; future radio-side probes won't hold tokens at all.
         .route("/api/ping", get(ping_handler))
         .route("/api/connectivity", get(connectivity_handler))
-        .route("/api/mesh/gossip", post(mesh_gossip_handler))
         .fallback(static_handler)
         .with_state(state)
 }
@@ -4426,6 +4426,10 @@ async fn connectivity_handler(State(state): State<GatewayState>) -> impl IntoRes
 
 /// POST /api/mesh/gossip — hand the radio a message for another node.
 ///
+/// Admin / owner only (SA-11): this path makes the brainstem seal and
+/// transmit under the colony identity. Mesh-peer tokens are intentionally
+/// not accepted — that would recreate the signing oracle for every pair.
+///
 /// The frame goes down the wired link **unsealed** (charter §5) and the
 /// brainstem takes it from there: a packet addressed to someone else is
 /// queued in its flash outbox, sealed with a fresh counter, and delivered
@@ -4438,6 +4442,7 @@ async fn mesh_gossip_handler(
 ) -> impl IntoResponse {
     use apexos_core::mesh_router::{MeshTransport, SendError};
     use apexos_mesh_proto::{MeshClass, Payload, PlainPacket, DEFAULT_HOP_LIMIT, WIRE_VERSION};
+    use crate::mesh_link::GossipRefuse;
 
     let Some(target) = body.get("target").and_then(|v| v.as_u64()) else {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
@@ -4445,6 +4450,13 @@ async fn mesh_gossip_handler(
         }))).into_response();
     };
     let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    if let Err(why) = state.mesh_link.admit_gossip(target, text) {
+        let status = match why {
+            GossipRefuse::RateLimited | GossipRefuse::QueueFull => StatusCode::TOO_MANY_REQUESTS,
+            _ => StatusCode::BAD_REQUEST,
+        };
+        return (status, Json(serde_json::json!({ "error": why.error() }))).into_response();
+    }
 
     let packet = PlainPacket {
         target: target as u16,
