@@ -2153,38 +2153,109 @@ async fn session_message_handler(
     Json(serde_json::json!({ "ok": true, "session_id": session.0 }))
 }
 
-/// Resolve a user-supplied workspace path. Relative paths join `AGENTD_WORKSPACE`;
-/// the canonical result must stay inside the workspace (defeats `../` + absolute
-/// escapes) — a frontend must never reach a file outside the workspace through any
-/// of these routes (image attach, explorer list/read).
-fn resolve_workspace_path(path: &str) -> Result<std::path::PathBuf, String> {
+fn workspace_dir() -> Result<std::path::PathBuf, String> {
     let ws = std::env::var("AGENTD_WORKSPACE")
         .ok().filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
-    let ws_canon = std::fs::canonicalize(&ws).map_err(|e| format!("workspace {ws}: {e}"))?;
-    let p = std::path::Path::new(path);
-    let joined = if p.is_absolute() { p.to_path_buf() } else { ws_canon.join(p) };
-    let canon = std::fs::canonicalize(&joined).map_err(|e| format!("{}: {e}", joined.display()))?;
-    if !canon.starts_with(&ws_canon) {
-        return Err(format!("path {} escapes workspace", canon.display()));
-    }
-    Ok(canon)
+    let _ = std::fs::create_dir_all(&ws);
+    std::fs::canonicalize(&ws).map_err(|e| format!("workspace {ws}: {e}"))
 }
 
-/// Like `resolve_workspace_path` but for a *write* target that may not exist yet
-/// (e.g. an audio op-chain `output_path`): confine the parent directory to the
-/// workspace and re-append the final component. Rejects `..` so the new suffix
-/// cannot escape.
+fn workspace_beneath() -> Result<apexos_confine::Beneath, String> {
+    let ws = workspace_dir()?;
+    apexos_confine::Beneath::open(&ws).map_err(|e| format!("workspace {}: {e}", ws.display()))
+}
+
+/// Relative path under the workspace, **without** resolving the target.
+/// `..` and absolute escapes are refused. IO must use [`workspace_beneath`].
+fn workspace_rel(path: &str) -> Result<std::path::PathBuf, String> {
+    if std::path::Path::new(path)
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err("path traversal (..) is not allowed".to_string());
+    }
+    let ws = workspace_dir()?;
+    let p = std::path::Path::new(path);
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        ws.join(p)
+    };
+    let rel = apexos_confine::relative_under(&ws, &joined)
+        .ok_or_else(|| format!("path {} escapes workspace", joined.display()))?;
+    Ok(if rel.as_os_str().is_empty() {
+        std::path::PathBuf::from(".")
+    } else {
+        rel
+    })
+}
+
+/// Display path (workspace + rel). For ffmpeg/argv that still need a pathname.
+/// Explorer IO uses the root fd, not this.
+fn resolve_workspace_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let rel = workspace_rel(path)?;
+    let ws = workspace_dir()?;
+    Ok(if rel == std::path::Path::new(".") {
+        ws
+    } else {
+        ws.join(rel)
+    })
+}
+
+/// Write target: parent must exist (checked via the root fd) and stay under
+/// the workspace; the final component is appended un-resolved.
 fn resolve_workspace_write_path(path: &str) -> Result<std::path::PathBuf, String> {
     let p = std::path::Path::new(path);
     if p.components().any(|c| c == std::path::Component::ParentDir) {
         return Err("path traversal (..) is not allowed".to_string());
     }
     let name = p.file_name().ok_or_else(|| format!("no file name in {path}"))?;
+    if name == "." || name == ".." {
+        return Err("path traversal (..) is not allowed".to_string());
+    }
     let parent = p.parent().filter(|d| !d.as_os_str().is_empty());
-    let parent_str = parent.map(|d| d.to_string_lossy().into_owned()).unwrap_or_else(|| ".".to_string());
-    let parent_canon = resolve_workspace_path(&parent_str)?;
-    Ok(parent_canon.join(name))
+    let parent_str = parent
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".to_string());
+    let parent_rel = workspace_rel(&parent_str)?;
+    let root = workspace_beneath()?;
+    if parent_rel != std::path::Path::new(".") {
+        root.stat(&parent_rel)
+            .map_err(|e| format!("{}: {e}", parent_rel.display()))?;
+    }
+    Ok(if parent_rel == std::path::Path::new(".") {
+        workspace_dir()?.join(name)
+    } else {
+        workspace_dir()?.join(parent_rel).join(name)
+    })
+}
+
+fn workspace_write_rel(path: &str) -> Result<(apexos_confine::Beneath, std::path::PathBuf), String> {
+    let p = std::path::Path::new(path);
+    if p.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err("path traversal (..) is not allowed".to_string());
+    }
+    let name = p.file_name().ok_or_else(|| format!("no file name in {path}"))?;
+    if name == "." || name == ".." {
+        return Err("path traversal (..) is not allowed".to_string());
+    }
+    let parent = p.parent().filter(|d| !d.as_os_str().is_empty());
+    let parent_str = parent
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".to_string());
+    let parent_rel = workspace_rel(&parent_str)?;
+    let root = workspace_beneath()?;
+    if parent_rel != std::path::Path::new(".") {
+        root.stat(&parent_rel)
+            .map_err(|e| format!("{}: {e}", parent_rel.display()))?;
+    }
+    let rel = if parent_rel == std::path::Path::new(".") {
+        std::path::PathBuf::from(name)
+    } else {
+        parent_rel.join(name)
+    };
+    Ok((root, rel))
 }
 
 /// A single safe path component for a rename/new-folder name: non-empty, not a
@@ -2198,46 +2269,73 @@ fn safe_component(name: &str) -> bool {
         && !name.contains('\0')
 }
 
-/// Recursively copy `src` → `dst` (a file or a whole directory tree). Used by the
-/// Explorer copy endpoint and as the cross-device fallback for move (EXDEV).
-/// Symlinks are followed (`std::fs::copy` copies the target's bytes) — exo-workspace
-/// trees don't carry links, and following keeps the copy self-contained.
-fn copy_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    let meta = std::fs::symlink_metadata(src)?;
-    if meta.is_dir() {
-        std::fs::create_dir(dst)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            copy_recursive(&entry.path(), &dst.join(entry.file_name()))?;
+/// Recursively copy `src` → `dst` through a [`apexos_confine::Beneath`] root.
+/// Symlinks are refused (not followed) — a planted link cannot pull bytes
+/// from outside the workspace.
+fn copy_beneath(
+    root: &apexos_confine::Beneath,
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> std::io::Result<()> {
+    let meta = root.stat(src)?;
+    if meta.is_symlink {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to copy a symlink",
+        ));
+    }
+    if meta.is_dir {
+        match root.mkdir(dst) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        for entry in root.read_dir(src)? {
+            copy_beneath(root, &src.join(&entry.name), &dst.join(&entry.name))?;
         }
         Ok(())
     } else {
-        std::fs::copy(src, dst).map(|_| ())
+        let bytes = root.read(src)?;
+        root.write(dst, &bytes, false)
     }
 }
 
-/// Resolve a move/copy: the existing, workspace-confined `src` and the target path
-/// inside the existing, workspace-confined `dest` directory (target keeps src's
-/// basename). Rejects a non-existent/non-dir destination, a name collision, and
-/// moving a directory into itself or one of its own descendants.
-fn resolve_move_target(src: &str, dest: &str) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+/// Resolve a move/copy to (root, src_rel, dest_rel). Both ends stay under
+/// the same workspace fd.
+fn resolve_move_target(
+    src: &str,
+    dest: &str,
+) -> Result<(apexos_confine::Beneath, std::path::PathBuf, std::path::PathBuf), String> {
     if src.trim().is_empty() {
         return Err("no source".to_string());
     }
-    let src_canon = resolve_workspace_path(src)?;
-    let dest_dir = resolve_workspace_path(dest)?;
-    if !dest_dir.is_dir() {
+    let root = workspace_beneath()?;
+    let src_rel = workspace_rel(src)?;
+    if src_rel == std::path::Path::new(".") {
+        return Err("cannot move the workspace root".to_string());
+    }
+    let dest_rel = workspace_rel(dest)?;
+    let dest_st = root
+        .stat(&dest_rel)
+        .map_err(|e| format!("destination: {e}"))?;
+    if !dest_st.is_dir {
         return Err("destination is not a directory".to_string());
     }
-    let name = src_canon.file_name().ok_or_else(|| "source has no name".to_string())?;
-    if dest_dir == src_canon || dest_dir.starts_with(&src_canon) {
+    let name = src_rel
+        .file_name()
+        .ok_or_else(|| "source has no name".to_string())?;
+    if dest_rel == src_rel || dest_rel.starts_with(&src_rel) {
         return Err("cannot move a folder into itself".to_string());
     }
-    let target = dest_dir.join(name);
-    if target.exists() {
+    let target = if dest_rel == std::path::Path::new(".") {
+        std::path::PathBuf::from(name)
+    } else {
+        dest_rel.join(name)
+    };
+    if root.exists(&target) {
         return Err("a file or folder with that name already exists here".to_string());
     }
-    Ok((src_canon, target))
+    Ok((root, src_rel, target))
 }
 
 /// Run raw user-attached image refs through the vision shim, returning prepared
@@ -2251,9 +2349,12 @@ async fn prepare_user_images(raw: &[serde_json::Value]) -> Vec<apexos_core::Imag
     let mut out = Vec::new();
     for item in raw {
         let prepared = if let Some(p) = item.get("path").and_then(|v| v.as_str()) {
-            match resolve_workspace_path(p) {
-                Ok(path) => tokio::task::spawn_blocking(move || apexos_core::vision::load_and_prepare(&path)).await,
-                Err(e) => { eprintln!("[vision] user image path rejected: {e}"); continue; }
+            match (workspace_beneath(), workspace_rel(p)) {
+                (Ok(root), Ok(rel)) => match root.read(&rel) {
+                    Ok(bytes) => tokio::task::spawn_blocking(move || apexos_core::vision::prepare_image(&bytes)).await,
+                    Err(e) => { eprintln!("[vision] user image read failed: {e}"); continue; }
+                },
+                (Err(e), _) | (_, Err(e)) => { eprintln!("[vision] user image path rejected: {e}"); continue; }
             }
         } else if let Some(b64) = item.get("b64").and_then(|v| v.as_str()) {
             let b64 = b64.to_string();
@@ -4170,7 +4271,7 @@ async fn sensor_config_post_handler(
 /// absolute paths; the result is `<workspace>/<dest>` (a relative subpath under the
 /// canonical workspace root). Parents are created on write. Mirrors the FS-confine
 /// rule (workspace-only for writes); the caller is already a token-authenticated peer.
-fn confine_mesh_dest(dest: &str) -> Result<std::path::PathBuf, String> {
+fn confine_mesh_dest(dest: &str) -> Result<(apexos_confine::Beneath, std::path::PathBuf), String> {
     let p = std::path::Path::new(dest);
     if p.components().any(|c| c == std::path::Component::ParentDir) {
         return Err("path traversal (..) is not allowed".to_string());
@@ -4181,10 +4282,9 @@ fn confine_mesh_dest(dest: &str) -> Result<std::path::PathBuf, String> {
     if p.as_os_str().is_empty() {
         return Err("empty dest".to_string());
     }
-    let ws = std::env::var("AGENTD_WORKSPACE").ok().filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
-    let ws_canon = std::fs::canonicalize(&ws).map_err(|e| format!("workspace {ws}: {e}"))?;
-    Ok(ws_canon.join(p))
+    let root = workspace_beneath()?;
+    let rel = workspace_rel(dest)?;
+    Ok((root, rel))
 }
 
 /// POST /api/mesh/file — receive a file from a mesh peer (token-gated) and write it
@@ -4203,16 +4303,18 @@ async fn mesh_file_handler(
     if body.is_empty() {
         return Json(serde_json::json!({ "ok": false, "error": "empty body" }));
     }
-    let target = match confine_mesh_dest(&dest) {
+    let (root, target) = match confine_mesh_dest(&dest) {
         Ok(p)  => p,
         Err(e) => return Json(serde_json::json!({ "ok": false, "error": format!("dest: {e}") })),
     };
     if let Some(parent) = target.parent() {
-        if let Err(e) = tokio::fs::create_dir_all(parent).await {
-            return Json(serde_json::json!({ "ok": false, "error": format!("mkdir: {e}") }));
+        if !parent.as_os_str().is_empty() && parent != std::path::Path::new(".") {
+            if let Err(e) = root.mkdir_all(parent) {
+                return Json(serde_json::json!({ "ok": false, "error": format!("mkdir: {e}") }));
+            }
         }
     }
-    match tokio::fs::write(&target, &body).await {
+    match root.write(&target, &body, false) {
         Ok(_)  => Json(serde_json::json!({ "ok": true, "path": dest, "bytes": body.len() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("write: {e}") })),
     }
@@ -6199,37 +6301,33 @@ async fn workspace_list_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let rel = params.get("path").map(|s| s.as_str()).unwrap_or("");
-    let dir = match resolve_workspace_path(rel) {
-        Ok(d) => d,
-        Err(e) => return Json(serde_json::json!({ "error": e, "path": rel, "entries": [] })),
+    let (root, dir_rel) = match (workspace_beneath(), workspace_rel(rel)) {
+        (Ok(r), Ok(p)) => (r, p),
+        (Err(e), _) | (_, Err(e)) => return Json(serde_json::json!({ "error": e, "path": rel, "entries": [] })),
     };
-    let ws = std::env::var("AGENTD_WORKSPACE").ok().filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/var/lib/agentd/workspace".to_string());
-    let ws_canon = std::fs::canonicalize(&ws).unwrap_or_else(|_| std::path::PathBuf::from(&ws));
+    let ws_canon = root.display().to_path_buf();
 
-    let mut entries: Vec<serde_json::Value> = Vec::new();
-    let mut rd = match tokio::fs::read_dir(&dir).await {
-        Ok(r) => r,
+    let listed = match root.read_dir(&dir_rel) {
+        Ok(v) => v,
         Err(e) => return Json(serde_json::json!({ "error": format!("read dir: {e}"), "path": rel, "entries": [] })),
     };
-    while let Ok(Some(entry)) = rd.next_entry().await {
-        let p = entry.path();
-        let name = match p.file_name().and_then(|n| n.to_str()) { Some(n) => n.to_string(), None => continue };
-        if name.starts_with('.') { continue; } // skip dotfiles
-        let meta = entry.metadata().await.ok();
-        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-        let size = meta.as_ref().filter(|m| m.is_file()).map(|m| m.len()).unwrap_or(0);
-        let modified = meta.as_ref().and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs()).unwrap_or(0);
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    for entry in listed {
+        if entry.name.starts_with('.') { continue; }
+        if entry.is_symlink { continue; } // never present a planted link as a file
+        let child_rel = if dir_rel == std::path::Path::new(".") {
+            std::path::PathBuf::from(&entry.name)
+        } else {
+            dir_rel.join(&entry.name)
+        };
+        let p = ws_canon.join(&child_rel);
         let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        let rel_path = p.strip_prefix(&ws_canon).map(|r| r.to_string_lossy().to_string())
-            .unwrap_or_else(|_| name.clone());
+        let rel_path = child_rel.to_string_lossy().to_string();
         entries.push(serde_json::json!({
-            "name": name,
-            "kind": if is_dir { "dir" } else { "file" },
-            "size": size,
-            "modified": modified,
+            "name": entry.name,
+            "kind": if entry.is_dir { "dir" } else { "file" },
+            "size": if entry.is_file { entry.len } else { 0 },
+            "modified": entry.mtime,
             "ext": ext,
             "path": rel_path,
             "abs": p.to_string_lossy(),
@@ -6254,11 +6352,11 @@ async fn workspace_read_handler(
 ) -> impl IntoResponse {
     const CAP: usize = 256 * 1024;
     let rel = params.get("path").map(|s| s.as_str()).unwrap_or("");
-    let path = match resolve_workspace_path(rel) {
-        Ok(p) => p,
-        Err(e) => return Json(serde_json::json!({ "error": e })),
+    let (root, path_rel) = match (workspace_beneath(), workspace_rel(rel)) {
+        (Ok(r), Ok(p)) => (r, p),
+        (Err(e), _) | (_, Err(e)) => return Json(serde_json::json!({ "error": e })),
     };
-    let bytes = match tokio::fs::read(&path).await {
+    let bytes = match root.read(&path_rel) {
         Ok(b) => b,
         Err(e) => return Json(serde_json::json!({ "error": format!("read: {e}") })),
     };
@@ -6291,23 +6389,24 @@ async fn workspace_download_handler(
 ) -> Response {
     const CAP: u64 = 256 * 1024 * 1024;
     let rel = params.get("path").map(|s| s.as_str()).unwrap_or("");
-    let path = match resolve_workspace_path(rel) {
-        Ok(p) => p,
-        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    let (root, path_rel) = match (workspace_beneath(), workspace_rel(rel)) {
+        (Ok(r), Ok(p)) => (r, p),
+        (Err(e), _) | (_, Err(e)) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let meta = match tokio::fs::metadata(&path).await {
+    let meta = match root.stat(&path_rel) {
         Ok(m) => m,
         Err(e) => return (StatusCode::NOT_FOUND, format!("{e}")).into_response(),
     };
-    if meta.is_dir() { return (StatusCode::BAD_REQUEST, "is a directory".to_string()).into_response(); }
-    if meta.len() > CAP { return (StatusCode::PAYLOAD_TOO_LARGE, "file too large (>256 MB)".to_string()).into_response(); }
-    let bytes = match tokio::fs::read(&path).await {
+    if meta.is_dir { return (StatusCode::BAD_REQUEST, "is a directory".to_string()).into_response(); }
+    if meta.is_symlink { return (StatusCode::BAD_REQUEST, "is a symlink".to_string()).into_response(); }
+    if meta.len > CAP { return (StatusCode::PAYLOAD_TOO_LARGE, "file too large (>256 MB)".to_string()).into_response(); }
+    let bytes = match root.read(&path_rel) {
         Ok(b) => b,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("read: {e}")).into_response(),
     };
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let ext = path_rel.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     // ASCII-sanitise the filename for the (latin1) Content-Disposition header.
-    let name: String = path.file_name().and_then(|n| n.to_str()).unwrap_or("download")
+    let name: String = path_rel.file_name().and_then(|n| n.to_str()).unwrap_or("download")
         .chars().map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' { c } else { '_' }).collect();
     (
         StatusCode::OK,
@@ -6328,14 +6427,14 @@ async fn workspace_upload_handler(
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let rel = params.get("path").map(|s| s.as_str()).unwrap_or("");
-    let target = match resolve_workspace_write_path(rel) {
+    let (root, target) = match workspace_write_rel(rel) {
         Ok(p) => p,
         Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
     if body.is_empty() {
         return Json(serde_json::json!({ "ok": false, "error": "empty upload" }));
     }
-    match tokio::fs::write(&target, &body).await {
+    match root.write(&target, &body, false) {
         Ok(_) => Json(serde_json::json!({ "ok": true, "path": rel, "bytes": body.len() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("write: {e}") })),
     }
@@ -6355,14 +6454,14 @@ struct WorkspaceOpBody {
 /// `path` is workspace-relative; the parent must already exist (single-level new
 /// folder). Confined exactly like the agent FS tools.
 async fn workspace_mkdir_handler(Json(body): Json<WorkspaceOpBody>) -> impl IntoResponse {
-    let target = match resolve_workspace_write_path(&body.path) {
+    let (root, target) = match workspace_write_rel(&body.path) {
         Ok(p) => p,
         Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
-    if target.exists() {
+    if root.exists(&target) {
         return Json(serde_json::json!({ "ok": false, "error": "already exists" }));
     }
-    match tokio::fs::create_dir(&target).await {
+    match root.mkdir(&target) {
         Ok(_) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("mkdir: {e}") })),
     }
@@ -6372,20 +6471,14 @@ async fn workspace_mkdir_handler(Json(body): Json<WorkspaceOpBody>) -> impl Into
 /// Refuses the workspace root itself; a mounted exo-workspace stick's mountpoint
 /// fails naturally (EBUSY) — eject it first.
 async fn workspace_delete_handler(Json(body): Json<WorkspaceOpBody>) -> impl IntoResponse {
-    let target = match resolve_workspace_path(&body.path) {
-        Ok(p) => p,
-        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    let (root, target) = match (workspace_beneath(), workspace_rel(&body.path)) {
+        (Ok(r), Ok(p)) => (r, p),
+        (Err(e), _) | (_, Err(e)) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
-    if resolve_workspace_path("").map(|root| root == target).unwrap_or(false) {
+    if target == std::path::Path::new(".") {
         return Json(serde_json::json!({ "ok": false, "error": "refusing to delete the workspace root" }));
     }
-    let is_dir = tokio::fs::metadata(&target).await.map(|m| m.is_dir()).unwrap_or(false);
-    let res = if is_dir {
-        tokio::fs::remove_dir_all(&target).await
-    } else {
-        tokio::fs::remove_file(&target).await
-    };
-    match res {
+    match root.remove_all(&target) {
         Ok(_) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("delete: {e}") })),
     }
@@ -6395,22 +6488,27 @@ async fn workspace_delete_handler(Json(body): Json<WorkspaceOpBody>) -> impl Int
 /// single safe component (no separator / traversal); the target stays in the same
 /// (already-confined) parent directory.
 async fn workspace_rename_handler(Json(body): Json<WorkspaceOpBody>) -> impl IntoResponse {
-    let from = match resolve_workspace_path(&body.path) {
-        Ok(p) => p,
-        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    let (root, from) = match (workspace_beneath(), workspace_rel(&body.path)) {
+        (Ok(r), Ok(p)) => (r, p),
+        (Err(e), _) | (_, Err(e)) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
+    if from == std::path::Path::new(".") {
+        return Json(serde_json::json!({ "ok": false, "error": "cannot rename the workspace root" }));
+    }
     let name = body.name.trim();
     if !safe_component(name) {
         return Json(serde_json::json!({ "ok": false, "error": "invalid name (no /, .. and not empty)" }));
     }
-    let Some(parent) = from.parent() else {
-        return Json(serde_json::json!({ "ok": false, "error": "cannot rename the workspace root" }));
+    let parent = from.parent().unwrap_or(std::path::Path::new("."));
+    let to = if parent.as_os_str().is_empty() || parent == std::path::Path::new(".") {
+        std::path::PathBuf::from(name)
+    } else {
+        parent.join(name)
     };
-    let to = parent.join(name);
-    if to.exists() {
+    if root.exists(&to) {
         return Json(serde_json::json!({ "ok": false, "error": "already exists" }));
     }
-    match tokio::fs::rename(&from, &to).await {
+    match root.rename(&from, &to) {
         Ok(_) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("rename: {e}") })),
     }
@@ -6421,17 +6519,17 @@ async fn workspace_rename_handler(Json(body): Json<WorkspaceOpBody>) -> impl Int
 /// e.g. workspace ⇄ a mounted exo-workspace stick) falls back to recursive copy +
 /// remove. Both ends are workspace-confined.
 async fn workspace_move_handler(Json(body): Json<WorkspaceOpBody>) -> impl IntoResponse {
-    let (src, target) = match resolve_move_target(&body.src, &body.dest) {
+    let (root, src, target) = match resolve_move_target(&body.src, &body.dest) {
         Ok(t) => t,
         Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
     let res = tokio::task::spawn_blocking(move || {
-        match std::fs::rename(&src, &target) {
+        match root.rename(&src, &target) {
             Ok(_) => Ok(()),
             // EXDEV (18): cross-device link — copy then remove the source.
             Err(e) if e.raw_os_error() == Some(18) => {
-                copy_recursive(&src, &target)?;
-                if src.is_dir() { std::fs::remove_dir_all(&src) } else { std::fs::remove_file(&src) }
+                copy_beneath(&root, &src, &target)?;
+                root.remove_all(&src)
             }
             Err(e) => Err(e),
         }
@@ -6446,11 +6544,11 @@ async fn workspace_move_handler(Json(body): Json<WorkspaceOpBody>) -> impl IntoR
 /// POST /api/workspace/copy {src, dest} — copy `src` into the `dest` directory
 /// (recursive for a folder; keeps the basename). Both ends are workspace-confined.
 async fn workspace_copy_handler(Json(body): Json<WorkspaceOpBody>) -> impl IntoResponse {
-    let (src, target) = match resolve_move_target(&body.src, &body.dest) {
+    let (root, src, target) = match resolve_move_target(&body.src, &body.dest) {
         Ok(t) => t,
         Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
-    let res = tokio::task::spawn_blocking(move || copy_recursive(&src, &target)).await;
+    let res = tokio::task::spawn_blocking(move || copy_beneath(&root, &src, &target)).await;
     match res {
         Ok(Ok(())) => Json(serde_json::json!({ "ok": true })),
         Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": format!("copy: {e}") })),

@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use apexos_confine::{Access, Denied};
+use apexos_confine::{confine_beneath, Access, Beneath, Denied};
 use std::process::Command;
 use std::time::Duration;
 
@@ -928,25 +928,42 @@ fn is_secret_path(canon: &Path) -> bool {
 /// std-only `apexos-confine` crate; here we map our policy — the per-agent workspace,
 /// the read allowlist, the secret denylist — into it and render the agent-facing
 /// error strings.
+fn denied_msg(d: Denied) -> String {
+    match d {
+        Denied::Traversal => "path traversal (..) is not allowed".to_string(),
+        Denied::Unresolvable(p) => format!("cannot resolve path {}", p.display()),
+        Denied::OutsideWorkspace { workspace, path } => format!(
+            "write/delete is confined to the workspace ({}); {} is outside it",
+            workspace.display(),
+            path.display(),
+        ),
+        Denied::Secret(p) => format!("access to {} is blocked (sensitive)", p.display()),
+        Denied::OutsideReadAllowlist(p) => format!(
+            "reading {} is outside the workspace and the read allowlist",
+            p.display(),
+        ),
+        Denied::OutsideRoots(p) => format!("{} is outside the allowed roots", p.display()),
+    }
+}
+
 fn confine(path: &str, write: bool) -> Result<PathBuf, String> {
     let resolved = resolve_path(path);
     let access = if write { Access::Write } else { Access::Read };
     apexos_confine::confine_fs(&resolved, access, &workspace_root(), &read_roots(), is_secret_path)
-        .map_err(|d| match d {
-            Denied::Traversal => "path traversal (..) is not allowed".to_string(),
-            Denied::Unresolvable(p) => format!("cannot resolve path {}", p.display()),
-            Denied::OutsideWorkspace { workspace, path } => format!(
-                "write/delete is confined to the workspace ({}); {} is outside it",
-                workspace.display(),
-                path.display(),
-            ),
-            Denied::Secret(p) => format!("access to {} is blocked (sensitive)", p.display()),
-            Denied::OutsideReadAllowlist(p) => format!(
-                "reading {} is outside the workspace and the read allowlist",
-                p.display(),
-            ),
-            Denied::OutsideRoots(p) => format!("{} is outside the allowed roots", p.display()),
-        })
+        .map_err(denied_msg)
+}
+
+/// Confine then return a root fd + relative path. The caller MUST use the
+/// `Beneath` handle (openat2) — never `std::fs` on a checked pathname.
+fn confine_io(path: &str, write: bool) -> Result<(Beneath, PathBuf), String> {
+    let access = if write { Access::Write } else { Access::Read };
+    let ws = workspace_root();
+    let requested = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        ws.join(path)
+    };
+    confine_beneath(&requested, access, &ws, &read_roots(), is_secret_path).map_err(denied_msg)
 }
 
 // ─── Git tools ────────────────────────────────────────────────────────────────
@@ -1230,15 +1247,15 @@ fn read_file(args: &Value) -> Value {
         Some(p) => p,
         None => return tool_error("path is required"),
     };
-    let path = match confine(path, false) {
+    let (root, rel) = match confine_io(path, false) {
         Ok(p) => p,
         Err(e) => return tool_error(e),
     };
     let max_bytes = args["max_bytes"].as_u64().unwrap_or(1_048_576) as usize;
 
-    let file = match fs::File::open(&path) {
+    let file = match root.open_at(&rel, 0, 0) {
         Ok(f) => f,
-        Err(e) => return tool_error(format!("cannot open {}: {}", path.display(), e)),
+        Err(e) => return tool_error(format!("cannot open {}: {}", rel.display(), e)),
     };
 
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -1272,31 +1289,12 @@ fn write_file(args: &Value) -> Value {
         None => return tool_error("content is required"),
     };
     let append = args["append"].as_bool().unwrap_or(false);
-    let path = match confine(path, true) {
+    let (root, rel) = match confine_io(path, true) {
         Ok(p) => p,
         Err(e) => return tool_error(e),
     };
 
-    // Create parent dirs if needed
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    use std::io::Write as IoWrite;
-    use std::fs::OpenOptions;
-
-    let mut file = match OpenOptions::new()
-        .write(true)
-        .create(true)
-        .append(append)
-        .truncate(!append)
-        .open(&path)
-    {
-        Ok(f) => f,
-        Err(e) => return tool_error(format!("cannot open {}: {}", path.display(), e)),
-    };
-
-    match file.write_all(content.as_bytes()) {
+    match root.write(&rel, content.as_bytes(), append) {
         Ok(_) => tool_ok(json!({ "bytes_written": content.len() })),
         Err(e) => tool_error(format!("write error: {}", e)),
     }
@@ -1653,63 +1651,55 @@ fn list_dir(args: &Value) -> Value {
         None => return tool_error("path is required"),
     };
     let recursive = args["recursive"].as_bool().unwrap_or(false);
-    let path = match confine(path, false) {
+    let (root, rel) = match confine_io(path, false) {
         Ok(p) => p,
         Err(e) => return tool_error(e),
     };
 
     let mut entries = Vec::new();
-    collect_dir(&path, recursive, 0, &mut entries);
+    collect_dir(&root, &rel, recursive, 0, &mut entries);
     tool_ok(json!(entries))
 }
 
-fn collect_dir(path: &std::path::Path, recursive: bool, depth: usize, out: &mut Vec<Value>) {
+fn collect_dir(root: &Beneath, rel: &Path, recursive: bool, depth: usize, out: &mut Vec<Value>) {
     if depth > 3 {
         return;
     }
-    let read = match fs::read_dir(path) {
+    let read = match root.read_dir(rel) {
         Ok(r) => r,
         Err(_) => return,
     };
-    for entry in read.flatten() {
-        // file_type / symlink_metadata do not follow — a nested symlink must
-        // not recurse outside the confined root (SA-15).
-        let ft = entry.file_type().ok();
-        let is_symlink = ft.as_ref().is_some_and(|t| t.is_symlink());
-        let is_dir = ft.as_ref().is_some_and(|t| t.is_dir());
-        let meta = fs::symlink_metadata(entry.path()).ok();
-        let kind = if is_symlink {
+    let display_root = root.display();
+    for entry in read {
+        // lstat via the root fd — a nested symlink is reported, never followed
+        // (SA-15 + finding 8).
+        let kind = if entry.is_symlink {
             "symlink"
-        } else if is_dir {
+        } else if entry.is_dir {
             "dir"
         } else {
             "file"
         };
-        let size = meta.as_ref().and_then(|m| {
-            if m.file_type().is_file() {
-                Some(m.len())
-            } else {
-                None
-            }
-        });
-        let modified = meta.as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs());
-
-        let child = entry.path();
+        let child_rel = if rel == Path::new(".") {
+            PathBuf::from(&entry.name)
+        } else {
+            rel.join(&entry.name)
+        };
+        let child = display_root.join(&child_rel);
         let mut entry_json = json!({
             "name": child.to_string_lossy(),
             "kind": kind,
         });
-        if let Some(s) = size { entry_json["size"] = json!(s); }
-        if let Some(m) = modified { entry_json["modified"] = json!(m); }
+        if entry.is_file {
+            entry_json["size"] = json!(entry.len);
+        }
+        if entry.mtime > 0 {
+            entry_json["modified"] = json!(entry.mtime);
+        }
         out.push(entry_json);
 
-        if recursive && is_dir && !is_symlink {
-            if confine(&child.to_string_lossy(), false).is_ok() {
-                collect_dir(&child, true, depth + 1, out);
-            }
+        if recursive && entry.is_dir && !entry.is_symlink {
+            collect_dir(root, &child_rel, true, depth + 1, out);
         }
     }
 }
@@ -1719,12 +1709,12 @@ fn create_dir(args: &Value) -> Value {
         Some(p) => p,
         None => return tool_error("path is required"),
     };
-    let path = match confine(path, true) {
+    let (root, rel) = match confine_io(path, true) {
         Ok(p) => p,
         Err(e) => return tool_error(e),
     };
-    match fs::create_dir_all(&path) {
-        Ok(_) => tool_ok(json!({ "created": path.to_string_lossy() })),
+    match root.mkdir_all(&rel) {
+        Ok(_) => tool_ok(json!({ "created": root.display().join(&rel).to_string_lossy() })),
         Err(e) => tool_error(format!("create_dir failed: {}", e)),
     }
 }
@@ -1735,32 +1725,34 @@ fn delete_path(args: &Value) -> Value {
         None => return tool_error("path is required"),
     };
 
-    // Confine to the workspace (rejects `..`, resolves symlinks, blocks escapes)
-    // via the shared gate, then operate on the returned *canonical* path — never
-    // the raw string — so a symlink swap after the check cannot redirect the
-    // delete (closes the TOCTOU the old `metadata(path)`/`remove(path)` had).
-    let canonical = match confine(path, true) {
+    // Confine to the workspace, then delete via the root fd (openat2 /
+    // unlinkat). A rename+symlink of an ancestor between check and use cannot
+    // redirect the delete (finding 8).
+    let (root, rel) = match confine_io(path, true) {
         Ok(p) => p,
         Err(e) => return tool_error(e),
     };
+    if rel == Path::new(".") {
+        return tool_error("refusing to delete the workspace root");
+    }
 
     let recursive = args["recursive"].as_bool().unwrap_or(false);
-    let meta = match fs::metadata(&canonical) {
+    let meta = match root.stat(&rel) {
         Ok(m) => m,
-        Err(e) => return tool_error(format!("cannot stat {}: {}", canonical.display(), e)),
+        Err(e) => return tool_error(format!("cannot stat {}: {}", rel.display(), e)),
     };
 
-    let result = if meta.is_dir() {
+    let result = if meta.is_dir {
         if !recursive {
             return tool_error("path is a directory — set recursive=true to delete it");
         }
-        fs::remove_dir_all(&canonical)
+        root.remove_all(&rel)
     } else {
-        fs::remove_file(&canonical)
+        root.unlink(&rel, false)
     };
 
     match result {
-        Ok(_) => tool_ok(json!({ "deleted": canonical.to_string_lossy() })),
+        Ok(_) => tool_ok(json!({ "deleted": root.display().join(&rel).to_string_lossy() })),
         Err(e) => tool_error(format!("delete failed: {}", e)),
     }
 }
@@ -3493,6 +3485,29 @@ mod tests {
         assert!(
             !txt.contains("passwd") && !txt.contains("/etc/"),
             "must not recurse through a symlink to /etc: {txt}"
+        );
+
+        std::env::remove_var("AGENTD_WORKSPACE");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn confine_io_refuses_swapped_symlink_ancestor() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let pid = std::process::id();
+        let ws = std::env::temp_dir().join(format!("apexos-toctou-{pid}"));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(ws.join("sub")).unwrap();
+        fs::write(ws.join("sub/file"), b"in").unwrap();
+        std::env::set_var("AGENTD_WORKSPACE", &ws);
+
+        let (root, rel) = confine_io("sub/file", true).expect("pre-swap confine");
+        fs::rename(ws.join("sub"), ws.join("sub.bak")).unwrap();
+        std::os::unix::fs::symlink("/etc", ws.join("sub")).unwrap();
+        assert!(root.read(&rel).is_err(), "openat2 must refuse the planted /etc hop");
+        assert!(
+            root.write(&rel, b"pwn", false).is_err(),
+            "write must not land at /etc/file"
         );
 
         std::env::remove_var("AGENTD_WORKSPACE");

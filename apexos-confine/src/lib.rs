@@ -16,6 +16,16 @@
 //!
 //! Structured [`Denied`] reasons let the caller render its own messages while this
 //! crate stays generic. See `PATTERNS.md` in the ApexOS-RS repo.
+//!
+//! IO goes through [`Beneath`] (`openat2` + `RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS`)
+//! so a rename+symlink of an ancestor between check and use cannot escape.
+//! [`confine_fs`] remains the policy predicate (approval / "is this allowed?");
+//! do not `std::fs` the `PathBuf` it returns.
+
+#[cfg(target_os = "linux")]
+mod openat;
+#[cfg(target_os = "linux")]
+pub use openat::{confine_beneath, io_denied, relative_under, Beneath, DirEnt, Stat};
 
 use std::path::{Component, Path, PathBuf};
 

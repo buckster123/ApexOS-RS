@@ -15,7 +15,7 @@
 //!
 //! std-only, deterministic, uses real temp dirs (no tempfile dep).
 
-use apexos_confine::{confine_fs, confine_to_roots, has_traversal, Access, Denied};
+use apexos_confine::{confine_beneath, confine_fs, confine_to_roots, has_traversal, Access, Denied};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -186,4 +186,22 @@ fn secret_denylist_beats_workspace_containment() {
         matches!(r, Err(Denied::Secret(_))),
         "workspace containment must not skip the secret denylist, got {r:?}"
     );
+}
+
+// ── 5. Check/use race: operate through the root fd, not the checked path ──────
+
+#[cfg(target_os = "linux")]
+#[test]
+fn openat2_refuses_renamed_ancestor_symlink() {
+    use std::os::unix::fs::symlink;
+    let ws = mktmp("ws");
+    let sub = ws.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("file"), b"in").unwrap();
+    let (root, rel) = confine_beneath(&ws.join("sub/file"), Access::Write, &ws, &[], |_| false)
+        .expect("pre-swap confine");
+    std::fs::rename(&sub, ws.join("sub.bak")).unwrap();
+    symlink("/etc", ws.join("sub")).unwrap();
+    assert!(root.read(&rel).is_err(), "must not follow the planted /etc hop");
+    assert!(root.write(&rel, b"pwn", false).is_err());
 }
