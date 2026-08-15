@@ -18,7 +18,8 @@
 > Wave 14 (PR #368): findings 15, SA-7.
 > Wave 15 (PR #369): SA-5.
 > Wave 16 (PR #370): SA-3.
-> Wave 17 (this tree): SA-8.
+> Wave 17 (PR #371): SA-8.
+> Wave 18 (this tree): SA-9.
 
 ## Ranked findings
 
@@ -331,6 +332,10 @@ dropping them.
 - **Minimal fix:** Persist one versioned worker/batch transaction before
   acknowledging or starting work, surface write failures, and reconcile
   references at boot.
+- **Fixed (Wave 18):** `persist_worker_txn` writes `worker_txn.json`
+  (version+seq+workers+batches) before the fanout ToolResult / mesh accept.
+  A persist failure rolls the mint back and refuses. Boot prefers the txn
+  file and synthesizes a batch for any orphan worker.
 
 ### SA-10. High — mutable security configuration can silently revert or self-reset
 

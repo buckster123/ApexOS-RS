@@ -877,24 +877,102 @@ fn posture_of(w: &Worker) -> Posture {
 
 // ── Persistence (atomic — restarts are a first-class path here) ─────────────
 
-fn save_workers(workers: &HashMap<u64, Worker>, path: &PathBuf) {
+const WORKER_TXN_VERSION: u32 = 1;
+
+/// One versioned worker+batch snapshot (SA-9). Written before any fanout
+/// ack so a crash cannot leave the conductor holding ids that disk never
+/// recorded. Split `workers.json`/`batches.json` stay as a human-readable
+/// mirror; boot prefers this file.
+#[derive(Serialize, Deserialize)]
+struct WorkerTxn {
+    version: u32,
+    seq:     u64,
+    workers: Vec<PersistedWorker>,
+    batches: Vec<PersistedBatch>,
+}
+
+fn snapshot_workers(workers: &HashMap<u64, Worker>) -> Vec<PersistedWorker> {
     let mut snapshot: Vec<PersistedWorker> = workers.iter().map(|(id, w)| PersistedWorker {
         id: *id, batch: w.batch, parent: w.parent, session: w.session,
         task: w.task.clone(), state: w.state, step: w.step, summary: w.summary.clone(),
         artifacts: w.artifacts.clone(), episode: w.episode.clone(),
         yolo: w.yolo, model: w.model.clone(), step_ceiling: w.step_ceiling,
     }).collect();
-    snapshot.sort_by_key(|w| w.id); // deterministic file → readable diffs
-    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
-    if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
-        // Temp + rename (the self-update request idiom), NOT goals.json's direct
-        // write: parking on restart is this file's core job, so a torn write is
-        // a real failure mode, not a corner case.
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, &json).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+    snapshot.sort_by_key(|w| w.id);
+    snapshot
+}
+
+fn snapshot_batches(batches: &HashMap<u64, BatchMeta>) -> Vec<PersistedBatch> {
+    let mut snapshot: Vec<PersistedBatch> = batches.iter().map(|(id, b)| PersistedBatch {
+        batch: *id, parent: b.parent, created_epoch: b.created_epoch,
+        deadline_s: b.deadline_s, reported: b.reported,
+        origin_node: b.origin.as_ref().map(|(n, _)| n.clone()),
+        origin_batch: b.origin.as_ref().map(|(_, ob)| *ob),
+    }).collect();
+    snapshot.sort_by_key(|b| b.batch);
+    snapshot
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))?;
+    Ok(())
+}
+
+fn worker_txn_path(workers_path: &Path) -> PathBuf {
+    workers_path.with_file_name("worker_txn.json")
+}
+
+/// Persist workers and batches as one versioned transaction. The txn file is
+/// the commit; split files are a best-effort mirror. Returns the new seq.
+fn persist_worker_txn(
+    workers:      &HashMap<u64, Worker>,
+    batches:      &HashMap<u64, BatchMeta>,
+    workers_path: &Path,
+    batches_path: &Path,
+    seq:          &mut u64,
+) -> Result<u64, String> {
+    *seq = seq.saturating_add(1);
+    let txn = WorkerTxn {
+        version: WORKER_TXN_VERSION,
+        seq:     *seq,
+        workers: snapshot_workers(workers),
+        batches: snapshot_batches(batches),
+    };
+    let json = serde_json::to_string_pretty(&txn).map_err(|e| format!("encode worker txn: {e}"))?;
+    atomic_write(&worker_txn_path(workers_path), json.as_bytes())?;
+    // Mirrors for grep/health — never the commit. A torn mirror is recovered
+    // from the txn on the next boot.
+    let _ = atomic_write(workers_path, serde_json::to_string_pretty(&txn.workers).unwrap_or_default().as_bytes());
+    let _ = atomic_write(batches_path, serde_json::to_string_pretty(&txn.batches).unwrap_or_default().as_bytes());
+    Ok(*seq)
+}
+
+/// Best-effort persist used on the tick/cancel path. Fanout acks go through
+/// [`persist_worker_txn`] and fail closed.
+fn save_worker_state(
+    workers:      &HashMap<u64, Worker>,
+    batches:      &HashMap<u64, BatchMeta>,
+    workers_path: &Path,
+    batches_path: &Path,
+    seq:          &mut u64,
+) {
+    if let Err(e) = persist_worker_txn(workers, batches, workers_path, batches_path, seq) {
+        eprintln!("[worker] persist failed (state still in RAM): {e}");
+    }
+}
+
+fn load_worker_txn(workers_path: &Path) -> Option<WorkerTxn> {
+    let raw = std::fs::read_to_string(worker_txn_path(workers_path)).ok()?;
+    let txn: WorkerTxn = serde_json::from_str(&raw).ok()?;
+    if txn.version == 0 || txn.version > WORKER_TXN_VERSION {
+        return None;
+    }
+    Some(txn)
 }
 
 fn load_workers(path: &PathBuf) -> Vec<PersistedWorker> {
@@ -903,27 +981,35 @@ fn load_workers(path: &PathBuf) -> Vec<PersistedWorker> {
         .unwrap_or_default()
 }
 
-fn save_batches(batches: &HashMap<u64, BatchMeta>, path: &PathBuf) {
-    let mut snapshot: Vec<PersistedBatch> = batches.iter().map(|(id, b)| PersistedBatch {
-        batch: *id, parent: b.parent, created_epoch: b.created_epoch,
-        deadline_s: b.deadline_s, reported: b.reported,
-        origin_node: b.origin.as_ref().map(|(n, _)| n.clone()),
-        origin_batch: b.origin.as_ref().map(|(_, ob)| *ob),
-    }).collect();
-    snapshot.sort_by_key(|b| b.batch);
-    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
-    if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, &json).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
-    }
-}
-
 fn load_batches(path: &PathBuf) -> Vec<PersistedBatch> {
     std::fs::read_to_string(path).ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default()
+}
+
+/// SA-9 boot reconcile: a worker whose batch row is missing can never fire
+/// `TaskBatchDone`. Synthesize a placeholder batch from the worker so the
+/// report path still closes.
+fn reconcile_batches(workers: &HashMap<u64, Worker>, batches: &mut HashMap<u64, BatchMeta>) -> usize {
+    let mut synthesized = 0usize;
+    for w in workers.values() {
+        if batches.contains_key(&w.batch) { continue; }
+        let all_terminal = workers.values().filter(|x| x.batch == w.batch).all(|x| is_terminal(x.state));
+        batches.insert(w.batch, BatchMeta {
+            parent:        w.parent,
+            created_epoch: epoch_now(),
+            deadline_s:    DEFAULT_BATCH_DEADLINE_S,
+            reported:      all_terminal,
+            inline_ack:    None,
+            origin:        None,
+        });
+        synthesized += 1;
+        eprintln!(
+            "[worker] reconcile: synthesized batch {} for orphan worker (parent {})",
+            w.batch, w.parent
+        );
+    }
+    synthesized
 }
 
 // ── Evidence + episodes (W1c — the terminal worker's trail) ─────────────────
@@ -1094,10 +1180,24 @@ pub fn spawn_worker_driver(
         let mut next_worker_id:  u64 = 1;
         let mut next_batch_id:   u64 = 1;
         let mut next_worker_sid: u64 = apexos_core::WORKER_SESSION_BASE;
+        let mut txn_seq:         u64 = 0;
 
-        reload_workers(&mut workers, &bus, &workers_path,
-                       &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid).await;
-        reload_batches(&mut batches, &batches_path, &mut next_batch_id);
+        if let Some(txn) = load_worker_txn(&workers_path) {
+            txn_seq = txn.seq;
+            hydrate_workers(&mut workers, txn.workers,
+                &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid);
+            hydrate_batches(&mut batches, txn.batches, &mut next_batch_id);
+            eprintln!("[worker] loaded worker_txn.json seq {txn_seq}");
+            emit_reloaded_workers(&workers, &bus).await;
+        } else {
+            reload_workers(&mut workers, &bus, &workers_path,
+                           &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid).await;
+            reload_batches(&mut batches, &batches_path, &mut next_batch_id);
+        }
+        let n = reconcile_batches(&workers, &mut batches);
+        if n > 0 {
+            eprintln!("[worker] reconciled {n} orphan worker(s) onto synthesized batches");
+        }
         reload_mandalas(&mut mandalas, &mut trees, &mut cell_by_worker,
                         &mandalas_path, &worktrees_dir, &mut next_mandala_id);
         reload_remotes(&mut remotes, &mut polls, &batches, &bus, &mesh.remotes_path,
@@ -1130,12 +1230,13 @@ pub fn spawn_worker_driver(
                             // locals and their assigns spawn after the ack.
                             if let Some((ctx, minted)) = fanout(&mut workers, &mut batches, &mandalas, &trees, &cell_by_worker, &bus, cap, max_steps, &proxy, &yolo_set, &models, session, call_id, args,
                                    &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid,
-                                   &mesh, &mesh_out_tx, &mut remotes).await {
+                                   &mesh, &mesh_out_tx, &mut remotes,
+                                   &workers_path, &batches_path, &mut txn_seq).await {
                                 if let Some(ctx) = &ctx {
                                     bind_cells(&mut trees, &mut cell_by_worker, &worktrees_dir, ctx, &minted);
                                 }
-                                save_workers(&workers, &workers_path);
-                                save_batches(&batches, &batches_path);
+                                save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq);
+                                save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq);
                                 remote::save_remotes(&remotes, &mesh.remotes_path);
                                 update_gauges(&workers, &mesh);
                             }
@@ -1158,9 +1259,9 @@ pub fn spawn_worker_driver(
                                 check_barriers(&mut workers, &mut trees, &cell_by_worker, &mandalas, &bus, &worktrees_dir).await;
                                 admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
                                 let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
-                                if chg { save_batches(&batches, &batches_path); }
+                                if chg { save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq); }
                                 spawn_report_home(&mesh, reports).await;
-                                save_workers(&workers, &workers_path);
+                                save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq);
                                 remote::save_remotes(&remotes, &mesh.remotes_path);
                                 update_gauges(&workers, &mesh);
                             }
@@ -1175,6 +1276,7 @@ pub fn spawn_worker_driver(
                         &mut workers, &mut remotes, &mut batches, &mut polls,
                         &bus, &proxy, &agents_dir, &yolo_set, &models, cap, max_steps,
                         &mesh, &mut next_worker_id, &mut next_batch_id, &mut next_worker_sid,
+                        &workers_path, &batches_path, &mut txn_seq,
                         req,
                     ).await;
                     if saved {
@@ -1185,11 +1287,11 @@ pub fn spawn_worker_driver(
                         if check_barriers(&mut workers, &mut trees, &cell_by_worker, &mandalas, &bus, &worktrees_dir).await {
                             admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
                         }
-                        save_workers(&workers, &workers_path);
-                        save_batches(&batches, &batches_path);
+                        save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq);
+                        save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq);
                         remote::save_remotes(&remotes, &mesh.remotes_path);
                         let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
-                        if chg { save_batches(&batches, &batches_path); }
+                        if chg { save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq); }
                         spawn_report_home(&mesh, reports).await;
                         update_gauges(&workers, &mesh);
                     }
@@ -1205,10 +1307,10 @@ pub fn spawn_worker_driver(
                             sync_remote_cells(&mut trees, &cell_by_worker, &remotes, &worktrees_dir);
                             if check_barriers(&mut workers, &mut trees, &cell_by_worker, &mandalas, &bus, &worktrees_dir).await {
                                 admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
-                                save_workers(&workers, &workers_path);
+                                save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq);
                             }
                             let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
-                            if chg { save_batches(&batches, &batches_path); }
+                            if chg { save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq); }
                             spawn_report_home(&mesh, reports).await;
                             remote::save_remotes(&remotes, &mesh.remotes_path);
                         }
@@ -1220,10 +1322,10 @@ pub fn spawn_worker_driver(
                                 sync_remote_cells(&mut trees, &cell_by_worker, &remotes, &worktrees_dir);
                                 if check_barriers(&mut workers, &mut trees, &cell_by_worker, &mandalas, &bus, &worktrees_dir).await {
                                     admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
-                                    save_workers(&workers, &workers_path);
+                                    save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq);
                                 }
                                 let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
-                                if chg { save_batches(&batches, &batches_path); }
+                                if chg { save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq); }
                                 spawn_report_home(&mesh, reports).await;
                                 remote::save_remotes(&remotes, &mesh.remotes_path);
                             }
@@ -1242,9 +1344,9 @@ pub fn spawn_worker_driver(
                                 check_barriers(&mut workers, &mut trees, &cell_by_worker, &mandalas, &bus, &worktrees_dir).await;
                                 admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
                                 let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
-                                if chg { save_batches(&batches, &batches_path); }
+                                if chg { save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq); }
                                 spawn_report_home(&mesh, reports).await;
-                                save_workers(&workers, &workers_path);
+                                save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq);
                                 update_gauges(&workers, &mesh);
                             }
                         }
@@ -1254,14 +1356,14 @@ pub fn spawn_worker_driver(
                         // the truth; the slot stays held (the turn is still in flight).
                         Ok(Event::ApprovalPending { session, call, .. }) if apexos_core::is_worker_session(session.0) => {
                             if block_on_approval(&mut workers, &bus, session.0, &call.tool).await {
-                                save_workers(&workers, &workers_path);
+                                save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq);
                             }
                         }
                         // The approval resolved (either verdict — a decline still returns
                         // a result and the turn continues): back to Running, fresh stall clock.
                         Ok(Event::UserApproval { session, .. }) if apexos_core::is_worker_session(session.0) => {
                             let resumed = resume_from_approval(&mut workers, &bus, session.0).await;
-                            if resumed { save_workers(&workers, &workers_path); }
+                            if resumed { save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq); }
                         }
                         // A send landed on a worker session — the revive/wake edge
                         // (PB-3). The router hydrates a parked worker's history off
@@ -1299,7 +1401,7 @@ pub fn spawn_worker_driver(
                                         if ep.is_some() { workers.get_mut(&wid).unwrap().episode = ep; }
                                     }
                                 }
-                                save_workers(&workers, &workers_path);
+                                save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq);
                             }
                         }
                         // A worker turn errored (Error precedes the synthetic
@@ -1332,10 +1434,10 @@ pub fn spawn_worker_driver(
                                     relay_remote_cancels(&mut remotes, &bus, &mesh, &remote_ids).await;
                                     admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
                                     let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
-                                    if chg { save_batches(&batches, &batches_path); }
+                                    if chg { save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq); }
                                     spawn_report_home(&mesh, reports).await;
                                     sync_cells(&mut trees, &cell_by_worker, &workers, &worktrees_dir, &agents_dir);
-                                    save_workers(&workers, &workers_path);
+                                    save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq);
                                     remote::save_remotes(&remotes, &mesh.remotes_path);
                                     update_gauges(&workers, &mesh);
                                 }
@@ -1443,10 +1545,10 @@ pub fn spawn_worker_driver(
                         admit_queued(&mut workers, &bus, &proxy, &yolo_set, &models, cap, max_steps).await;
                     }
                     let (chg, reports) = check_batches(&workers, &remotes, &mut batches, &bus, &agents_dir).await;
-                    if chg { save_batches(&batches, &batches_path); }
+                    if chg { save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq); }
                     spawn_report_home(&mesh, reports).await;
                     if failed_any || reaped_any { sync_cells(&mut trees, &cell_by_worker, &workers, &worktrees_dir, &agents_dir); }
-                    if failed_any || parked_any { save_workers(&workers, &workers_path); }
+                    if failed_any || parked_any { save_worker_state(&workers, &batches, &workers_path, &batches_path, &mut txn_seq); }
                     // W2: due remote polls — supervision across the wire on the
                     // review cadence (dark peers skipped; a poll is never the
                     // liveness probe, and a poll failure never fails a row —
@@ -1470,7 +1572,11 @@ pub fn spawn_worker_driver(
 /// (workers.json usually re-seeds it too, but an all-terminal batch whose
 /// workers were pruned by hand must still never collide).
 fn reload_batches(batches: &mut HashMap<u64, BatchMeta>, path: &PathBuf, next_batch_id: &mut u64) {
-    for pb in load_batches(path) {
+    hydrate_batches(batches, load_batches(path), next_batch_id);
+}
+
+fn hydrate_batches(batches: &mut HashMap<u64, BatchMeta>, loaded: Vec<PersistedBatch>, next_batch_id: &mut u64) {
+    for pb in loaded {
         *next_batch_id = (*next_batch_id).max(pb.batch + 1);
         batches.insert(pb.batch, BatchMeta {
             parent: pb.parent, created_epoch: pb.created_epoch,
@@ -1490,6 +1596,15 @@ async fn reload_workers(
 ) {
     let loaded = load_workers(path);
     if loaded.is_empty() { return; }
+    hydrate_workers(workers, loaded, next_worker_id, next_batch_id, next_worker_sid);
+    emit_reloaded_workers(workers, bus).await;
+    eprintln!("[worker] reloaded workers from {} (non-terminal ones parked)", path.display());
+}
+
+fn hydrate_workers(
+    workers: &mut HashMap<u64, Worker>, loaded: Vec<PersistedWorker>,
+    next_worker_id: &mut u64, next_batch_id: &mut u64, next_worker_sid: &mut u64,
+) {
     for pw in loaded {
         *next_worker_id  = (*next_worker_id).max(pw.id + 1);
         *next_batch_id   = (*next_batch_id).max(pw.batch + 1);
@@ -1508,6 +1623,9 @@ async fn reload_workers(
             last_review_key: None, review_attempt: 0,
         });
     }
+}
+
+async fn emit_reloaded_workers(workers: &HashMap<u64, Worker>, bus: &BusHandle) {
     let mut ids: Vec<u64> = workers.keys().copied().collect();
     ids.sort_unstable();
     for id in ids {
@@ -1515,7 +1633,6 @@ async fn reload_workers(
         let detail = if w.state == WorkerState::Parked { "parked by daemon restart" } else { "" };
         emit_state(bus, id, w, detail).await;
     }
-    eprintln!("[worker] reloaded workers from {} (non-terminal ones parked)", path.display());
 }
 
 // ── W2 mesh workers — the driver's remote seam ──────────────────────────────
@@ -1855,6 +1972,7 @@ async fn handle_mesh_req(
     cap: usize, max_steps: u32,
     mesh: &MeshDeps,
     next_worker_id: &mut u64, next_batch_id: &mut u64, next_worker_sid: &mut u64,
+    workers_path: &Path, batches_path: &Path, txn_seq: &mut u64,
     req: WorkerMeshReq,
 ) -> bool {
     let WorkerMeshReq { kind, from, body, parent, hops, reply } = req;
@@ -1902,6 +2020,16 @@ async fn handle_mesh_req(
                 apexos_core::mesh_hops_set(&mesh.mesh_hops, SessionId(sid), hops);
                 minted_rows.push(serde_json::json!({ "index": i, "worker": wid, "session": sid }));
                 minted_ids.push(wid);
+            }
+            // SA-9: persist before the HTTP accept — a crash after reply
+            // used to orphan the conductor's assign with no local batch.
+            if let Err(e) = persist_worker_txn(workers, batches, workers_path, batches_path, txn_seq) {
+                for id in &minted_ids { workers.remove(id); }
+                batches.remove(&batch);
+                let _ = reply.send(serde_json::json!({
+                    "ok": false, "error": format!("could not persist hosted batch: {e}"),
+                }));
+                return false;
             }
             for wid in &minted_ids {
                 emit_state(bus, *wid, &workers[wid], "queued (mesh)").await;
@@ -2085,6 +2213,7 @@ async fn fanout(
     next_worker_id: &mut u64, next_batch_id: &mut u64, next_worker_sid: &mut u64,
     mesh: &MeshDeps, mesh_out_tx: &mpsc::Sender<MeshOutcome>,
     remotes: &mut HashMap<u64, RemoteWorker>,
+    workers_path: &Path, batches_path: &Path, txn_seq: &mut u64,
 ) -> Option<(Option<CellsCtx>, Vec<u64>)> {
     let refuse = |msg: String| Event::ToolResult {
         session: call_session, call: call_id,
@@ -2235,6 +2364,21 @@ async fn fanout(
                     t.prompt.clone(), t.model.clone(), None);
             }
         }
+    }
+
+    // SA-9: persist the minted batch BEFORE cards, ack, or admission. A
+    // crash after ToolResult used to leave the conductor holding ids disk
+    // never recorded. Failure rolls the mint back and refuses honestly.
+    let local_ids: Vec<u64> = minted.iter().map(|(w, _)| *w).collect();
+    let remote_ids: Vec<u64> = remote_groups.iter().flat_map(|(_, wids, _)| wids.iter().copied()).collect();
+    if let Err(e) = persist_worker_txn(workers, batches, workers_path, batches_path, txn_seq) {
+        for id in &local_ids { workers.remove(id); }
+        for id in &remote_ids { remotes.remove(id); }
+        batches.remove(&batch);
+        bus.emit(refuse(format!(
+            "could not persist worker batch {batch} — refusing the fanout so nothing is acknowledged without a durable record: {e}"
+        ))).await;
+        return None;
     }
 
     // Cards BEFORE the ack: bus order is delivery order, so the goal driver's
@@ -4260,6 +4404,59 @@ mod tests {
         assert!(!pw.yolo);
         assert!(pw.model.is_none());
         assert_eq!(pw.step_ceiling, 0, "pre-M1c workers fall back to the env global");
+    }
+
+    #[test]
+    fn persist_worker_txn_round_trips_and_bumps_seq() {
+        let dir = std::env::temp_dir().join(format!("apexos-wtxn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wpath = dir.join("workers.json");
+        let bpath = dir.join("batches.json");
+        let mut workers = HashMap::new();
+        workers.insert(3, Worker { batch: 9, parent: 4, ..mk(WorkerState::Queued) });
+        let mut batches = HashMap::new();
+        batches.insert(9, BatchMeta {
+            parent: 4, created_epoch: 100, deadline_s: 3600, reported: false,
+            inline_ack: None, origin: None,
+        });
+        let mut seq = 0;
+        persist_worker_txn(&workers, &batches, &wpath, &bpath, &mut seq).unwrap();
+        assert_eq!(seq, 1);
+        let txn = load_worker_txn(&wpath).expect("txn file");
+        assert_eq!(txn.version, WORKER_TXN_VERSION);
+        assert_eq!(txn.seq, 1);
+        assert_eq!(txn.workers.len(), 1);
+        assert_eq!(txn.workers[0].id, 3);
+        assert_eq!(txn.workers[0].batch, 9);
+        assert_eq!(txn.batches.len(), 1);
+        assert_eq!(txn.batches[0].batch, 9);
+        persist_worker_txn(&workers, &batches, &wpath, &bpath, &mut seq).unwrap();
+        assert_eq!(load_worker_txn(&wpath).unwrap().seq, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_worker_txn_fails_when_parent_is_not_a_dir() {
+        let blocked = std::env::temp_dir().join(format!("apexos-wtxn-nodir-{}", std::process::id()));
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let wpath = blocked.join("workers.json");
+        let mut seq = 0;
+        let err = persist_worker_txn(&HashMap::new(), &HashMap::new(), &wpath, &blocked.join("batches.json"), &mut seq);
+        assert!(err.is_err(), "must surface the write failure, got {err:?}");
+        let _ = std::fs::remove_file(&blocked);
+    }
+
+    #[test]
+    fn reconcile_synthesizes_batch_for_orphan_workers() {
+        let mut workers = HashMap::new();
+        workers.insert(1, Worker { batch: 42, parent: 7, ..mk(WorkerState::Parked) });
+        let mut batches = HashMap::new();
+        assert_eq!(reconcile_batches(&workers, &mut batches), 1);
+        let b = batches.get(&42).expect("synthesized");
+        assert_eq!(b.parent, 7);
+        assert!(!b.reported, "non-terminal orphan must still be able to report");
+        assert_eq!(reconcile_batches(&workers, &mut batches), 0, "idempotent");
     }
 
     #[test]
