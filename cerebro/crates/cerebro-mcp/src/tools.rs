@@ -112,11 +112,11 @@ fn tool_schema(name: &str) -> Value {
                     "visibility": {
                         "type": "string",
                         "enum": ["private", "shared", "thread"],
-                        "description": "Change visibility. share_memory stays the deliberate publish act; privatizing an owner-less memory requires set_agent_id (else it would be visible to no one)."
+                        "description": "Change visibility. share_memory stays the deliberate publish act; privatizing an owner-less memory requires set_agent_id equal to the caller (else it would be visible to no one)."
                     },
                     "set_agent_id": {
                         "type": "string",
-                        "description": "Re-attribute ownership (e.g. heal an agent_id-null record). Caller-stamped for model calls — a model can only claim to itself."
+                        "description": "Claim an owner-less memory to the caller. Must equal agent_id (system-stamped). Cannot reassign an owned memory or another identity — use share_memory to transfer."
                     }
                 },
                 "required": ["memory_id"]
@@ -358,7 +358,10 @@ fn tool_schema(name: &str) -> Value {
                 "properties": {
                     "content":      { "type": "string" },
                     "to_agent_id":   { "type": "string" },
-                    "from_agent_id": { "type": "string" },
+                    "from_agent_id": {
+                        "type": "string",
+                        "description": "Ignored. Sender is the stamped caller (agent_id)."
+                    },
                     "thread_id":     { "type": "string" },
                     "agent_id":      { "type": "string" }
                 },

@@ -15,7 +15,8 @@
 > Wave 11 (PR #365): finding 11.
 > Wave 12 (PR #366): finding 13.
 > Wave 13 (PR #367): SA-12.
-> Wave 14 (this tree): findings 15, SA-7.
+> Wave 14 (PR #368): findings 15, SA-7.
+> Wave 15 (this tree): SA-5.
 
 ## Ranked findings
 
@@ -272,6 +273,10 @@ dropping them.
   attribution.
 - **Minimal fix:** Derive owner and sender solely from trusted caller context
   and move identity reassignment to a separate admin-only API.
+- **Fixed (Wave 15):** `stamp_agent_id` overwrites `set_agent_id` / `from_agent_id`
+  when present. Cerebro derives sender from stamped `agent_id` only, and
+  `set_agent_id` must equal the caller on an owner-less row — owned transfer
+  stays `share_memory`.
 
 ### SA-6. High — lossy broadcast channels carry non-replayable commands
 
