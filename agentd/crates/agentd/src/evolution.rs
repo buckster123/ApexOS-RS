@@ -40,25 +40,125 @@ pub fn parse_evolution_id_from_title(title: &str) -> Option<EvolutionId> {
 
 // ── undo-snapshot codec ──────────────────────────────────────────────────────
 //
-// The rollback snapshot is persisted as one line inside a Cerebro episode memory.
-// `undo_step_line` writes it; `parse_undo_snapshot_from_text` reads it back. They
-// are a 1:1 pair — the round-trip test below is the contract.
+// The rollback snapshot is persisted as marker lines inside a Cerebro episode
+// memory. `undo_step_line` writes `{undo, owner, exact target}` together;
+// `parse_rollback_record_from_text` reads them back. Legacy memories that only
+// carry `undo_snapshot:` still parse (owner/target filled by
+// `complete_legacy_record`). The undo JSON is compact and newline-escaped so
+// the snapshot is always single-line.
 
-/// Build the episode-step content that carries an undo snapshot. The snapshot is
-/// compact JSON on its own marker line; `serde_json::to_string` escapes any newline
-/// in the payload, so the snapshot is always single-line and recoverable.
-pub fn undo_step_line(summary: &str, undo: &EvolutionProposal) -> String {
+/// Sentinel target meaning "the node's global soul.md + live soul_arc".
+pub const GLOBAL_SOUL_TARGET: &str = "global";
+
+/// Durable rollback record: the inverse proposal plus who owns it and which
+/// soul file it must write back to. Persisted with the snapshot so a later
+/// `rollback_evolution` cannot apply another agent's undo to the caller's
+/// current soul (SA-7).
+#[derive(Debug, Clone)]
+pub struct RollbackRecord {
+    pub undo: EvolutionProposal,
+    /// Agent that applied the original evolution (and owns the private snapshot).
+    pub owner: String,
+    /// Exact apply target: [`GLOBAL_SOUL_TARGET`] or the per-agent soul path.
+    pub target: String,
+}
+
+/// Encode the apply-time soul path. `None` is the global soul.
+pub fn encode_soul_target(path: Option<&std::path::Path>) -> String {
+    match path {
+        None => GLOBAL_SOUL_TARGET.to_string(),
+        Some(p) => {
+            let s = p.to_string_lossy();
+            // The codec is line-oriented — never let a newline split the marker.
+            let line = s.lines().next().unwrap_or(GLOBAL_SOUL_TARGET);
+            if line.is_empty() { GLOBAL_SOUL_TARGET.to_string() } else { line.to_string() }
+        }
+    }
+}
+
+/// Inverse of [`encode_soul_target`]. `global` / empty → `None` (node soul).
+pub fn decode_soul_target(s: &str) -> Option<std::path::PathBuf> {
+    let t = s.trim();
+    if t.is_empty() || t == GLOBAL_SOUL_TARGET {
+        None
+    } else {
+        Some(std::path::PathBuf::from(t))
+    }
+}
+
+/// Caller may roll this record back iff they are the recorded owner, or the
+/// node agent (operator recovery). A guest cannot apply another agent's undo.
+pub fn rollback_authorized(caller: &str, owner: &str, node_agent: &str) -> bool {
+    let owner = owner.trim();
+    if owner.is_empty() {
+        return caller == node_agent;
+    }
+    caller == owner || caller == node_agent
+}
+
+/// Fill owner/target on a record parsed from a pre-SA-7 snapshot (no marker
+/// lines). Episode `agent_id` is the best attribution we have; else the node.
+pub fn complete_legacy_record(
+    rec: &mut RollbackRecord,
+    episode_agent: Option<&str>,
+    node_agent: &str,
+) {
+    if rec.owner.trim().is_empty() {
+        rec.owner = episode_agent
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(node_agent)
+            .to_string();
+    }
+    if rec.target.trim().is_empty() {
+        rec.target = GLOBAL_SOUL_TARGET.to_string();
+    }
+}
+
+fn first_line(s: &str) -> &str {
+    s.lines().next().unwrap_or("").trim()
+}
+
+fn marker_line<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
+    let start = text.find(marker)? + marker.len();
+    let rest = &text[start..];
+    let end = rest.find('\n').unwrap_or(rest.len());
+    Some(rest[..end].trim())
+}
+
+/// Build the episode-step content that carries `{undo, owner, target}`.
+/// The snapshot is compact JSON on its own marker line; `serde_json::to_string`
+/// escapes any newline in the payload, so the snapshot is always single-line.
+pub fn undo_step_line(
+    summary: &str,
+    undo: &EvolutionProposal,
+    owner: &str,
+    target: &str,
+) -> String {
     let undo_json = serde_json::to_string(undo).unwrap_or_default();
-    format!("evolution apply: {summary}\nundo_snapshot: {undo_json}")
+    format!(
+        "evolution apply: {summary}\nundo_snapshot: {undo_json}\nundo_owner: {}\nundo_target: {}",
+        first_line(owner),
+        first_line(target),
+    )
 }
 
 /// Recover an undo snapshot from a single memory's `content` string.
 pub fn parse_undo_snapshot_from_text(text: &str) -> Option<EvolutionProposal> {
-    let marker = "undo_snapshot: ";
-    let start = text.find(marker)? + marker.len();
-    let rest = &text[start..];
-    let end = rest.find('\n').unwrap_or(rest.len());
-    serde_json::from_str(&rest[..end]).ok()
+    let raw = marker_line(text, "undo_snapshot: ")?;
+    serde_json::from_str(raw).ok()
+}
+
+/// Recover the full rollback record (undo + owner + target). Legacy content
+/// without owner/target lines still yields a record (empty owner, `global`
+/// target) so cold restore can hydrate it via [`complete_legacy_record`].
+pub fn parse_rollback_record_from_text(text: &str) -> Option<RollbackRecord> {
+    let undo = parse_undo_snapshot_from_text(text)?;
+    let owner = marker_line(text, "undo_owner: ").unwrap_or("").to_string();
+    let target = marker_line(text, "undo_target: ")
+        .unwrap_or(GLOBAL_SOUL_TARGET)
+        .to_string();
+    Some(RollbackRecord { undo, owner, target })
 }
 
 /// Recover an undo snapshot from a `get_episode_memories` result — a JSON array of
@@ -66,12 +166,56 @@ pub fn parse_undo_snapshot_from_text(text: &str) -> Option<EvolutionProposal> {
 /// rendered array text (where the undo JSON is escaped-within-JSON and never parses
 /// — the bug behind the chronic "loaded 0 rollback snapshot(s)").
 pub fn parse_undo_from_episode_memories(mems_text: &str) -> Option<EvolutionProposal> {
-    serde_json::from_str::<serde_json::Value>(mems_text)
-        .ok()?
-        .as_array()?
-        .iter()
-        .filter_map(|n| n["content"].as_str())
-        .find_map(parse_undo_snapshot_from_text)
+    parse_rollback_from_episode_memories(mems_text).map(|r| r.undo)
+}
+
+/// Recover the full rollback record from a `get_episode_memories` JSON array.
+/// If the content has no `undo_owner` line (pre-SA-7), the memory node's
+/// `agent_id` is the attribution — that is who the snapshot was stored as.
+pub fn parse_rollback_from_episode_memories(mems_text: &str) -> Option<RollbackRecord> {
+    let arr = serde_json::from_str::<serde_json::Value>(mems_text).ok()?;
+    for n in arr.as_array()? {
+        let Some(content) = n["content"].as_str() else { continue };
+        let Some(mut rec) = parse_rollback_record_from_text(content) else { continue };
+        if rec.owner.is_empty() {
+            if let Some(aid) = n["agent_id"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                rec.owner = aid.to_string();
+            }
+        }
+        return Some(rec);
+    }
+    None
+}
+
+/// A pre-SA-7 guest snapshot stored `target=global` even though the write went
+/// to that agent's soul_file. If we still have the path, retarget so rollback
+/// cannot clobber the node soul. Policy/plugin undos stay `global` — they never
+/// wrote a soul file.
+pub fn heal_legacy_target(rec: &mut RollbackRecord, node_agent: &str, soul_file: Option<&str>) {
+    if !matches!(rec.undo, EvolutionProposal::UpdateSystemPrompt { .. }) {
+        return;
+    }
+    let target_is_global = rec.target.trim().is_empty() || rec.target == GLOBAL_SOUL_TARGET;
+    if target_is_global && rec.owner != node_agent {
+        if let Some(path) = soul_file.map(str::trim).filter(|s| !s.is_empty()) {
+            rec.target = path.to_string();
+        }
+    }
+}
+
+/// Finding 15 readback: the stored memory id must appear in the episode's
+/// memories *and* that node's content must still parse as a rollback record.
+/// A transport-Ok / `ok:false` link, or a store that never attached the
+/// memory, fails this check and the H4 gate refuses the rewrite.
+pub fn snapshot_is_linked(mems_text: &str, memory_id: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(mems_text) else {
+        return false;
+    };
+    let Some(arr) = v.as_array() else { return false };
+    arr.iter().any(|n| {
+        n["id"].as_str() == Some(memory_id)
+            && n["content"].as_str().and_then(parse_rollback_record_from_text).is_some()
+    })
 }
 
 // ── fossil healing (colony C1: evolution residue) ────────────────────────────
@@ -373,9 +517,15 @@ mod tests {
         let undo = EvolutionProposal::UpdateSystemPrompt {
             content: "old soul\nwith a newline".into(), reason: "rollback".into(),
         };
-        let line = undo_step_line("system prompt updated (8 chars)", &undo);
+        let line = undo_step_line(
+            "system prompt updated (8 chars)", &undo, "GUEST-1", "/etc/agentd/souls/GUEST-1.md",
+        );
         let parsed = parse_undo_snapshot_from_text(&line).expect("should parse back");
         assert!(json_eq(&parsed, &undo), "round-trip must preserve the snapshot");
+        let rec = parse_rollback_record_from_text(&line).expect("full record");
+        assert_eq!(rec.owner, "GUEST-1");
+        assert_eq!(rec.target, "/etc/agentd/souls/GUEST-1.md");
+        assert!(json_eq(&rec.undo, &undo));
     }
 
     #[test]
@@ -385,7 +535,9 @@ mod tests {
         let undo = EvolutionProposal::UpdatePolicyRule {
             tool_pattern: "git_push".into(), new_rule: PolicyRule::Ask, reason: "rollback".into(),
         };
-        let content = undo_step_line("policy rule 'git_push' set to 'allow'", &undo);
+        let content = undo_step_line(
+            "policy rule 'git_push' set to 'allow'", &undo, "APEX", GLOBAL_SOUL_TARGET,
+        );
         let mems = serde_json::json!([
             { "id": "mem_noise", "content": "unrelated memory, no marker here" },
             { "id": "mem_x", "content": content },
@@ -395,6 +547,100 @@ mod tests {
         assert!(json_eq(&parsed, &undo));
         // A rendered array string with no marker yields nothing.
         assert!(parse_undo_from_episode_memories("[]").is_none());
+    }
+
+    #[test]
+    fn legacy_snapshot_without_owner_target_still_parses() {
+        let undo = EvolutionProposal::UpdateSystemPrompt {
+            content: "old".into(), reason: "rollback".into(),
+        };
+        let legacy = format!(
+            "evolution apply: soul\nundo_snapshot: {}",
+            serde_json::to_string(&undo).unwrap(),
+        );
+        let mut rec = parse_rollback_record_from_text(&legacy).expect("legacy undo");
+        assert!(rec.owner.is_empty());
+        assert_eq!(rec.target, GLOBAL_SOUL_TARGET);
+        complete_legacy_record(&mut rec, Some("GUEST-1"), "APEX");
+        assert_eq!(rec.owner, "GUEST-1");
+        complete_legacy_record(&mut rec, None, "APEX");
+        assert_eq!(rec.owner, "GUEST-1", "already-filled owner is kept");
+        let mut orphan = parse_rollback_record_from_text(&legacy).unwrap();
+        complete_legacy_record(&mut orphan, None, "APEX");
+        assert_eq!(orphan.owner, "APEX");
+
+        // Memory-node attribution wins when the content has no undo_owner line.
+        let mems = serde_json::json!([{
+            "id": "mem_g",
+            "agent_id": "GUEST-1",
+            "content": legacy,
+        }]).to_string();
+        let from_node = parse_rollback_from_episode_memories(&mems).expect("node owner");
+        assert_eq!(from_node.owner, "GUEST-1");
+        let mut healed = from_node;
+        heal_legacy_target(&mut healed, "APEX", Some("/etc/agentd/souls/GUEST-1.md"));
+        assert_eq!(healed.target, "/etc/agentd/souls/GUEST-1.md");
+        // Policy undos stay global even when the owner is a guest.
+        let policy = EvolutionProposal::UpdatePolicyRule {
+            tool_pattern: "git_push".into(), new_rule: PolicyRule::Ask, reason: "rollback".into(),
+        };
+        let mut pol = RollbackRecord {
+            undo: policy, owner: "GUEST-1".into(), target: GLOBAL_SOUL_TARGET.into(),
+        };
+        heal_legacy_target(&mut pol, "APEX", Some("/etc/agentd/souls/GUEST-1.md"));
+        assert_eq!(pol.target, GLOBAL_SOUL_TARGET);
+        // Node-owned global stays global.
+        let mut apex = parse_rollback_record_from_text(&legacy).unwrap();
+        complete_legacy_record(&mut apex, None, "APEX");
+        heal_legacy_target(&mut apex, "APEX", Some("/etc/agentd/souls/GUEST-1.md"));
+        assert_eq!(apex.target, GLOBAL_SOUL_TARGET);
+    }
+
+    #[test]
+    fn rollback_authorized_is_owner_or_node_only() {
+        assert!(rollback_authorized("GUEST-1", "GUEST-1", "APEX"));
+        assert!(rollback_authorized("APEX", "GUEST-1", "APEX"));
+        assert!(!rollback_authorized("GUEST-2", "GUEST-1", "APEX"));
+        assert!(!rollback_authorized("GUEST-1", "APEX", "APEX"));
+        // Legacy empty owner: only the node agent may retry.
+        assert!(rollback_authorized("APEX", "", "APEX"));
+        assert!(!rollback_authorized("GUEST-1", "", "APEX"));
+    }
+
+    #[test]
+    fn soul_target_round_trips() {
+        assert_eq!(encode_soul_target(None), GLOBAL_SOUL_TARGET);
+        assert!(decode_soul_target(GLOBAL_SOUL_TARGET).is_none());
+        assert!(decode_soul_target("").is_none());
+        let p = std::path::Path::new("/etc/agentd/souls/GUEST-1.md");
+        assert_eq!(encode_soul_target(Some(p)), "/etc/agentd/souls/GUEST-1.md");
+        assert_eq!(
+            decode_soul_target("/etc/agentd/souls/GUEST-1.md").as_deref(),
+            Some(p),
+        );
+    }
+
+    #[test]
+    fn snapshot_link_readback_requires_id_and_parseable_record() {
+        let undo = EvolutionProposal::UpdateSystemPrompt {
+            content: "old".into(), reason: "rollback".into(),
+        };
+        let content = undo_step_line("pre-apply", &undo, "APEX", GLOBAL_SOUL_TARGET);
+        let linked = serde_json::json!([
+            { "id": "mem_x", "content": content },
+        ])
+        .to_string();
+        assert!(snapshot_is_linked(&linked, "mem_x"));
+        assert!(!snapshot_is_linked(&linked, "mem_other"));
+        // Transport-Ok / ok:false path: episode_add_step did not attach the memory.
+        let unlinked = serde_json::json!([]).to_string();
+        assert!(!snapshot_is_linked(&unlinked, "mem_x"));
+        // Id present but content is not a snapshot — not a recoverable undo.
+        let bogus = serde_json::json!([
+            { "id": "mem_x", "content": "not a snapshot" },
+        ])
+        .to_string();
+        assert!(!snapshot_is_linked(&bogus, "mem_x"));
     }
 
     #[test]

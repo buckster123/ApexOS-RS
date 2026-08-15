@@ -653,8 +653,9 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("[agentd] warning: failed to share soul_arc with supervisor");
     }
 
-    // Rollback store: undo snapshots indexed by EvolutionId (in-memory, cleared on restart).
-    let rollback_store: Arc<Mutex<HashMap<EvolutionId, EvolutionProposal>>> =
+    // Rollback store: {undo, owner, exact target} indexed by EvolutionId.
+    // Hydrated from Cerebro on boot; a failed rollback leaves the entry so it can retry.
+    let rollback_store: Arc<Mutex<HashMap<EvolutionId, evolution::RollbackRecord>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     // ToolProxy — lets the evolution applier call Cerebro tools directly for episode tracking.
@@ -731,9 +732,10 @@ async fn main() -> anyhow::Result<()> {
     {
         let proxy = tool_proxy.clone();
         let store = Arc::clone(&rollback_store);
+        let identities = Arc::clone(&identities);
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-            restore_rollback_store(&proxy, &store).await;
+            restore_rollback_store(&proxy, &store, &identities).await;
         });
     }
 
@@ -985,7 +987,7 @@ fn spawn_evolution_applier(
     policy_arc:      Arc<RwLock<PolicyEngine>>,
     sv_cmd_tx:       mpsc::Sender<SupervisorCmd>,
     mut rollback_rx: mpsc::Receiver<(SessionId, ActionId, EvolutionId)>,
-    rollback_store:  Arc<Mutex<HashMap<EvolutionId, EvolutionProposal>>>,
+    rollback_store:  Arc<Mutex<HashMap<EvolutionId, evolution::RollbackRecord>>>,
     tool_proxy:      ToolProxy,
     session_bindings: apexos_core::SessionBindings,
     identities:      Arc<RwLock<apexos_core::Identities>>,
@@ -1057,22 +1059,29 @@ fn spawn_evolution_applier(
                     // Scoped strictly to update_system_prompt so small edits stay
                     // untaxed (colony red line 6); other kinds keep best-effort
                     // post-apply journaling. On gate failure: honest refusal, no apply.
+                    // Finding 15: persist must return ToolOutput.ok AND the episode
+                    // link must read back; a transport-Ok / ok:false add_step is a
+                    // refusal, not a stored-memory-id green light.
                     let is_soul_rewrite =
                         matches!(&proposal, EvolutionProposal::UpdateSystemPrompt { .. });
                     let mut pre_episode: Option<String> = None;
+                    let record = undo.as_ref().map(|undo_p| evolution::RollbackRecord {
+                        undo: undo_p.clone(),
+                        owner: evo_agent.clone(),
+                        target: evolution::encode_soul_target(agent_soul.as_deref()),
+                    });
                     if is_soul_rewrite {
-                        let gate_err: Option<String> = match &undo {
+                        let gate_err: Option<String> = match &record {
                             None => Some(
                                 "no rollback snapshot could be computed (prior soul unreadable) — \
                                  refusing the rewrite; fix the soul file first".into(),
                             ),
-                            Some(undo_p) => {
+                            Some(rec) => {
                                 let kind = evolution::kind(&proposal);
-                                let eid = episode_start(&tool_proxy, id, &kind).await;
+                                let eid = episode_start(&tool_proxy, id, &kind, &evo_agent).await;
                                 let stored = match &eid {
-                                    Some(e) => episode_add_step(
-                                        &tool_proxy, e, undo_p,
-                                        "pre-apply rollback snapshot", &evo_agent,
+                                    Some(e) => persist_rollback_snapshot(
+                                        &tool_proxy, e, rec, "pre-apply rollback snapshot",
                                     ).await,
                                     None => None,
                                 };
@@ -1147,19 +1156,19 @@ fn spawn_evolution_applier(
                     let kind = evolution::kind(&proposal_copy);
                     let episode_id = match pre_episode {
                         Some(e) => Some(e),
-                        None    => episode_start(&tool_proxy, id, &kind).await,
+                        None    => episode_start(&tool_proxy, id, &kind, &evo_agent).await,
                     };
                     match result {
                         Ok(summary) => {
-                            if let Some(undo_proposal) = undo {
+                            if let Some(rec) = record {
                                 if !is_soul_rewrite {
                                     if let Some(ref eid) = episode_id {
-                                        episode_add_step(
-                                            &tool_proxy, eid, &undo_proposal, &summary, &evo_agent,
+                                        persist_rollback_snapshot(
+                                            &tool_proxy, eid, &rec, &summary,
                                         ).await;
                                     }
                                 }
-                                rollback_store.lock().await.insert(id, undo_proposal);
+                                rollback_store.lock().await.insert(id, rec);
                             }
                             episode_end(&tool_proxy, &episode_id, "success", &summary).await;
                             bus.emit(Event::EvolutionApplied {
@@ -1180,8 +1189,10 @@ fn spawn_evolution_applier(
                 },
 
                 Some((session, call_id, evo_id)) = rollback_rx.recv() => {
-                    let undo = rollback_store.lock().await.remove(&evo_id);
-                    match undo {
+                    // Peek, don't pop: a failed apply must leave the snapshot
+                    // so the owner can retry (SA-7). Remove only after commit.
+                    let record = rollback_store.lock().await.get(&evo_id).cloned();
+                    match record {
                         None => {
                             bus.emit(Event::ToolResult {
                                 session,
@@ -1194,17 +1205,38 @@ fn spawn_evolution_applier(
                                 },
                             }).await;
                         }
-                        Some(undo_proposal) => {
-                            // Restore to the same soul the original write targeted
-                            // (the requesting session's bound agent, else global).
-                            let agent_soul = soul_target_for(session, &session_bindings, &identities).await;
+                        Some(rec) => {
+                            let caller = apexos_core::resolve_agent_id(&session_bindings, session);
+                            let node   = apexos_core::node_agent_id();
+                            if !evolution::rollback_authorized(&caller, &rec.owner, &node) {
+                                eprintln!(
+                                    "[evolution] rollback refused {:?}: caller {caller} is not owner {}",
+                                    evo_id, rec.owner
+                                );
+                                bus.emit(Event::ToolResult {
+                                    session,
+                                    call:   call_id,
+                                    output: ToolOutput {
+                                        ok:      false,
+                                        content: serde_json::json!(format!(
+                                            "rollback refused: evolution {} belongs to {}, not {caller}",
+                                            evo_id.0, rec.owner
+                                        )),
+                                    },
+                                }).await;
+                                continue;
+                            }
+                            // Apply ONLY to the stored target — never the requester's
+                            // current soul binding (SA-7).
+                            let agent_soul = evolution::decode_soul_target(&rec.target);
                             let result = apply_evolution(
-                                evo_id, undo_proposal,
+                                evo_id, rec.undo,
                                 &soul_arc, &soul_path, &policy_path, &plugins_path,
                                 &policy_arc, &sv_cmd_tx, agent_soul.as_ref(),
                             ).await;
                             match result {
                                 Ok(summary) => {
+                                    rollback_store.lock().await.remove(&evo_id);
                                     eprintln!("[evolution] rolled back {:?}: {summary}", evo_id);
                                     bus.emit(Event::EvolutionRolledBack {
                                         evolution_id:   evo_id,
@@ -1224,7 +1256,7 @@ fn spawn_evolution_applier(
                                     }).await;
                                 }
                                 Err(e) => {
-                                    eprintln!("[evolution] rollback failed {:?}: {e}", evo_id);
+                                    eprintln!("[evolution] rollback failed {:?}: {e} (snapshot kept)", evo_id);
                                     bus.emit(Event::ToolResult {
                                         session,
                                         call:   call_id,
@@ -1275,10 +1307,15 @@ pub(crate) fn parse_cerebro_id(output: &apexos_core::ToolOutput, json_key: &str)
     Some(text[start..end].to_owned())
 }
 
-async fn episode_start(proxy: &ToolProxy, evo_id: EvolutionId, kind: &str) -> Option<String> {
+async fn episode_start(
+    proxy:    &ToolProxy,
+    evo_id:   EvolutionId,
+    kind:     &str,
+    agent_id: &str,
+) -> Option<String> {
     match proxy.call("episode_start", serde_json::json!({
         "title":    format!("evolution {}: {kind}", evo_id.0),
-        "agent_id": apexos_core::node_agent_id(),
+        "agent_id": agent_id,
         "tags":     ["evolution", kind]
     })).await {
         Ok(out) if out.ok => parse_cerebro_id(&out, "episode_id"),
@@ -1287,17 +1324,20 @@ async fn episode_start(proxy: &ToolProxy, evo_id: EvolutionId, kind: &str) -> Op
     }
 }
 
-/// Store the undo snapshot as a memory, then link it to the episode as a step.
-/// Returns the stored memory id — the H4 snapshot gate uses it to VERIFY the undo
-/// is durably persisted before a full soul rewrite is allowed to proceed.
-async fn episode_add_step(
+/// Store `{undo, owner, target}` as a private memory, link it to the episode,
+/// then read the link back. Returns the memory id only when ALL three succeed
+/// with `ToolOutput.ok` (finding 15). A transport-Ok / `ok:false` add_step used
+/// to return the stored id anyway — the H4 gate then allowed a soul rewrite
+/// whose snapshot was invisible to cold-start restore.
+async fn persist_rollback_snapshot(
     proxy:      &ToolProxy,
     episode_id: &str,
-    undo:       &EvolutionProposal,
+    record:     &evolution::RollbackRecord,
     summary:    &str,
-    agent_id:   &str,
 ) -> Option<String> {
-    let content = evolution::undo_step_line(summary, undo);
+    let content = evolution::undo_step_line(
+        summary, &record.undo, &record.owner, &record.target,
+    );
 
     // Step 1: store the undo snapshot as a memory to get its id. memory_store
     // returns the stored node, whose id field is `id` (NOT `memory_id`) — reading
@@ -1317,7 +1357,7 @@ async fn episode_add_step(
     //               them — fixed in cerebro-mcp alongside this).
     let memory_id = match proxy.call("memory_store", serde_json::json!({
         "content":  content,
-        "agent_id": agent_id,
+        "agent_id": record.owner,
         "visibility": "private",
         "salience": 0.25,
         "tags":     ["evolution", "undo_snapshot"],
@@ -1335,15 +1375,51 @@ async fn episode_add_step(
 
     let mid = memory_id?;
 
-    // Step 2: link the memory to the episode.
-    if let Err(e) = proxy.call("episode_add_step", serde_json::json!({
-        "episode_id": episode_id,
-        "memory_id":  mid,
-        "role":       "event"
+    // Step 2: link the memory to the episode. cerebro-mcp requires `description`;
+    // `role` is the HTTP alias and is ignored here. Require ToolOutput.ok —
+    // DirectCall wraps MCP errors as ok:false, which is not a Rust Err.
+    match proxy.call("episode_add_step", serde_json::json!({
+        "episode_id":  episode_id,
+        "memory_id":   mid,
+        "description": summary,
+        "role":        "event"
     })).await {
-        eprintln!("[evolution] episode_add_step: {e}");
+        Ok(out) if out.ok => {}
+        Ok(out) => {
+            eprintln!("[evolution] episode_add_step not ok: {:?}", out.content);
+            return None;
+        }
+        Err(e) => {
+            eprintln!("[evolution] episode_add_step: {e}");
+            return None;
+        }
     }
-    Some(mid)
+
+    // Step 3: read the link back as the owner. If the owner cannot see the
+    // snapshot, cold-start restore as that agent cannot either — refuse.
+    let mems = match proxy.call("get_episode_memories", serde_json::json!({
+        "episode_id": episode_id,
+        "agent_id":   record.owner,
+    })).await {
+        Ok(out) if out.ok => mcp_text(&out),
+        Ok(out) => {
+            eprintln!("[evolution] get_episode_memories not ok: {:?}", out.content);
+            None
+        }
+        Err(e) => {
+            eprintln!("[evolution] get_episode_memories: {e}");
+            None
+        }
+    };
+    match mems {
+        Some(text) if evolution::snapshot_is_linked(&text, &mid) => Some(mid),
+        _ => {
+            eprintln!(
+                "[evolution] snapshot link readback failed for {mid} on {episode_id} — refusing"
+            );
+            None
+        }
+    }
 }
 
 async fn episode_end(proxy: &ToolProxy, episode_id: &Option<String>, outcome: &str, summary: &str) {
@@ -1360,13 +1436,15 @@ async fn episode_end(proxy: &ToolProxy, episode_id: &Option<String>, outcome: &s
 
 /// On cold-start: read all Cerebro evolution episodes, parse undo snapshots, rebuild rollback_store.
 /// Best-effort — if Cerebro is unavailable, rollback_store stays empty and apply still works.
+/// SA-7: list/read unscoped so private non-APEX undo memories hydrate, not just APEX's.
 async fn restore_rollback_store(
     proxy:          &ToolProxy,
-    rollback_store: &Arc<Mutex<HashMap<EvolutionId, EvolutionProposal>>>,
+    rollback_store: &Arc<Mutex<HashMap<EvolutionId, evolution::RollbackRecord>>>,
+    identities:     &Arc<RwLock<apexos_core::Identities>>,
 ) {
+    // Omit agent_id: VisibilityScope::global, every agent's episodes.
     let text = match proxy.call("list_episodes", serde_json::json!({
-        "agent_id": apexos_core::node_agent_id(),
-        "limit":    200
+        "limit": 200
     })).await {
         Ok(out) if out.ok => match mcp_text(&out) {
             Some(t) => t,
@@ -1400,16 +1478,21 @@ async fn restore_rollback_store(
         // this node has ever used — no id reuse / episode-title duplication.
         max_id = max_id.max(evo_id.0);
 
+        // Omit agent_id so private non-APEX undo memories are visible
+        // (for_agent(APEX) hid guest snapshots even when the episode listed them).
         let mems_text = match proxy.call("get_episode_memories", serde_json::json!({
             "episode_id": episode_id,
-            "agent_id":   apexos_core::node_agent_id()
         })).await {
             Ok(out) if out.ok => match mcp_text(&out) { Some(t) => t, None => continue },
             _ => continue,
         };
 
-        if let Some(proposal) = evolution::parse_undo_from_episode_memories(&mems_text) {
-            rollback_store.lock().await.insert(evo_id, proposal);
+        if let Some(mut rec) = evolution::parse_rollback_from_episode_memories(&mems_text) {
+            let node = apexos_core::node_agent_id();
+            evolution::complete_legacy_record(&mut rec, ep["agent_id"].as_str(), &node);
+            let soul_file = identities.read().await.agent(&rec.owner).map(|a| a.soul_file.clone());
+            evolution::heal_legacy_target(&mut rec, &node, soul_file.as_deref());
+            rollback_store.lock().await.insert(evo_id, rec);
             count += 1;
         }
 
@@ -1437,10 +1520,10 @@ async fn restore_rollback_store(
     // without ever linking them to an episode, so the walk above can't reach them —
     // yet they're exactly the high-access fossils the colony found polluting recall.
     // Bounded, best-effort, idempotent (healed nodes stop matching the predicate).
+    // Unscoped search: guest-private fossils were invisible under APEX's scope.
     if let Ok(out) = proxy.call("memory_search", serde_json::json!({
-        "query":    "undo_snapshot evolution apply",
-        "top_k":    40,
-        "agent_id": apexos_core::node_agent_id(),
+        "query": "undo_snapshot evolution apply",
+        "top_k": 40,
     })).await {
         if out.ok {
             if let Some(results) = mcp_text(&out)
@@ -3345,8 +3428,9 @@ fn rollback_evolution_spec() -> ToolSpec {
     ToolSpec {
         name:        "rollback_evolution".into(),
         description: "Revert a previously applied evolution by its ID. \
-                      Uses the in-memory undo snapshot taken at apply time. \
-                      Only available for evolutions applied in the current daemon session.".into(),
+                      Uses the persisted undo snapshot (owner + exact soul target) \
+                      taken at apply time; restored across daemon restarts. \
+                      Only the owning agent or the node agent may roll it back.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

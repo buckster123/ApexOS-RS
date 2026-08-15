@@ -14,7 +14,8 @@
 > Wave 10 (PR #364): finding 8.
 > Wave 11 (PR #365): finding 11.
 > Wave 12 (PR #366): finding 13.
-> Wave 13 (this tree): SA-12.
+> Wave 13 (PR #367): SA-12.
+> Wave 14 (this tree): findings 15, SA-7.
 
 ## Ranked findings
 
@@ -204,6 +205,9 @@
   rollback restoration cannot find it.
 - **Minimal fix:** Require `ToolOutput.ok`, verify the episode link by readback,
   and treat either failure as a hard pre-apply refusal.
+- **Fixed (Wave 14):** `persist_rollback_snapshot` requires `episode_add_step`
+  `ok:true` plus a `get_episode_memories` readback (`snapshot_is_linked`);
+  either failure is an H4 refusal.
 
 ## Scout addendum
 
@@ -289,6 +293,10 @@ dropping them.
 - **Minimal fix:** Persist `{undo, owner, exact target}` together, authorize the
   caller against that owner, apply only to the stored target, and remove the
   snapshot only after a successful commit.
+- **Fixed (Wave 14):** `RollbackRecord` is persisted with the snapshot; rollback
+  authorizes caller vs owner (or node agent), writes the stored target, and
+  pops the in-memory entry only after a successful apply. Cold restore lists
+  episodes and reads memories unscoped so private non-APEX undos hydrate.
 
 ### SA-8. High — active session deletion/archive races late turn persistence
 
