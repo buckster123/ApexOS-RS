@@ -312,3 +312,58 @@ async fn policy_mode_persists_before_ok() {
     std::env::remove_var("AGENTD_POLICY_TOML");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[tokio::test]
+async fn gossip_is_admin_only_and_rejects_broadcast() {
+    let mut ids = apexos_core::Identities::default();
+    ids.seed_defaults("/tmp/soul.md");
+    ids.user_mut("owner").unwrap().set_pin("1337");
+    let mut guest = apexos_core::User {
+        id: "guest".into(),
+        name: "Guest".into(),
+        ..Default::default()
+    };
+    guest.set_pin("4242");
+    ids.users.push(guest);
+    let (base, _tmp) = boot("admin-secret", ids).await;
+
+    let (st, v) = json_post(
+        &format!("{base}/api/mesh/gossip"),
+        None,
+        serde_json::json!({ "target": 7, "text": "hi" }),
+    )
+    .await;
+    assert_eq!(st, 401, "ungated gossip is the signing oracle: {v}");
+
+    let (_, login) = json_post(
+        &format!("{base}/api/auth/login"),
+        None,
+        serde_json::json!({ "user_id": "guest", "pin": "4242" }),
+    )
+    .await;
+    let guest_tok = login["token"].as_str().expect("guest token");
+    let (st, _) = json_post(
+        &format!("{base}/api/mesh/gossip"),
+        Some(guest_tok),
+        serde_json::json!({ "target": 7, "text": "hi" }),
+    )
+    .await;
+    assert_eq!(st, 403, "guest must not sign radio A2A");
+
+    let (st, v) = json_post(
+        &format!("{base}/api/mesh/gossip"),
+        Some("admin-secret"),
+        serde_json::json!({ "target": 65535, "text": "hi" }),
+    )
+    .await;
+    assert_eq!(st, 400, "broadcast: {v}");
+    assert!(v["error"].as_str().unwrap_or("").contains("broadcast"));
+
+    let (st, v) = json_post(
+        &format!("{base}/api/mesh/gossip"),
+        Some("admin-secret"),
+        serde_json::json!({ "target": 7, "text": "hello from admin" }),
+    )
+    .await;
+    assert_eq!(st, 503, "admin may call; no radio is honest 503: {v}");
+}
