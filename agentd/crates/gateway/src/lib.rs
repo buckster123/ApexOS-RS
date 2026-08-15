@@ -4581,7 +4581,7 @@ async fn mesh_memory_handler(
         None => return Json(serde_json::json!({ "ok": false, "error": "missing 'from'" })),
     };
 
-    // Import into the receiving node's own agent space, default-private.
+    // Import into the receiving node's own agent space, receiver-stamped private.
     let agent_id = apexos_core::node_agent_id();
     let (args, preview) = match mesh::federated_remember_args(&from, &agent_id, &body) {
         Ok(v)  => v,

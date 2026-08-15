@@ -284,8 +284,10 @@ const FED_TAG_MAX_CHARS: usize = 48;
 /// Provenance is SYSTEM-stamped as tags (`colony` · `from:<node>` ·
 /// `origin:<sender memory id>`) — the sender cannot forge or omit them, and a
 /// peer's imports stay one tag-filter away from bulk cleanup. The memory lands
-/// in `agent_id`'s space (the receiving node's own agent), default-private;
-/// sharing it onward is the receiving agent's call.
+/// in `agent_id`'s space (the receiving node's own agent) with
+/// `visibility:"private"` receiver-stamped (SA-3). A missing visibility would
+/// default Shared (R-05) and leak through `shared_only` federated recall.
+/// Sharing it onward is the receiving agent's `share_memory` call.
 pub fn federated_remember_args(
     from_node: &str,
     agent_id: &str,
@@ -326,9 +328,13 @@ pub fn federated_remember_args(
     }
 
     let mut args = serde_json::json!({
-        "content":  full,
-        "agent_id": agent_id,
-        "tags":     tags,
+        "content":    full,
+        "agent_id":   agent_id,
+        "tags":       tags,
+        // SA-3: never omit this — remember() defaults Shared and the import
+        // would be immediately re-exportable via mesh_recall / shared_only.
+        // Sender-supplied visibility is ignored; publish is share_memory.
+        "visibility": "private",
     });
     // Type + salience are preserved when valid, else dropped (auto-classified).
     let mut memory_type = None;
@@ -522,6 +528,7 @@ mod tests {
         });
         let (args, preview) = federated_remember_args("apex1", "APEX", &body).unwrap();
         assert_eq!(args["agent_id"], "APEX");
+        assert_eq!(args["visibility"], "private", "SA-3: import is receiver-stamped private");
         assert_eq!(args["memory_type"], "semantic");
         assert_eq!(args["salience"], 0.8);
         let tags: Vec<&str> = args["tags"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
@@ -589,6 +596,27 @@ mod tests {
         });
         let (args, _) = federated_remember_args("apex3", "APEX", &sem).unwrap();
         assert_eq!(args["salience"], 0.95, "non-procedures keep sender salience");
+    }
+
+    #[test]
+    fn federated_import_ignores_sender_visibility() {
+        // A peer that marks the payload Shared (or omits visibility) must still
+        // land private. Publish is the receiver's share_memory, not the wire.
+        let shared = serde_json::json!({
+            "from": "apex1",
+            "memory": {
+                "content": "one-hop import that claimed to be shared",
+                "visibility": "shared",
+            },
+        });
+        let (args, _) = federated_remember_args("apex1", "APEX", &shared).unwrap();
+        assert_eq!(args["visibility"], "private");
+        let omitted = serde_json::json!({
+            "from": "apex1",
+            "memory": { "content": "one-hop import with no visibility field" },
+        });
+        let (args, _) = federated_remember_args("apex1", "APEX", &omitted).unwrap();
+        assert_eq!(args["visibility"], "private");
     }
 
     #[test]

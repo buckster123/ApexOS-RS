@@ -1793,6 +1793,44 @@ mod cortex_pipeline {
     }
 
     #[tokio::test]
+    async fn federated_import_stays_private_until_published() {
+        // SA-3: a one-hop import is receiver-stamped private. shared_only recall
+        // (the mesh_recall wire) must not return it until share_memory publishes.
+        let (cortex, _dir) = make_cortex().await;
+        let apex = AgentId("APEX".into());
+        let imported = cortex.remember_with_visibility(
+            "thermal calibration imported from a peer one hop away",
+            None,
+            Some(vec!["colony".into(), "from:apex1".into()]),
+            None,
+            VisibilityScope::for_agent(apex.clone()),
+            Some(Visibility::Private),
+        ).await.unwrap();
+        assert_eq!(imported.visibility, Visibility::Private);
+
+        let hidden = cortex.recall(
+            "thermal calibration imported", 5, VisibilityScope::shared_only(),
+        ).await.unwrap();
+        assert!(
+            hidden.is_empty(),
+            "unpublished import must not leak on federated recall, got {}",
+            hidden.len()
+        );
+
+        cortex.storage.read().await.sqlite
+            .share_memory(&imported.id, None, &VisibilityScope::for_agent(apex))
+            .await
+            .unwrap();
+
+        let published = cortex.recall(
+            "thermal calibration imported", 5, VisibilityScope::shared_only(),
+        ).await.unwrap();
+        assert_eq!(published.len(), 1, "share_memory is what makes it colony-queryable");
+        assert_eq!(published[0].0.id, imported.id);
+        assert_eq!(published[0].0.visibility, Visibility::Shared);
+    }
+
+    #[tokio::test]
     async fn frontier_bounding_keeps_association_hits_and_scope_denial() {
         // CB-008: the visibility map is now fetched for the seeds' reachable
         // frontier only. Two properties must hold end-to-end:
