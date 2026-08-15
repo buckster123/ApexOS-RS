@@ -22,7 +22,10 @@ use apexos_core::{
     ActionId, Bus, ContentBlock, Event, EvolutionId, EvolutionProposal, ImageSource, Message,
     PluginId, PolicyMode, SessionId, SensorReading, Subsystem, SystemState, ToolOutput, ToolSpec,
 };
-use apexos_gateway::{serve, ConsolidateReq, GatewayState, PeerRegistry, SpawnReq};
+use apexos_gateway::{
+    serve, ConsolidateReq, GatewayState, PeerRegistry, SessionRetireKind, SessionRetireReq,
+    SpawnReq,
+};
 use apexos_plugins::{
     load as load_plugins, PluginConfig, PolicyConfig, PolicyEngine, RestartPolicy,
     Supervisor, SupervisorCmd, ToolProxy, VastState,
@@ -450,6 +453,8 @@ async fn main() -> anyhow::Result<()> {
     // LLM summary + Cerebro session_save and replies on the oneshot.
     let (consolidate_tx, mut consolidate_rx) =
         tokio::sync::mpsc::channel::<ConsolidateReq>(8);
+    let (session_retire_tx, session_retire_rx) =
+        tokio::sync::mpsc::channel::<apexos_gateway::SessionRetireReq>(8);
 
     // Federated memory imports (colony-federation Slice 1): the gateway's
     // /api/mesh/memory handler sends validated, provenance-stamped `remember`
@@ -544,6 +549,7 @@ async fn main() -> anyhow::Result<()> {
         fed_stats:            Arc::clone(&fed_stats),
         fed_stats_path:       fed_stats_path.clone(),
         consolidate_tx:       consolidate_tx.clone(),
+        session_retire_tx:    session_retire_tx.clone(),
         spawn_tx:             spawn_tx.clone(),
         worker_mesh_tx:       worker_mesh_tx.clone(),
         mesh_workers_enabled,
@@ -881,7 +887,8 @@ async fn main() -> anyhow::Result<()> {
                        tool_reg, histories, Arc::clone(&history_budget),
                        engine, max_depth, session_store, router_proxy,
                        Arc::clone(&session_bindings), Arc::clone(&persona_sessions),
-                       Arc::clone(&identities), spawn_rx, Arc::clone(&mesh_hops),
+                       Arc::clone(&identities), spawn_rx, session_retire_rx,
+                       Arc::clone(&mesh_hops),
                        Arc::clone(&sensor_presence), Arc::clone(&sensor_profile),
                        worker_models.clone(), mk_pinned.clone());
 
@@ -1776,6 +1783,7 @@ fn spawn_agent_router(
     persona_sessions: apexos_core::PersonaSessions,
     identities:    Arc<RwLock<apexos_core::Identities>>,
     spawn_rx:      tokio::sync::mpsc::Receiver<SpawnReq>,
+    mut retire_rx: tokio::sync::mpsc::Receiver<apexos_gateway::SessionRetireReq>,
     mesh_hops:     apexos_core::MeshHops,
     sensor_presence: SensorPresence,
     sensor_profile: Arc<std::sync::RwLock<String>>,
@@ -1904,7 +1912,9 @@ fn spawn_agent_router(
                     // UserPrompt event. An unreadable file still refuses BEFORE the
                     // gate takes a slot: a blank-history turn appended over real JSONL
                     // truth is silent corruption, and refusal is the honest failure.
-                    let revive_ok = if apexos_core::is_worker_session(session.0)
+                    let revive_ok = if session_store.is_tombstoned(session) {
+                        false
+                    } else if apexos_core::is_worker_session(session.0)
                         && !histories.lock().await.contains_key(&session)
                         && session_store.exists(session)
                     {
@@ -1924,7 +1934,12 @@ fn spawn_agent_router(
                             }
                         }
                     } else { true };
-                    if revive_ok {
+                    if session_store.is_tombstoned(session) {
+                        bus.emit(Event::Error {
+                            session: Some(session),
+                            message: format!("session {} has been deleted or archived", session.0),
+                        }).await;
+                    } else if revive_ok {
                         // Run now if the session's slot is free, else queue FIFO behind
                         // the in-flight turn (runs when it frees the slot via turn_done).
                         if let Some((text, images)) = gate.admit(session, text, images) {
@@ -2025,16 +2040,20 @@ fn spawn_agent_router(
                     // a turn that wrote its assistant message before the cancel lands
                     // ends on Assistant and is left untouched).
                     let marker = {
-                        let mut hist = histories.lock().await;
-                        match hist.get_mut(&session) {
-                            Some(h) if cancel_marker_needed(h) => {
-                                let m = Message::Assistant {
-                                    content: vec![ContentBlock::Text { text: "⊘ turn cancelled".into() }],
-                                };
-                                h.push(m.clone());
-                                Some(m)
+                        if session_store.is_tombstoned(session) {
+                            None
+                        } else {
+                            let mut hist = histories.lock().await;
+                            match hist.get_mut(&session) {
+                                Some(h) if cancel_marker_needed(h) => {
+                                    let m = Message::Assistant {
+                                        content: vec![ContentBlock::Text { text: "⊘ turn cancelled".into() }],
+                                    };
+                                    h.push(m.clone());
+                                    Some(m)
+                                }
+                                _ => None,
                             }
-                            _ => None,
                         }
                     };
                     if let Some(m) = marker {
@@ -2124,6 +2143,17 @@ fn spawn_agent_router(
                     if let Some((text, images)) = gate.complete(session) {
                         to_run = Some((session, text, images)); // stays busy, drains next
                     }
+                }
+
+                // SA-8: delete/archive serialized here with the turn gate.
+                // Tombstone first so a late append/reinsert cannot recreate the
+                // JSONL; abort the in-flight generation; then move/remove the file.
+                Some(req) = retire_rx.recv() => {
+                    let sid = SessionId(req.session_id);
+                    session_store.tombstone(sid);
+                    gate.retire(sid);
+                    cascade_cancel(sid, &session_children, &abort_handles).await;
+                    apply_session_retire(&session_store, &histories, req).await;
                 }
             }
 
@@ -2592,7 +2622,9 @@ async fn root_turn(
                     session_store.append(session, msg).await;
                 }
             }
-            histories.lock().await.insert(session, updated);
+            if !session_store.is_tombstoned(session) {
+                histories.lock().await.insert(session, updated);
+            }
         }
         Err(e) => {
             eprintln!("[agent:{:?}] turn error: {e}", session);
@@ -4003,22 +4035,54 @@ fn extract_final_text(history: &[Message]) -> String {
         .unwrap_or_default()
 }
 
+/// Apply a delete/archive after the gate has tombstoned + cancelled the session.
+async fn apply_session_retire(
+    store:     &SessionStore,
+    histories: &Arc<Mutex<HashMap<SessionId, Vec<Message>>>>,
+    req:       SessionRetireReq,
+) {
+    let sid = SessionId(req.session_id);
+    let body = match req.kind {
+        SessionRetireKind::Delete => {
+            let removed = store.remove_file(sid).await;
+            histories.lock().await.remove(&sid);
+            serde_json::json!({ "ok": removed, "session_id": sid.0, "deleted": removed })
+        }
+        SessionRetireKind::Archive => match store.archive_file(sid).await {
+            Ok(moved) => {
+                if moved {
+                    histories.lock().await.remove(&sid);
+                }
+                serde_json::json!({ "ok": moved, "session_id": sid.0, "archived": moved })
+            }
+            Err(e) => serde_json::json!({ "ok": false, "error": e }),
+        },
+    };
+    let _ = req.reply.send(body);
+}
+
 /// Per-session turn serialization: at most one turn in flight per session, extra
 /// prompts queued FIFO. A pure state machine (no async/IO) so the concurrency
 /// invariants are unit-testable; the router drives it and spawns whatever payload
 /// it returns. See the concurrent-UserPrompt race (BACKLOG #2).
 #[derive(Default)]
 struct TurnGate {
-    busy:   std::collections::HashSet<SessionId>,
-    queued: HashMap<SessionId, std::collections::VecDeque<(String, Vec<ImageSource>)>>,
+    busy:     std::collections::HashSet<SessionId>,
+    queued:   HashMap<SessionId, std::collections::VecDeque<(String, Vec<ImageSource>)>>,
+    /// Retired by delete/archive (SA-8). New admits are refused; `complete`
+    /// never starts a queued prompt.
+    retired:  std::collections::HashSet<SessionId>,
 }
 
 impl TurnGate {
     /// A prompt arrived. Returns `Some(payload)` to run now (the slot was free), or
-    /// `None` if it was queued behind an in-flight turn.
+    /// `None` if it was queued behind an in-flight turn (or the session is retired).
     fn admit(&mut self, session: SessionId, text: String, images: Vec<ImageSource>)
         -> Option<(String, Vec<ImageSource>)>
     {
+        if self.retired.contains(&session) {
+            return None;
+        }
         if self.busy.contains(&session) {
             self.queued.entry(session).or_default().push_back((text, images));
             None
@@ -4031,6 +4095,11 @@ impl TurnGate {
     /// The in-flight turn for `session` ended. Returns `Some(payload)` = the next
     /// queued prompt to run (the slot stays busy), or `None` = the slot is freed.
     fn complete(&mut self, session: SessionId) -> Option<(String, Vec<ImageSource>)> {
+        if self.retired.contains(&session) {
+            self.busy.remove(&session);
+            self.queued.remove(&session);
+            return None;
+        }
         if let Some((text, images)) = self.queued.get_mut(&session).and_then(|q| q.pop_front()) {
             Some((text, images)) // stays busy, run next
         } else {
@@ -4044,6 +4113,18 @@ impl TurnGate {
     /// turn. `busy` clears when that turn's slot guard fires `complete`.
     fn cancel(&mut self, session: SessionId) {
         self.queued.remove(&session);
+    }
+
+    /// Delete/archive: drop the queue and refuse further admits. The in-flight
+    /// turn is aborted separately; its `complete` then frees the slot without
+    /// starting queued work.
+    fn retire(&mut self, session: SessionId) {
+        self.queued.remove(&session);
+        self.retired.insert(session);
+    }
+
+    fn is_busy(&self, session: SessionId) -> bool {
+        self.busy.contains(&session)
     }
 }
 
@@ -4819,6 +4900,21 @@ tmpfs /var/lib/agentd/workspace/media tmpfs rw 0 0
         assert!(g.complete(s).is_none());
         // Slot is free again.
         assert!(g.admit(s, "c".into(), vec![]).is_some());
+    }
+
+    #[test]
+    fn turngate_retire_drops_queue_and_refuses_new_admits() {
+        let mut g = TurnGate::default();
+        let s = SessionId(7);
+        assert!(g.admit(s, "a".into(), vec![]).is_some());
+        assert!(g.admit(s, "b".into(), vec![]).is_none());
+        assert!(g.is_busy(s));
+        g.retire(s);
+        // Queued prompt must not run when the in-flight turn's slot frees.
+        assert!(g.complete(s).is_none());
+        assert!(!g.is_busy(s));
+        // A late prompt on the deleted session must not start a new turn.
+        assert!(g.admit(s, "late".into(), vec![]).is_none());
     }
 
     #[test]

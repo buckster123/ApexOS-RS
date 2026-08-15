@@ -17,7 +17,8 @@
 > Wave 13 (PR #367): SA-12.
 > Wave 14 (PR #368): findings 15, SA-7.
 > Wave 15 (PR #369): SA-5.
-> Wave 16 (this tree): SA-3.
+> Wave 16 (PR #370): SA-3.
+> Wave 17 (this tree): SA-8.
 
 ## Ranked findings
 
@@ -317,6 +318,9 @@ dropping them.
   suffix.
 - **Minimal fix:** Serialize management through the turn gate, cancel and join
   the active generation, and keep a tombstone that rejects late commits.
+- **Fixed (Wave 17):** Delete/archive go through `SessionRetireReq` on the
+  router (TurnGate `retire` + abort). `SessionStore` tombstones the id so
+  `append` and late `histories.insert` cannot recreate the JSONL.
 
 ### SA-9. High — worker/batch state is acknowledged before durable persistence
 

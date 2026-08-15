@@ -60,6 +60,17 @@ pub struct ConsolidateReq {
     pub reply:      tokio::sync::oneshot::Sender<serde_json::Value>,
 }
 
+/// Delete or archive a session (SA-8). Serialized through the agentd turn
+/// gate so an in-flight persist cannot recreate the JSONL.
+#[derive(Debug, Clone, Copy)]
+pub enum SessionRetireKind { Delete, Archive }
+
+pub struct SessionRetireReq {
+    pub session_id: u64,
+    pub kind:       SessionRetireKind,
+    pub reply:      tokio::sync::oneshot::Sender<serde_json::Value>,
+}
+
 /// A federation Cerebro call (colony-federation Slices 1+2): the gateway's
 /// `/api/mesh/memory` and `/api/mesh/recall` handlers validate the peer payload
 /// into ready tool args (the pure `mesh::federated_*` fns), then send this to
@@ -200,6 +211,9 @@ pub struct GatewayState {
     /// The handler sends a `ConsolidateReq` and awaits its oneshot reply. See
     /// `session_consolidate_handler` + `consolidate::run` (agentd).
     pub consolidate_tx:     tokio::sync::mpsc::Sender<ConsolidateReq>,
+    /// Session delete/archive → the agentd router (owns TurnGate + SessionStore).
+    /// The handler sends a `SessionRetireReq` and awaits its oneshot reply.
+    pub session_retire_tx:  tokio::sync::mpsc::Sender<SessionRetireReq>,
     /// Blocking cross-node spawn requests → the agentd spawn worker (which owns the
     /// turn engine). The `/api/spawn` handler sends a `SpawnReq` and awaits its
     /// oneshot reply. See `spawn_handler` + the worker in `spawn_agent_router`.
@@ -2499,9 +2513,7 @@ async fn session_delete_handler(
     if !session_ok(&state.sessions_dir, id, &auth) {
         return Json(serde_json::json!({ "ok": false, "error": "not your session" }));
     }
-    let removed = tokio::fs::remove_file(session_file(&state.sessions_dir, id)).await.is_ok();
-    state.histories.lock().await.remove(&SessionId(id));
-    Json(serde_json::json!({ "ok": removed, "session_id": id, "deleted": removed }))
+    retire_session(&state, id, SessionRetireKind::Delete).await
 }
 
 /// POST /api/sessions/:id/archive — move the transcript into `sessions/archive/`
@@ -2518,18 +2530,27 @@ async fn session_archive_handler(
     if !session_ok(&state.sessions_dir, id, &auth) {
         return Json(serde_json::json!({ "ok": false, "error": "not your session" }));
     }
-    let archive_dir = state.sessions_dir.join("archive");
-    if let Err(e) = tokio::fs::create_dir_all(&archive_dir).await {
-        return Json(serde_json::json!({ "ok": false, "error": format!("archive dir: {e}") }));
+    retire_session(&state, id, SessionRetireKind::Archive).await
+}
+
+/// Auth already checked. Hand the retire to the router so TurnGate + tombstone
+/// + file IO run in one place (SA-8).
+async fn retire_session(
+    state: &GatewayState,
+    id:    u64,
+    kind:  SessionRetireKind,
+) -> Json<serde_json::Value> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if state.session_retire_tx.send(SessionRetireReq {
+        session_id: id, kind, reply: reply_tx,
+    }).await.is_err() {
+        return Json(serde_json::json!({ "ok": false, "error": "session retire worker unavailable" }));
     }
-    let moved = tokio::fs::rename(
-        session_file(&state.sessions_dir, id),
-        archive_dir.join(format!("{id}.jsonl")),
-    ).await.is_ok();
-    if moved {
-        state.histories.lock().await.remove(&SessionId(id));
+    match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
+        Ok(Ok(v))  => Json(v),
+        Ok(Err(_)) => Json(serde_json::json!({ "ok": false, "error": "session retire worker dropped the request" })),
+        Err(_)     => Json(serde_json::json!({ "ok": false, "error": "session retire timed out" })),
     }
-    Json(serde_json::json!({ "ok": moved, "session_id": id, "archived": moved }))
 }
 
 /// POST /api/sessions/:id/consolidate — distill the session into Cerebro: one LLM

@@ -1,16 +1,47 @@
 use apexos_core::{Message, SessionId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 pub struct SessionStore {
     pub sessions_dir: PathBuf,
+    /// Sessions retired by delete/archive (SA-8). In-memory: a late
+    /// `append`/`histories.insert` must not recreate a removed JSONL.
+    tombstones: std::sync::Mutex<HashSet<u64>>,
 }
 
 impl SessionStore {
     pub fn new(log_dir: &Path) -> Self {
-        Self { sessions_dir: log_dir.join("sessions") }
+        Self {
+            sessions_dir: log_dir.join("sessions"),
+            tombstones: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Mark `id` retired. Subsequent [`append`] is a no-op; callers must also
+    /// refuse in-memory history reinsert.
+    pub fn tombstone(&self, id: SessionId) {
+        self.tombstones.lock().unwrap_or_else(|e| e.into_inner()).insert(id.0);
+    }
+
+    pub fn is_tombstoned(&self, id: SessionId) -> bool {
+        self.tombstones.lock().unwrap_or_else(|e| e.into_inner()).contains(&id.0)
+    }
+
+    /// Delete the live JSONL. Missing file → false (same as today's handler).
+    pub async fn remove_file(&self, id: SessionId) -> bool {
+        fs::remove_file(self.session_path(id)).await.is_ok()
+    }
+
+    /// Move the live JSONL into `sessions/archive/`. Recoverable.
+    pub async fn archive_file(&self, id: SessionId) -> Result<bool, String> {
+        let archive_dir = self.sessions_dir.join("archive");
+        fs::create_dir_all(&archive_dir).await.map_err(|e| format!("archive dir: {e}"))?;
+        Ok(fs::rename(
+            self.session_path(id),
+            archive_dir.join(format!("{}.jsonl", id.0)),
+        ).await.is_ok())
     }
 
     pub async fn init(&self) -> std::io::Result<()> {
@@ -28,9 +59,11 @@ impl SessionStore {
     }
 
     /// Append one message to the session's JSONL file. Fire-and-forget safe.
-    /// Ephemeral spawn sessions are not persisted.
+    /// Ephemeral spawn sessions are not persisted. A tombstoned session is a
+    /// no-op — `create(true)` here is what resurrected deleted JSONLs (SA-8).
     pub async fn append(&self, session_id: SessionId, msg: &Message) {
         if apexos_core::is_spawn_session(session_id.0) { return; }
+        if self.is_tombstoned(session_id) { return; }
         let line = match serde_json::to_string(msg) {
             Ok(s) => s + "\n",
             Err(_) => return,
@@ -117,7 +150,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("apexos-sstore-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sessions")).unwrap();
-        SessionStore { sessions_dir: dir.join("sessions") }
+        SessionStore::new(&dir)
     }
 
     fn user_msg(text: &str) -> Message {
@@ -149,6 +182,34 @@ mod tests {
         assert!(all.contains_key(&normal));
         assert!(!all.contains_key(&worker), "worker JSONL must not hydrate at boot");
         assert!(store.load_one(worker).await.is_some(), "revive edge must still read it");
+        let _ = std::fs::remove_dir_all(store.sessions_dir.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn tombstone_blocks_append_from_recreating_the_file() {
+        let store = tmp_store("tomb");
+        let sid = SessionId(9);
+        store.append(sid, &user_msg("before")).await;
+        assert!(store.exists(sid));
+        store.tombstone(sid);
+        assert!(store.remove_file(sid).await);
+        assert!(!store.exists(sid));
+        store.append(sid, &user_msg("late persist after delete")).await;
+        assert!(!store.exists(sid), "tombstoned append must not recreate the JSONL");
+        let _ = std::fs::remove_dir_all(store.sessions_dir.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn archive_then_tombstone_does_not_recreate_live_file() {
+        let store = tmp_store("arch");
+        let sid = SessionId(3);
+        store.append(sid, &user_msg("chat")).await;
+        store.tombstone(sid);
+        assert!(store.archive_file(sid).await.unwrap());
+        assert!(!store.exists(sid));
+        store.append(sid, &user_msg("late")).await;
+        assert!(!store.exists(sid));
+        assert!(store.sessions_dir.join("archive").join("3.jsonl").exists());
         let _ = std::fs::remove_dir_all(store.sessions_dir.parent().unwrap());
     }
 }
