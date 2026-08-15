@@ -111,10 +111,9 @@ mirrors Cerebro's `describe_image` exactly:
 | `anthropic` | only the API — model `OCCIPITAL_CURATE_API_MODEL` (default `claude-haiku-4-5`) |
 | `off` | `web_distill` returns an honest error |
 
-No plugin-env change is needed for the API fallback: plugins inherit agentd's environment
-(`spawn_plugin` overlays `[plugin.env]` without clearing), so `ANTHROPIC_API_KEY` from
-`/etc/agentd/env` already reaches occipital-mcp — the same way cerebro-mcp's `describe_image`
-gets it.
+The API fallback still sees `ANTHROPIC_API_KEY` from `/etc/agentd/env`: `spawn_plugin`
+`env_clear`s the child, then `plugin_child_env` inherits that key **only** for the
+`occipital` and `cerebro` plugin ids. `apexos-tools` never receives it (finding 11).
 
 What it changes for the agent:
 

@@ -59,7 +59,8 @@ Opt-in (it needs a paid xAI key to do anything): `--imaginarium`, the TUI
 3. seeds `/etc/imaginarium/env` with a minted `IMAGINARIUM_TOKEN` (never
    overwritten) and an empty `XAI_API_KEY=` slot;
 4. mirrors `IMAGINARIUM_URL` + `IMAGINARIUM_TOKEN` into `/etc/agentd/env`
-   (seed-if-absent) — the MCP proxy inherits them from agentd's env, the kiosk
+   (seed-if-absent) — the MCP proxy inherits them **only as the `imaginarium`
+   plugin** (`env_clear` + id-gated extra inherit; finding 11); the kiosk
    UI reads the same file;
 5. installs `deploy/imaginarium.service` — but **enables it, and registers the
    MCP plugin block, only when an `XAI_API_KEY` is present** (INSTALLED vs
@@ -94,7 +95,8 @@ needs the daemon up at boot — a downed node is an honest per-call error.
 ### Proxy mode is not optional
 
 The plugin block runs `imaginarium mcp` with **no args** — proxy mode
-auto-activates from the inherited `IMAGINARIUM_URL`/`IMAGINARIUM_TOKEN`. Do not
+auto-activates from `IMAGINARIUM_URL`/`IMAGINARIUM_TOKEN` inherited only by
+this plugin id. Do not
 "simplify" it to local mode: that would fork a second library/jobs DB inside the
 agentd child **and** require handing that child the xAI key — both halves of the
 design undone in one line.

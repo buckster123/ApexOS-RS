@@ -69,11 +69,11 @@ restart = "always"
 # install.sh provisions it OPT-IN (--imaginarium / APEXOS_IMAGINARIUM=1) and appends the
 # live block only when the node is ACTIVE (binary built AND an XAI_API_KEY present in
 # /etc/imaginarium/env — the only file that ever holds the key). The plugin runs the MCP
-# server in PROXY mode: IMAGINARIUM_URL + IMAGINARIUM_TOKEN are inherited from agentd's
-# env (/etc/agentd/env; plugin env overlays, never clears), so every tool call funnels
-# through the local `imaginarium serve` daemon — one library, one jobs DB, no xAI key in
-# any agentd-side process. Do NOT run it without the URL env (local mode would fork a
-# second library AND pull the key into an agentd child). See docs/imaginarium.md.
+# server in PROXY mode: IMAGINARIUM_URL + IMAGINARIUM_TOKEN are inherited from
+# agentd's env *only for this plugin id* (`spawn_plugin` env_clear — finding 11).
+# apexos-tools never sees them. The xAI gen key stays in /etc/imaginarium/env.
+# Do NOT run it without the URL env (local mode would fork a second library).
+# See docs/imaginarium.md.
 #
 # [[plugin]]
 # id      = "imaginarium"

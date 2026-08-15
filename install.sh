@@ -1573,11 +1573,10 @@ fi
 
 # Enable the Imaginarium MCP plugin only when the node is ACTIVE (binary built AND
 # an xAI key present, so imaginarium.service actually runs). The plugin invokes
-# `imaginarium mcp` with no proxy arg: PROXY mode auto-activates from the
-# IMAGINARIUM_URL + IMAGINARIUM_TOKEN that land in /etc/agentd/env below (plugin
-# env is overlaid onto agentd's, never cleared), so every agent tool call funnels
-# through the daemon — one library, one jobs DB, and the xAI key stays out of
-# every agentd-side process. Same anchored-grep idempotency as occipital: skips
+# `imaginarium mcp` with no proxy arg: PROXY mode auto-activates from
+# IMAGINARIUM_URL + IMAGINARIUM_TOKEN in /etc/agentd/env, inherited only by
+# this plugin id after spawn_plugin env_clear (finding 11). The xAI key stays
+# out of every agentd-side process. Same anchored-grep idempotency as occipital: skips
 # the commented template AND a prior run / an APEX register_mcp_server entry.
 if $IMAGINARIUM_ACTIVE && [[ -f /etc/agentd/plugins.toml ]] \
    && ! grep -qE '^[[:space:]]*id[[:space:]]*=[[:space:]]*"imaginarium"' /etc/agentd/plugins.toml; then

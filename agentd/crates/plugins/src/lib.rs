@@ -1,6 +1,7 @@
 pub mod config;
 pub mod courier;
 pub mod mcp;
+pub mod plugin_env;
 pub mod policy;
 pub mod supervisor;
 pub mod tool_claim;
