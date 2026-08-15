@@ -80,6 +80,8 @@ pub struct SpawnReq {
     pub prompt:    String,
     pub system:    Option<String>,
     pub timeout_s: u64,
+    /// Inbound `x-mesh-hops` after [`apexos_core::parse_mesh_hops`].
+    pub hops:      u32,
     pub reply:     tokio::sync::oneshot::Sender<serde_json::Value>,
 }
 
@@ -96,6 +98,8 @@ pub struct WorkerMeshReq {
     pub body:   serde_json::Value,
     /// Fanout only: the sender-peer's a2a landing session on THIS node.
     pub parent: Option<SessionId>,
+    /// Inbound mesh hops (fanout). Other worker kinds leave this 0.
+    pub hops:   u32,
     pub reply:  tokio::sync::oneshot::Sender<serde_json::Value>,
 }
 
@@ -4118,16 +4122,22 @@ async fn spawn_handler(
         Some(s) if !s.trim().is_empty() => s.to_string(),
         _ => return Json(serde_json::json!({ "ok": false, "error": "missing prompt" })),
     };
-    let hops = headers.get("x-mesh-hops").and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-    if hops >= 3 {
-        return Json(serde_json::json!({ "ok": false, "error": "mesh hop limit reached (loop guard)" }));
-    }
+    let hops = match apexos_core::parse_mesh_hops(
+        headers.get("x-mesh-hops").and_then(|v| v.to_str().ok()),
+    ) {
+        Ok(n) => n,
+        Err(apexos_core::MeshHopsError::Limit) => {
+            return Json(serde_json::json!({ "ok": false, "error": "mesh hop limit reached (loop guard)" }));
+        }
+        Err(_) => {
+            return Json(serde_json::json!({ "ok": false, "error": "x-mesh-hops required and must increase" }));
+        }
+    };
     let system = body["system"].as_str().filter(|s| !s.trim().is_empty()).map(str::to_string);
     let timeout_s = body["timeout_s"].as_u64().unwrap_or(90).clamp(5, 300);
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if state.spawn_tx.send(SpawnReq { prompt, system, timeout_s, reply: reply_tx }).await.is_err() {
+    if state.spawn_tx.send(SpawnReq { prompt, system, timeout_s, hops, reply: reply_tx }).await.is_err() {
         return Json(serde_json::json!({ "ok": false, "error": "spawn worker unavailable" }));
     }
     // The worker already bounds the turn by timeout_s; add slack for the round-trip.
@@ -4148,6 +4158,7 @@ async fn worker_mesh_request(
     state: GatewayState,
     kind: WorkerMeshKind,
     body: serde_json::Value,
+    hops: u32,
 ) -> Json<serde_json::Value> {
     if !state.mesh_workers_enabled {
         return Json(serde_json::json!({ "ok": false, "error": "mesh workers disabled on this node (AGENTD_MESH_WORKERS=0)" }));
@@ -4163,7 +4174,7 @@ async fn worker_mesh_request(
         Some(mesh_session_for(&state, &from))
     } else { None };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let req = WorkerMeshReq { kind, from, body, parent, reply: reply_tx };
+    let req = WorkerMeshReq { kind, from, body, parent, hops, reply: reply_tx };
     if state.worker_mesh_tx.send(req).await.is_err() {
         return Json(serde_json::json!({ "ok": false, "error": "worker driver unavailable" }));
     }
@@ -4186,12 +4197,18 @@ async fn worker_fanout_handler(
     headers:      axum::http::HeaderMap,
     Json(body):   Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let hops = headers.get("x-mesh-hops").and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-    if hops >= 3 {
-        return Json(serde_json::json!({ "ok": false, "error": "mesh hop limit reached (loop guard)" }));
-    }
-    worker_mesh_request(state, WorkerMeshKind::Fanout, body).await
+    let hops = match apexos_core::parse_mesh_hops(
+        headers.get("x-mesh-hops").and_then(|v| v.to_str().ok()),
+    ) {
+        Ok(n) => n,
+        Err(apexos_core::MeshHopsError::Limit) => {
+            return Json(serde_json::json!({ "ok": false, "error": "mesh hop limit reached (loop guard)" }));
+        }
+        Err(_) => {
+            return Json(serde_json::json!({ "ok": false, "error": "x-mesh-hops required and must increase" }));
+        }
+    };
+    worker_mesh_request(state, WorkerMeshKind::Fanout, body, hops).await
 }
 
 /// POST /api/worker/query — a remote conductor polling one of its hosted
@@ -4202,7 +4219,7 @@ async fn worker_query_handler(
     State(state): State<GatewayState>,
     Json(body):   Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    worker_mesh_request(state, WorkerMeshKind::Query, body).await
+    worker_mesh_request(state, WorkerMeshKind::Query, body, 0).await
 }
 
 /// POST /api/worker/cancel — a remote conductor cancelling its hosted batch
@@ -4213,7 +4230,7 @@ async fn worker_cancel_mesh_handler(
     State(state): State<GatewayState>,
     Json(body):   Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    worker_mesh_request(state, WorkerMeshKind::Cancel, body).await
+    worker_mesh_request(state, WorkerMeshKind::Cancel, body, 0).await
 }
 
 /// POST /api/worker/report — a hosting peer pushing a settled batch home to
@@ -4224,7 +4241,7 @@ async fn worker_report_mesh_handler(
     State(state): State<GatewayState>,
     Json(body):   Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    worker_mesh_request(state, WorkerMeshKind::Report, body).await
+    worker_mesh_request(state, WorkerMeshKind::Report, body, 0).await
 }
 
 /// GET /api/capabilities — this node's structured capability snapshot (senses,

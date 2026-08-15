@@ -284,6 +284,62 @@ pub fn hash_pin(pin: &str, salt_hex: &str) -> String {
 pub type SessionBindings =
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<apexos_protocol::SessionId, String>>>;
 
+/// Per-session inbound mesh hop count (finding 13). Missing = 0 (local /
+/// never arrived over the mesh). Outbound delegation sends [`next_mesh_hops`].
+/// std Mutex so the tool-dispatch path can read without `.await`.
+pub type MeshHops =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<apexos_protocol::SessionId, u32>>>;
+
+/// Inbound `x-mesh-hops` at this value or above is refused.
+pub const MESH_HOP_LIMIT: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshHopsError {
+    Missing,
+    Invalid,
+    Limit,
+}
+
+/// Parse a peer `x-mesh-hops` header. Missing / zero / unparseable / at-limit
+/// all fail — peer-only endpoints must carry a strictly positive count.
+pub fn parse_mesh_hops(raw: Option<&str>) -> Result<u32, MeshHopsError> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(MeshHopsError::Missing);
+    };
+    let n = s.parse::<u32>().map_err(|_| MeshHopsError::Invalid)?;
+    if n == 0 {
+        return Err(MeshHopsError::Invalid);
+    }
+    if n >= MESH_HOP_LIMIT {
+        return Err(MeshHopsError::Limit);
+    }
+    Ok(n)
+}
+
+/// Next outbound hop from a session's stored inbound depth. Local sessions
+/// (stored 0) send 1. A session that already received `LIMIT-1` cannot
+/// delegate again.
+pub fn next_mesh_hops(stored: u32) -> Result<u32, MeshHopsError> {
+    let n = stored.saturating_add(1);
+    if n >= MESH_HOP_LIMIT {
+        return Err(MeshHopsError::Limit);
+    }
+    Ok(n)
+}
+
+pub fn mesh_hops_get(map: &MeshHops, session: apexos_protocol::SessionId) -> u32 {
+    map.lock()
+        .ok()
+        .and_then(|m| m.get(&session).copied())
+        .unwrap_or(0)
+}
+
+pub fn mesh_hops_set(map: &MeshHops, session: apexos_protocol::SessionId, hops: u32) {
+    if let Ok(mut m) = map.lock() {
+        m.insert(session, hops);
+    }
+}
+
 /// The agent identity bound to `session`, or the node default ([`node_agent_id`])
 /// when the session is unbound (legacy / pre-selection) — so single-agent nodes
 /// behave exactly as before.
@@ -363,6 +419,26 @@ mod tests {
             Some("claude-haiku-4-5")
         );
         assert_eq!(worker_model_for(&models, 8), None); // strictly per-session
+    }
+
+    #[test]
+    fn mesh_hops_parse_and_increment() {
+        assert_eq!(parse_mesh_hops(None), Err(MeshHopsError::Missing));
+        assert_eq!(parse_mesh_hops(Some("")), Err(MeshHopsError::Missing));
+        assert_eq!(parse_mesh_hops(Some("0")), Err(MeshHopsError::Invalid));
+        assert_eq!(parse_mesh_hops(Some("nope")), Err(MeshHopsError::Invalid));
+        assert_eq!(parse_mesh_hops(Some("3")), Err(MeshHopsError::Limit));
+        assert_eq!(parse_mesh_hops(Some("1")), Ok(1));
+        assert_eq!(parse_mesh_hops(Some("2")), Ok(2));
+        assert_eq!(next_mesh_hops(0), Ok(1));
+        assert_eq!(next_mesh_hops(1), Ok(2));
+        assert_eq!(next_mesh_hops(2), Err(MeshHopsError::Limit));
+        let map: MeshHops = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let sid = apexos_protocol::SessionId(42);
+        assert_eq!(mesh_hops_get(&map, sid), 0);
+        mesh_hops_set(&map, sid, 1);
+        assert_eq!(mesh_hops_get(&map, sid), 1);
+        assert_eq!(next_mesh_hops(mesh_hops_get(&map, sid)), Ok(2));
     }
 
     #[test]

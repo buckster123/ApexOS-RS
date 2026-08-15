@@ -241,6 +241,7 @@ pub struct MeshDeps {
     pub enabled:      bool,
     pub slots_gauge:  Arc<AtomicUsize>,
     pub queued_gauge: Arc<AtomicUsize>,
+    pub mesh_hops:    apexos_core::MeshHops,
 }
 
 /// Internal outcomes of spawned mesh HTTP calls (assigns + polls) — the
@@ -272,12 +273,18 @@ async fn peer_http(peers: &Arc<RwLock<PeerRegistry>>, node: &str) -> Option<(Str
 
 /// POST one mesh-worker JSON body; returns the parsed reply or an error
 /// string. Bearer token when stored; MESH_HTTP_TIMEOUT_S bound.
-async fn mesh_post(http_base: &str, path: &str, token: Option<&str>, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+async fn mesh_post(
+    http_base: &str,
+    path: &str,
+    token: Option<&str>,
+    body: &serde_json::Value,
+    hops: u32,
+) -> Result<serde_json::Value, String> {
     let url = format!("{http_base}{path}");
     let mut req = reqwest::Client::new()
         .post(&url)
         .timeout(Duration::from_secs(remote::MESH_HTTP_TIMEOUT_S))
-        .header("x-mesh-hops", "1")
+        .header("x-mesh-hops", hops.to_string())
         .json(body);
     if let Some(t) = token { req = req.bearer_auth(t); }
     match req.send().await {
@@ -1766,7 +1773,7 @@ async fn run_due_polls(
         let body = serde_json::json!({ "from": *mesh.node_id, "batch": peer_batch });
         let tx = mesh_out_tx.clone();
         tokio::spawn(async move {
-            let result = mesh_post(&base, "/api/worker/query", token.as_deref(), &body).await;
+            let result = mesh_post(&base, "/api/worker/query", token.as_deref(), &body, 1).await;
             let _ = tx.send(MeshOutcome::Poll { batch, node, result }).await;
         });
     }
@@ -1785,7 +1792,7 @@ async fn spawn_report_home(mesh: &MeshDeps, reports: Vec<(String, u64, u64, Vec<
         tokio::spawn(async move {
             for (i, delay) in std::iter::once(0u64).chain(remote::REPORT_RETRY_DELAYS_S).enumerate() {
                 if delay > 0 { tokio::time::sleep(Duration::from_secs(delay)).await; }
-                match mesh_post(&base, "/api/worker/report", token.as_deref(), &body).await {
+                match mesh_post(&base, "/api/worker/report", token.as_deref(), &body, 1).await {
                     Ok(v) if v["ok"].as_bool() == Some(true) => {
                         eprintln!("[worker] batch {local_batch} reported home to {node} (origin batch {origin_batch})");
                         return;
@@ -1826,7 +1833,7 @@ async fn relay_remote_cancels(
             "workers": workers,
         });
         tokio::spawn(async move {
-            match mesh_post(&base, "/api/worker/cancel", token.as_deref(), &body).await {
+            match mesh_post(&base, "/api/worker/cancel", token.as_deref(), &body, 1).await {
                 Ok(v) if v["ok"].as_bool() == Some(true) => {}
                 Ok(v) => eprintln!("[worker] cancel relay to {node} refused: {}", v["error"].as_str().unwrap_or("?")),
                 Err(e) => eprintln!("[worker] cancel relay to {node} failed: {e} (deadline is the net)"),
@@ -1850,7 +1857,7 @@ async fn handle_mesh_req(
     next_worker_id: &mut u64, next_batch_id: &mut u64, next_worker_sid: &mut u64,
     req: WorkerMeshReq,
 ) -> bool {
-    let WorkerMeshReq { kind, from, body, parent, reply } = req;
+    let WorkerMeshReq { kind, from, body, parent, hops, reply } = req;
     match kind {
         // ── peer role: host a batch for a remote conductor ──
         WorkerMeshKind::Fanout => {
@@ -1892,6 +1899,7 @@ async fn handle_mesh_req(
                 // all apply. yolo is ALWAYS false — it never crosses the wire.
                 let (wid, sid) = mint_local_worker(workers, next_worker_id, next_worker_sid,
                     batch, parent.0, task, model, false, false, ceiling);
+                apexos_core::mesh_hops_set(&mesh.mesh_hops, SessionId(sid), hops);
                 minted_rows.push(serde_json::json!({ "index": i, "worker": wid, "session": sid }));
                 minted_ids.push(wid);
             }
@@ -2296,8 +2304,10 @@ async fn fanout(
         match resolved {
             Some((base, token)) => {
                 let body = remote::build_fanout_body(&mesh.node_id, batch, deadline_s, &items);
+                let hops = apexos_core::next_mesh_hops(apexos_core::mesh_hops_get(&mesh.mesh_hops, call_session))
+                    .unwrap_or(apexos_core::MESH_HOP_LIMIT);
                 tokio::spawn(async move {
-                    let result = mesh_post(&base, "/api/worker/fanout", token.as_deref(), &body).await;
+                    let result = mesh_post(&base, "/api/worker/fanout", token.as_deref(), &body, hops).await;
                     let _ = tx.send(MeshOutcome::Assign { batch, node, wids, result }).await;
                 });
             }
