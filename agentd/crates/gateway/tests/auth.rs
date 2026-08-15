@@ -238,3 +238,77 @@ async fn guest_session_cannot_hit_run() {
     std::env::remove_var("AGENTD_IDENTITIES");
     let _ = std::fs::remove_dir_all(&tmp_ids);
 }
+
+#[tokio::test]
+async fn create_user_refuses_when_persist_blocked() {
+    let _g = IDENTITIES_ENV.lock().unwrap();
+    let tmp_ids = std::env::temp_dir().join(format!("apex-ids-blk-{}", std::process::id()));
+    let id_path = tmp_ids.join("identities.toml");
+    let _ = std::fs::create_dir_all(&tmp_ids);
+    std::env::set_var("AGENTD_IDENTITIES", id_path.to_str().unwrap());
+
+    let mut ids = apexos_core::Identities::default();
+    ids.seed_defaults("/tmp/soul.md");
+    ids.persist_blocked = true;
+    let (base, _tmp) = boot("admin-secret", ids).await;
+
+    let (st, v) = json_post(
+        &format!("{base}/api/identities/user"),
+        Some("admin-secret"),
+        serde_json::json!({ "name": "Guest" }),
+    )
+    .await;
+    assert_eq!(st, 500, "blocked persist must fail closed: {v}");
+    assert!(!id_path.exists(), "must not mint a fresh identities.toml");
+
+    std::env::remove_var("AGENTD_IDENTITIES");
+    let _ = std::fs::remove_dir_all(&tmp_ids);
+}
+
+#[tokio::test]
+async fn policy_mode_persists_before_ok() {
+    let _g = IDENTITIES_ENV.lock().unwrap();
+    let tmp = std::env::temp_dir().join(format!(
+        "apex-pol-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let pol = tmp.join("policy.toml");
+    std::fs::write(&pol, "mode = \"suggest\"\n\n[rules]\n\"read_file\" = \"allow\"\n").unwrap();
+    std::env::set_var("AGENTD_POLICY_TOML", pol.to_str().unwrap());
+
+    let mut ids = apexos_core::Identities::default();
+    ids.seed_defaults("/tmp/soul.md");
+    let (base, _sess) = boot("admin-secret", ids).await;
+
+    let (st, v) = json_post(
+        &format!("{base}/api/policy"),
+        Some("admin-secret"),
+        serde_json::json!({ "mode": "yolo" }),
+    )
+    .await;
+    assert_eq!(st, 200, "policy set: {v}");
+    assert!(v["ok"].as_bool().unwrap(), "body: {v}");
+    let on_disk = std::fs::read_to_string(&pol).unwrap();
+    assert!(on_disk.contains("yolo"), "mode must hit disk: {on_disk}");
+    assert!(on_disk.contains("read_file"), "rules must survive: {on_disk}");
+
+    std::fs::write(&pol, "not valid toml [[[").unwrap();
+    let before = std::fs::read_to_string(&pol).unwrap();
+    let (st, v) = json_post(
+        &format!("{base}/api/policy"),
+        Some("admin-secret"),
+        serde_json::json!({ "mode": "suggest" }),
+    )
+    .await;
+    assert_eq!(st, 200, "handler still 200 with ok:false: {v}");
+    assert!(!v["ok"].as_bool().unwrap(), "torn policy must not report success: {v}");
+    assert_eq!(std::fs::read_to_string(&pol).unwrap(), before);
+
+    std::env::remove_var("AGENTD_POLICY_TOML");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

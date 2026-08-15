@@ -409,17 +409,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Identity registry (docs/agent-identity.md 3a/3b-2): users + agents. Seed the
     // default owner + built-in APEX (pointing at the live soul.md) on a fresh node.
-    // Best-effort persist — /etc/agentd may be root-owned pre-install.sh; runtime
-    // works regardless (re-seeds in-memory; APEX always resolves).
+    // Torn/unparseable files are quarantined — never treated as empty (SA-10).
     let identities = {
         let path = apexos_core::Identities::default_path();
-        let mut ids = apexos_core::Identities::load(&path);
-        if ids.seed_defaults(&soul_path.to_string_lossy()) {
-            if let Err(e) = ids.save(&path) {
-                eprintln!("[identity] could not persist {}: {e} (re-seeding in-memory)", path.display());
-            }
-        }
-        Arc::new(RwLock::new(ids))
+        Arc::new(RwLock::new(apexos_core::Identities::boot_load(
+            &path,
+            &soul_path.to_string_lossy(),
+        )))
     };
 
     // Prompt-cache config (Anthropic): env-tunable defaults (AGENTD_CACHE*), held in a
