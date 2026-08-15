@@ -443,6 +443,9 @@ the supervisor checks policy before it ever calls you (`supervisor.rs:384-403`).
 - **Secrets.** Pass API keys via `[plugin.env]`, not `args`. The env block is in
   `/etc/agentd/plugins.toml`, which is `agentd`-readable but not world-readable; args
   are logged to the event log (`run_log_writer`) and visible in the UI tool card.
+  `spawn_plugin` **`env_clear`s** the child and rebuilds a non-secret allowlist
+  (`plugin_child_env`) plus this overlay. `[plugin.env]` cannot inject `AGENTD_TOKEN`
+  / mesh / sensor / PSK keys. Do not rely on inheriting agentd's full environment.
 
 ### For agents self-extending at runtime
 

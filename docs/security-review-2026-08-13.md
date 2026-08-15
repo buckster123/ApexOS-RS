@@ -11,7 +11,8 @@
 > Wave 7 (PR #361): finding 2.
 > Wave 8 (PR #362): finding 6.
 > Wave 9 (PR #363): finding 7.
-> Wave 10 (this tree): finding 8.
+> Wave 10 (PR #364): finding 8.
+> Wave 11 (this tree): finding 11.
 
 ## Ranked findings
 
@@ -409,8 +410,9 @@ setuid escalation and ordinary writes to the base OS or home directories.
 They do **not** protect daemon environment secrets, `/var/lib/agentd`, mutable
 agent configuration, the network, granted devices, or the root self-update/USB
 request consumers. Findings 5 and 7 closed the root-helper path/symlink holes;
-finding 11 is the main path remaining after the model has crossed the approval
-gate.
+finding 11 closed the env leak (children no longer inherit `AGENTD_TOKEN` /
+provider keys); same-uid file access to `/var/lib/agentd` remains after the
+model has crossed the approval gate.
 
 ## Verification
 

@@ -6,6 +6,7 @@ use std::process::Stdio;
 use apexos_core::{ActionId, BusHandle, Event, EvolutionId, EvolutionProposal, PluginId, SessionId, ToolCall, ToolOutput};
 use crate::config::{PluginConfig, RestartPolicy};
 use crate::mcp::McpClient;
+use crate::plugin_env::plugin_child_env;
 use crate::policy::{
     apply_yolo_grant, requests_yolo_elevation, Decision, PolicyEngine, PolicyMode,
 };
@@ -2368,15 +2369,14 @@ impl Supervisor {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            .env_clear();
 
         if let Some(cwd) = &cfg.cwd {
             cmd.current_dir(cwd);
         }
-        if let Some(env) = &cfg.env {
-            for (k, v) in env {
-                cmd.env(k, v);
-            }
+        for (k, v) in plugin_child_env(&cfg.id, cfg.env.as_ref(), |key| std::env::var(key).ok()) {
+            cmd.env(k, v);
         }
 
         let mut child = cmd.spawn()?;
