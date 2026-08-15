@@ -67,6 +67,8 @@ pub const CTR_RESERVATION: u64 = 1024;
 const KEY_NODE_ID: u8 = 0;
 const KEY_PSK: u8 = 1;
 const KEY_CTR_HW: u8 = 2;
+/// Replay windows occupy keys `[KEY_REPLAY_BASE, KEY_REPLAY_BASE + MAX)`.
+const KEY_REPLAY_BASE: u8 = 16;
 
 /// Big enough for the largest record ([`KEY_PSK`], 32 B) plus key and header,
 /// rounded well past flash word alignment.
@@ -213,43 +215,86 @@ impl<S: BlockingMultiwrite> Store<S> {
             .map_err(|_| ())
     }
 
-    /// Raise the persisted counter ceiling by [`CTR_RESERVATION`] and return
-    /// the new ceiling. The write lands *before* any counter in the new block
-    /// is used, so a power cut can only ever waste counters, never repeat
-    /// them.
-    pub async fn reserve_counters(&mut self) -> Result<u64, ()> {
+    /// Raise the persisted counter ceiling by [`CTR_RESERVATION`].
+    /// Returns `(previous, new_ceiling)`. A flash *read* error is `Err`,
+    /// never treated as high-water zero (SA-1).
+    pub async fn reserve_counters(&mut self) -> Result<(u64, u64), ()> {
         let Self { flash, buf, .. } = self;
         let mut map = MapStorage::new(
             FlashRef(flash),
             MapConfig::new(MAP_RANGE),
             Cache::new_uncached(),
         );
-        let current = map
+        let fetched = map
             .fetch_item::<u64>(buf, &KEY_CTR_HW)
             .await
-            .ok()
-            .flatten()
-            .unwrap_or(0);
-        let next = current.saturating_add(CTR_RESERVATION);
+            .map_err(|_| ());
+        let (previous, next) =
+            apexos_mesh_proto::reserve_from_stored(fetched, CTR_RESERVATION)?;
         map.store_item(buf, &KEY_CTR_HW, &next)
             .await
             .map_err(|_| ())?;
-        Ok(next)
+        Ok((previous, next))
     }
 
-    /// The persisted ceiling, without reserving more.
-    pub async fn counter_high_water(&mut self) -> u64 {
+    /// The persisted ceiling, without reserving more. `Err` on a torn read.
+    pub async fn counter_high_water(&mut self) -> Result<u64, ()> {
         let Self { flash, buf, .. } = self;
         let mut map = MapStorage::new(
             FlashRef(flash),
             MapConfig::new(MAP_RANGE),
             Cache::new_uncached(),
         );
-        map.fetch_item::<u64>(buf, &KEY_CTR_HW)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(0)
+        match map.fetch_item::<u64>(buf, &KEY_CTR_HW).await {
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => Ok(0),
+            Err(_) => Err(()),
+        }
+    }
+
+    /// Load persisted replay windows. Missing keys → empty table.
+    /// A torn record fails closed (caller must not accept radio frames).
+    pub async fn load_replay(&mut self) -> Result<apexos_mesh_proto::ReplayTable, ()> {
+        use apexos_mesh_proto::{ReplayTable, MAX_REPLAY_SENDERS, REPLAY_SLOT_BYTES};
+        let Self { flash, buf, .. } = self;
+        let mut map = MapStorage::new(
+            FlashRef(flash),
+            MapConfig::new(MAP_RANGE),
+            Cache::new_uncached(),
+        );
+        let mut table = ReplayTable::new();
+        for i in 0..MAX_REPLAY_SENDERS {
+            let key = KEY_REPLAY_BASE + i as u8;
+            match map.fetch_item::<&[u8]>(buf, &key).await {
+                Ok(None) => {}
+                Ok(Some(bytes)) if bytes.len() == REPLAY_SLOT_BYTES => {
+                    if !table.load_slot(bytes) {
+                        return Err(());
+                    }
+                }
+                Ok(Some(_)) => return Err(()),
+                Err(_) => return Err(()),
+            }
+        }
+        Ok(table)
+    }
+
+    pub async fn save_replay(&mut self, table: &apexos_mesh_proto::ReplayTable) -> Result<(), ()> {
+        use apexos_mesh_proto::MAX_REPLAY_SENDERS;
+        let Self { flash, buf, .. } = self;
+        let mut map = MapStorage::new(
+            FlashRef(flash),
+            MapConfig::new(MAP_RANGE),
+            Cache::new_uncached(),
+        );
+        for i in 0..MAX_REPLAY_SENDERS {
+            let key = KEY_REPLAY_BASE + i as u8;
+            if let Some(bytes) = table.encode_slot(i) {
+                let slice: &[u8] = &bytes;
+                map.store_item(buf, &key, &slice).await.map_err(|_| ())?;
+            }
+        }
+        Ok(())
     }
 
     /// Queue a message for a peer that is not currently reachable.

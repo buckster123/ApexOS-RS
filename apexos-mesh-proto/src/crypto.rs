@@ -155,6 +155,15 @@ impl ReplayWindow {
         self.highest
     }
 
+    /// Persist form: `(highest, bitmap)`.
+    pub fn parts(self) -> (u64, u64) {
+        (self.highest, self.bitmap)
+    }
+
+    pub fn from_parts(highest: u64, bitmap: u64) -> Self {
+        Self { highest, bitmap }
+    }
+
     /// Check `ctr` against the window and mark it seen if fresh. Returns
     /// `true` exactly once per counter value.
     pub fn check_and_accept(&mut self, ctr: u64) -> bool {
@@ -185,4 +194,128 @@ impl ReplayWindow {
             }
         }
     }
+}
+
+/// How many senders a receiver will remember forever. Full ⇒ refuse the
+/// *new* sender; never evict a window (finding 12). Liveness stays a
+/// separate, evictable cache.
+pub const MAX_REPLAY_SENDERS: usize = 16;
+
+/// Packed flash/disk record: `node_id_le(2) ++ highest_le(8) ++ bitmap_le(8)`.
+pub const REPLAY_SLOT_BYTES: usize = 18;
+
+/// Outcome of offering a `(sender, ctr)` to the never-evict table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayAdmit {
+    Fresh,
+    Replay,
+    TableFull,
+}
+
+/// Persistent per-sender replay state. Distinct from the 8-slot RAM
+/// neighbour liveness table: this one never forgets, and a full table
+/// refuses unknown senders instead of evicting security state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplayTable {
+    slots: [Option<(u16, ReplayWindow)>; MAX_REPLAY_SENDERS],
+}
+
+impl ReplayTable {
+    pub const fn new() -> Self {
+        Self {
+            slots: [None; MAX_REPLAY_SENDERS],
+        }
+    }
+
+    pub fn accept(&mut self, node_id: u16, ctr: u64) -> ReplayAdmit {
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|s| matches!(s, Some((id, _)) if *id == node_id))
+        {
+            return if slot.as_mut().unwrap().1.check_and_accept(ctr) {
+                ReplayAdmit::Fresh
+            } else {
+                ReplayAdmit::Replay
+            };
+        }
+        let Some(free) = self.slots.iter_mut().find(|s| s.is_none()) else {
+            return ReplayAdmit::TableFull;
+        };
+        let mut w = ReplayWindow::new();
+        if !w.check_and_accept(ctr) {
+            return ReplayAdmit::Replay;
+        }
+        *free = Some((node_id, w));
+        ReplayAdmit::Fresh
+    }
+
+    pub fn len(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn encode_slot(&self, i: usize) -> Option<[u8; REPLAY_SLOT_BYTES]> {
+        let (id, w) = self.slots.get(i)?.as_ref()?;
+        Some(encode_replay_slot(*id, *w))
+    }
+
+    /// Restore one persisted slot. Occupied slots are filled in order;
+    /// returns false if the table is already full or the record is short.
+    pub fn load_slot(&mut self, bytes: &[u8]) -> bool {
+        let Some((id, w)) = decode_replay_slot(bytes) else {
+            return false;
+        };
+        if self.slots.iter().any(|s| matches!(s, Some((n, _)) if *n == id)) {
+            return true;
+        }
+        if let Some(free) = self.slots.iter_mut().find(|s| s.is_none()) {
+            *free = Some((id, w));
+            true
+        } else {
+            false
+        }
+    }
+}
+
+pub fn encode_replay_slot(node_id: u16, window: ReplayWindow) -> [u8; REPLAY_SLOT_BYTES] {
+    let mut b = [0u8; REPLAY_SLOT_BYTES];
+    b[0..2].copy_from_slice(&node_id.to_le_bytes());
+    let (highest, bitmap) = window.parts();
+    b[2..10].copy_from_slice(&highest.to_le_bytes());
+    b[10..18].copy_from_slice(&bitmap.to_le_bytes());
+    b
+}
+
+pub fn decode_replay_slot(bytes: &[u8]) -> Option<(u16, ReplayWindow)> {
+    if bytes.len() < REPLAY_SLOT_BYTES {
+        return None;
+    }
+    let node_id = u16::from_le_bytes(bytes[0..2].try_into().ok()?);
+    let highest = u64::from_le_bytes(bytes[2..10].try_into().ok()?);
+    let bitmap = u64::from_le_bytes(bytes[10..18].try_into().ok()?);
+    Some((node_id, ReplayWindow::from_parts(highest, bitmap)))
+}
+
+/// Map a high-water flash read onto the next reservation.
+///
+/// `Ok(None)` is first boot (no record). `Err` is a torn/unreadable store
+/// and **must not** be treated as zero (SA-1).
+pub fn reserve_from_stored(
+    stored: Result<Option<u64>, ()>,
+    step: u64,
+) -> Result<(u64, u64), ()> {
+    match stored {
+        Err(()) => Err(()),
+        Ok(None) => Ok((0, step)),
+        Ok(Some(v)) => Ok((v, v.saturating_add(step))),
+    }
+}
+
+/// Next sealed-provision counter. Missing previous → 1; never returns 0.
+pub fn next_provision_ctr(previous: Option<u64>) -> u64 {
+    previous.unwrap_or(0).saturating_add(1).max(1)
 }

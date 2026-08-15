@@ -1,15 +1,12 @@
 //! The neighbour table: who is on the air, and which of their frames we have
 //! already accepted.
 //!
-//! Charter §8 puts a per-sender replay window on **every** receiver, the
-//! brainstem included. This is that, plus the liveness the heartbeat tier
-//! exists to produce.
+//! Liveness only — who is on the air right now.
 //!
-//! Fixed capacity, no allocation: a brainstem with a full table evicts the
-//! stalest neighbour rather than growing. Radio neighbours are bounded by
-//! physics, and a table that can grow is a table an attacker can grow.
-
-use apexos_mesh_proto::ReplayWindow;
+//! Replay state lives in [`apexos_mesh_proto::ReplayTable`] and is persisted
+//! in flash. This table is allowed to evict the stalest neighbour because
+//! forgetting "I heard you 30s ago" is not a security event. Forgetting a
+//! replay window is (finding 12).
 
 /// How many neighbours to track. Well past the number of nodes within radio
 /// range of one another in any deployment this charter describes.
@@ -25,7 +22,6 @@ struct Entry {
     node_id: u16,
     last_seen_ms: u64,
     rssi_dbm: i8,
-    replay: ReplayWindow,
 }
 
 /// A bounded set of radio neighbours with per-sender replay state.
@@ -46,32 +42,16 @@ impl Neighbors {
         }
     }
 
-    /// Offer a received `(sender, ctr)` to the table.
-    ///
-    /// Returns `true` only if this frame is **fresh** — never seen before
-    /// from this sender. A replay, or a frame older than the window reaches,
-    /// returns `false` and must be dropped by the caller before its payload
-    /// is acted on. This is the last line before hostile air becomes
-    /// behaviour.
-    pub fn accept(&mut self, node_id: u16, ctr: u64, rssi_dbm: i8, now_ms: u64) -> bool {
+    /// Note a *fresh* (already replay-checked) frame from this sender.
+    pub fn heard(&mut self, node_id: u16, rssi_dbm: i8, now_ms: u64) {
         if let Some(slot) = self.slot_for(node_id, now_ms) {
             let entry = slot.get_or_insert(Entry {
                 node_id,
                 last_seen_ms: now_ms,
                 rssi_dbm,
-                replay: ReplayWindow::new(),
             });
-            // A fresh entry starts with an empty window, so the first frame
-            // from a rebooted peer is accepted on its merits — the sender's
-            // own persisted counter is what stops it repeating itself.
-            let fresh = entry.replay.check_and_accept(ctr);
-            if fresh {
-                entry.last_seen_ms = now_ms;
-                entry.rssi_dbm = rssi_dbm;
-            }
-            fresh
-        } else {
-            false
+            entry.last_seen_ms = now_ms;
+            entry.rssi_dbm = rssi_dbm;
         }
     }
 

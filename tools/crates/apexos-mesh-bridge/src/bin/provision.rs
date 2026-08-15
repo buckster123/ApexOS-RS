@@ -368,16 +368,24 @@ async fn main() -> ExitCode {
     };
 
     // Unsealed for first touch; sealed proves key custody to a board that is
-    // already commissioned.
+    // already commissioned. The AEAD nonce is (CORTEX_SENDER, ctr) — a
+    // fixed ctr=1 under the colony key is nonce reuse (SA-1).
     let frame = if args.sealed {
+        let ctr_path = std::env::var("APEXNET_PROVISION_CTR_FILE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from(format!("{psk_path}.ctr")));
+        let ctr = match apexos_mesh_bridge::take_provision_ctr(&ctr_path) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("persist provision counter {}: {e}", ctr_path.display());
+                return ExitCode::FAILURE;
+            }
+        };
         match seal(
             &Psk(psk),
             MeshClass::Critical,
             CORTEX_SENDER,
-            // The cortex's counter for this one-shot link. A board only ever
-            // checks that the frame opens; the replay window that would make
-            // this counter load-bearing belongs to the router (P5b).
-            1,
+            ctr,
             &packet,
         ) {
             Ok(f) => f,
