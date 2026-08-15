@@ -211,17 +211,34 @@ fn stamp_spawn_provenance(args: &mut serde_json::Value, tool: &str) {
     }
 }
 
+/// Caller-identity aliases the model can pass instead of `agent_id`. These are
+/// NOT cross-agent targets (`target_agent_id` / `to_agent_id`) — they are
+/// owner/sender fields that used to bypass the stamp (SA-5).
+const CALLER_IDENTITY_ALIASES: &[&str] = &["set_agent_id", "from_agent_id"];
+
 /// Stamp the caller's agent identity onto a Cerebro tool call's args, overriding
 /// any model-supplied value. In every Cerebro tool `agent_id` is the *caller's*
 /// space (storing/filter/scope); cross-agent targets use distinct params
 /// (`target_agent_id`/`to_agent_id`), so this never redirects a cross-agent op.
 /// Coerces a non-object/absent args into an object so the stamp always lands.
+/// If the model also supplied a caller-identity alias (`set_agent_id`,
+/// `from_agent_id`), overwrite it too — do not insert those keys when absent
+/// (an injected `set_agent_id` on every `update_memory` would re-attribute
+/// shared memories the caller can merely see).
 fn stamp_agent_id(args: &mut serde_json::Value, agent_id: &str) {
     if !args.is_object() {
         *args = serde_json::json!({});
     }
     if let Some(obj) = args.as_object_mut() {
         obj.insert("agent_id".to_string(), serde_json::Value::String(agent_id.to_string()));
+        for alias in CALLER_IDENTITY_ALIASES {
+            if obj.contains_key(*alias) {
+                obj.insert(
+                    (*alias).to_string(),
+                    serde_json::Value::String(agent_id.to_string()),
+                );
+            }
+        }
     }
 }
 
@@ -3484,6 +3501,33 @@ mod tests {
         let mut c = serde_json::Value::Null;
         stamp_agent_id(&mut c, "LUMA");
         assert_eq!(c["agent_id"], "LUMA");
+    }
+
+    #[test]
+    fn stamp_agent_id_overwrites_caller_aliases_only_when_present() {
+        // SA-5: set_agent_id / from_agent_id used to ride through unstamped.
+        let mut forged = serde_json::json!({
+            "memory_id": "mem_x",
+            "agent_id": "GUEST",
+            "set_agent_id": "APEX",
+            "from_agent_id": "APEX",
+            "to_agent_id": "LUMA",
+            "target_agent_id": "LUMA",
+        });
+        stamp_agent_id(&mut forged, "GUEST");
+        assert_eq!(forged["agent_id"], "GUEST");
+        assert_eq!(forged["set_agent_id"], "GUEST");
+        assert_eq!(forged["from_agent_id"], "GUEST");
+        // Cross-agent destinations are NOT caller identity — leave them.
+        assert_eq!(forged["to_agent_id"], "LUMA");
+        assert_eq!(forged["target_agent_id"], "LUMA");
+
+        // Absent aliases stay absent (don't inject set_agent_id onto every call).
+        let mut plain = serde_json::json!({ "query": "x" });
+        stamp_agent_id(&mut plain, "APEX");
+        assert_eq!(plain["agent_id"], "APEX");
+        assert!(plain.get("set_agent_id").is_none());
+        assert!(plain.get("from_agent_id").is_none());
     }
 
     #[test]

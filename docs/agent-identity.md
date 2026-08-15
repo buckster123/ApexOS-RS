@@ -94,7 +94,10 @@ The stamp is now a **family** — three stamps, all applied at the same seam, no
 from the model:
 
 - **`stamp_agent_id`** — the original: overrides `agent_id` on every `cerebro`-plugin call
-  with `resolve_agent_id(session)` (bound agent → else `node_agent_id()`).
+  with `resolve_agent_id(session)` (bound agent → else `node_agent_id()`). Also overwrites
+  caller-identity aliases (`set_agent_id`, `from_agent_id`) when the model supplied them
+  — those used to bypass the stamp (SA-5). Does **not** insert those keys when absent.
+  Cross-agent destinations (`target_agent_id`, `to_agent_id`) are left alone.
 - **`stamp_workspace`** — the same move for the *filesystem*: apexos-tools is one process
   shared by every agent, so the per-agent FS root travels per call as `__workspace`
   (`agent_workspace_root(agent_id)`), overwriting anything the model typed — a model can

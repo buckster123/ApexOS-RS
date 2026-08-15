@@ -394,12 +394,18 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 node.tags = coerce_str_list(&args["tags"]);
             }
             // Ownership re-attribution (colony C1: fossils with agent_id null).
-            // Model-originated calls are safe by construction — the supervisor
-            // stamps agent_id with the caller's own identity, so a model can only
-            // claim a memory to itself; explicit reassignment is a DirectCall
-            // (daemon migration) privilege.
-            if let Some(a) = args["set_agent_id"].as_str().map(str::trim).filter(|a| !a.is_empty()) {
-                node.agent_id = Some(AgentId(a.to_string()));
+            // SA-5: set_agent_id is a caller-identity alias the supervisor stamp
+            // does not cover on its own. Only the stamped caller may claim, and
+            // only an owner-less row — transferring an owned memory stays
+            // share_memory (owner-gated) or a future admin API.
+            if let Some(a) = effective_set_agent_id(args)? {
+                if node.agent_id.is_some() {
+                    anyhow::bail!(
+                        "set_agent_id is only for owner-less memories — transfer an owned \
+                         memory with share_memory"
+                    );
+                }
+                node.agent_id = Some(AgentId(a));
             }
             // Visibility change (colony C1: privatize leaked evolution residue).
             // share_memory remains the deliberate private→shared publish act; this
@@ -685,9 +691,9 @@ async fn route(name: &str, args: &Value, brain: Arc<CerebroCortex>) -> anyhow::R
                 .ok_or_else(|| anyhow::anyhow!("content is required"))?.to_string();
             let to_agent = args["to_agent_id"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("to_agent_id is required"))?;
-            let from_agent = args["from_agent_id"].as_str()
-                .or_else(|| args["agent_id"].as_str())
-                .unwrap_or("unknown");
+            // SA-5: sender is the stamped caller only. `from_agent_id` is a
+            // model-visible alias and is not honored.
+            let from_agent = message_sender(args)?;
             let thread_id = args["thread_id"].as_str().map(str::to_string);
             let scope     = agent_scope(args);
             let tags = vec![
@@ -1655,6 +1661,35 @@ fn coerce_str_list(v: &Value) -> Vec<String> {
     }
 }
 
+/// SA-5: `set_agent_id` may only equal the stamped caller (`agent_id`).
+/// A mismatch is a forged reassignment; absence means no ownership change.
+fn effective_set_agent_id(args: &Value) -> anyhow::Result<Option<String>> {
+    let Some(requested) = args["set_agent_id"].as_str().map(str::trim).filter(|a| !a.is_empty()) else {
+        return Ok(None);
+    };
+    match args["agent_id"].as_str().map(str::trim).filter(|a| !a.is_empty()) {
+        Some(caller) if caller == requested => Ok(Some(caller.to_string())),
+        Some(caller) => anyhow::bail!(
+            "set_agent_id must equal the caller ({caller}); identity reassignment is admin-only"
+        ),
+        None => anyhow::bail!(
+            "set_agent_id requires a caller agent_id; identity reassignment is admin-only"
+        ),
+    }
+}
+
+/// SA-5: `send_message` sender is the stamped `agent_id`. `from_agent_id` is ignored.
+fn message_sender(args: &Value) -> anyhow::Result<String> {
+    args["agent_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            anyhow::anyhow!("send_message requires a caller agent_id (from_agent_id is not honored)")
+        })
+}
+
 fn agent_scope(args: &Value) -> VisibilityScope {
     match args["agent_id"].as_str() {
         Some(id) if !id.is_empty() => VisibilityScope::for_agent(AgentId(id.to_string())),
@@ -1788,6 +1823,110 @@ mod tests {
         assert_eq!(list.len(), 1, "content edit must create exactly one snapshot");
         assert_eq!(list[0]["content"].as_str(), Some("the original wording of this memory"));
         assert_eq!(list[0]["edited_by"].as_str(), Some("FORGE"));
+    }
+
+    #[test]
+    fn effective_set_agent_id_is_caller_only() {
+        assert!(effective_set_agent_id(&json!({})).unwrap().is_none());
+        assert_eq!(
+            effective_set_agent_id(&json!({
+                "agent_id": "FORGE", "set_agent_id": "FORGE"
+            })).unwrap().as_deref(),
+            Some("FORGE"),
+        );
+        assert!(effective_set_agent_id(&json!({
+            "agent_id": "FORGE", "set_agent_id": "APEX"
+        })).is_err());
+        assert!(effective_set_agent_id(&json!({
+            "set_agent_id": "APEX"
+        })).is_err());
+    }
+
+    #[test]
+    fn message_sender_ignores_from_agent_id() {
+        assert_eq!(
+            message_sender(&json!({
+                "agent_id": "GUEST", "from_agent_id": "APEX"
+            })).unwrap(),
+            "GUEST",
+        );
+        assert!(message_sender(&json!({ "from_agent_id": "APEX" })).is_err());
+        assert!(message_sender(&json!({})).is_err());
+    }
+
+    // SA-5: set_agent_id cannot reassign to another identity or seize an owned row.
+    #[tokio::test]
+    async fn update_memory_set_agent_id_is_caller_and_orphan_only() {
+        let (brain, _dir) = make_brain().await;
+        let call = |name: &str, args: Value| json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name": name, "arguments": args}
+        });
+        let read = |resp: &Value| -> Value {
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+        };
+
+        // Owner-less shared row — the C1 fossil shape.
+        let orphan = read(&dispatch_tool(call("remember", json!({
+            "content": "an owner-less shared fossil"
+        })), Arc::clone(&brain)).await);
+        let orphan_id = orphan["id"].as_str().unwrap().to_string();
+        assert!(orphan["agent_id"].is_null());
+
+        // Forged reassignment to someone else → refused.
+        let resp = dispatch_tool(call("update_memory", json!({
+            "memory_id": orphan_id, "agent_id": "FORGE", "set_agent_id": "APEX"
+        })), Arc::clone(&brain)).await;
+        assert!(resp.get("error").is_some(), "forged set_agent_id must error, got {resp}");
+
+        // Claim to self on an orphan → attributed.
+        let claimed = read(&dispatch_tool(call("update_memory", json!({
+            "memory_id": orphan_id, "agent_id": "FORGE", "set_agent_id": "FORGE"
+        })), Arc::clone(&brain)).await);
+        assert_eq!(claimed["agent_id"].as_str(), Some("FORGE"));
+
+        // Already owned — even claiming to self is not a transfer path.
+        let owned = read(&dispatch_tool(call("remember", json!({
+            "content": "already owned", "agent_id": "FORGE"
+        })), Arc::clone(&brain)).await);
+        let owned_id = owned["id"].as_str().unwrap().to_string();
+        let resp = dispatch_tool(call("update_memory", json!({
+            "memory_id": owned_id, "agent_id": "FORGE", "set_agent_id": "FORGE"
+        })), Arc::clone(&brain)).await;
+        assert!(resp.get("error").is_some(), "set_agent_id on owned memory must error, got {resp}");
+    }
+
+    #[tokio::test]
+    async fn send_message_sender_is_stamped_caller() {
+        let (brain, _dir) = make_brain().await;
+        let call = |name: &str, args: Value| json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name": name, "arguments": args}
+        });
+        let read = |resp: &Value| -> Value {
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+        };
+
+        let sent = dispatch_tool(call("send_message", json!({
+            "content": "hello from the guest, not spoofed",
+            "to_agent_id": "LUMA",
+            "from_agent_id": "APEX",
+            "agent_id": "GUEST",
+        })), Arc::clone(&brain)).await;
+        assert!(sent.get("error").is_none(), "send_message failed: {sent}");
+        let r = read(&sent);
+        let tags: Vec<&str> = r["tags"].as_array().unwrap()
+            .iter().filter_map(|t| t.as_str()).collect();
+        assert!(tags.contains(&"from:GUEST"), "sender must be the caller, got {tags:?}");
+        assert!(!tags.contains(&"from:APEX"), "from_agent_id must not win, got {tags:?}");
+        assert!(tags.contains(&"to:LUMA"));
+
+        let resp = dispatch_tool(call("send_message", json!({
+            "content": "forged sender with no caller agent_id",
+            "to_agent_id": "LUMA",
+            "from_agent_id": "APEX",
+        })), Arc::clone(&brain)).await;
+        assert!(resp.get("error").is_some(), "send_message without agent_id must error, got {resp}");
     }
 
     #[test]

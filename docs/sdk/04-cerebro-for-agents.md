@@ -345,7 +345,7 @@ affect-tagged memories under pressure. Audit reads are available via `query_audi
 | `find_relevant_procedures` | one of `tags`/`concepts` | `limit` (5), `agent_id` | tag/concept filter | `[MemoryNode]` (empty if neither given) |
 | `record_procedure_outcome` | `procedure_id`, `success` | `agent_id` | nudges salience/difficulty | `{status, procedure_id, success, new_salience}` |
 | `check_inbox` | `agent_id` | `limit` (20) | tag `to:{agent}` (global scope) | `[MemoryNode]` |
-| `send_message` | `content`, `to_agent_id` | `from_agent_id`, `thread_id`, `agent_id` | `remember` (Affective, tags `to:`/`from:`) | `MemoryNode` |
+| `send_message` | `content`, `to_agent_id` | `thread_id`, `agent_id` | `remember` (Affective, tags `to:`/`from:{caller}`; `from_agent_id` is ignored) | `MemoryNode` |
 | `dream_run` | — | `agent_id`, `max_llm_calls` (20, max 20) | `dream.run_cycle` | 6-phase report `{phases, success, …}` |
 | `dream_status` | — | — | last report | report or `{status:"no_cycles_run"}` |
 
