@@ -21,7 +21,8 @@
 > Wave 17 (PR #371): SA-8.
 > Wave 18 (PR #372): SA-9.
 > Wave 19 (PR #373): SA-10.
-> Wave 20 (this tree): SA-11.
+> Wave 20 (PR #374): SA-11.
+> Wave 21 (this tree): finding 12, SA-1.
 
 ## Ranked findings
 
@@ -176,6 +177,10 @@
 - **Minimal fix:** Persist a replay high-water/window per provisioned sender,
   never evict security state, separate the bounded liveness cache from replay
   state, and reject sender IDs outside the commissioned registry.
+- **Fixed (Wave 21):** `ReplayTable` (16 never-evict slots) is distinct from
+  the 8-slot RAM liveness cache. Windows persist to the `apexnet` map
+  (`KEY_REPLAY_BASE+i`). A full table refuses the new sender. A torn load
+  fails closed (radio accepts nothing).
 
 ### 13. High — mesh hop guard resets to one at every node
 
@@ -233,6 +238,11 @@ dropping them.
 - **Minimal fix:** Persist and reserve provisioner counters, make flash
   reservation atomically return the prior and new high-water marks, and fail
   closed on every counter-state read error.
+- **Fixed (Wave 21):** `--sealed` provision takes the next counter from
+  `{psk}.ctr` (persist-before-seal). `reserve_counters` returns
+  `(previous, ceiling)` via `reserve_from_stored`; a flash-read error is
+  `Err`, never high-water 0. Boot leaves the allocator silent rather than
+  reminting `ctr=1`.
 
 ### SA-2. High — radio ACK precedes durable cortex acceptance
 

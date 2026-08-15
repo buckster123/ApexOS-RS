@@ -5,7 +5,8 @@
 
 use apexos_mesh_proto::{
     chunk_blob, encode_frame, open, seal, Deframer, Error, MeshClass, MeshFrame, Payload,
-    PlainPacket, Psk, Reassembler, ReplayWindow, MAX_WIRE_FRAME,
+    next_provision_ctr, reserve_from_stored, PlainPacket, Psk, Reassembler, ReplayAdmit,
+    ReplayTable, ReplayWindow, MAX_REPLAY_SENDERS, MAX_WIRE_FRAME,
 };
 
 fn psk() -> Psk {
@@ -164,6 +165,50 @@ fn replay_window_rejects_zero_always() {
     assert!(!w.check_and_accept(0));
     assert!(w.check_and_accept(5));
     assert!(!w.check_and_accept(0));
+}
+
+#[test]
+fn replay_table_never_evicts_and_survives_round_trip() {
+    let mut t = ReplayTable::new();
+    assert_eq!(t.accept(1, 10), ReplayAdmit::Fresh);
+    assert_eq!(t.accept(1, 10), ReplayAdmit::Replay);
+    for id in 2..=MAX_REPLAY_SENDERS as u16 {
+        assert_eq!(t.accept(id, 1), ReplayAdmit::Fresh, "slot {id}");
+    }
+    assert_eq!(t.len(), MAX_REPLAY_SENDERS);
+    // 17th sender is refused — we do not evict sender 1's window.
+    assert_eq!(t.accept(99, 1), ReplayAdmit::TableFull);
+    assert_eq!(t.accept(1, 10), ReplayAdmit::Replay);
+    assert_eq!(t.accept(1, 11), ReplayAdmit::Fresh);
+
+    let mut back = ReplayTable::new();
+    for i in 0..MAX_REPLAY_SENDERS {
+        if let Some(bytes) = t.encode_slot(i) {
+            assert!(back.load_slot(&bytes));
+        }
+    }
+    assert_eq!(back.accept(1, 11), ReplayAdmit::Replay);
+    assert_eq!(back.accept(1, 12), ReplayAdmit::Fresh);
+}
+
+#[test]
+fn reserve_from_stored_fails_closed_on_read_error() {
+    assert_eq!(reserve_from_stored(Ok(None), 1024), Ok((0, 1024)));
+    assert_eq!(reserve_from_stored(Ok(Some(4096)), 1024), Ok((4096, 5120)));
+    assert_eq!(reserve_from_stored(Err(()), 1024), Err(()));
+    assert_ne!(
+        reserve_from_stored(Err(()), 1024),
+        Ok((0, 1024)),
+        "a torn read must not look like first boot"
+    );
+}
+
+#[test]
+fn next_provision_ctr_never_repeats_or_returns_zero() {
+    assert_eq!(next_provision_ctr(None), 1);
+    assert_eq!(next_provision_ctr(Some(0)), 1);
+    assert_eq!(next_provision_ctr(Some(1)), 2);
+    assert_eq!(next_provision_ctr(Some(99)), 100);
 }
 
 // ── The deframer under fire (the §4.3 MUSTs) ────────────────────────────────

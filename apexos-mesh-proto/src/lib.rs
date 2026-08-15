@@ -60,7 +60,11 @@ pub mod frame;
 pub mod types;
 
 pub use chunk::{blob_root, chunk_blob, ChunkSet, Reassembler, DEFAULT_CHUNK_SIZE};
-pub use crypto::{open, open_blob, seal, seal_blob, Psk, ReplayWindow};
+pub use crypto::{
+    decode_replay_slot, encode_replay_slot, next_provision_ctr, open, open_blob,
+    reserve_from_stored, seal, seal_blob, Psk, ReplayAdmit, ReplayTable, ReplayWindow,
+    MAX_REPLAY_SENDERS, REPLAY_SLOT_BYTES,
+};
 pub use frame::{
     decode_datagram, decode_frame, encode_datagram, encode_frame, Deframer, DeframerStats,
     MAX_DATAGRAM_FRAME,

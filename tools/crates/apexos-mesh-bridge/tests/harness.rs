@@ -376,6 +376,8 @@ fn provision_frames_match_what_the_firmware_expects() {
     assert_eq!(decoded.payload, packet.payload);
 
     // Rotation: sealed under the current key. It must open under that key...
+    // First sealed provision still uses ctr=1; later ones increment a
+    // persisted file (`take_provision_ctr`) so the AEAD nonce never repeats.
     let sealed = seal(&Psk(psk), MeshClass::Critical, 1, 1, &packet).unwrap();
     let mut deframer = Deframer::new();
     let got = deframer.push(&encode_frame(&sealed).unwrap());

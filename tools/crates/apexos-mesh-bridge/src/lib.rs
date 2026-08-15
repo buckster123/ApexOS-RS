@@ -156,6 +156,26 @@ pub fn backoff_ms(attempt: u32) -> u64 {
     250u64.saturating_mul(1u64 << attempt.min(5)).min(5_000)
 }
 
+/// Persist-and-increment the sealed-provision AEAD counter (SA-1).
+/// Missing file → 1. A write failure refuses so we never reseal `(1, 1)`.
+pub fn take_provision_ctr(path: &std::path::Path) -> std::io::Result<u64> {
+    let prev = match std::fs::read_to_string(path) {
+        Ok(s) => {
+            let parsed = s.trim().parse::<u64>().map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+            })?;
+            Some(parsed)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let next = apexos_mesh_proto::next_provision_ctr(prev);
+    let tmp = path.with_extension("ctr.tmp");
+    std::fs::write(&tmp, format!("{next}\n"))?;
+    std::fs::rename(&tmp, path)?;
+    Ok(next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +190,23 @@ mod tests {
         assert_eq!(backoff_ms(5), 5000);
         assert_eq!(backoff_ms(6), 5000);
         assert_eq!(backoff_ms(u32::MAX), 5000);
+    }
+
+    #[test]
+    fn take_provision_ctr_increments_and_survives_reread() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-prov-ctr-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("apexnet.psk.ctr");
+        assert_eq!(take_provision_ctr(&path).unwrap(), 1);
+        assert_eq!(take_provision_ctr(&path).unwrap(), 2);
+        assert_eq!(take_provision_ctr(&path).unwrap(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

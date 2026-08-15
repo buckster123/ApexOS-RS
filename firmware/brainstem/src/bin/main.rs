@@ -376,7 +376,7 @@ async fn counter_task(store: &'static StoreMutex) {
     loop {
         if counter::remaining() < CTR_LOW_WATER {
             let mut guard = store.lock().await;
-            if let Ok(ceiling) = guard.reserve_counters().await {
+            if let Ok((_, ceiling)) = guard.reserve_counters().await {
                 counter::raise_ceiling(ceiling);
             }
         }
@@ -405,6 +405,14 @@ async fn radio_task(
         return;
     };
     let mut neighbors = Neighbors::new();
+    let (mut replay, replay_blocked) = {
+        let mut guard = store.lock().await;
+        match guard.load_replay().await {
+            Ok(t) => (t, false),
+            Err(()) => (apexos_mesh_proto::ReplayTable::new(), true),
+        }
+    };
+    let mut replay_dirty = false;
     let mut next_beat = Instant::now();
     // The counter the head-of-queue message was last sent under; an Ack must
     // match it to retire that message.
@@ -449,6 +457,12 @@ async fn radio_task(
                     )
                 {
                     let _ = radio.advertise(&frame).await;
+                }
+            }
+            if replay_dirty {
+                let mut guard = store.lock().await;
+                if guard.save_replay(&replay).await.is_ok() {
+                    replay_dirty = false;
                 }
             }
         }
@@ -513,13 +527,15 @@ async fn radio_task(
                 else {
                     continue;
                 };
-                if !neighbors.accept(
-                    heard.frame.sender,
-                    heard.frame.ctr,
-                    heard.rssi_dbm,
-                    now_ms(),
-                ) {
+                if replay_blocked {
                     continue;
+                }
+                match replay.accept(heard.frame.sender, heard.frame.ctr) {
+                    apexos_mesh_proto::ReplayAdmit::Fresh => {
+                        neighbors.heard(heard.frame.sender, heard.rssi_dbm, now_ms());
+                        replay_dirty = true;
+                    }
+                    _ => continue,
                 }
                 NEIGHBOR_COUNT.store(neighbors.alive(now_ms()) as u8, Ordering::Relaxed);
 
@@ -637,9 +653,12 @@ async fn main(spawner: Spawner) -> ! {
         if let Some(id) = identity.node_id {
             NODE_ID.store(id, Ordering::Relaxed);
         }
-        let previous = guard.counter_high_water().await;
-        let ceiling = guard.reserve_counters().await.unwrap_or(previous);
-        counter::init(previous, ceiling);
+        match guard.reserve_counters().await {
+            Ok((previous, ceiling)) => counter::init(previous, ceiling),
+            // Torn high-water: stay silent. NEXT=0/CEILING=0 refuses TX
+            // rather than reminting ctr=1 under the colony key (SA-1).
+            Err(()) => {}
+        }
         // Whatever the outbox held before the power cut is still there.
         QUEUE_DEPTH.store(guard.outbox_len().await, Ordering::Relaxed);
     }
