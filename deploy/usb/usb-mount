@@ -10,45 +10,51 @@
 #   usb-mount <kernel-dev>        e.g. usb-mount sdb1
 #
 # Safety: mounts noexec,nosuid,nodev; FAT/exFAT get uid/gid=agentd (portable across
-# nodes); the resolved mountpoint is hard-confined to <workspace>/media/.
+# nodes). Media root + unmounted mountpoints are root-owned; helpers lstat and
+# refuse symlinks; mountinfo TARGET + SOURCE are checked immediately before and
+# after mount. See usb-confine.sh.
 set -euo pipefail
 
+_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=usb-confine.sh
+. "$_HERE/usb-confine.sh"
+
 DEV_NAME="${1:?usage: usb-mount <kernel-dev>}"
+safe_kernel_dev "$DEV_NAME" || { echo "usb-mount: unsafe device name '$DEV_NAME'" >&2; exit 1; }
 DEV="/dev/${DEV_NAME}"
 [[ -b "$DEV" ]] || { echo "usb-mount: $DEV is not a block device" >&2; exit 1; }
+[[ ! -L "$DEV" ]] || { echo "usb-mount: $DEV is a symlink — refusing" >&2; exit 1; }
 
-# Workspace root (where the agent reads/writes) — from agentd's env, default the
-# standard path. This script runs as root, outside agentd's env, so read the file.
-WORKSPACE="$(. /etc/agentd/env 2>/dev/null; echo "${AGENTD_WORKSPACE:-/var/lib/agentd/workspace}")"
-MEDIA_ROOT="${WORKSPACE%/}/media"
-
+MEDIA_ROOT="$(usb_media_root)"
 LABEL="$(blkid -s LABEL -o value "$DEV" 2>/dev/null || true)"
 FSTYPE="$(blkid -s TYPE -o value "$DEV" 2>/dev/null || true)"
 
 # Claim only ApexOS exo-workspace sticks (defense-in-depth; udev already gated).
-[[ "$LABEL" == APEX-* ]] || { echo "usb-mount: $DEV label '$LABEL' is not APEX-* — not claiming" >&2; exit 0; }
+SAFE_LABEL="$(safe_exo_label "$LABEL" || true)"
+[[ -n "$SAFE_LABEL" ]] || { echo "usb-mount: $DEV label '$LABEL' is not APEX-* — not claiming" >&2; exit 0; }
 
-# Sanitise the label → a single path component (no / .. or control chars).
-SAFE_LABEL="$(printf '%s' "$LABEL" | tr -cd 'A-Za-z0-9._-')"
-[[ -n "$SAFE_LABEL" && "$SAFE_LABEL" != *..* ]] || { echo "usb-mount: unsafe label '$LABEL'" >&2; exit 1; }
-MNT="${MEDIA_ROOT}/${SAFE_LABEL}"
+ensure_media_root "$MEDIA_ROOT" || exit 1
+MNT="$(prepare_mountpoint "$MEDIA_ROOT" "$SAFE_LABEL")" || exit 1
 
-# Hard-confine the resolved mountpoint to <workspace>/media/ (never escape).
-case "$MNT" in
-  "${MEDIA_ROOT}/"*) : ;;
-  *) echo "usb-mount: refusing mountpoint $MNT outside $MEDIA_ROOT" >&2; exit 1 ;;
-esac
+# Already mounted at this exact path? (idempotent — re-trigger / re-plug is a no-op.)
+if existing="$(mountinfo_source_for "$MNT" || true)" && [[ -n "$existing" ]]; then
+  source_is_dev "$existing" "$DEV" \
+    || { echo "usb-mount: $MNT already holds $existing, not $DEV" >&2; exit 1; }
+  echo "usb-mount: $MNT already mounted" >&2
+  _run="${APEXOS_USB_RUNDIR:-/run/apexos-usb}"
+  install -d -m 755 "$_run"
+  printf '%s\n%s\n%s\n' "$MNT" "$DEV" "$SAFE_LABEL" > "${_run}/${DEV_NAME}.mnt"
+  exit 0
+fi
+
+# Last look before the mount syscall — close the obvious rename/swap window.
+assert_not_symlink "$MEDIA_ROOT" "media root" || exit 1
+assert_not_symlink "$MNT" "mountpoint" || exit 1
+assert_root_owned_dir "$MNT" "mountpoint" || exit 1
+assert_canonical_mnt "$MNT" "$(realpath -e "$MEDIA_ROOT")/${SAFE_LABEL}" || exit 1
 
 AGENT_UID="$(id -u agentd 2>/dev/null || echo 0)"
 AGENT_GID="$(id -g agentd 2>/dev/null || echo 0)"
-
-mkdir -p "$MNT"
-
-# Already mounted there? (idempotent — re-trigger / re-plug is a no-op.)
-if mountpoint -q "$MNT"; then
-  echo "usb-mount: $MNT already mounted" >&2
-  exit 0
-fi
 
 case "$FSTYPE" in
   vfat|exfat|msdos)
@@ -65,10 +71,19 @@ case "$FSTYPE" in
     ;;
 esac
 
+# Confirm the kernel recorded THIS path + THIS device. If not, unwind.
+got="$(mountinfo_source_for "$MNT" || true)"
+if [[ -z "$got" ]] || ! source_is_dev "$got" "$DEV"; then
+  echo "usb-mount: post-mount check failed (source='${got:-none}') — unmounting" >&2
+  umount "$MNT" 2>/dev/null || umount -l "$MNT" 2>/dev/null || true
+  exit 1
+fi
+
 # Record dev→mountpoint so usb-umount can clean up on an unplug (the device node is
 # gone by then, so we can't re-derive the label).
-install -d -m 755 /run/apexos-usb
-printf '%s\n' "$MNT" > "/run/apexos-usb/${DEV_NAME}.mnt"
+_run="${APEXOS_USB_RUNDIR:-/run/apexos-usb}"
+install -d -m 755 "$_run"
+printf '%s\n%s\n%s\n' "$MNT" "$DEV" "$SAFE_LABEL" > "${_run}/${DEV_NAME}.mnt"
 
 echo "usb-mount: ${DEV} (${FSTYPE:-?}, ${LABEL}) → ${MNT}" >&2
 

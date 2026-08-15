@@ -9,40 +9,73 @@
 #                                  NoNewPrivileges, so it never calls this directly)
 #
 # Always runs as root, from a systemd unit (the mount @.service ExecStop, or the eject
-# drain) — never via sudo. Hard-confines the target to <workspace>/media/ and the label
-# to APEX-* before unmounting anything.
+# drain) — never via sudo. lstat-refuses a symlink mountpoint; umounts only when
+# mountinfo TARGET matches the constructed media path and SOURCE matches the
+# expected device / label. See usb-confine.sh.
 set -euo pipefail
 
-WORKSPACE="$(. /etc/agentd/env 2>/dev/null; echo "${AGENTD_WORKSPACE:-/var/lib/agentd/workspace}")"
-MEDIA_ROOT="${WORKSPACE%/}/media"
+_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=usb-confine.sh
+. "$_HERE/usb-confine.sh"
+
+MEDIA_ROOT="$(usb_media_root)"
 
 MNT=""
 STATE=""
+EXPECTED_DEV=""
+EXPECTED_LABEL=""
 if [[ "${1:-}" == "--label" ]]; then
   LABEL="${2:?usage: usb-umount --label APEX-<name>}"
-  [[ "$LABEL" == APEX-* ]] || { echo "usb-umount: '$LABEL' is not an APEX-* label" >&2; exit 1; }
-  SAFE_LABEL="$(printf '%s' "$LABEL" | tr -cd 'A-Za-z0-9._-')"
-  [[ -n "$SAFE_LABEL" && "$SAFE_LABEL" != *..* ]] || { echo "usb-umount: unsafe label" >&2; exit 1; }
+  SAFE_LABEL="$(safe_exo_label "$LABEL" || true)"
+  [[ -n "$SAFE_LABEL" ]] || { echo "usb-umount: '$LABEL' is not an APEX-* label" >&2; exit 1; }
   MNT="${MEDIA_ROOT}/${SAFE_LABEL}"
+  EXPECTED_LABEL="$SAFE_LABEL"
 else
   DEV_NAME="${1:?usage: usb-umount <kernel-dev> | --label APEX-<name>}"
-  STATE="/run/apexos-usb/${DEV_NAME}.mnt"
+  safe_kernel_dev "$DEV_NAME" || { echo "usb-umount: unsafe device name '$DEV_NAME'" >&2; exit 1; }
+  STATE="${APEXOS_USB_RUNDIR:-/run/apexos-usb}/${DEV_NAME}.mnt"
+  if [[ -L "$STATE" ]]; then
+    echo "usb-umount: state file is a symlink — refusing" >&2
+    exit 1
+  fi
   [[ -f "$STATE" ]] || { echo "usb-umount: no state for ${DEV_NAME} (already gone?)" >&2; exit 0; }
-  MNT="$(cat "$STATE")"
+  {
+    IFS= read -r _stated_mnt || true
+    IFS= read -r EXPECTED_DEV || true
+    IFS= read -r EXPECTED_LABEL || true
+  } < "$STATE"
+  # Never use the stated path — a `media/../../etc` prefix still matches
+  # MEDIA_ROOT/. Reconstruct from the label (or the basename of a legacy
+  # one-line state file).
+  if [[ -z "$EXPECTED_LABEL" ]]; then
+    EXPECTED_LABEL="$(basename "${_stated_mnt:-}")"
+  fi
+  SAFE_LABEL="$(safe_exo_label "$EXPECTED_LABEL" || true)"
+  [[ -n "$SAFE_LABEL" ]] || { echo "usb-umount: state for ${DEV_NAME} has no APEX-* label" >&2; exit 1; }
+  MNT="${MEDIA_ROOT}/${SAFE_LABEL}"
 fi
 
-# Hard-confine: only ever unmount something strictly under <workspace>/media/.
-case "$MNT" in
-  "${MEDIA_ROOT}/"*) : ;;
-  *) echo "usb-umount: refusing target $MNT outside $MEDIA_ROOT" >&2; exit 1 ;;
-esac
+assert_under "$MNT" "$MEDIA_ROOT" || exit 1
+assert_not_symlink "$MEDIA_ROOT" "media root" || exit 1
+assert_not_symlink "$MNT" "umount target" || exit 1
 
-if mountpoint -q "$MNT"; then
+# Hostility (symlink / wrong source) is exit 1. Not mounted is 2 — just clean up.
+set +e
+SRC="$(assert_umount_ok "$MNT" "$EXPECTED_DEV" "$EXPECTED_LABEL")"
+rc=$?
+set -e
+if [[ "$rc" -eq 1 ]]; then
+  exit 1
+fi
+if [[ "$rc" -eq 0 ]]; then
+  # Recheck immediately before the syscall.
+  assert_not_symlink "$MNT" "umount target" || exit 1
+  assert_umount_ok "$MNT" "$EXPECTED_DEV" "$EXPECTED_LABEL" >/dev/null || exit 1
   sync
-  umount "$MNT" 2>/dev/null || umount -l "$MNT"   # lazy as a fallback on a yanked stick
-  echo "usb-umount: unmounted $MNT" >&2
+  umount "$MNT" 2>/dev/null || umount -l "$MNT"
+  echo "usb-umount: unmounted $MNT (was $SRC)" >&2
 fi
-# Remove the (now-empty) mountpoint + the state file.
-rmdir "$MNT" 2>/dev/null || true
-[[ -n "$STATE" ]] && rm -f "$STATE"
+
+rmdir_mountpoint "$MNT"
+[[ -n "$STATE" && ! -L "$STATE" ]] && rm -f "$STATE"
 exit 0

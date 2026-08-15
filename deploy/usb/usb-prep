@@ -15,6 +15,10 @@
 # just renames a volume + adds folders — recoverable); format (slice B) is gated harder.
 set -euo pipefail
 
+_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=usb-confine.sh
+. "$_HERE/usb-confine.sh"
+
 MODE="${1:?usage: usb-prep <relabel|format> <dev> <name>}"
 DEV="${2:?usage: usb-prep <relabel|format> <dev> <name>}"
 NAME="${3:?usage: usb-prep <relabel|format> <dev> <name>}"
@@ -80,9 +84,8 @@ esac
 udevadm trigger --settle --action=change "$DEV" 2>/dev/null || true
 /usr/local/lib/apexos/usb-mount "$DEV_NAME"
 
-WORKSPACE="$(. /etc/agentd/env 2>/dev/null; echo "${AGENTD_WORKSPACE:-/var/lib/agentd/workspace}")"
-MNT="${WORKSPACE%/}/media/${LABEL}"
-if [[ -d "$MNT" ]] && mountpoint -q "$MNT"; then
+MNT="$(usb_media_root)/${LABEL}"
+if src="$(mountinfo_source_for "$MNT" || true)" && [[ -n "$src" ]]; then
   /usr/local/bin/apexos-workspace-init "$MNT" "$SAFE_NAME" >&2 || true
   echo "usb-prep: $DEV is now exo-workspace $LABEL at $MNT" >&2
 else

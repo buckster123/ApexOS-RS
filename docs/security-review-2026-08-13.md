@@ -9,7 +9,8 @@
 > Wave 5 (PR #359): finding 5.
 > Wave 6 (PR #360): finding 4.
 > Wave 7 (PR #361): finding 2.
-> Wave 8 (this tree): finding 6.
+> Wave 8 (PR #362): finding 6.
+> Wave 9 (this tree): finding 7.
 
 ## Ranked findings
 
@@ -406,8 +407,9 @@ in `ActionId`/`SessionId`; the approval issue is authority binding.
 setuid escalation and ordinary writes to the base OS or home directories.
 They do **not** protect daemon environment secrets, `/var/lib/agentd`, mutable
 agent configuration, the network, granted devices, or the root self-update/USB
-request consumers. Findings 5, 7, and 11 are therefore the main paths remaining
-after the model has crossed the approval gate.
+request consumers. Findings 5 and 7 closed the root-helper path/symlink holes;
+finding 11 is the main path remaining after the model has crossed the approval
+gate.
 
 ## Verification
 
