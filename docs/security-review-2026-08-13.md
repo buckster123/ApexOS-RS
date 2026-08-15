@@ -19,7 +19,8 @@
 > Wave 15 (PR #369): SA-5.
 > Wave 16 (PR #370): SA-3.
 > Wave 17 (PR #371): SA-8.
-> Wave 18 (this tree): SA-9.
+> Wave 18 (PR #372): SA-9.
+> Wave 19 (this tree): SA-10.
 
 ## Ranked findings
 
@@ -348,6 +349,11 @@ dropping them.
 - **Minimal fix:** Validate and atomically persist before mutating memory or
   returning success, and quarantine parse corruption instead of treating it as
   absence.
+- **Fixed (Wave 19):** `POST /api/policy` writes `mode` into policy.toml
+  (validate + `write_config_atomic`) before flipping RAM. `Identities::boot_load`
+  quarantines an unparseable registry to `identities.toml.corrupt` and blocks
+  persist so a torn PIN/agent file cannot be overwritten with Owner/APEX
+  defaults. Identity create/setup/default clone→save→commit.
 
 ### SA-11. High — public mesh gossip is an authenticated-radio signing oracle
 

@@ -32,7 +32,9 @@ use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use apexos_core::{ActionId, BusHandle, ClientEvent, Event, Message as CoreMessage, SessionId};
-use apexos_plugins::{PolicyEngine, Rule, VastState, VastPhase, load_recipes};
+use apexos_plugins::{
+    policy_toml_set_mode, load_recipes, PolicyEngine, PolicyMode, Rule, VastPhase, VastState,
+};
 use tokio::sync::mpsc;
 
 /// Lightweight record of a council session, served by `GET /api/council[/:id]`.
@@ -1165,15 +1167,36 @@ fn oai_slot_key_path(slot: &str) -> String {
     }
 }
 
+fn policy_toml_path() -> PathBuf {
+    std::env::var("AGENTD_POLICY_TOML")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("config/policy.toml"))
+}
+
+/// Validate + atomically persist `mode` into policy.toml. RAM is not the commit.
+fn persist_policy_mode(mode: PolicyMode) -> Result<(), String> {
+    let path = policy_toml_path();
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let (new_toml, _) = policy_toml_set_mode(&text, mode).map_err(|e| e.to_string())?;
+    apexos_core::write_config_atomic(&path, new_toml.as_bytes())
+        .map_err(|e| format!("persist {}: {e}", path.display()))?;
+    Ok(())
+}
+
 async fn set_policy_handler(
     State(state): State<GatewayState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let mode = body["mode"].as_str().unwrap_or("").trim().to_string();
-    if !matches!(mode.as_str(), "suggest" | "auto-edit" | "yolo") {
+    let Some(parsed) = PolicyMode::from_api(&mode) else {
         return Json(serde_json::json!({ "ok": false, "error": "unknown mode" }));
+    };
+    if let Err(e) = persist_policy_mode(parsed) {
+        return Json(serde_json::json!({ "ok": false, "error": e }));
     }
     *state.policy_mode.write().await = mode.clone();
+    state.policy_arc.write().await.config.mode = parsed;
     let _ = state.policy_set_tx.send(mode).await;
     Json(serde_json::json!({ "ok": true }))
 }
@@ -4922,9 +4945,13 @@ async fn identities_create_user_handler(
         u.set_pin(&pin);
     }
     let has_pin = u.has_pin();
-    ids.users.push(u);
-    if let Err(e) = ids.save(&apexos_core::Identities::default_path()) {
+    let mut next = ids.clone();
+    next.users.push(u);
+    if let Err(e) = ids.commit(&apexos_core::Identities::default_path(), next) {
         eprintln!("[identity] persist failed: {e}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": format!("persist failed: {e}"),
+        }))).into_response();
     }
     (StatusCode::OK, Json(serde_json::json!({ "id": id, "has_pin": has_pin }))).into_response()
 }
@@ -4966,15 +4993,19 @@ async fn identities_create_agent_handler(
     if let Err(e) = std::fs::create_dir_all(&agent_ws) {
         eprintln!("[identity] could not provision workspace {}: {e}", agent_ws.display());
     }
-    ids.agents.push(apexos_core::AgentRecord {
+    let mut next = ids.clone();
+    next.agents.push(apexos_core::AgentRecord {
         id: id.clone(),
         name: body.name,
         owner: body.owner,
         soul_file: soul_file.to_string_lossy().into_owned(),
         default_skin: body.default_skin,
     });
-    if let Err(e) = ids.save(&apexos_core::Identities::default_path()) {
+    if let Err(e) = ids.commit(&apexos_core::Identities::default_path(), next) {
         eprintln!("[identity] persist failed: {e}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": format!("persist failed: {e}"),
+        }))).into_response();
     }
     (StatusCode::OK, Json(serde_json::json!({ "id": id, "soul_file": soul_file.to_string_lossy() }))).into_response()
 }
@@ -5129,8 +5160,9 @@ async fn auth_setup_handler(
     }
     {
         let mut ids = state.identities.write().await;
-        ids.seed_defaults("/etc/agentd/soul.md");
-        match ids.user_mut(apexos_core::DEFAULT_USER_ID) {
+        let mut next = ids.clone();
+        next.seed_defaults("/etc/agentd/soul.md");
+        match next.user_mut(apexos_core::DEFAULT_USER_ID) {
             Some(u) => u.set_pin(&body.pin),
             None => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
@@ -5138,7 +5170,7 @@ async fn auth_setup_handler(
                 }))).into_response();
             }
         }
-        if let Err(e) = ids.save(&apexos_core::Identities::default_path()) {
+        if let Err(e) = ids.commit(&apexos_core::Identities::default_path(), next) {
             eprintln!("[identity] persist owner PIN failed: {e}");
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
                 "ok": false, "error": "persist failed",
@@ -5214,16 +5246,20 @@ async fn auth_default_handler(
 ) -> impl IntoResponse {
     let mut ids = state.identities.write().await;
     let id = body.user_id.trim();
+    let mut next = ids.clone();
     if id.is_empty() {
-        ids.default_user = None;
-    } else if ids.user(id).is_some() {
-        ids.default_user = Some(id.to_string());
+        next.default_user = None;
+    } else if next.user(id).is_some() {
+        next.default_user = Some(id.to_string());
     } else {
         return (StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "ok": false, "error": format!("no such profile '{id}'") }))).into_response();
     }
-    if let Err(e) = ids.save(&apexos_core::Identities::default_path()) {
+    if let Err(e) = ids.commit(&apexos_core::Identities::default_path(), next) {
         eprintln!("[identity] persist default_user failed: {e}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "ok": false, "error": format!("persist failed: {e}"),
+        }))).into_response();
     }
     (StatusCode::OK, Json(serde_json::json!({ "ok": true, "default_user": ids.default_user }))).into_response()
 }

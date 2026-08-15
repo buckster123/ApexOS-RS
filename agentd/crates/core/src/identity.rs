@@ -171,6 +171,50 @@ pub struct Identities {
     pub users: Vec<User>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentRecord>,
+    /// Set when boot refused a torn/unreadable file. Save/commit fail closed
+    /// so a later API write cannot mint a fresh Owner/APEX over the wreckage.
+    #[serde(skip)]
+    pub persist_blocked: bool,
+}
+
+/// Why [`Identities::try_load`] failed. Missing is a fresh node; anything else
+/// is *not* an empty registry (SA-10).
+#[derive(Debug)]
+pub enum IdentitiesLoadError {
+    NotFound,
+    Io(std::io::Error),
+    Parse(String),
+}
+
+impl std::fmt::Display for IdentitiesLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IdentitiesLoadError::NotFound => write!(f, "identities.toml not found"),
+            IdentitiesLoadError::Io(e) => write!(f, "read identities.toml: {e}"),
+            IdentitiesLoadError::Parse(e) => write!(f, "parse identities.toml: {e}"),
+        }
+    }
+}
+
+/// Temp+rename with in-place fallback when the parent dir is not writable
+/// (`/etc/agentd` is root-owned; the file is agentd-owned — see gotchas).
+pub fn write_config_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let atomic = (|| {
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)?;
+        Ok::<(), std::io::Error>(())
+    })();
+    if let Err(e) = atomic {
+        let _ = std::fs::remove_file(&tmp);
+        if e.kind() == std::io::ErrorKind::PermissionDenied
+            || e.to_string().contains("os error 13")
+        {
+            return std::fs::write(path, bytes);
+        }
+        return Err(e);
+    }
+    Ok(())
 }
 
 impl Identities {
@@ -181,20 +225,103 @@ impl Identities {
             .unwrap_or_else(|_| std::path::PathBuf::from("/etc/agentd/identities.toml"))
     }
 
-    /// Load from `path`; a missing or unparseable file yields an empty registry
-    /// (caller seeds defaults) — never panics on bad config.
-    pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default()
+    /// Load a *valid* registry. Missing and parse/IO errors are distinct —
+    /// never fold corruption into [`Default`].
+    pub fn try_load(path: &Path) -> Result<Self, IdentitiesLoadError> {
+        match std::fs::read_to_string(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(IdentitiesLoadError::NotFound)
+            }
+            Err(e) => Err(IdentitiesLoadError::Io(e)),
+            Ok(s) => toml::from_str(&s).map_err(|e| IdentitiesLoadError::Parse(e.to_string())),
+        }
     }
 
-    /// Persist to `path` as pretty TOML.
+    /// Move a torn/unparseable registry aside so a later seed cannot overwrite it.
+    pub fn quarantine(path: &Path) -> std::io::Result<PathBuf> {
+        let dest = {
+            let primary = path.with_extension("toml.corrupt");
+            if primary.exists() {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                path.with_extension(format!("toml.corrupt.{ts}"))
+            } else {
+                primary
+            }
+        };
+        std::fs::rename(path, &dest)?;
+        Ok(dest)
+    }
+
+    /// Daemon-start load. Missing → seed Owner/APEX. Unparseable → quarantine
+    /// and return an empty persist-blocked registry (do not treat as absence).
+    pub fn boot_load(path: &Path, apex_soul_file: &str) -> Self {
+        match Self::try_load(path) {
+            Ok(mut ids) => {
+                if ids.seed_defaults(apex_soul_file) {
+                    if let Err(e) = ids.save(path) {
+                        eprintln!(
+                            "[identity] could not persist {}: {e} (re-seeding in-memory)",
+                            path.display()
+                        );
+                    }
+                }
+                ids
+            }
+            Err(IdentitiesLoadError::NotFound) => {
+                let mut ids = Self::default();
+                ids.seed_defaults(apex_soul_file);
+                if let Err(e) = ids.save(path) {
+                    eprintln!(
+                        "[identity] could not persist {}: {e} (re-seeding in-memory)",
+                        path.display()
+                    );
+                }
+                ids
+            }
+            Err(e) => {
+                if matches!(e, IdentitiesLoadError::Parse(_)) {
+                    match Self::quarantine(path) {
+                        Ok(side) => eprintln!(
+                            "[identity] quarantined unparseable {} → {} ({e}); persist blocked",
+                            path.display(),
+                            side.display()
+                        ),
+                        Err(qe) => eprintln!(
+                            "[identity] unparseable {} ({e}); quarantine failed ({qe}); persist blocked",
+                            path.display()
+                        ),
+                    }
+                } else {
+                    eprintln!("[identity] {e}; persist blocked (will not seed-overwrite)");
+                }
+                let mut ids = Self::default();
+                ids.persist_blocked = true;
+                ids
+            }
+        }
+    }
+
+    /// Persist to `path` as pretty TOML. Fails closed when [`persist_blocked`].
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if self.persist_blocked {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "identities registry corrupt; restore identities.toml.corrupt",
+            ));
+        }
         let body = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, body)
+        write_config_atomic(path, body.as_bytes())
+    }
+
+    /// Persist `next` then replace `self`. On persist failure `self` is unchanged.
+    pub fn commit(&mut self, path: &Path, next: Self) -> std::io::Result<()> {
+        next.save(path)?;
+        *self = next;
+        Ok(())
     }
 
     pub fn user(&self, id: &str) -> Option<&User> {
@@ -568,6 +695,96 @@ mod tests {
         // Absent in older files → None (migration-safe).
         let legacy: Identities = toml::from_str("[[user]]\nid='owner'\nname='Owner'\n").unwrap();
         assert_eq!(legacy.default_user, None);
+    }
+
+    fn tmp_ids(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-ids-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("identities.toml");
+        (dir, path)
+    }
+
+    #[test]
+    fn try_load_distinguishes_missing_from_corrupt() {
+        let (dir, path) = tmp_ids("load");
+        assert!(matches!(
+            Identities::try_load(&path),
+            Err(IdentitiesLoadError::NotFound)
+        ));
+        std::fs::write(&path, "[[user]]\nid = \"owner\"\nthis is not toml").unwrap();
+        assert!(matches!(
+            Identities::try_load(&path),
+            Err(IdentitiesLoadError::Parse(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn boot_load_quarantines_torn_file_and_blocks_persist() {
+        let (dir, path) = tmp_ids("boot-torn");
+        let torn = "[[user]]\nid = \"owner\"\nname = \"Owner\"\npin_hash = \"abc";
+        std::fs::write(&path, torn).unwrap();
+        let ids = Identities::boot_load(&path, "/etc/agentd/soul.md");
+        assert!(ids.persist_blocked);
+        assert!(ids.users.is_empty(), "must not seed over a torn registry");
+        assert!(!path.exists(), "live path moved aside");
+        let sidecar = dir.join("identities.toml.corrupt");
+        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), torn);
+        assert!(ids.save(&path).is_err(), "blocked save must not recreate live file");
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn boot_load_missing_seeds_defaults() {
+        let (dir, path) = tmp_ids("boot-miss");
+        let ids = Identities::boot_load(&path, "/etc/agentd/soul.md");
+        assert!(!ids.persist_blocked);
+        assert_eq!(ids.users.len(), 1);
+        assert_eq!(ids.agents.len(), 1);
+        let back = Identities::try_load(&path).expect("seeded file");
+        assert_eq!(back.user(DEFAULT_USER_ID).unwrap().name, "Owner");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_leaves_memory_untouched_when_save_fails() {
+        let (dir, path) = tmp_ids("commit");
+        let mut ids = Identities::default();
+        ids.seed_defaults("/etc/agentd/soul.md");
+        ids.save(&path).unwrap();
+        let mut next = ids.clone();
+        next.users.push(User {
+            id: "guest".into(),
+            name: "Guest".into(),
+            ..Default::default()
+        });
+        // Path is a directory → write fails; RAM must stay at the pre-commit registry.
+        let bad = dir.join("not-a-file");
+        std::fs::create_dir(&bad).unwrap();
+        assert!(ids.commit(&bad, next).is_err());
+        assert!(ids.user("guest").is_none());
+        let disk = Identities::try_load(&path).unwrap();
+        assert!(disk.user("guest").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_config_atomic_round_trips() {
+        let (dir, path) = tmp_ids("atomic");
+        write_config_atomic(&path, b"hello").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+        write_config_atomic(&path, b"world").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"world");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

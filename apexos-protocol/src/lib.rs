@@ -158,6 +158,27 @@ pub enum PolicyMode {
     Yolo,
 }
 
+impl PolicyMode {
+    /// The exact string written into `mode = "..."` in policy.toml / POST /api/policy.
+    pub fn as_toml_str(self) -> &'static str {
+        match self {
+            PolicyMode::Suggest   => "suggest",
+            PolicyMode::AutoEdit  => "auto-edit",
+            PolicyMode::Yolo      => "yolo",
+        }
+    }
+
+    /// Parse a Settings / API mode string. Unknown values are None (fail closed).
+    pub fn from_api(s: &str) -> Option<Self> {
+        match s {
+            "suggest"    => Some(PolicyMode::Suggest),
+            "auto-edit"  => Some(PolicyMode::AutoEdit),
+            "yolo"       => Some(PolicyMode::Yolo),
+            _            => None,
+        }
+    }
+}
+
 /// Per-tool approval rule — the value side of the `[rules]` table in policy.toml.
 /// Lives here so `EvolutionProposal::UpdatePolicyRule` can reference it without a
 /// circular dep. `plugins::policy::Rule` mirrors these variants 1:1.

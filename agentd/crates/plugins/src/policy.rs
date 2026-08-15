@@ -80,6 +80,29 @@ impl PolicyConfig {
     }
 }
 
+/// Set `mode = "..."` then validate the candidate document. A torn or
+/// unparseable policy.toml is refused — never rewritten from a RAM-only flip.
+pub fn policy_toml_set_mode(
+    toml_text: &str,
+    mode: PolicyMode,
+) -> anyhow::Result<(String, PolicyConfig)> {
+    let mut doc = toml_text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| anyhow::anyhow!("policy.toml parse error: {e}"))?;
+    doc["mode"] = toml_edit::value(mode.as_toml_str());
+    let new_toml = doc.to_string();
+    let config = PolicyConfig::parse(&new_toml)
+        .map_err(|e| anyhow::anyhow!("rejected policy mode edit (would corrupt policy.toml): {e}"))?;
+    if config.mode != mode {
+        anyhow::bail!(
+            "policy mode did not round-trip (wanted {}, got {:?})",
+            mode.as_toml_str(),
+            config.mode
+        );
+    }
+    Ok((new_toml, config))
+}
+
 impl From<apexos_core::PolicyRule> for Rule {
     fn from(r: apexos_core::PolicyRule) -> Self {
         match r {
@@ -446,5 +469,18 @@ inherit_mode    = false
         assert!(cfg.subagents.inherit_mode);
         // And SubagentsConfig::default() (what serde calls for the absent section).
         assert_eq!(SubagentsConfig::default().max_depth, 4);
+    }
+
+    #[test]
+    fn policy_set_mode_preserves_rules_and_validates() {
+        let src = "mode = \"suggest\"\n\n[rules]\n\"read_file\" = \"allow\"\n";
+        let (new_toml, cfg) = policy_toml_set_mode(src, PolicyMode::Yolo).unwrap();
+        assert_eq!(cfg.mode, PolicyMode::Yolo);
+        assert_eq!(cfg.rules["read_file"], Rule::Allow);
+        assert!(new_toml.contains("yolo"));
+        let (back, cfg2) = policy_toml_set_mode(&new_toml, PolicyMode::AutoEdit).unwrap();
+        assert_eq!(cfg2.mode, PolicyMode::AutoEdit);
+        assert!(back.contains("auto-edit"));
+        assert!(policy_toml_set_mode("[[not a policy", PolicyMode::Suggest).is_err());
     }
 }
