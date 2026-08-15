@@ -277,6 +277,9 @@ pub struct Supervisor {
     /// default), so routing/isolation can't depend on what the model typed.
     /// See docs/agent-identity.md (slices 1 & 3b).
     session_bindings:  apexos_core::SessionBindings,
+    /// Inbound mesh hop count per session — outbound `agent_spawn(node)`
+    /// sends stored+1 (finding 13).
+    mesh_hops:         apexos_core::MeshHops,
     /// Identity registry — lets `read_soul_md` return a bound agent's OWN
     /// soul_file (per-agent souls, docs/agent-identity.md 3b-2) rather than the
     /// global soul.md. `None` until wired → reads fall back to the global soul.
@@ -301,6 +304,7 @@ impl Supervisor {
         bus: BusHandle,
         policy: Arc<RwLock<PolicyEngine>>,
         session_bindings: apexos_core::SessionBindings,
+        mesh_hops: apexos_core::MeshHops,
     ) -> Self {
         let (sv_tx, sv_rx) = mpsc::channel::<SupervisorCmd>(64);
         Self {
@@ -322,6 +326,7 @@ impl Supervisor {
             events_dir:        None,
             vast_state:        None,
             session_bindings,
+            mesh_hops,
             identities:        None,
             propose_tx:        None,
             self_update_tx:    None,
@@ -2262,8 +2267,9 @@ impl Supervisor {
                 // Cross-node: BLOCKING spawn on the peer (colony-mesh keystone). Run a
                 // sub-agent there, get its output back over HTTP (timeout + breaker).
                 Some(node_id) => {
+                    let hops = apexos_core::mesh_hops_get(&self.mesh_hops, session);
                     tokio::spawn(async move {
-                        let output = mesh_agent_spawn(&node_id, &prompt, system.as_deref(), timeout_s).await;
+                        let output = mesh_agent_spawn(&node_id, &prompt, system.as_deref(), timeout_s, hops).await;
                         bus.emit(Event::ToolResult { session, call: call_id, output }).await;
                     });
                 }
@@ -3197,9 +3203,15 @@ fn breaker_record(node: &str, ok: bool, now: std::time::Instant) {
 
 /// Blocking cross-node spawn: run `prompt` as a sub-agent on `node` and return its
 /// output. Bounded by the peer's own `timeout_s` plus HTTP slack; a per-peer circuit
-/// breaker fails fast when a peer is repeatedly unreachable. `x-mesh-hops: 1` lets
-/// the receiver refuse a runaway cross-node recursion.
-async fn mesh_agent_spawn(node: &str, prompt: &str, system: Option<&str>, timeout_s: u64) -> ToolOutput {
+/// breaker fails fast when a peer is repeatedly unreachable. `x-mesh-hops` is
+/// the caller's inbound depth plus one (finding 13).
+async fn mesh_agent_spawn(
+    node: &str,
+    prompt: &str,
+    system: Option<&str>,
+    timeout_s: u64,
+    inbound_hops: u32,
+) -> ToolOutput {
     let err = |m: String| ToolOutput { ok: false, content: serde_json::json!(m) };
     let now = std::time::Instant::now();
     if breaker_open(node, now) {
@@ -3209,12 +3221,18 @@ async fn mesh_agent_spawn(node: &str, prompt: &str, system: Option<&str>, timeou
         Some(p) => p,
         None    => return err(format!("agent_spawn: peer '{node}' not found in peers.toml")),
     };
+    let hops = match apexos_core::next_mesh_hops(inbound_hops) {
+        Ok(n) => n,
+        Err(_) => {
+            return err("agent_spawn: mesh hop limit reached (loop guard)".into());
+        }
+    };
     let http_base = ws_url.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1);
     let mut body = serde_json::json!({ "prompt": prompt, "timeout_s": timeout_s });
     if let Some(s) = system { body["system"] = serde_json::json!(s); }
     let mut req = reqwest::Client::new()
         .post(format!("{http_base}/api/spawn"))
-        .header("x-mesh-hops", "1")
+        .header("x-mesh-hops", hops.to_string())
         .json(&body)
         .timeout(std::time::Duration::from_secs(timeout_s + 20));
     if let Some(t) = token.as_deref() {

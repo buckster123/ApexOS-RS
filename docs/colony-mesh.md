@@ -122,8 +122,8 @@ delegation, cross-node task decomposition.
   H6 — resolved *before* the local/remote branch, so a remote spawn gets the same default;
   `inherit_soul:true` is the deliberate opt-in to full identity).
 - **Circuit breaker + loop guard:** per-peer recent-failure tracking → short-circuit a failing peer for
-  a cooldown (3 consecutive failures → 60s open, no cascading hangs); the **`x-mesh-hops`** header caps
-  A→B→A spawn recursion (refused at ≥ 3).
+  a cooldown (3 consecutive failures → 60s open, no cascading hangs); the **`x-mesh-hops`** header is
+  required, increments at every outbound delegation (stored inbound + 1), and is refused at ≥ 3.
 - **Effort:** Medium. **Acceptance:** `agent_spawn(node="ApexOS-RS", prompt="research X, return findings",
   timeout_s=60)` blocks and returns apex1's sub-agent output.
 

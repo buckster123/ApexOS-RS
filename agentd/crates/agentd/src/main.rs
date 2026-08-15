@@ -396,6 +396,7 @@ async fn main() -> anyhow::Result<()> {
     // boot resolve identity here, falling back to the node default when unbound.
     // Shared across gateway (writes), supervisor (stamp), and router (boot).
     let session_bindings: apexos_core::SessionBindings = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let mesh_hops: apexos_core::MeshHops = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
     // Per-session active persona/skin (ui-glowup G5 tier-2). The UI sends the
     // human's chosen persona over the WS (`set_persona` / `hello{persona}`); the
@@ -591,7 +592,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Supervisor — pass policy_arc so the evolution applier can hot-swap the engine.
-    let mut supervisor = Supervisor::new(handle.clone(), Arc::clone(&policy_arc), Arc::clone(&session_bindings));
+    let mut supervisor = Supervisor::new(handle.clone(), Arc::clone(&policy_arc), Arc::clone(&session_bindings), Arc::clone(&mesh_hops));
     let sv_cmd_tx      = supervisor.cmd_tx();
     // Rollback channel: applier receives (session, call_id, evolution_id) requests.
     let (rollback_tx, rollback_rx) = mpsc::channel::<(SessionId, ActionId, EvolutionId)>(16);
@@ -790,6 +791,7 @@ async fn main() -> anyhow::Result<()> {
             enabled: mesh_workers_enabled,
             slots_gauge: Arc::clone(&worker_slots_gauge),
             queued_gauge: Arc::clone(&worker_queued_gauge),
+            mesh_hops: Arc::clone(&mesh_hops),
         },
         worker_council_tx,
     );
@@ -877,7 +879,7 @@ async fn main() -> anyhow::Result<()> {
                        tool_reg, histories, Arc::clone(&history_budget),
                        engine, max_depth, session_store, router_proxy,
                        Arc::clone(&session_bindings), Arc::clone(&persona_sessions),
-                       Arc::clone(&identities), spawn_rx,
+                       Arc::clone(&identities), spawn_rx, Arc::clone(&mesh_hops),
                        Arc::clone(&sensor_presence), Arc::clone(&sensor_profile),
                        worker_models.clone(), mk_pinned.clone());
 
@@ -1691,6 +1693,7 @@ fn spawn_agent_router(
     persona_sessions: apexos_core::PersonaSessions,
     identities:    Arc<RwLock<apexos_core::Identities>>,
     spawn_rx:      tokio::sync::mpsc::Receiver<SpawnReq>,
+    mesh_hops:     apexos_core::MeshHops,
     sensor_presence: SensorPresence,
     sensor_profile: Arc<std::sync::RwLock<String>>,
     worker_models: apexos_core::WorkerModels,
@@ -1729,9 +1732,11 @@ fn spawn_agent_router(
         let bus           = bus.clone();
         let bcast         = bcast.clone();
         let mut spawn_rx  = spawn_rx;
+        let mesh_hops_w   = Arc::clone(&mesh_hops);
         tokio::spawn(async move {
             while let Some(req) = spawn_rx.recv().await {
                 let child_id = SessionId(next_child_id.fetch_add(1, Ordering::SeqCst));
+                apexos_core::mesh_hops_set(&mesh_hops_w, child_id, req.hops);
                 let history  = vec![Message::User {
                     content: vec![ContentBlock::Text { text: req.prompt }],
                 }];
@@ -1883,6 +1888,10 @@ fn spawn_agent_router(
 
                     let child_id = SessionId(next_child_id.fetch_add(1, Ordering::SeqCst));
                     session_depths.lock().await.insert(child_id, parent_depth + 1);
+                    // Local spawn stays on this node — copy inbound mesh hops,
+                    // do not increment (only a cross-node hop increments).
+                    let parent_hops = apexos_core::mesh_hops_get(&mesh_hops, parent);
+                    apexos_core::mesh_hops_set(&mesh_hops, child_id, parent_hops);
                     session_children.lock().await
                         .entry(parent).or_default().push(child_id);
 
