@@ -71,18 +71,22 @@ in `cerebro-mcp` `tools.rs`), used pre-flight to confirm the rollback snapshot/e
 1. opens a Cerebro episode (the local `episode_start` helper, best-effort);
 2. computes the inverse proposal (`compute_undo`) *before* applying;
 3. applies (`apply_evolution`) — writes the file + hot-reloads the live `Arc`;
-4. stores the undo in the in-memory `rollback_store: Arc<Mutex<HashMap<EvolutionId,
-   EvolutionProposal>>>` **and** journals it into the episode as a memory tagged
-   `["evolution","undo_snapshot"]` (the local `episode_add_step` helper);
+4. stores a `RollbackRecord { undo, owner, exact target }` in the in-memory
+   `rollback_store` **and** journals it into the episode as a memory tagged
+   `["evolution","undo_snapshot"]` (the local `persist_rollback_snapshot` helper,
+   which requires `ToolOutput.ok` **and** an episode-link readback);
 5. emits `Event::EvolutionApplied { id, proposal, patch_summary, applied_by }`.
 
-**Rollback** (the `rollback_evolution` arm of the applier loop) pops the undo proposal from
-`rollback_store` and feeds it back through the same `apply_evolution`. The undo is itself a
-proposal, so the mechanism is symmetric. On cold start the store is rebuilt best-effort from
-Cerebro episodes (`restore_rollback_store`, parsing each step via
-`parse_undo_snapshot_from_text`) — but if Cerebro is unavailable, an evolution applied in a
-*prior* daemon session has **no in-memory undo** and `rollback_evolution` returns `no
-rollback snapshot for evolution N`.
+**Rollback** (the `rollback_evolution` arm of the applier loop) peeks the record,
+authorizes the caller against the recorded owner (or the node agent), and applies
+**only** the stored target through the same `apply_evolution`. The in-memory entry
+is removed only after a successful commit so a failed rollback can retry. The undo
+is itself a proposal, so the mechanism is symmetric. On cold start the store is
+rebuilt best-effort from Cerebro episodes (`restore_rollback_store`, unscoped so
+private non-APEX undos hydrate, parsing via `parse_rollback_record_from_text`) —
+but if Cerebro is unavailable, an evolution applied in a *prior* daemon session has
+**no in-memory undo** and `rollback_evolution` returns `no rollback snapshot for
+evolution N`.
 
 **Durability gotcha.** `update_system_prompt` writes `soul.md` with a plain
 `tokio::fs::write` (the `UpdateSystemPrompt` arm of `apply_evolution`); `update_policy_rule`
@@ -99,8 +103,8 @@ gotchas are the detail source):
   only.
 - **The H4 snapshot gate**: a *full soul rewrite* (`update_system_prompt`) refuses to apply
   unless the undo snapshot exists AND its episode step is durably persisted first (verified
-  by stored-memory id). Refusal is the honest failure mode for an unrecoverable identity
-  rewrite; small edits stay untaxed.
+  by stored-memory id **and** a `get_episode_memories` readback). A transport-Ok /
+  `ok:false` `episode_add_step` is a refusal. Small edits stay untaxed.
 - **PAC-2 structural lint** (`agentd/src/pac_lint.rs`, pure + unit-tested): a
   dense-claiming `UpdateSystemPrompt` payload is linted before the snapshot gate — lint
   errors → refusal with a line-numbered report; prose/lean souls pass untouched.
@@ -111,10 +115,12 @@ gotchas are the detail source):
 - **`soul_rehearse`**: run a candidate soul on an ephemeral, tool-less mind (an identity
   probe battery, optional A/B vs the current soul) *before* proposing — opt-in by design,
   policy `allow`.
-- **Per-agent soul targeting** (`soul_target_for`): for a session bound to a non-default
-  agent, `read_soul_md` reads and `propose_evolution{UpdateSystemPrompt}`/rollback write
-  the **bound agent's own `soul_file`** — only APEX/unbound touches the global `soul.md` +
-  live `soul_arc`.
+- **Per-agent soul targeting** (`soul_target_for` at apply; stored target at rollback):
+  for a session bound to a non-default agent, `read_soul_md` reads and
+  `propose_evolution{UpdateSystemPrompt}` writes the **bound agent's own `soul_file`**.
+  Rollback writes the **stored** target and requires the caller to be that owner (or
+  the node agent) — it does not retarget at the requesting session's binding. Only
+  APEX/unbound apply touches the global `soul.md` + live `soul_arc`.
 
 ---
 
@@ -453,10 +459,10 @@ Apply arm = the matching `EvolutionProposal::*` arm of `apply_evolution` (in `ma
 | Tool gate (`check` before dispatch) | `run` in `agentd/crates/plugins/src/supervisor.rs` (calls `PolicyEngine::check`) |
 | Virtual-tool interception | `dispatch_tool` in `agentd/crates/plugins/src/supervisor.rs` |
 | Applier loop, `apply_evolution`, `compute_undo`, `write_atomic` (IO-thin glue) | `agentd/crates/agentd/src/main.rs` (`spawn_evolution_applier`, `apply_evolution`, `compute_undo`, `write_atomic`) |
-| Pure evolution state machine (`kind`/`invert`, undo codec, TOML edits) — new evolution *logic* goes here, with a test | `agentd/crates/agentd/src/evolution.rs` (`kind`, `invert`, `undo_step_line`/`parse_undo_snapshot_from_text`, `policy_toml_set_rule`, `plugins_toml_add`/`_remove`, `wishlist_append`, `fossil_heal_args`) |
+| Pure evolution state machine (`kind`/`invert`, undo codec, TOML edits) — new evolution *logic* goes here, with a test | `agentd/crates/agentd/src/evolution.rs` (`kind`, `invert`, `RollbackRecord`, `undo_step_line`/`parse_rollback_record_from_text`, `rollback_authorized`, `snapshot_is_linked`, `policy_toml_set_rule`, `plugins_toml_add`/`_remove`, `wishlist_append`, `fossil_heal_args`) |
 | PAC-2 dense-soul lint gate | `agentd/crates/agentd/src/pac_lint.rs` (format-gated: only dense-claiming `UpdateSystemPrompt` payloads) |
 | Tool specs (`gather_tools`) | `gather_tools` in `agentd/crates/agentd/src/main.rs` (+ the `*_spec` builders) |
-| Cold-start rollback restore | `restore_rollback_store` + `parse_undo_snapshot_from_text` in `agentd/crates/agentd/src/main.rs` |
+| Cold-start rollback restore | `restore_rollback_store` + `parse_rollback_record_from_text` in `agentd/crates/agentd/src/evolution.rs` (unscoped episode/memory walk) |
 | Default policy | `config/policy.toml` |
 | Identity / self-evolution doctrine | `config/soul.md` (Self-evolution §), `docs/symbiosis.md` §5 |
 | Sandbox / chown model | `deploy/agentd.service`, `docs/architecture.md` (Security model) |
