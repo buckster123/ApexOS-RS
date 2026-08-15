@@ -1136,6 +1136,7 @@ fi
 hdr "Installing USB exo-workspace support"
 if [[ -d "$REPO_DIR/deploy/usb" ]]; then
   # Helper scripts (all root-run by the systemd units — never via sudo).
+  install -Dm 644 "$REPO_DIR/deploy/usb/usb-confine.sh"        /usr/local/lib/apexos/usb-confine.sh
   install -Dm 755 "$REPO_DIR/deploy/usb/usb-mount"             /usr/local/lib/apexos/usb-mount
   install -Dm 755 "$REPO_DIR/deploy/usb/usb-umount"            /usr/local/lib/apexos/usb-umount
   install -Dm 755 "$REPO_DIR/deploy/usb/usb-eject-drain"       /usr/local/lib/apexos/usb-eject-drain
@@ -1158,9 +1159,31 @@ if [[ -d "$REPO_DIR/deploy/usb" ]]; then
   install -Dm 644 "$REPO_DIR/deploy/systemd/apexos-usb-prep.service"  /etc/systemd/system/apexos-usb-prep.service
   # The old sudoers drop-in is now dead (sudo can't escalate under NoNewPrivileges) — remove it.
   rm -f /etc/sudoers.d/apexos-usb
-  # The mount target + the request dirs live under /var/lib/agentd (agentd-owned).
-  install -d -o agentd -g agentd /var/lib/agentd/workspace/media 2>/dev/null \
-    || mkdir -p /var/lib/agentd/workspace/media
+  # media/ is the root helper's mount parent — root-owned so agentd cannot
+  # replace it (or an APEX-* child) with a symlink the helpers would follow.
+  # Request dirs stay agentd-owned (the daemon only drops files there).
+  _media=/var/lib/agentd/workspace/media
+  if [[ -L "$_media" ]]; then
+    rm -f "$_media"
+  fi
+  install -d -o root -g root -m 0755 "$_media"
+  chown root:root "$_media"
+  chmod 0755 "$_media"
+  if [[ -L "$_media/.apexos-media" ]]; then
+    rm -f "$_media/.apexos-media"
+  fi
+  install -o root -g root -m 0444 /dev/null "$_media/.apexos-media"
+  # Reclaim leftover unmounted APEX-* dirs; drop planted symlinks. Never
+  # recurse into a live mount (that would chown the stick).
+  for _d in "$_media"/APEX-*; do
+    [[ -e "$_d" || -L "$_d" ]] || continue
+    if [[ -L "$_d" ]]; then
+      rm -f "$_d"
+    elif [[ -d "$_d" ]] && ! mountpoint -q "$_d" 2>/dev/null; then
+      chown root:root "$_d"
+      chmod 0755 "$_d"
+    fi
+  done
   install -d -o agentd -g agentd /var/lib/agentd/usb-eject 2>/dev/null \
     || mkdir -p /var/lib/agentd/usb-eject
   install -d -o agentd -g agentd /var/lib/agentd/usb-prep 2>/dev/null \

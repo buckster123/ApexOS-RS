@@ -23,8 +23,8 @@ for req in "$REQ_DIR"/APEX-*; do
   # Remove the request FIRST so a stuck/failing umount can't re-trigger the drain in a
   # loop — the requester learns the outcome from /proc/mounts, not from the request file.
   rm -f "$req"
-  # usb-umount re-validates the label (APEX-*, safe chars) and hard-confines the target
-  # to <workspace>/media/ before touching anything — defence in depth.
+  # usb-umount re-validates the label, lstat-refuses a symlink mountpoint, and
+  # umounts only when mountinfo TARGET/SOURCE match — defence in depth.
   /usr/local/lib/apexos/usb-umount --label "$label" \
     || echo "usb-eject-drain: umount of '$label' failed (stick busy? already gone?)" >&2
 done

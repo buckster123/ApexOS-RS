@@ -48,14 +48,16 @@ perms, so the agent couldn't write them. So we mount with `uid=agentd` ourselves
 |-------|------|
 | `deploy/udev/99-apexos-usb.rules` | On an `APEX-*` block dev: `UDISKS_IGNORE=1` (DE defers) + start the mount service on `add`, run the umount helper on `remove`. |
 | `deploy/systemd/apexos-usb-mount@.service` | Oneshot (root) — `ExecStart`/`ExecStop` call the helpers, keyed on the kernel dev name. |
-| `deploy/usb/usb-mount` | Own-mount at `<workspace>/media/<label>` with `noexec,nosuid,nodev` + `uid=agentd,gid=agentd` (FAT/exFAT) or mount+chown (other). Hard-confines the mountpoint to `media/`; idempotent; records dev→mountpoint in `/run/apexos-usb/`. |
-| `deploy/usb/usb-umount` | Unmount by `<dev>` (udev remove, via the `/run` state) or `--label APEX-…` (eject). Hard-confines + validates the label before touching anything. |
+| `deploy/usb/usb-mount` | Own-mount at `<workspace>/media/<label>` with `noexec,nosuid,nodev` + `uid=agentd,gid=agentd` (FAT/exFAT) or mount+chown (other). `media/` is root-owned; helpers `lstat`-refuse symlinks and check mountinfo TARGET+SOURCE; idempotent; records `MNT`/`DEV`/`LABEL` in `/run/apexos-usb/`. |
+| `deploy/usb/usb-umount` | Unmount by `<dev>` (udev remove, via the `/run` state) or `--label APEX-…` (eject). Label + path confine + `lstat` + exact mountinfo TARGET; never `umount` through a symlink. |
+| `deploy/usb/usb-confine.sh` | Shared confinement sourced by the helpers. Drill: `deploy/usb/usb-confine-drill.sh`. |
 | `deploy/systemd/apexos-usb-eject.path`/`.service` + `deploy/usb/usb-eject-drain` | Root eject watcher: drains `APEX-<label>` request files via `usb-umount --label` (see *Eject* below). Replaced the removed `deploy/sudoers.d/apexos-usb` (inert under `NoNewPrivileges`). |
 | `deploy/systemd/apexos-usb-prep.path`/`.service` + `deploy/usb/usb-prep`(`-drain`) | Root prep watcher for *"Use this drive"*: drains `*.req` files via `usb-prep` (relabel/format → mount → init). |
 
 `install.sh` installs all of the above (helpers → `/usr/local/lib/apexos/`,
 `apexos-workspace-init` → `/usr/local/bin`), removes the old sudoers drop-in, makes
-`<workspace>/media` + the agentd-owned request dirs, reloads udev, and enables the
+`<workspace>/media` **root-owned 0755** (so agentd cannot plant a symlink the
+helpers would follow) + the agentd-owned request dirs, reloads udev, and enables the
 eject/prep path units. Runs on every node (the marker-gate keeps it safe everywhere).
 
 ## Eject — privilege separation, NOT sudo
@@ -73,7 +75,8 @@ failed in the field). The fix is privilege separation, so agentd never escalates
 2. A **path unit** `apexos-usb-eject.path` (root) watches that dir and fires
    `apexos-usb-eject.service` (root oneshot), whose `usb-eject-drain` removes each request
    and runs `usb-umount --label` **as root** — the label re-validated by the drain and a
-   third time by `usb-umount`, which hard-confines the target to `<workspace>/media/`.
+   third time by `usb-umount`, which `lstat`-refuses a symlink and umounts only when
+   mountinfo TARGET is the constructed `<workspace>/media/<label>`.
 3. The requester **polls `/proc/mounts`** (≤8s): success when the mountpoint disappears;
    otherwise a clear "still mounted — check `journalctl -u apexos-usb-eject`".
 
@@ -196,9 +199,9 @@ untrusted FS image; deeper untrusted-filesystem hardening is a post-mk1 item.
 
 ## Verify
 
-- **Dev box (no real stick)**: `valid_exo_label` unit test (gateway); the bash helpers
-  syntax-check + their validation/confinement paths run (bad label rejected, not-mounted
-  no-op); `POST /api/media/eject` rejects bad labels and attempts the helper for good
+- **Dev box (no real stick)**: `valid_exo_label` unit test (gateway); `bash deploy/usb/usb-confine-drill.sh`
+  (symlink refusal, label/dev sanitising, mountinfo exact-TARGET, `bash -n` on every
+  helper); `POST /api/media/eject` rejects bad labels and attempts the helper for good
   ones (gated). A full loopback test: `truncate -s 64M img && mkfs.exfat -L APEX-test img
   && losetup …` then run `usb-mount` (needs root).
 - **Field-test (real exFAT stick)**: `apexos-workspace-init` + relabel `APEX-<name>` →
