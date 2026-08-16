@@ -17,8 +17,9 @@ pub enum NameOwner {
     Virtual,
     /// Only this plugin id may register the name.
     Plugin(&'static str),
-    /// Finding 11: fs/shell (`apexos-tools`) and net (`apexos-net`) share
-    /// the reserved names; each process advertises its own class.
+    /// Finding 11: fs/shell (`apexos-tools`), net (`apexos-net`), and
+    /// device (`apexos-dev`) share the reserved names; each process
+    /// advertises its own class.
     ToolsFamily,
 }
 
@@ -47,7 +48,7 @@ impl std::fmt::Display for ClaimError {
 }
 
 pub fn is_tools_family(plugin_id: &str) -> bool {
-    plugin_id == "apexos-tools" || plugin_id == "apexos-net"
+    plugin_id == "apexos-tools" || plugin_id == "apexos-net" || plugin_id == "apexos-dev"
 }
 
 /// Owner of a well-known name, if any.
@@ -86,7 +87,7 @@ pub fn claim_tool_name(
         }
         Some(NameOwner::ToolsFamily) if !is_tools_family(claimant) => {
             return Err(ClaimError::Reserved {
-                expected: "apexos-tools|apexos-net",
+                expected: "apexos-tools|apexos-net|apexos-dev",
             });
         }
         Some(NameOwner::Plugin(_)) | Some(NameOwner::ToolsFamily) | None => {}
@@ -105,8 +106,8 @@ pub fn stamps_agent_id(plugin_id: &str, tool: &str) -> bool {
     plugin_id == "cerebro" || matches!(name_owner(tool), Some(NameOwner::Plugin("cerebro")))
 }
 
-/// Workspace stamp applies to the tools family (fs + net workers) and to
-/// any call whose reserved owner is that family.
+/// Workspace stamp applies to the tools family (fs + net + dev workers) and
+/// to any call whose reserved owner is that family.
 pub fn stamps_workspace(plugin_id: &str, tool: &str) -> bool {
     is_tools_family(plugin_id)
         || matches!(name_owner(tool), Some(NameOwner::ToolsFamily))
@@ -356,10 +357,11 @@ mod tests {
         assert!(claim_tool_name("read_file", "apexos-tools", &empty()).is_ok());
         assert!(claim_tool_name("remember", "cerebro", &empty()).is_ok());
         assert!(claim_tool_name("http_fetch", "apexos-net", &empty()).is_ok());
+        assert!(claim_tool_name("camera_capture", "apexos-dev", &empty()).is_ok());
         assert_eq!(
             claim_tool_name("read_file", "evil", &empty()),
             Err(ClaimError::Reserved {
-                expected: "apexos-tools|apexos-net"
+                expected: "apexos-tools|apexos-net|apexos-dev"
             })
         );
         assert_eq!(
@@ -388,6 +390,7 @@ mod tests {
         assert!(stolen_allowlist("read_file", Some("evil")));
         assert!(!stolen_allowlist("read_file", Some("apexos-tools")));
         assert!(!stolen_allowlist("http_fetch", Some("apexos-net")));
+        assert!(!stolen_allowlist("camera_capture", Some("apexos-dev")));
         assert!(stolen_allowlist("http_fetch", Some("evil")));
         assert!(!stolen_allowlist("read_file", None));
         assert!(!stolen_allowlist("propose_evolution", None));
@@ -399,6 +402,7 @@ mod tests {
     fn stamps_follow_the_name_not_just_the_id_string() {
         assert!(stamps_workspace("apexos-tools", "read_file"));
         assert!(stamps_workspace("apexos-net", "http_fetch"));
+        assert!(stamps_workspace("apexos-dev", "camera_capture"));
         assert!(stamps_workspace("evil", "read_file"));
         assert!(!stamps_workspace("evil", "custom_tool"));
         assert!(stamps_agent_id("cerebro", "remember"));

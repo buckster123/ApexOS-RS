@@ -111,9 +111,9 @@ pub fn tools_worker_rules(
     tools_worker_rules_for(workspace, read_roots, git_roots, extra_rw, true)
 }
 
-/// `grant_devices`: the fs/shell worker needs `/dev` (camera/gpio/alsa).
-/// The net worker does not — only null/zero/urandom — so `run_command` is
-/// not even in that process, and http_fetch cannot open /dev/video*.
+/// `grant_devices`: only the device-class worker (and the unclassed compat
+/// process) get `/dev`. The fs/shell worker must not — `run_command` would
+/// inherit it. Net worker is the same (null/zero/urandom only).
 pub fn tools_worker_rules_for(
     workspace: &Path,
     read_roots: &[PathBuf],

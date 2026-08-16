@@ -52,7 +52,7 @@ The point of naming these: hardening is *closing specific boundaries*, not a vib
 Gemini's framing of a "Nursery" — an immutable guardrail layer the evolving agent can't bypass — is the right mental model. Grounded against what we already have:
 
 ### A1. Namespace-isolate the `apexos-tools` worker *(net/no-net split shipped Wave 28)*
-The original premise — "the tools process does FS + GPIO only; it has **no legitimate reason to touch the network**" — was **wrong against the shipped tool set**: `http_fetch`, `screenshot_mirror`, `notify`, and `ui_query` legitimately open sockets. Wave 28 split the binary into two MCP children (`--class=fs` empty netns / `--class=net` host net). Leftover: a **device-class** worker (camera/gpio still share `audio`/`video` groups); pivot-root / `CLONE_NEWNS` remains attractive on the fs worker.
+The original premise — "the tools process does FS + GPIO only; it has **no legitimate reason to touch the network**" — was **wrong against the shipped tool set**: `http_fetch`, `screenshot_mirror`, `notify`, and `ui_query` legitimately open sockets. Wave 28 split fs/net; Wave 29 added `--class=dev` (camera/gpio, empty netns, `/dev` allowed; the shell worker no longer gets `/dev`). Leftover: same uid (SETUID blocked); pivot-root / `CLONE_NEWNS` remains attractive on the fs worker.
 
 ### A2. Capability caps on the systemd units *(small)*
 Add `CapabilityBoundingSet=` (drop `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, …) + `RestrictAddressFamilies=`/`SystemCallFilter=` to `agentd.service` and friends. We already ship `NoNewPrivileges` + `ProtectSystem=strict` + `PrivateDevices` — this tightens the residual.

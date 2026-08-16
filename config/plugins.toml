@@ -28,6 +28,15 @@ cmd     = "/usr/local/bin/apexos-tools"
 args    = ["--class", "net"]
 restart = "always"
 
+# Finding 11: device-class worker. camera_capture + gpio_* get /dev and an
+# empty netns. The fs/shell worker above does not get /dev, so run_command
+# cannot open the camera.
+[[plugin]]
+id      = "apexos-dev"
+cmd     = "/usr/local/bin/apexos-tools"
+args    = ["--class", "dev"]
+restart = "always"
+
 # Sonus — Suno music generation (generate_song / check_status / download_track …).
 # Pure-Rust drop-in for the old Python hermes-sonus plugin: same tool names, no venv.
 # Standalone sibling repo (github.com/buckster123/Sonus-RS) — NOT a workspace member,
