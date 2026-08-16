@@ -11,8 +11,9 @@
 //!      (cerebro/occipital vision, imaginarium proxy token) — never by
 //!      `apexos-tools`.
 //!   3. `[plugin.env]` overlays, but cannot inject a never-key.
-//!   4. Same-uid file access (`/var/lib/agentd/.api_key`) is a residual —
-//!      closing it needs a separate worker user (not this slice).
+//!   4. Same-uid file access (`/var/lib/agentd/.api_key`) is closed in the
+//!      tools worker by Landlock (`apexos-confine::restrict_tools_worker`),
+//!      not by a second uid (agentd cannot setuid under NoNewPrivileges).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -60,6 +61,7 @@ const INHERIT: &[&str] = &[
     "APEXOS_UI_STATE_URL",
     "APEXOS_CAMERA_CMD",
     "APEXOS_CAMERA_DEVICE",
+    "APEXOS_LANDLOCK",
 ];
 
 fn extra_inherit(plugin_id: &str) -> &'static [&'static str] {
@@ -88,7 +90,11 @@ pub fn plugin_child_env(
     parent: impl Fn(&str) -> Option<String>,
 ) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    for key in INHERIT.iter().copied().chain(extra_inherit(plugin_id).iter().copied()) {
+    for key in INHERIT
+        .iter()
+        .copied()
+        .chain(extra_inherit(plugin_id).iter().copied())
+    {
         if is_never_key(key) {
             continue;
         }
@@ -144,7 +150,13 @@ mod tests {
             env.get("AGENTD_WORKSPACE").map(String::as_str),
             Some("/var/lib/agentd/workspace")
         );
-        assert_eq!(env.get("TELEGRAM_BOT_TOKEN").map(String::as_str), Some("tg"));
+        assert_eq!(
+            env.get("TELEGRAM_BOT_TOKEN").map(String::as_str),
+            Some("tg")
+        );
+        assert_eq!(env.get("APEXOS_LANDLOCK").map(String::as_str), None);
+        let env_ll = plugin_child_env("apexos-tools", None, parent(&[("APEXOS_LANDLOCK", "0")]));
+        assert_eq!(env_ll.get("APEXOS_LANDLOCK").map(String::as_str), Some("0"));
         for banned in [
             "AGENTD_TOKEN",
             "ANTHROPIC_API_KEY",
@@ -155,7 +167,10 @@ mod tests {
             "SENSOR_BRIDGE_TOKEN",
             "IMAGINARIUM_TOKEN",
         ] {
-            assert!(!env.contains_key(banned), "{banned} leaked into apexos-tools");
+            assert!(
+                !env.contains_key(banned),
+                "{banned} leaked into apexos-tools"
+            );
         }
     }
 
@@ -170,7 +185,10 @@ mod tests {
                 ("CEREBRO_DATA_DIR", "/should-not-inherit-this-name"),
             ]),
         );
-        assert_eq!(env.get("ANTHROPIC_API_KEY").map(String::as_str), Some("sk-ant"));
+        assert_eq!(
+            env.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-ant")
+        );
         assert!(!env.contains_key("AGENTD_TOKEN"));
         // CEREBRO_DATA_DIR comes from [plugin.env], not a blanket inherit.
         assert!(!env.contains_key("CEREBRO_DATA_DIR"));
@@ -187,7 +205,10 @@ mod tests {
                 ("XAI_API_KEY", "xai-secret"),
             ]),
         );
-        assert_eq!(env.get("IMAGINARIUM_TOKEN").map(String::as_str), Some("proxy"));
+        assert_eq!(
+            env.get("IMAGINARIUM_TOKEN").map(String::as_str),
+            Some("proxy")
+        );
         assert_eq!(
             env.get("IMAGINARIUM_URL").map(String::as_str),
             Some("http://127.0.0.1:8791")
@@ -210,11 +231,7 @@ mod tests {
         let mut overlay = HashMap::new();
         overlay.insert("RUST_LOG".into(), "debug".into());
         overlay.insert("CEREBRO_DATA_DIR".into(), "/var/lib/agentd/cerebro".into());
-        let env = plugin_child_env(
-            "cerebro",
-            Some(&overlay),
-            parent(&[("RUST_LOG", "warn")]),
-        );
+        let env = plugin_child_env("cerebro", Some(&overlay), parent(&[("RUST_LOG", "warn")]));
         assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("debug"));
         assert_eq!(
             env.get("CEREBRO_DATA_DIR").map(String::as_str),

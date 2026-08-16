@@ -8,6 +8,23 @@ use std::io::{self, BufRead, Write};
 mod tools;
 
 fn main() {
+    // Finding 11 part 2: same-uid DAC still sees /var/lib/agentd/.api_key.
+    // Landlock is inherited by run_command children. APEXOS_LANDLOCK=0 skips.
+    match apexos_confine::restrict_tools_worker() {
+        apexos_confine::LandlockStatus::Restricted { abi } => {
+            eprintln!("[apexos-tools] landlock restricted (abi {abi})");
+        }
+        apexos_confine::LandlockStatus::Disabled => {
+            eprintln!("[apexos-tools] landlock disabled (APEXOS_LANDLOCK)");
+        }
+        apexos_confine::LandlockStatus::Unsupported => {
+            eprintln!("[apexos-tools] landlock unsupported — same-uid residual remains");
+        }
+        apexos_confine::LandlockStatus::Error(e) => {
+            eprintln!("[apexos-tools] landlock failed ({e}) — same-uid residual remains");
+        }
+    }
+
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = stdout.lock();
