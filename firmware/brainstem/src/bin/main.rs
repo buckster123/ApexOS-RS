@@ -77,8 +77,8 @@ use esp_storage::FlashStorage;
 use static_cell::StaticCell;
 
 use apexos_mesh_proto::{
-    encode_frame, Deframer, MeshClass, MeshFrame, Payload, PlainPacket, BROADCAST,
-    DEFAULT_HOP_LIMIT, FLAG_ACK_REQUESTED, WIRE_VERSION,
+    decide_radio_inbound, encode_frame, Deframer, InboxTable, MeshClass, MeshFrame, Payload,
+    PlainPacket, RadioInbound, BROADCAST, DEFAULT_HOP_LIMIT, FLAG_ACK_REQUESTED, WIRE_VERSION,
 };
 use brainstem::{counter, neighbors::Neighbors, radio::Radio, store};
 
@@ -152,6 +152,21 @@ static TX_QUEUE: Channel<CriticalSectionRawMutex, MeshFrame, 8> = Channel::new()
 /// queue is full.
 fn enqueue(frame: MeshFrame) {
     let _ = TX_QUEUE.try_send(frame);
+}
+
+/// Host accepted `(radio_sender, radio_ctr)` — radio task ACKs on the air.
+static HOST_ACCEPT: Channel<CriticalSectionRawMutex, (u16, u64), 8> = Channel::new();
+
+/// Forward an inbound radio packet up the USB with its original provenance
+/// so the cortex can accept that exact pair.
+fn enqueue_up(sender: u16, ctr: u64, ct: alloc::vec::Vec<u8>) {
+    enqueue(MeshFrame {
+        ver: WIRE_VERSION,
+        class: MeshClass::Gossip,
+        sender,
+        ctr,
+        ct,
+    });
 }
 
 /// The persistent store, shared by the tasks that write it (provisioning and
@@ -306,6 +321,14 @@ async fn inbound_task(
                 // frame, which now carries the new node id.
             }
 
+            // The cortex accepted a radio pair. Tell the radio task so it
+            // can ACK on the air (SA-2). Any Ack on this cable is a host
+            // accept — the radio path never writes Ack onto USB.
+            if let Payload::Ack { of_sender, of_ctr } = &packet.payload {
+                let _ = HOST_ACCEPT.try_send((*of_sender, *of_ctr));
+                continue;
+            }
+
             // A packet the cortex addressed to some OTHER node is ours to
             // carry, not to act on: queue it durably and let the radio deliver
             // it when that peer turns up. This is the whole point of a
@@ -412,7 +435,12 @@ async fn radio_task(
             Err(()) => (apexos_mesh_proto::ReplayTable::new(), true),
         }
     };
+    let mut inbox = {
+        let mut guard = store.lock().await;
+        guard.load_inbox().await.unwrap_or_else(|_| InboxTable::new())
+    };
     let mut replay_dirty = false;
+    let mut inbox_dirty = false;
     let mut next_beat = Instant::now();
     // The counter the head-of-queue message was last sent under; an Ack must
     // match it to retire that message.
@@ -420,6 +448,33 @@ async fn radio_task(
     let mut next_drain = Instant::now();
 
     loop {
+        // Cortex accepted a held pair — now (and only now) ACK on the air.
+        while let Ok((of_sender, of_ctr)) = HOST_ACCEPT.try_receive() {
+            let _ = inbox.take(of_sender, of_ctr);
+            inbox_dirty = true;
+            let ident = *identity.lock().await;
+            if let (Some(node_id), Some(psk)) = (ident.node_id, ident.psk)
+                && let Some(ctr) = counter::try_next()
+                && let Ok(ack) = apexos_mesh_proto::seal(
+                    &apexos_mesh_proto::Psk(psk),
+                    MeshClass::Gossip,
+                    node_id,
+                    ctr,
+                    &PlainPacket {
+                        target: of_sender,
+                        hop_limit: 1,
+                        flags: 0,
+                        payload: Payload::Ack {
+                            of_sender,
+                            of_ctr,
+                        },
+                    },
+                )
+            {
+                let _ = radio.advertise(&ack).await;
+            }
+        }
+
         // Advertising is a standing state, so the timer only decides how often
         // we refresh the payload; between refreshes we are listening.
         let now = Instant::now();
@@ -463,6 +518,21 @@ async fn radio_task(
                 let mut guard = store.lock().await;
                 if guard.save_replay(&replay).await.is_ok() {
                     replay_dirty = false;
+                }
+            }
+            if inbox_dirty {
+                let mut guard = store.lock().await;
+                if guard.save_inbox(&inbox).await.is_ok() {
+                    inbox_dirty = false;
+                }
+            }
+            // USB retry of anything still waiting on the host (SA-2).
+            let cortex_up = LAST_INBOUND_MS.load(Ordering::Relaxed) != 0
+                && now_ms().saturating_sub(LAST_INBOUND_MS.load(Ordering::Relaxed))
+                    < CORTEX_TIMEOUT_MS;
+            if cortex_up {
+                for slot in inbox.iter() {
+                    enqueue_up(slot.sender, slot.ctr, slot.packet().to_vec());
                 }
             }
         }
@@ -552,35 +622,48 @@ async fn radio_task(
                         pending_ctr = None;
                         next_drain = Instant::now();
                     }
-                    // Addressed to us: hand it up the wire and acknowledge it
-                    // on the air, so the sender can drop its copy.
+                    // Addressed to us: hold it until the cortex durably
+                    // accepts, then ACK (SA-2). A try_send drop is no
+                    // longer an implicit delivery.
                     _ if packet.target == ident.node_id.unwrap_or(UNPROVISIONED_NODE_ID) => {
-                        if let Some(up) =
-                            frame_for(packet.payload.clone(), MeshClass::Gossip, packet.target, 0)
-                        {
-                            enqueue(up);
-                        }
-                        if let Some(ctr) = counter::try_next()
-                            && let Ok(ack) = apexos_mesh_proto::seal(
-                                &apexos_mesh_proto::Psk(psk),
-                                MeshClass::Gossip,
-                                ident.node_id.unwrap_or(UNPROVISIONED_NODE_ID),
-                                ctr,
-                                &PlainPacket {
-                                    target: heard.frame.sender,
-                                    hop_limit: 1,
-                                    flags: 0,
-                                    payload: Payload::Ack {
-                                        of_sender: heard.frame.sender,
-                                        of_ctr: heard.frame.ctr,
-                                    },
-                                },
-                            )
-                        {
-                            let _ = radio.advertise(&ack).await;
-                            // Back to the heartbeat promptly; the ack has had
-                            // its moment on the air.
-                            next_beat = Instant::now() + Duration::from_millis(400);
+                        let Ok(ct) = postcard::to_allocvec(&packet) else {
+                            continue;
+                        };
+                        match decide_radio_inbound(
+                            &mut replay,
+                            &mut inbox,
+                            heard.frame.sender,
+                            heard.frame.ctr,
+                            &ct,
+                        ) {
+                            RadioInbound::Deliver => {
+                                replay_dirty = true;
+                                inbox_dirty = true;
+                                enqueue_up(heard.frame.sender, heard.frame.ctr, ct);
+                            }
+                            RadioInbound::WaitHost => {}
+                            RadioInbound::ReAck => {
+                                if let Some(ctr) = counter::try_next()
+                                    && let Ok(ack) = apexos_mesh_proto::seal(
+                                        &apexos_mesh_proto::Psk(psk),
+                                        MeshClass::Gossip,
+                                        ident.node_id.unwrap_or(UNPROVISIONED_NODE_ID),
+                                        ctr,
+                                        &PlainPacket {
+                                            target: heard.frame.sender,
+                                            hop_limit: 1,
+                                            flags: 0,
+                                            payload: Payload::Ack {
+                                                of_sender: heard.frame.sender,
+                                                of_ctr: heard.frame.ctr,
+                                            },
+                                        },
+                                    )
+                                {
+                                    let _ = radio.advertise(&ack).await;
+                                }
+                            }
+                            RadioInbound::Drop => {}
                         }
                     }
                     _ => {}

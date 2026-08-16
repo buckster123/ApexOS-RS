@@ -1019,17 +1019,100 @@ async fn handle_mesh_bridge(socket: WebSocket, state: GatewayState) {
             state.mesh_link.note_decode_fail();
             continue;
         };
+        state.mesh_link.note_rx();
+        if accept_radio_payload(&state, &frame, &mut seen).await {
+            continue;
+        }
         if !seen.accept(frame.sender, frame.ctr) {
             state.mesh_link.note_duplicate();
             continue;
         }
-        state.mesh_link.note_rx();
         absorb_mesh_frame(&state, &frame);
     }
 
     tx_task.abort();
     state.mesh_link.link_down();
     eprintln!("[mesh-bridge] bridge disconnected");
+}
+
+/// Persist an inbound radio data payload and tell the brainstem it may ACK.
+/// Returns true when the frame was radio-data (caller must not treat it as
+/// status). A USB retry of the same `(sender, ctr)` re-sends the host accept
+/// but does not re-deliver A2A.
+async fn accept_radio_payload(
+    state: &GatewayState,
+    frame: &apexos_mesh_proto::MeshFrame,
+    seen: &mut apexos_core::mesh_router::SeenCache,
+) -> bool {
+    use apexos_mesh_proto::{Payload, PlainPacket};
+    let Ok((packet, _)) = postcard::take_from_bytes::<PlainPacket>(&frame.ct) else {
+        return false;
+    };
+    let Some((kind, body)) = mesh_link::payload_kind_body(&packet.payload) else {
+        return false;
+    };
+    if !mesh_link::radio_payload_needs_accept(&packet.payload) {
+        return false;
+    }
+    let path = state.events_dir.join("radio_inbox.jsonl");
+    match mesh_link::persist_radio_inbox(&path, frame.sender, frame.ctr, kind, &body) {
+        Ok(news) => {
+            if news {
+                if let Payload::A2A { body: raw } = &packet.payload {
+                    deliver_radio_a2a(state, frame.sender, raw).await;
+                }
+            }
+            if !seen.accept(frame.sender, frame.ctr) {
+                state.mesh_link.note_duplicate();
+            }
+            if !state
+                .mesh_link
+                .push_frame(&mesh_link::host_accept_frame(frame.sender, frame.ctr))
+            {
+                eprintln!("[mesh-bridge] host accept not sent — no bridge subscriber");
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("[mesh-bridge] radio inbox persist failed: {e}");
+            // Do not host-accept: the brainstem will retry USB and the
+            // sender still holds the message.
+            true
+        }
+    }
+}
+
+async fn deliver_radio_a2a(state: &GatewayState, sender: u16, raw: &[u8]) {
+    let text = String::from_utf8_lossy(raw);
+    if text.trim().is_empty() {
+        return;
+    }
+    let from = format!("radio-{sender}");
+    let session = mesh_session_for(state, &from);
+    let prompt = a2a_prompt_text(Some(&from), None, &text);
+    state
+        .bus
+        .emit(Event::UserPrompt {
+            session,
+            text: prompt,
+            images: vec![],
+        })
+        .await;
+    let preview: String = text.chars().take(140).collect();
+    state
+        .bus
+        .emit(Event::MeshMessage {
+            from_node: from.clone(),
+            session,
+            preview: preview.clone(),
+        })
+        .await;
+    let snapshot = {
+        let mut map = state.mesh_unread.lock().unwrap_or_else(|e| e.into_inner());
+        mesh_unread_bump(&mut map, session.0, &from, &preview, now_epoch_secs());
+        map.clone()
+    };
+    persist_mesh_unread(&state.mesh_unread_path, &snapshot);
 }
 
 /// Make sense of a frame that arrived from our own brainstem.

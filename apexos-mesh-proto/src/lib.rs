@@ -57,6 +57,7 @@ use core::fmt;
 pub mod chunk;
 pub mod crypto;
 pub mod frame;
+pub mod inbox;
 pub mod types;
 
 pub use chunk::{blob_root, chunk_blob, ChunkSet, Reassembler, DEFAULT_CHUNK_SIZE};
@@ -64,6 +65,10 @@ pub use crypto::{
     decode_replay_slot, encode_replay_slot, next_provision_ctr, open, open_blob,
     reserve_from_stored, seal, seal_blob, Psk, ReplayAdmit, ReplayTable, ReplayWindow,
     MAX_REPLAY_SENDERS, REPLAY_SLOT_BYTES,
+};
+pub use inbox::{
+    decide_radio_inbound, decode_inbox_slot, encode_inbox_slot, InboxRefuse, InboxSlot,
+    InboxTable, RadioInbound, INBOX_PACKET_MAX, INBOX_SLOT_BYTES, MAX_INBOX,
 };
 pub use frame::{
     decode_datagram, decode_frame, encode_datagram, encode_frame, Deframer, DeframerStats,
