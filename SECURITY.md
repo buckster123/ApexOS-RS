@@ -27,7 +27,7 @@ The full trust-boundary table lives in [`docs/post-mk1.md` §2](docs/post-mk1.md
 
 ## What's already in place
 
-- **Path confinement** (`apexos-confine`): canonical-path checks, `..` and symlink-escape rejection (TOCTOU-safe), writes hard-confined to the agent workspace, reads limited to workspace + a small allowlist **minus** a secret denylist (`/etc/agentd/env`, `~/.ssh`, `/proc/*/environ`, `*.api_key`, `/etc/shadow`).
+- **Path confinement** (`apexos-confine`): canonical-path checks, `..` and symlink-escape rejection (TOCTOU-safe), writes hard-confined to the agent workspace, reads limited to workspace + a small allowlist **minus** a secret denylist (`/etc/agentd/env`, `/etc/agentd/ui.env`, `~/.ssh`, `/proc/*/environ`, `*.api_key`, `/etc/shadow`). The tools worker also applies a **Landlock** FS allowlist so same-uid `run_command` cannot open daemon secrets.
 - **Per-agent workspace + identity stamping** — the daemon overwrites `agent_id` and the workspace root on every tool call; the model cannot widen its own confinement or write to another agent's memory space.
 - **Policy/approval gate** — in the default (suggest) mode, destructive tools require human approval and a tool with no policy rule defaults to *ask*, never *allow*. Yolo/autonomy is opt-in, per node or per goal — never the default.
 - **systemd sandboxing** on every service: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices` where hardware isn't needed. The kiosk UI is `User=apexos-ui` with a token-only env file (SA-13).
@@ -42,7 +42,7 @@ We prefer an honest list over a clean-looking one:
 
 - **`run_command`'s denylist is best-effort by design** — it's a heuristic, trivially bypassable; the approval gate + systemd sandbox are the real controls, and the tool description says so.
 - **Plaintext LAN transport** — WS/HTTP carry bearer tokens over `ws://`/`http://`. This is LAN-scoped by design. **Never port-forward a node to the internet**; if you need remote access, use a VPN/overlay (WireGuard, Tailscale).
-- **The tools worker is not namespace-jailed** — it is path-confined and systemd-sandboxed, but shares the network namespace (several tools legitimately use sockets: `http_fetch`, the loopback screenshot mirror, node bootstrap). A net/no-net worker split is on the post-beta hardening track, with capability caps and input-normalization filters.
+- **The tools worker is not namespace-jailed** — it is path-confined, Landlocked (finding 11 part 2: same-uid `/var/lib/agentd/.api_key` is not readable after `restrict_tools_worker`), and systemd-sandboxed, but shares the network namespace and device groups (several tools legitimately use sockets: `http_fetch`, the loopback screenshot mirror, node bootstrap). A net/no-net worker split is on the post-beta hardening track.
 - **Some kiosks may still run `apexos-rs-ui` as root** — only via the persisted `APEXOS_UI_AS_ROOT` DRM fallback when seatless linuxkms cannot take the card as `apexos-ui`. That path still loads `/etc/agentd/ui.env` (gateway token + WS only), not `/etc/agentd/env`.
 
 ## Deployment guidance

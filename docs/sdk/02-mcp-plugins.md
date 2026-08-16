@@ -446,6 +446,8 @@ the supervisor checks policy before it ever calls you (`supervisor.rs:384-403`).
   `spawn_plugin` **`env_clear`s** the child and rebuilds a non-secret allowlist
   (`plugin_child_env`) plus this overlay. `[plugin.env]` cannot inject `AGENTD_TOKEN`
   / mesh / sensor / PSK keys. Do not rely on inheriting agentd's full environment.
+  `apexos-tools` also Landlocks itself (finding 11 part 2) so same-uid
+  `run_command` cannot open `/var/lib/agentd/.api_key`.
 
 ### For agents self-extending at runtime
 

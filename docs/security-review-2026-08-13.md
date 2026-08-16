@@ -27,7 +27,8 @@
 > Wave 23 (PR #377): SA-2.
 > Wave 24 (PR #379): SA-4.
 > Wave 25 (PR #380): SA-6.
-> Wave 26 (this tree): SA-13.
+> Wave 26 (PR #381): SA-13.
+> Wave 27 (this tree): finding 11 part 2 (same-uid `/var/lib/agentd`).
 
 ## Ranked findings
 
@@ -161,6 +162,8 @@
 ### 11. High — policy escape exposes all daemon secrets and agent state
 
 - **Files:** `agentd/crates/plugins/src/supervisor.rs:2747-2770`,
+  `agentd/crates/plugins/src/plugin_env.rs`,
+  `apexos-confine/src/landlock.rs`,
   `deploy/agentd.service:20-44`,
   `install.sh:914-928`
 - **Impact:** MCP children inherit the full agentd environment, UID, network
@@ -171,6 +174,15 @@
 - **Minimal fix:** Spawn plugins with `env_clear` and explicit non-secret
   variables, split shell/network/device workers into separate service users and
   namespaces, and keep daemon credentials out of tool-worker environments.
+- **Fixed (Wave 11):** `env_clear` + `plugin_child_env` — node/admin secrets
+  never leave agentd; provider keys only reach the plugin that needs them.
+- **Fixed (Wave 27):** `apexos-tools` applies a Landlock FS allowlist at
+  startup (`restrict_tools_worker`). The ruleset never grants `/var/lib/agentd`,
+  `/etc/agentd`, `/etc`, or `/proc` as a whole — workspace, usb-eject/prep,
+  the notify JSONL inode, and system exec/TLS paths only. Inherited by
+  `run_command` children, so `cat /var/lib/agentd/.api_key` fails closed.
+  Residual: still same uid (no SETUID under `NoNewPrivileges`); network and
+  device access stay shared; `APEXOS_LANDLOCK=0` is the operator skip.
 
 ### 12. High — radio replay state is volatile and attacker-evictable
 
@@ -493,12 +505,12 @@ in `ActionId`/`SessionId`; the approval issue is authority binding.
 
 `NoNewPrivileges`, `ProtectSystem=strict`, and `ProtectHome` still block direct
 setuid escalation and ordinary writes to the base OS or home directories.
-They do **not** protect daemon environment secrets, `/var/lib/agentd`, mutable
-agent configuration, the network, granted devices, or the root self-update/USB
-request consumers. Findings 5 and 7 closed the root-helper path/symlink holes;
-finding 11 closed the env leak (children no longer inherit `AGENTD_TOKEN` /
-provider keys); same-uid file access to `/var/lib/agentd` remains after the
-model has crossed the approval gate.
+They do **not** protect the network, granted devices, or the root
+self-update/USB request consumers. Findings 5 and 7 closed the root-helper
+path/symlink holes; finding 11 closed the env leak (children no longer inherit
+`AGENTD_TOKEN` / provider keys) and the tools-worker Landlock allowlist
+(Wave 27) so a same-uid `cat /var/lib/agentd/.api_key` fails closed. Network
+namespace and device groups remain shared.
 
 ## Verification
 

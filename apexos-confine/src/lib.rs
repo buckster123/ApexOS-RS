@@ -21,11 +21,20 @@
 //! so a rename+symlink of an ancestor between check and use cannot escape.
 //! [`confine_fs`] remains the policy predicate (approval / "is this allowed?");
 //! do not `std::fs` the `PathBuf` it returns.
+//!
+//! The tools worker additionally calls [`restrict_tools_worker`] (Landlock LSM)
+//! so a same-uid `run_command` cannot open daemon secrets that DAC would allow.
 
 #[cfg(target_os = "linux")]
 mod openat;
 #[cfg(target_os = "linux")]
 pub use openat::{confine_beneath, io_denied, relative_under, Beneath, DirEnt, Stat};
+
+mod landlock;
+pub use landlock::{
+    is_forbidden_landlock_root, restrict, restrict_tools_worker, tools_worker_rules, FsRules,
+    LandlockStatus,
+};
 
 use std::path::{Component, Path, PathBuf};
 
@@ -104,8 +113,8 @@ pub fn confine_fs(
     if has_traversal(requested) {
         return Err(Denied::Traversal);
     }
-    let canon =
-        canonicalize_lenient(requested).ok_or_else(|| Denied::Unresolvable(requested.to_path_buf()))?;
+    let canon = canonicalize_lenient(requested)
+        .ok_or_else(|| Denied::Unresolvable(requested.to_path_buf()))?;
 
     if is_secret(&canon) {
         return Err(Denied::Secret(canon));
@@ -137,8 +146,8 @@ pub fn confine_to_roots(requested: &Path, roots: &[PathBuf]) -> Result<PathBuf, 
     if has_traversal(requested) {
         return Err(Denied::Traversal);
     }
-    let canon =
-        canonicalize_lenient(requested).ok_or_else(|| Denied::Unresolvable(requested.to_path_buf()))?;
+    let canon = canonicalize_lenient(requested)
+        .ok_or_else(|| Denied::Unresolvable(requested.to_path_buf()))?;
     for root in roots {
         if canon.starts_with(root) {
             return Ok(canon);
@@ -158,7 +167,8 @@ mod tests {
     /// A unique, freshly-created temp dir (std-only — no tempfile dep).
     fn mktmp(tag: &str) -> PathBuf {
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("apexos-confine-{}-{tag}-{n}", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("apexos-confine-{}-{tag}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         fs::canonicalize(&p).unwrap()
@@ -182,7 +192,10 @@ mod tests {
 
         let outside = mktmp("outside");
         let r = confine_fs(&outside.join("x"), Access::Write, &ws, &[], |_| false);
-        assert!(matches!(r, Err(Denied::OutsideWorkspace { .. })), "got {r:?}");
+        assert!(
+            matches!(r, Err(Denied::OutsideWorkspace { .. })),
+            "got {r:?}"
+        );
     }
 
     #[test]
@@ -258,9 +271,15 @@ mod tests {
         // Even though `link` is lexically inside the workspace, canonicalization
         // resolves it to the outside target → denied.
         let r = confine_fs(&link, Access::Read, &ws, &[], |_| false);
-        assert!(matches!(r, Err(Denied::OutsideReadAllowlist(_))), "symlink escape must be denied, got {r:?}");
+        assert!(
+            matches!(r, Err(Denied::OutsideReadAllowlist(_))),
+            "symlink escape must be denied, got {r:?}"
+        );
         let w = confine_fs(&link, Access::Write, &ws, &[], |_| false);
-        assert!(matches!(w, Err(Denied::OutsideWorkspace { .. })), "symlink write-escape must be denied, got {w:?}");
+        assert!(
+            matches!(w, Err(Denied::OutsideWorkspace { .. })),
+            "symlink write-escape must be denied, got {w:?}"
+        );
     }
 
     #[test]

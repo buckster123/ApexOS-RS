@@ -148,7 +148,7 @@ and rename-ancestor TOCTOU cases. `apexos-tools` supplies the *policy* (per-agen
 read roots, secret denylist) and renders the agent-facing strings.
 · [`apexos-confine/`](apexos-confine/) (the algorithm) ← `confine()` / `confine_io()` / `confine_git_repo()` in [`tools/crates/apexos-tools/`](tools/crates/apexos-tools/)
 · explained in the FS/git-confinement notes in [`docs/gotchas.md`](docs/gotchas.md)
-· **Lift:** `cargo add apexos-confine` — std + Linux `libc` for `openat2`. The sandbox algorithm on its own.
+· **Lift:** `cargo add apexos-confine` — std + Linux `libc` for `openat2` + Landlock. The sandbox algorithm on its own.
 
 **Self-update loop** 🟡
 A daemon that safely rewrites its own binary: a watchdog at the privilege boundary, a health
