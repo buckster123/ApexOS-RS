@@ -301,7 +301,7 @@ impl<S: BlockingMultiwrite> Store<S> {
                         return Err(());
                     }
                 }
-                Err(_) => return Err(());
+                Err(_) => return Err(()),
             }
         }
         Ok(table)
