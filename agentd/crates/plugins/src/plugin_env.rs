@@ -11,9 +11,9 @@
 //!      (cerebro/occipital vision, imaginarium proxy token) — never by
 //!      `apexos-tools`.
 //!   3. `[plugin.env]` overlays, but cannot inject a never-key.
-//!   4. Same-uid file access (`/var/lib/agentd/.api_key`) is closed in the
-//!      tools worker by Landlock (`apexos-confine::restrict_tools_worker`),
-//!      not by a second uid (agentd cannot setuid under NoNewPrivileges).
+//!   4. Same-uid file access (`/var/lib/agentd/.api_key`) is closed by
+//!      Landlock. The shell worker's WAN is closed by an empty netns
+//!      (`isolate_network` on `--class=fs`). agentd cannot setuid.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -62,13 +62,15 @@ const INHERIT: &[&str] = &[
     "APEXOS_CAMERA_CMD",
     "APEXOS_CAMERA_DEVICE",
     "APEXOS_LANDLOCK",
+    "APEXOS_NETNS",
+    "APEXOS_TOOLS_CLASS",
 ];
 
 fn extra_inherit(plugin_id: &str) -> &'static [&'static str] {
     match plugin_id {
         "cerebro" | "occipital" => &["ANTHROPIC_API_KEY"],
         "imaginarium" => &["IMAGINARIUM_URL", "IMAGINARIUM_TOKEN"],
-        "apexos-tools" => &[
+        "apexos-tools" | "apexos-net" => &[
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_CHAT_ID",
             "NTFY_TOPIC",

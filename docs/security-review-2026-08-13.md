@@ -28,7 +28,8 @@
 > Wave 24 (PR #379): SA-4.
 > Wave 25 (PR #380): SA-6.
 > Wave 26 (PR #381): SA-13.
-> Wave 27 (this tree): finding 11 part 2 (same-uid `/var/lib/agentd`).
+> Wave 27 (PR #382): finding 11 part 2 (same-uid `/var/lib/agentd`).
+> Wave 28 (this tree): finding 11 net/no-net worker split.
 
 ## Ranked findings
 
@@ -181,8 +182,15 @@
   `/etc/agentd`, `/etc`, or `/proc` as a whole — workspace, usb-eject/prep,
   the notify JSONL inode, and system exec/TLS paths only. Inherited by
   `run_command` children, so `cat /var/lib/agentd/.api_key` fails closed.
-  Residual: still same uid (no SETUID under `NoNewPrivileges`); network and
-  device access stay shared; `APEXOS_LANDLOCK=0` is the operator skip.
+  Residual: still same uid (no SETUID under `NoNewPrivileges`);
+  `APEXOS_LANDLOCK=0` is the operator skip. Network split is Wave 28.
+- **Fixed (Wave 28):** two MCP children of the same binary. `apexos-tools
+  --class=fs` enters `CLONE_NEWUSER|CLONE_NEWNET` (empty netns) before
+  Landlock, so `run_command` cannot phone home. `apexos-net --class=net`
+  keeps the host network for `http_fetch` / `screenshot_mirror` / `notify` /
+  `ui_query` and does not get a `/dev` Landlock parent. Device tools stay
+  on the no-net side. Residual: same uid; camera/gpio still share
+  `audio`/`video` groups with agentd; `APEXOS_NETNS=0` skips the netns.
 
 ### 12. High — radio replay state is volatile and attacker-evictable
 
@@ -509,8 +517,9 @@ They do **not** protect the network, granted devices, or the root
 self-update/USB request consumers. Findings 5 and 7 closed the root-helper
 path/symlink holes; finding 11 closed the env leak (children no longer inherit
 `AGENTD_TOKEN` / provider keys) and the tools-worker Landlock allowlist
-(Wave 27) so a same-uid `cat /var/lib/agentd/.api_key` fails closed. Network
-namespace and device groups remain shared.
+(Wave 27) so a same-uid `cat /var/lib/agentd/.api_key` fails closed, and
+the Wave 28 net/no-net split so `run_command` has no WAN. Device groups
+remain shared with agentd; a device-class worker is the leftover.
 
 ## Verification
 

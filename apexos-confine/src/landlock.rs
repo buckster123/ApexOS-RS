@@ -108,6 +108,19 @@ pub fn tools_worker_rules(
     git_roots: &[PathBuf],
     extra_rw: &[PathBuf],
 ) -> FsRules {
+    tools_worker_rules_for(workspace, read_roots, git_roots, extra_rw, true)
+}
+
+/// `grant_devices`: the fs/shell worker needs `/dev` (camera/gpio/alsa).
+/// The net worker does not — only null/zero/urandom — so `run_command` is
+/// not even in that process, and http_fetch cannot open /dev/video*.
+pub fn tools_worker_rules_for(
+    workspace: &Path,
+    read_roots: &[PathBuf],
+    git_roots: &[PathBuf],
+    extra_rw: &[PathBuf],
+    grant_devices: bool,
+) -> FsRules {
     let mut rw = Vec::new();
     let mut ro = Vec::new();
 
@@ -118,8 +131,14 @@ pub fn tools_worker_rules(
     for p in extra_rw {
         push_admissible(&mut rw, p.clone());
     }
-    for p in SYSTEM_RW {
-        push_admissible(&mut rw, PathBuf::from(p));
+    if grant_devices {
+        for p in SYSTEM_RW {
+            push_admissible(&mut rw, PathBuf::from(p));
+        }
+    } else {
+        for p in ["/tmp", "/var/tmp", "/dev/null", "/dev/zero", "/dev/urandom"] {
+            push_admissible(&mut rw, PathBuf::from(p));
+        }
     }
 
     for p in read_roots {
@@ -175,6 +194,12 @@ fn ensure_notifications_file() -> Option<PathBuf> {
 
 /// Read the live tools env and apply the Landlock ruleset.
 pub fn restrict_tools_worker() -> LandlockStatus {
+    restrict_tools_worker_for(true)
+}
+
+/// Like [`restrict_tools_worker`], with `/dev` omitted when `grant_devices`
+/// is false (net-class worker).
+pub fn restrict_tools_worker_for(grant_devices: bool) -> LandlockStatus {
     if landlock_disabled() {
         return LandlockStatus::Disabled;
     }
@@ -210,11 +235,12 @@ pub fn restrict_tools_worker() -> LandlockStatus {
         _ => PathBuf::from("/var/lib/agentd/events/agents"),
     };
     read_roots.push(agents);
-    let rules = tools_worker_rules(
+    let rules = tools_worker_rules_for(
         &workspace,
         &read_roots,
         &env_paths("AGENTD_GIT_ROOTS"),
         &extra_rw,
+        grant_devices,
     );
     restrict(&rules)
 }
@@ -483,6 +509,20 @@ mod tests {
         assert!(!rules.ro.iter().any(|p| p == Path::new("/var/lib/agentd")));
         assert!(!rules.ro.iter().any(|p| p == Path::new("/etc/agentd")));
         assert!(!rules.ro.iter().any(|p| p == Path::new("/proc")));
+    }
+
+    #[test]
+    fn net_profile_does_not_grant_dev_as_a_parent() {
+        let rules = tools_worker_rules_for(
+            Path::new("/var/lib/agentd/workspace"),
+            &[],
+            &[],
+            &[],
+            false,
+        );
+        assert!(!rules.rw.iter().any(|p| p == Path::new("/dev")));
+        assert!(rules.rw.iter().any(|p| p == Path::new("/dev/null")));
+        assert!(rules.rw.iter().any(|p| p == Path::new("/tmp")));
     }
 
     #[test]

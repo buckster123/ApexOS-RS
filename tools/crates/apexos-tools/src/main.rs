@@ -7,10 +7,59 @@ use std::io::{self, BufRead, Write};
 
 mod tools;
 
+fn resolve_class() -> Result<Option<tools::ToolClass>, String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if let Some(v) = a.strip_prefix("--class=") {
+            return tools::parse_class(v);
+        }
+        if a == "--class" {
+            if let Some(v) = args.next() {
+                return tools::parse_class(&v);
+            }
+            return Err("--class needs a value (fs, net, or all)".into());
+        }
+    }
+    match std::env::var("APEXOS_TOOLS_CLASS") {
+        Ok(v) => tools::parse_class(&v),
+        Err(_) => Ok(None),
+    }
+}
+
 fn main() {
+    let class = match resolve_class() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[apexos-tools] {e}");
+            std::process::exit(2);
+        }
+    };
+
+    // Finding 11: the fs/shell worker drops into an empty netns so an approved
+    // run_command cannot phone home. The net worker keeps the host network.
+    // Compat (no --class) stays on the host net so a node that has not grown
+    // the apexos-net plugin still has http_fetch.
+    if class == Some(tools::ToolClass::Fs) {
+        match apexos_confine::isolate_network() {
+            apexos_confine::NetnsStatus::Isolated => {
+                eprintln!("[apexos-tools] netns isolated (fs class)");
+            }
+            apexos_confine::NetnsStatus::Disabled => {
+                eprintln!("[apexos-tools] netns disabled (APEXOS_NETNS)");
+            }
+            apexos_confine::NetnsStatus::Unsupported => {
+                eprintln!("[apexos-tools] netns unsupported — run_command still shares the host net");
+            }
+            apexos_confine::NetnsStatus::Error(e) => {
+                eprintln!("[apexos-tools] netns failed ({e}) — run_command still shares the host net");
+            }
+        }
+    }
+
     // Finding 11 part 2: same-uid DAC still sees /var/lib/agentd/.api_key.
-    // Landlock is inherited by run_command children. APEXOS_LANDLOCK=0 skips.
-    match apexos_confine::restrict_tools_worker() {
+    // Landlock is inherited by run_command children. Net class does not get /dev.
+    let grant_devices = class != Some(tools::ToolClass::Net);
+    match apexos_confine::restrict_tools_worker_for(grant_devices) {
         apexos_confine::LandlockStatus::Restricted { abi } => {
             eprintln!("[apexos-tools] landlock restricted (abi {abi})");
         }
@@ -57,13 +106,13 @@ fn main() {
             "tools/list" => json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": { "tools": tools::list() }
+                "result": { "tools": tools::list_for(class) }
             }),
             "tools/call" => {
                 let params = &req["params"];
                 let name = params["name"].as_str().unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                let result = tools::call(name, &args);
+                let result = tools::call_for(name, &args, class);
                 json!({
                     "jsonrpc": "2.0",
                     "id": id,

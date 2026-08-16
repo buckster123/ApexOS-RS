@@ -16,7 +16,16 @@ RUST_LOG            = "warn"
 [[plugin]]
 id      = "apexos-tools"
 cmd     = "/usr/local/bin/apexos-tools"
-args    = []
+args    = ["--class", "fs"]
+restart = "always"
+
+# Finding 11: net-class worker. http_fetch / screenshot_mirror / notify / ui_query
+# keep the host network. The fs/shell worker above is in an empty netns so
+# run_command cannot phone home.
+[[plugin]]
+id      = "apexos-net"
+cmd     = "/usr/local/bin/apexos-tools"
+args    = ["--class", "net"]
 restart = "always"
 
 # Sonus — Suno music generation (generate_song / check_status / download_track …).

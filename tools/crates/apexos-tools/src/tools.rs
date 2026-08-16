@@ -584,6 +584,60 @@ pub fn list() -> Value {
     ])
 }
 
+/// Finding 11 net/no-net split. The fs/shell worker (`--class=fs`) has an
+/// empty netns so `run_command` cannot phone home. Net tools live in a
+/// second process (`--class=net`) that keeps the host network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolClass {
+    Fs,
+    Net,
+}
+
+/// Tools that need a real network (or loopback HTTP to the UI).
+pub const NET_TOOLS: &[&str] = &[
+    "http_fetch",
+    "screenshot_mirror",
+    "ui_query",
+    "notify",
+];
+
+pub fn tool_class(name: &str) -> ToolClass {
+    if NET_TOOLS.contains(&name) {
+        ToolClass::Net
+    } else {
+        ToolClass::Fs
+    }
+}
+
+/// Parse `--class` / `APEXOS_TOOLS_CLASS`. `Ok(None)` = advertise every tool
+/// (compat: a node that has not grown the net plugin yet).
+pub fn parse_class(s: &str) -> Result<Option<ToolClass>, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "" | "all" => Ok(None),
+        "fs" | "shell" | "tools" => Ok(Some(ToolClass::Fs)),
+        "net" | "network" => Ok(Some(ToolClass::Net)),
+        other => Err(format!(
+            "unknown tools class '{other}' (want fs, net, or all)"
+        )),
+    }
+}
+
+pub fn list_for(class: Option<ToolClass>) -> Value {
+    let all = list();
+    let Some(want) = class else {
+        return all;
+    };
+    let Some(arr) = all.as_array() else {
+        return all;
+    };
+    Value::Array(
+        arr.iter()
+            .filter(|t| t["name"].as_str().map(tool_class) == Some(want))
+            .cloned()
+            .collect(),
+    )
+}
+
 // ─── Dispatch ────────────────────────────────────────────────────────────────
 
 pub fn call(name: &str, args: &Value) -> Value {
@@ -648,6 +702,17 @@ pub fn call(name: &str, args: &Value) -> Value {
         "git_worktree" => git_worktree(args),
         _ => tool_error(format!("unknown tool: {}", name)),
     }
+}
+
+pub fn call_for(name: &str, args: &Value, class: Option<ToolClass>) -> Value {
+    if let Some(want) = class {
+        if tool_class(name) != want {
+            return tool_error(format!(
+                "tool '{name}' belongs to the other worker class (this process is {want:?})"
+            ));
+        }
+    }
+    call(name, args)
 }
 
 fn tool_ok(content: Value) -> Value {
@@ -4286,6 +4351,60 @@ mod tests {
             unit.lines().any(|l| l.trim() == "CapabilityBoundingSet="),
             "empty capability set (uid-0-equivalent caps must not ride along)"
         );
+    }
+
+    #[test]
+    fn every_advertised_tool_has_a_class() {
+        let all = list();
+        let names: Vec<&str> = all
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"run_command"));
+        assert!(names.contains(&"http_fetch"));
+        for name in &names {
+            let _ = tool_class(name);
+        }
+        let fs = list_for(Some(ToolClass::Fs));
+        let net = list_for(Some(ToolClass::Net));
+        let fs_names: Vec<&str> = fs
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        let net_names: Vec<&str> = net
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(fs_names.contains(&"run_command"));
+        assert!(!fs_names.contains(&"http_fetch"));
+        assert!(net_names.contains(&"http_fetch"));
+        assert!(net_names.contains(&"screenshot_mirror"));
+        assert!(net_names.contains(&"ui_query"));
+        assert!(net_names.contains(&"notify"));
+        assert!(!net_names.contains(&"run_command"));
+        assert_eq!(fs_names.len() + net_names.len(), names.len());
+    }
+
+    #[test]
+    fn call_for_rejects_the_other_class() {
+        let err = call_for("http_fetch", &json!({"url": "https://example.com"}), Some(ToolClass::Fs));
+        assert_eq!(err["isError"], json!(true));
+        let err = call_for("run_command", &json!({"cmd": "true"}), Some(ToolClass::Net));
+        assert_eq!(err["isError"], json!(true));
+    }
+
+    #[test]
+    fn parse_class_accepts_the_closed_vocab() {
+        assert_eq!(parse_class("fs").unwrap(), Some(ToolClass::Fs));
+        assert_eq!(parse_class("net").unwrap(), Some(ToolClass::Net));
+        assert_eq!(parse_class("all").unwrap(), None);
+        assert!(parse_class("gpu").is_err());
     }
 }
 

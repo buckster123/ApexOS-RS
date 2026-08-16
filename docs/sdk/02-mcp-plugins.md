@@ -447,7 +447,8 @@ the supervisor checks policy before it ever calls you (`supervisor.rs:384-403`).
   (`plugin_child_env`) plus this overlay. `[plugin.env]` cannot inject `AGENTD_TOKEN`
   / mesh / sensor / PSK keys. Do not rely on inheriting agentd's full environment.
   `apexos-tools` also Landlocks itself (finding 11 part 2) so same-uid
-  `run_command` cannot open `/var/lib/agentd/.api_key`.
+  `run_command` cannot open `/var/lib/agentd/.api_key`. The shell worker
+  (`--class=fs`) is in an empty netns; `http_fetch` lives in `apexos-net`.
 
 ### For agents self-extending at runtime
 

@@ -51,11 +51,8 @@ The point of naming these: hardening is *closing specific boundaries*, not a vib
 
 Gemini's framing of a "Nursery" — an immutable guardrail layer the evolving agent can't bypass — is the right mental model. Grounded against what we already have:
 
-### A1. Namespace-isolate the `apexos-tools` worker *(re-graded 2026-07-05: DEFERRED post-beta)*
-The original premise — "the tools process does FS + GPIO only; it has **no legitimate reason to touch the network**" — turned out to be **wrong against the shipped tool set**: `http_fetch`, `screenshot_mirror` (fetches the UI's loopback snapshot server), `bootstrap_node` (SSH provisioning), and the notify/sonus paths all legitimately open sockets. So:
-- **`CLONE_NEWNET`** as scoped would break real tools; doing it properly means **splitting the worker into net/no-net halves** first — a real refactor, not a wrapper.
-- The marginal gain over what's in place (apexos-confine path confinement, `ProtectSystem=strict` + `PrivateDevices` + `NoNewPrivileges`, ssrf_guard, ask-gated `run_command`, the secret denylist) doesn't gate the beta. **Deferred; documented as a known residual in `SECURITY.md`.**
-- *Reality notes kept:* this is **new** code, NOT "use apexos-confine" (std-only path-string confinement, not OS jailing — they compose); pivot-root / `CLONE_NEWNS` (read-only `/` view) remains attractive *with* the split, post-beta.
+### A1. Namespace-isolate the `apexos-tools` worker *(net/no-net split shipped Wave 28)*
+The original premise — "the tools process does FS + GPIO only; it has **no legitimate reason to touch the network**" — was **wrong against the shipped tool set**: `http_fetch`, `screenshot_mirror`, `notify`, and `ui_query` legitimately open sockets. Wave 28 split the binary into two MCP children (`--class=fs` empty netns / `--class=net` host net). Leftover: a **device-class** worker (camera/gpio still share `audio`/`video` groups); pivot-root / `CLONE_NEWNS` remains attractive on the fs worker.
 
 ### A2. Capability caps on the systemd units *(small)*
 Add `CapabilityBoundingSet=` (drop `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, …) + `RestrictAddressFamilies=`/`SystemCallFilter=` to `agentd.service` and friends. We already ship `NoNewPrivileges` + `ProtectSystem=strict` + `PrivateDevices` — this tightens the residual.
