@@ -7,7 +7,7 @@ and adds the in-process **event Bus** (mpsc inbox → `SystemState::apply` → b
 every subsystem subscribes to, plus `SystemState`, the ID newtypes, the bounded-history trimmer,
 and the vision downscale shim.
 
-- **Key files:** `src/bus.rs` (`Bus::new` → `BusHandle` emit + broadcast subscribe; `Bus::run`) · `src/state.rs` (`SystemState::apply`) · `src/history.rs` (`trim_history`, pure + tested) · `src/vision.rs` · `src/lib.rs`
+- **Key files:** `src/bus.rs` (`Bus::new` → `BusHandle` emit + broadcast subscribe + `subscribe_commands` mpsc for SA-6; `Bus::run`) · `src/state.rs` (`SystemState::apply`) · `src/history.rs` (`trim_history`, pure + tested) · `src/vision.rs` · `src/lib.rs`
 - **Depends on:** `apexos-protocol`, `serde`, `serde_json`, `tokio`.
 - **Lift via:** copy the Bus pattern (mpsc-in → broadcast-out with a state-apply step) or `trim_history` (pure, tested) directly; depend on the crate to share the daemon's types + bus.
 
