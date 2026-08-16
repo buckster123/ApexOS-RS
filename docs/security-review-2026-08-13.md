@@ -22,7 +22,8 @@
 > Wave 18 (PR #372): SA-9.
 > Wave 19 (PR #373): SA-10.
 > Wave 20 (PR #374): SA-11.
-> Wave 21 (this tree): finding 12, SA-1.
+> Wave 21 (PR #375): finding 12, SA-1.
+> Wave 22 (this tree): SA-14.
 
 ## Ranked findings
 
@@ -414,6 +415,12 @@ dropping them.
 - **Minimal fix:** Connect through the exact vetted IP using a validating
   resolver/connector and reapply both host allowlisting and SSRF checks on every
   redirect.
+- **Fixed (Wave 22):** `http_fetch_hop_ok` runs the policy allowlist and
+  `ssrf_guard` on the original URL and every 3xx target. Reqwest uses
+  `PublicOnlyResolver` (`vetted_socket_addrs` — any private answer fails the
+  whole set) so connect-time DNS cannot rebind to loopback / RFC1918 /
+  link-local after the pre-check. Literal IPs still fail in `ssrf_guard`
+  (reqwest does not consult the resolver for them).
 
 ### SA-15. Medium — recursive directory listing follows nested symlinks
 

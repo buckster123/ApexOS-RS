@@ -1953,43 +1953,18 @@ fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-/// Resolve a URL's host and reject it if any resolved address is in a blocked
-/// range. Returns Ok(()) for public hosts. A literal IP host is checked
-/// directly.
-fn ssrf_guard(url: &str) -> Result<(), String> {
-    use std::net::{IpAddr, ToSocketAddrs};
-    use std::str::FromStr;
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid url: {}", e))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "url has no host".to_string())?;
-    let port = parsed.port_or_known_default().unwrap_or(80);
-
-    // Literal IP fast-path. The url crate already normalizes hex/octal/decimal
-    // IPv4 (0x7f000001 / 2130706433 / 0177.0.0.1 → 127.0.0.1); here we also
-    // strip IPv6 brackets and check the literal directly. Without this an IPv6
-    // literal (`http://[::1]/`) reaches to_socket_addrs as the *bracketed*
-    // string, fails to parse as an IpAddr, and leaks into a DNS lookup — so the
-    // is_blocked_ip IPv6 arm never runs on it. Parsing here makes the IPv6 block
-    // real and closes the defence-in-depth gap.
-    let bare = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host);
-    if let Ok(ip) = IpAddr::from_str(bare) {
-        if is_blocked_ip(ip) {
-            return Err(format!("blocked: {} is a non-public address", ip));
-        }
-        return Ok(());
+/// Fail closed if the set is empty or any address is non-public. Mixed
+/// public+private answers are a classic rebind shape — do not return the
+/// public subset.
+fn vetted_socket_addrs(
+    addrs: impl IntoIterator<Item = std::net::SocketAddr>,
+    host: &str,
+) -> Result<Vec<std::net::SocketAddr>, String> {
+    let addrs: Vec<_> = addrs.into_iter().collect();
+    if addrs.is_empty() {
+        return Err(format!("cannot resolve host {host}"));
     }
-
-    // host:port → resolve to one or more socket addresses.
-    let addrs = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("cannot resolve host {}: {}", host, e))?;
-    let mut any = false;
-    for sa in addrs {
-        any = true;
+    for sa in &addrs {
         if is_blocked_ip(sa.ip()) {
             return Err(format!(
                 "blocked: {} resolves to non-public address {}",
@@ -1998,10 +1973,68 @@ fn ssrf_guard(url: &str) -> Result<(), String> {
             ));
         }
     }
-    if !any {
-        return Err(format!("cannot resolve host {}", host));
+    Ok(addrs)
+}
+
+/// Resolve `host` to public socket addresses only. A literal IP is checked
+/// without DNS (the url crate already normalizes hex/octal/decimal IPv4).
+fn resolve_public(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>, String> {
+    use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+    use std::str::FromStr;
+
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = IpAddr::from_str(bare) {
+        if is_blocked_ip(ip) {
+            return Err(format!("blocked: {ip} is a non-public address"));
+        }
+        return Ok(vec![SocketAddr::new(ip, port)]);
     }
-    Ok(())
+
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("cannot resolve host {host}: {e}"))?;
+    vetted_socket_addrs(addrs, host)
+}
+
+/// Resolver reqwest uses for every connect, including redirect hops.
+/// Same filter as [`ssrf_guard`] — a rebind cannot swap a public answer
+/// for a private one between the pre-check and the socket.
+struct PublicOnlyResolver;
+
+impl reqwest::dns::Resolve for PublicOnlyResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            match resolve_public(&host, 0) {
+                Ok(addrs) => Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs),
+                Err(e) => Err(e.into()),
+            }
+        })
+    }
+}
+
+/// Resolve a URL's host and reject it if any resolved address is in a blocked
+/// range. Returns Ok(()) for public hosts. A literal IP host is checked
+/// directly. Reqwest also runs [`PublicOnlyResolver`] at connect time so this
+/// is the pre-check / error-message path, not the only gate.
+fn ssrf_guard(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid url: {}", e))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "url has no host".to_string())?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    resolve_public(host, port).map(|_| ())
+}
+
+/// Both gates on one hop: allowlist (when armed) then SSRF. Used for the
+/// original URL and every 3xx target — an allowlisted host must not bounce
+/// to an unlisted public host.
+fn http_fetch_hop_ok(url: &str) -> Result<(), String> {
+    http_fetch_policy_gate(url)?;
+    ssrf_guard(url)
 }
 
 fn http_fetch(args: &Value) -> Value {
@@ -2009,28 +2042,23 @@ fn http_fetch(args: &Value) -> Value {
         Some(u) => u,
         None => return tool_error("url is required"),
     };
-    // Enterprise connector mode first (deny / host allowlist), then SSRF.
-    if let Err(e) = http_fetch_policy_gate(url) {
-        return tool_error(e);
-    }
-    if let Err(e) = ssrf_guard(url) {
+    if let Err(e) = http_fetch_hop_ok(url) {
         return tool_error(e);
     }
     let method = args["method"].as_str().unwrap_or("GET").to_uppercase();
 
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
-        // Re-run the SSRF guard on every redirect hop. The ssrf_guard() above
-        // only vets the first URL, so without this a public URL could 302 to a
-        // loopback / link-local / RFC1918 address (e.g. 169.254.169.254 cloud
-        // metadata). NB: a determined attacker controlling DNS can still rebind
-        // between this check and reqwest's own resolve (TOCTOU) — closing that
-        // needs a pinned-IP connector and is tracked as a known residual.
+        .dns_resolver(std::sync::Arc::new(PublicOnlyResolver))
+        // Re-run allowlist + SSRF on every redirect hop. Policy used to vet
+        // only the first URL, so an allowlisted host could 302 to any public
+        // host. DNS for this client goes through PublicOnlyResolver, so a
+        // rebind cannot land on a private address after the pre-check.
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 10 {
                 attempt.stop()
-            } else if ssrf_guard(attempt.url().as_str()).is_err() {
-                attempt.error("redirect to non-public address blocked")
+            } else if let Err(e) = http_fetch_hop_ok(attempt.url().as_str()) {
+                attempt.error(e)
             } else {
                 attempt.follow()
             }
@@ -3397,7 +3425,7 @@ fn ui_query() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     // Serialize tests that mutate AGENTD_WORKSPACE — env vars are process-global
     // and Rust runs tests in parallel by default.
@@ -3722,6 +3750,40 @@ mod tests {
         assert!(http_fetch_policy_gate("https://evil.example.com/").is_err());
         std::env::set_var("AGENTD_HTTP_FETCH_ALLOWLIST", "");
         assert!(http_fetch_policy_gate("https://api.example.com/v1").is_err());
+        std::env::remove_var("AGENTD_HTTP_FETCH_MODE");
+        std::env::remove_var("AGENTD_HTTP_FETCH_ALLOWLIST");
+    }
+
+    #[test]
+    fn vetted_addrs_fail_closed_on_any_private() {
+        let pub_a: SocketAddr = "8.8.8.8:443".parse().unwrap();
+        let pub_b: SocketAddr = "1.1.1.1:443".parse().unwrap();
+        let loopback: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let meta: SocketAddr = "169.254.169.254:80".parse().unwrap();
+        assert!(vetted_socket_addrs([pub_a, pub_b], "ok.example").is_ok());
+        let mixed = vetted_socket_addrs([pub_a, loopback], "rebind.example").unwrap_err();
+        assert!(mixed.contains("127.0.0.1"), "{mixed}");
+        assert!(vetted_socket_addrs([meta], "meta.example").is_err());
+        assert!(vetted_socket_addrs(Vec::<SocketAddr>::new(), "empty").is_err());
+    }
+
+    #[test]
+    fn http_fetch_hop_rechecks_allowlist_and_ssrf() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("AGENTD_EE_CONNECTORS");
+        std::env::set_var("AGENTD_HTTP_FETCH_MODE", "allowlist");
+        // Include a private literal so the hop reaches SSRF after the allowlist.
+        std::env::set_var("AGENTD_HTTP_FETCH_ALLOWLIST", "api.example.com,127.0.0.1");
+        let bounced = http_fetch_hop_ok("https://evil.example.com/exfil").unwrap_err();
+        assert!(
+            bounced.contains("not on AGENTD_HTTP_FETCH_ALLOWLIST"),
+            "{bounced}"
+        );
+        let private = http_fetch_hop_ok("http://127.0.0.1/").unwrap_err();
+        assert!(private.contains("non-public"), "{private}");
+        std::env::set_var("AGENTD_HTTP_FETCH_MODE", "open");
+        assert!(http_fetch_hop_ok("http://8.8.8.8/").is_ok());
+        assert!(http_fetch_hop_ok("http://169.254.169.254/latest/meta-data/").is_err());
         std::env::remove_var("AGENTD_HTTP_FETCH_MODE");
         std::env::remove_var("AGENTD_HTTP_FETCH_ALLOWLIST");
     }
