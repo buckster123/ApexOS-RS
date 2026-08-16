@@ -204,6 +204,70 @@ fn reserve_from_stored_fails_closed_on_read_error() {
 }
 
 #[test]
+fn inbox_holds_until_host_accept_and_does_not_ack_on_full() {
+    use apexos_mesh_proto::{
+        decide_radio_inbound, InboxTable, RadioInbound, ReplayTable, MAX_INBOX,
+    };
+    let mut replay = ReplayTable::new();
+    let mut inbox = InboxTable::new();
+    let pkt = b"hello-radio";
+
+    assert_eq!(
+        decide_radio_inbound(&mut replay, &mut inbox, 1001, 7, pkt),
+        RadioInbound::Deliver
+    );
+    assert!(inbox.contains(1001, 7));
+    // Same pair again (sender retry) — still waiting on the host.
+    assert_eq!(
+        decide_radio_inbound(&mut replay, &mut inbox, 1001, 7, pkt),
+        RadioInbound::WaitHost
+    );
+    assert_eq!(inbox.len(), 1);
+
+    // Host accept frees the slot; a later retry of the same pair is a re-ACK.
+    assert!(inbox.take(1001, 7).is_some());
+    assert_eq!(
+        decide_radio_inbound(&mut replay, &mut inbox, 1001, 7, pkt),
+        RadioInbound::ReAck
+    );
+
+    // Fill the inbox with other pairs; a new sender must not consume replay.
+    for i in 0..MAX_INBOX as u64 {
+        assert_eq!(
+            decide_radio_inbound(&mut replay, &mut inbox, 2000, 10 + i, pkt),
+            RadioInbound::Deliver
+        );
+    }
+    assert!(inbox.is_full());
+    let before = replay.len();
+    assert_eq!(
+        decide_radio_inbound(&mut replay, &mut inbox, 3000, 1, pkt),
+        RadioInbound::Drop
+    );
+    assert_eq!(replay.len(), before, "a full inbox must not advance replay");
+
+    // Round-trip a slot through the flash encoding.
+    let mut back = InboxTable::new();
+    for i in 0..MAX_INBOX {
+        if let Some(bytes) = inbox.encode_slot(i) {
+            assert!(back.load_slot(&bytes));
+        }
+    }
+    assert_eq!(back.len(), inbox.len());
+    assert!(back.contains(2000, 10));
+
+    // A take must tombstone the flash slot so a reload cannot resurrect it.
+    assert!(inbox.take(2000, 10).is_some());
+    let mut after = InboxTable::new();
+    for i in 0..MAX_INBOX {
+        if let Some(bytes) = inbox.encode_slot(i) {
+            assert!(after.load_slot(&bytes));
+        }
+    }
+    assert!(!after.contains(2000, 10));
+}
+
+#[test]
 fn next_provision_ctr_never_repeats_or_returns_zero() {
     assert_eq!(next_provision_ctr(None), 1);
     assert_eq!(next_provision_ctr(Some(0)), 1);

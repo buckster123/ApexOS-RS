@@ -23,7 +23,8 @@
 > Wave 19 (PR #373): SA-10.
 > Wave 20 (PR #374): SA-11.
 > Wave 21 (PR #375): finding 12, SA-1.
-> Wave 22 (this tree): SA-14.
+> Wave 22 (PR #376): SA-14.
+> Wave 23 (this tree): SA-2.
 
 ## Ranked findings
 
@@ -255,6 +256,12 @@ dropping them.
   delivered.
 - **Minimal fix:** Persist inbound packets with original sender/counter
   provenance and ACK only after agentd durably accepts the payload.
+- **Fixed (Wave 23):** `InboxTable` holds `(sender, ctr, packet)` (flash +
+  RAM). `decide_radio_inbound` will not advance replay if the inbox is full.
+  USB-up frames keep the original sender/ctr. agentd persists
+  `<log_dir>/radio_inbox.jsonl` then sends `Payload::Ack` down the cable;
+  the brainstem ACKs on the air only after that host accept. A2A is
+  delivered as `radio-<id>`.
 
 ### SA-3. High — federated imports default back to shared visibility
 

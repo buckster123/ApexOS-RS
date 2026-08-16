@@ -69,10 +69,14 @@ const KEY_PSK: u8 = 1;
 const KEY_CTR_HW: u8 = 2;
 /// Replay windows occupy keys `[KEY_REPLAY_BASE, KEY_REPLAY_BASE + MAX)`.
 const KEY_REPLAY_BASE: u8 = 16;
+/// Radio inbox (SA-2) occupies `[KEY_INBOX_BASE, KEY_INBOX_BASE + MAX_INBOX)`.
+const KEY_INBOX_BASE: u8 = 48;
 
 /// Big enough for the largest record ([`KEY_PSK`], 32 B) plus key and header,
 /// rounded well past flash word alignment.
-const BUF_LEN: usize = 128;
+/// Scratch for map store/fetch. Must fit an inbox slot (268 B) plus the
+/// sequential-storage header — replay slots are 18 B and still fit.
+const BUF_LEN: usize = 384;
 
 /// Ceiling on one queued message. A radio frame cannot exceed one extended
 /// advertisement anyway, so anything larger could never be delivered on this
@@ -277,6 +281,48 @@ impl<S: BlockingMultiwrite> Store<S> {
             }
         }
         Ok(table)
+    }
+
+    pub async fn load_inbox(&mut self) -> Result<apexos_mesh_proto::InboxTable, ()> {
+        use apexos_mesh_proto::{InboxTable, MAX_INBOX};
+        let Self { flash, buf, .. } = self;
+        let mut map = MapStorage::new(
+            FlashRef(flash),
+            MapConfig::new(MAP_RANGE),
+            Cache::new_uncached(),
+        );
+        let mut table = InboxTable::new();
+        for i in 0..MAX_INBOX {
+            let key = KEY_INBOX_BASE + i as u8;
+            match map.fetch_item::<&[u8]>(buf, &key).await {
+                Ok(None) => {}
+                Ok(Some(bytes)) => {
+                    if !table.load_slot(bytes) {
+                        return Err(());
+                    }
+                }
+                Err(_) => return Err(());
+            }
+        }
+        Ok(table)
+    }
+
+    pub async fn save_inbox(&mut self, table: &apexos_mesh_proto::InboxTable) -> Result<(), ()> {
+        use apexos_mesh_proto::MAX_INBOX;
+        let Self { flash, buf, .. } = self;
+        let mut map = MapStorage::new(
+            FlashRef(flash),
+            MapConfig::new(MAP_RANGE),
+            Cache::new_uncached(),
+        );
+        for i in 0..MAX_INBOX {
+            let key = KEY_INBOX_BASE + i as u8;
+            if let Some(bytes) = table.encode_slot(i) {
+                let slice: &[u8] = &bytes;
+                map.store_item(buf, &key, &slice).await.map_err(|_| ())?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn save_replay(&mut self, table: &apexos_mesh_proto::ReplayTable) -> Result<(), ()> {

@@ -28,6 +28,7 @@
 //! anything that arrived over the air.
 
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -35,7 +36,9 @@ use std::time::{Duration, Instant};
 use apexos_core::mesh_router::{
     LatencyClass, MeshTransport, SendError, SendReceipt, TransportHealth, TransportId,
 };
-use apexos_mesh_proto::MeshFrame;
+use apexos_mesh_proto::{
+    MeshClass, MeshFrame, Payload, PlainPacket, BROADCAST, WIRE_VERSION,
+};
 use tokio::sync::broadcast;
 
 /// What the brainstem last told us about its own radio. This is the only
@@ -58,6 +61,95 @@ pub const GOSSIP_MAX_TEXT: usize = 180;
 pub const GOSSIP_QUEUE_CAP: u16 = 8;
 const GOSSIP_RATE_MAX: usize = 4;
 const GOSSIP_RATE_WINDOW: Duration = Duration::from_secs(10);
+
+/// Payloads the cortex must persist before the brainstem may radio-ACK (SA-2).
+/// Heartbeat / status / Ack / Provision are not "data the sender is waiting
+/// to retire."
+pub fn radio_payload_needs_accept(payload: &Payload) -> bool {
+    matches!(
+        payload,
+        Payload::A2A { .. }
+            | Payload::Alarm { .. }
+            | Payload::DreamDigest(_)
+            | Payload::ChunkAnnounce { .. }
+            | Payload::ChunkRequest { .. }
+            | Payload::ChunkData { .. }
+            | Payload::CourierManifest(_)
+            | Payload::CourierReceipt(_)
+    )
+}
+
+pub fn payload_kind_body(payload: &Payload) -> Option<(&'static str, String)> {
+    Some(match payload {
+        Payload::A2A { body } => ("A2A", String::from_utf8_lossy(body).into_owned()),
+        Payload::Alarm { code, detail } => ("Alarm", format!("{code}:{detail}")),
+        Payload::DreamDigest(_) => ("DreamDigest", String::new()),
+        Payload::ChunkAnnounce { .. } => ("ChunkAnnounce", String::new()),
+        Payload::ChunkRequest { .. } => ("ChunkRequest", String::new()),
+        Payload::ChunkData { .. } => ("ChunkData", String::new()),
+        Payload::CourierManifest(_) => ("CourierManifest", String::new()),
+        Payload::CourierReceipt(_) => ("CourierReceipt", String::new()),
+        _ => return None,
+    })
+}
+
+/// Unsealed USB frame: "I accepted radio `(of_sender, of_ctr)`."
+/// Target is broadcast so the brainstem will not queue it as outbox cargo.
+pub fn host_accept_frame(of_sender: u16, of_ctr: u64) -> MeshFrame {
+    let packet = PlainPacket {
+        target: BROADCAST,
+        hop_limit: 1,
+        flags: 0,
+        payload: Payload::Ack { of_sender, of_ctr },
+    };
+    let ct = postcard::to_allocvec(&packet).unwrap_or_default();
+    MeshFrame {
+        ver: WIRE_VERSION,
+        class: MeshClass::Gossip,
+        sender: 0,
+        ctr: 1,
+        ct,
+    }
+}
+
+/// Append one accepted pair. Returns `Ok(true)` if this is news, `Ok(false)`
+/// if `(sender, ctr)` is already on disk (USB retry).
+pub fn persist_radio_inbox(
+    path: &Path,
+    sender: u16,
+    ctr: u64,
+    kind: &str,
+    body: &str,
+) -> Result<bool, String> {
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        for line in existing.lines().filter(|l| !l.is_empty()) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if v.get("sender").and_then(|x| x.as_u64()) == Some(sender as u64)
+                    && v.get("ctr").and_then(|x| x.as_u64()) == Some(ctr)
+                {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("radio inbox mkdir: {e}"))?;
+    }
+    let line = serde_json::json!({
+        "sender": sender,
+        "ctr": ctr,
+        "kind": kind,
+        "body": body,
+    });
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("radio inbox open: {e}"))?;
+    use std::io::Write;
+    writeln!(f, "{line}").map_err(|e| format!("radio inbox write: {e}"))?;
+    Ok(true)
+}
 
 /// Why `/api/mesh/gossip` refused the send (SA-11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +259,15 @@ impl MeshLink {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
         self.outbound.subscribe()
+    }
+
+    /// Push a frame toward every connected bridge. Returns false when no
+    /// bridge is subscribed (the send must not be treated as accepted).
+    pub fn push_frame(&self, frame: &MeshFrame) -> bool {
+        let Ok(bytes) = apexos_mesh_proto::encode_datagram(frame) else {
+            return false;
+        };
+        self.outbound.send(bytes).is_ok()
     }
 
     pub fn link_up(&self) {
@@ -321,6 +422,51 @@ mod tests {
             ctr: 7,
             ct: vec![0xAB; len],
         }
+    }
+
+    #[test]
+    fn persist_radio_inbox_is_idempotent_on_sender_ctr() {
+        let dir = std::env::temp_dir().join(format!("apexos-radio-inbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("radio_inbox.jsonl");
+        assert_eq!(
+            persist_radio_inbox(&path, 1001, 7, "A2A", "hi").unwrap(),
+            true
+        );
+        assert_eq!(
+            persist_radio_inbox(&path, 1001, 7, "A2A", "hi").unwrap(),
+            false
+        );
+        assert_eq!(
+            persist_radio_inbox(&path, 1001, 8, "A2A", "next").unwrap(),
+            true
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_accept_frame_is_an_ack_of_the_radio_pair() {
+        let f = host_accept_frame(1002, 42);
+        let (packet, _): (PlainPacket, _) = postcard::take_from_bytes(&f.ct).unwrap();
+        assert_eq!(packet.target, BROADCAST);
+        assert_eq!(
+            packet.payload,
+            Payload::Ack {
+                of_sender: 1002,
+                of_ctr: 42
+            }
+        );
+        assert!(radio_payload_needs_accept(&Payload::A2A {
+            body: b"x".to_vec()
+        }));
+        assert!(!radio_payload_needs_accept(&Payload::Heartbeat {
+            uptime_s: 1,
+            cortex_up: true,
+            conn: 2,
+        }));
     }
 
     #[tokio::test]
