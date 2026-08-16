@@ -190,9 +190,10 @@ Set in the systemd service `Environment=` line (already done in `deploy/apexos-r
 
 ### Required user groups
 ```bash
-sudo usermod -aG render,video,input agentd
+sudo usermod -aG render,video,input agentd      # camera / TTS (agentd)
+sudo usermod -aG video,render,input,tty apexos-ui  # kiosk DRM (install.sh)
 ```
-(Only needs doing once; survives reboots.)
+(Only needs doing once; survives reboots. The kiosk unit is `User=apexos-ui`, not root.)
 
 ### Device nodes
 ```

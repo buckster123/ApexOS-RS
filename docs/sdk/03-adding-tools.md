@@ -108,7 +108,7 @@ every FS tool:
   (`fn read_roots`: `/etc/agentd/parts`, `/sys`, `/proc/cpuinfo`/`meminfo`,
   `/var/lib/agentd/update`; extend with `AGENTD_READ_ROOTS`, colon-sep) **minus** an
   always-blocked secret denylist (`fn is_secret_path`: `/proc/*/environ`,
-  `/etc/agentd/env`, `~/.ssh`, `/etc/shadow`, `*.api_key`).
+  `/etc/agentd/env`, `/etc/agentd/ui.env`, `~/.ssh`, `/etc/shadow`, `*.api_key`).
 
 It rejects `..` (component-based) and operates on the **canonical** path (symlinks
 resolved). The confinement *mechanism* (traversal rejection, lenient canonicalize, root

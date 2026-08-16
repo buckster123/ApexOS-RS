@@ -356,9 +356,12 @@ installed.
   non-loopback bind refuses to start if it is empty. The handler accepts only a
   `SensorIngress` (`sensor_reading`) — never the full `Event` enum. Static
   files are an ungated whitelist.
-- `apexos-rs-ui` runs as **root** with a device allowlist — `drmSetMaster` +
-  `drmModePageFlip` require DRM master, and on a seatless Pi only root wins reliably. The
-  service uses `User=root`, `PAMName=login`, `TTYPath=/dev/tty7`,
+- `apexos-rs-ui` runs as **`apexos-ui`** (SA-13) with a device allowlist and a
+  **token-only** `EnvironmentFile` (`/etc/agentd/ui.env` — never the full
+  `/etc/agentd/env`). `ExecStartPre` unbinds fbcon so seatless linuxkms can take
+  DRM master without `CAP_SYS_ADMIN`. A board that still cannot modeset gets a
+  persisted `APEXOS_UI_AS_ROOT` drop-in (`User=root` + those two caps). The
+  service uses `PAMName=login`, `TTYPath=/dev/tty7`,
   `WantedBy=multi-user.target` (Pi boots to `multi-user.target`, not `graphical.target`).
 - **Policy posture.** `config/policy.toml` defaults `mode=suggest`: read-only verbs allowed,
   write/delete/`run_command`/`http_fetch` gated, wake-loop boot verbs explicitly allowed so
@@ -369,7 +372,7 @@ installed.
   `/var/lib/agentd/events/agents`, how a conductor reads batch evidence; the root is
   `agents/` only, so session transcripts next door stay unreadable;
   `AGENTD_READ_ROOTS`-extensible) minus an always-blocked secret
-  denylist (`/etc/agentd/env`, `/proc/*/environ`, `~/.ssh`, `/etc/shadow`, `*.api_key`).
+  denylist (`/etc/agentd/env`, `/etc/agentd/ui.env`, `/proc/*/environ`, `~/.ssh`, `/etc/shadow`, `*.api_key`).
   `apexos-tools`' `run_command` denylist remains a soft substring heuristic, trivially
   bypassable; treat the approval gate + systemd sandbox, not the denylist, as the boundary.
 

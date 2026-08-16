@@ -26,7 +26,8 @@
 > Wave 22 (PR #376): SA-14.
 > Wave 23 (PR #377): SA-2.
 > Wave 24 (PR #379): SA-4.
-> Wave 25 (this tree): SA-6.
+> Wave 25 (PR #380): SA-6.
+> Wave 26 (this tree): SA-13.
 
 ## Ranked findings
 
@@ -424,6 +425,14 @@ dropping them.
 - **Minimal fix:** Run a dedicated unprivileged UI account with explicit
   DRM/input ACLs, `ProtectSystem=strict`, an empty capability set, and a
   credential containing only the gateway token.
+- **Fixed (Wave 26):** `User=apexos-ui` + `SupplementaryGroups=video render
+  input tty`. `EnvironmentFile=-/etc/agentd/ui.env` (token + WS only;
+  install.sh rewrites it from `AGENTD_TOKEN`). `ProtectSystem=strict`,
+  empty `CapabilityBoundingSet`, `InaccessiblePaths` on `/etc/agentd/env`
+  and sibling secret files. `ExecStartPre=+` unbinds fbcon so seatless
+  linuxkms can take DRM master without `CAP_SYS_ADMIN`. Residual: a board
+  that still cannot modeset gets a persisted `APEXOS_UI_AS_ROOT` drop-in
+  (`User=root` + those two caps only) — still token-only env.
 
 ### SA-14. High — HTTP egress authorization is lost across DNS and redirects
 

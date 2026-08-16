@@ -30,7 +30,7 @@ The full trust-boundary table lives in [`docs/post-mk1.md` §2](docs/post-mk1.md
 - **Path confinement** (`apexos-confine`): canonical-path checks, `..` and symlink-escape rejection (TOCTOU-safe), writes hard-confined to the agent workspace, reads limited to workspace + a small allowlist **minus** a secret denylist (`/etc/agentd/env`, `~/.ssh`, `/proc/*/environ`, `*.api_key`, `/etc/shadow`).
 - **Per-agent workspace + identity stamping** — the daemon overwrites `agent_id` and the workspace root on every tool call; the model cannot widen its own confinement or write to another agent's memory space.
 - **Policy/approval gate** — in the default (suggest) mode, destructive tools require human approval and a tool with no policy rule defaults to *ask*, never *allow*. Yolo/autonomy is opt-in, per node or per goal — never the default.
-- **systemd sandboxing** on every service: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices` where hardware isn't needed.
+- **systemd sandboxing** on every service: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices` where hardware isn't needed. The kiosk UI is `User=apexos-ui` with a token-only env file (SA-13).
 - **Token-gated network surface** — shared node token or minted session tokens (24 h, in-memory), constant-time comparison; a non-loopback bind refuses to start without a token.
 - **SSRF guard** on `http_fetch` — loopback/link-local/RFC1918/unspecified blocked, including **encoded-IPv4** (hex/octal/decimal, normalized by the URL parser) and **IPv6 literals** (`[::1]`, v4-mapped, `fe80::/fc00::`), re-checked (policy allowlist + SSRF) on every redirect hop; DNS goes through the same public-only resolver so a rebind cannot land on a private address after the pre-check. 4 MB streaming cap.
 - **Self-update privilege separation** — adversarial review of the source diff, then an isolated `--locked` build (no caller `test_cmd`), then a *request file*; only the root watchdog touches `/usr/local/bin`, with health-gated rollback and a probation window.
@@ -43,10 +43,11 @@ We prefer an honest list over a clean-looking one:
 - **`run_command`'s denylist is best-effort by design** — it's a heuristic, trivially bypassable; the approval gate + systemd sandbox are the real controls, and the tool description says so.
 - **Plaintext LAN transport** — WS/HTTP carry bearer tokens over `ws://`/`http://`. This is LAN-scoped by design. **Never port-forward a node to the internet**; if you need remote access, use a VPN/overlay (WireGuard, Tailscale).
 - **The tools worker is not namespace-jailed** — it is path-confined and systemd-sandboxed, but shares the network namespace (several tools legitimately use sockets: `http_fetch`, the loopback screenshot mirror, node bootstrap). A net/no-net worker split is on the post-beta hardening track, with capability caps and input-normalization filters.
+- **Some kiosks may still run `apexos-rs-ui` as root** — only via the persisted `APEXOS_UI_AS_ROOT` DRM fallback when seatless linuxkms cannot take the card as `apexos-ui`. That path still loads `/etc/agentd/ui.env` (gateway token + WS only), not `/etc/agentd/env`.
 
 ## Deployment guidance
 
 - Keep nodes **LAN-only**. The token gate is designed for a trusted-LAN threat model, not the open internet.
-- Treat `/etc/agentd/env` as the node secret store (`600 root:root` — the installer enforces this).
+- Treat `/etc/agentd/env` as the node secret store (`600 root:root` — the installer enforces this). The kiosk unit must load `/etc/agentd/ui.env` (token + WS only), never this file.
 - Pair mesh peers deliberately (the 6-digit pairing code is single-use, 5-minute, lockout-guarded); a paired peer is trusted for a2a messaging, file relay, and federation.
 - If a node runs with approval mode off (yolo) or autonomous goals, remember the blast radius is the *workspace + allowed tools*, not the whole host — but review your policy rules before widening anything.

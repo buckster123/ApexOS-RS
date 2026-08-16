@@ -25,7 +25,7 @@
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `AGENTD_TOKEN` | `""` (auth **disabled**, warns) | gateway bearer token (WS `?token=` + REST `Authorization: Bearer`). Empty + non-loopback `AGENTD_BIND` → the process **refuses to start**. Minted once by install.sh into `/etc/agentd/env` (never overwritten); ui-slint reads it for its own connections and re-exports it on login re-exec. cerebro-api uses the SAME secret with the same non-loopback interlock |
+| `AGENTD_TOKEN` | `""` (auth **disabled**, warns) | gateway bearer token (WS `?token=` + REST `Authorization: Bearer`). Empty + non-loopback `AGENTD_BIND` → the process **refuses to start**. Minted once by install.sh into `/etc/agentd/env` (never overwritten) and **mirrored into `/etc/agentd/ui.env`** (token + `AGENTD_WS` only — the kiosk unit must not load the full env, SA-13); ui-slint reads it for its own connections and re-exports it on login re-exec. cerebro-api uses the SAME secret with the same non-loopback interlock |
 | `AGENTD_BIND` | `127.0.0.1:8787` (code) / `0.0.0.0:8787` (installer seed — LAN, token-gated) | gateway listen address; must parse as a SocketAddr (else fatal) |
 | `AGENTD_WORKSPACE` | `/var/lib/agentd/workspace` | the agent workspace root — relative fs-tool paths resolve here, writes are hard-confined to it, USB sticks mount under `media/`. Empty string → default everywhere EXCEPT the policy engine, which fails **closed** (unset/empty → `Ask`); in tools, the per-call supervisor-stamped workspace wins over the env (per-agent subroots) |
 | `AGENTD_LOG` | `events` (code) / `/var/lib/agentd/events` (unit) | event/session log dir — also roots `goals.json`, `workers.json`, `batches.json`, `mandalas.json`, `remote_workers.json`, `agents/` (evidence), `worktrees/` (mandala trees). apexos-tools appends `<AGENTD_LOG>/agents` to the read-roots so evidence files are readable |
@@ -286,6 +286,7 @@ udev note: `ID_FS_LABEL` (only `APEX-*` sticks are claimed), `UDISKS_IGNORE`, an
 | `APEXOS_VOICE` | off | `1` provisions Kokoro TTS + Whisper STT |
 | `APEXOS_IMAGINARIUM` | off | `1` provisions the Imaginarium node (needs an `XAI_API_KEY` for ACTIVE) |
 | `APEXOS_SONUS` | off | `1` provisions Sonus-RS — boot/USB file, install.conf, or `--sonus`, same provenance precedence as the other add-on flags (USB-parse gap closed `#326`) |
+| `APEXOS_UI_AS_ROOT` | `false` | kiosk DRM fallback (SA-13). Default unit is `User=apexos-ui`. `true` (or `--ui-as-root`) installs a systemd drop-in that runs the UI as root with `CAP_SYS_ADMIN`+`CAP_SYS_TTY_CONFIG` only — still loads `/etc/agentd/ui.env`, never `/etc/agentd/env`. install.sh auto-sets this if the unprivileged start fails. `--ui-unpriv` clears it |
 | `CARGO_BUILD_JOBS` (+ `CARGO_PROFILE_RELEASE_{OPT_LEVEL,LTO,CODEGEN_UNITS}`) | low-RAM only | the OOM build guard: ≤4 GiB nodes build with jobs 1, opt-level 2, LTO off, 16 codegen units — installer-set for the build only, never persisted |
 | `KOKORO_MODEL_URL` / `KOKORO_VOICES_URL` / `WHISPER_GGML_URL` | upstream releases | model download overrides (mirrors / air-gapped installs) |
 | `SUDO_USER` | ambient | the unprivileged user cargo builds as (falls back to the repo owner) |

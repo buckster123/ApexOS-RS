@@ -631,12 +631,12 @@ entirely **agentd's**, reached over the wire.
   read-only endpoints for a passive display; anything that *acts* should expect
   an approval round-trip and surface it (toast + the tool card already do).
 - **The systemd sandbox is the real confinement**, not the UI. `apexos-rs-ui`
-  runs as **root** on the Pi (DRM master on a seatless board —
-  `deploy/apexos-rs-ui.service`, `User=root`), but it does no privileged work
-  itself; it only talks to the loopback gateway. `agentd` is the jailed party
-  (`ProtectSystem=strict`, `ReadWritePaths=/var/lib/agentd /etc/agentd`). Do not
-  add code to the UI that shells out, writes config, or touches the filesystem —
-  route it through agentd so the sandbox + policy apply.
+  runs as **`apexos-ui`** on the Pi (`deploy/apexos-rs-ui.service`) with a
+  token-only `/etc/agentd/ui.env` and talks only to the loopback gateway.
+  `agentd` is the jailed party (`ProtectSystem=strict`,
+  `ReadWritePaths=/var/lib/agentd /etc/agentd`). Do not add code to the UI that
+  shells out, writes config, or touches the filesystem — route it through
+  agentd so the sandbox + policy apply.
 - **For agents self-extending the UI:** this surface is *additive and
   reversible* by construction — a new app is new Slint + new Rust plumbing,
   never a change to agentd's perimeter. The audit discipline is the build/commit

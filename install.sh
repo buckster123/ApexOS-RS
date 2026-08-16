@@ -53,6 +53,8 @@
 #   --openrouter-key=KEY    Set OPENROUTER_API_KEY
 #   --tier=TIER             nano | micro | standard | pro (default: auto-detect)
 #   --mode=MODE             kiosk | headless | desktop (default: auto)
+#   --ui-as-root            Kiosk DRM fallback: run apexos-rs-ui as root (SA-13)
+#   --ui-unpriv             Force the unprivileged kiosk user (clears APEXOS_UI_AS_ROOT)
 #   --repo-dir=PATH         Use a local clone instead of fetching from GitHub
 
 set -euo pipefail
@@ -309,7 +311,7 @@ load_persisted_config() {
     fi
     return 0
   fi
-  local c_mode c_tier c_no_ui c_no_sensor c_no_api c_voice c_no_occipital c_imaginarium c_sonus
+  local c_mode c_tier c_no_ui c_no_sensor c_no_api c_voice c_no_occipital c_imaginarium c_sonus c_ui_root
   c_mode=$(_envval "$CONF_FILE" APEXOS_MODE)
   c_tier=$(_envval "$CONF_FILE" APEXOS_TIER)
   c_no_ui=$(_envval "$CONF_FILE" APEXOS_NO_UI)
@@ -319,6 +321,7 @@ load_persisted_config() {
   c_no_occipital=$(_envval "$CONF_FILE" APEXOS_NO_OCCIPITAL)
   c_imaginarium=$(_envval "$CONF_FILE" APEXOS_IMAGINARIUM)
   c_sonus=$(_envval "$CONF_FILE" APEXOS_SONUS)
+  c_ui_root=$(_envval "$CONF_FILE" APEXOS_UI_AS_ROOT)
   [[ -n "$c_mode" ]] && ! $MODE_CLI && MODE="$c_mode"
   [[ -n "$c_tier" ]] && ! $TIER_CLI && TIER="$c_tier"
   [[ -n "$c_no_ui"     ]] && ! $NO_UI_CLI          && { _truthy "$c_no_ui"     && NO_UI=true          || NO_UI=false; }
@@ -328,6 +331,7 @@ load_persisted_config() {
   [[ -n "$c_voice"     ]] && ! $NO_VOICE_CLI       && { _truthy "$c_voice"     && NO_VOICE=false      || NO_VOICE=true; }
   [[ -n "$c_imaginarium" ]] && ! $IMAGINARIUM_CLI  && { _truthy "$c_imaginarium" && NO_IMAGINARIUM=false || NO_IMAGINARIUM=true; }
   [[ -n "$c_sonus" ]] && ! $SONUS_CLI && { _truthy "$c_sonus" && NO_SONUS=false || NO_SONUS=true; }
+  [[ -n "$c_ui_root" ]] && ! $UI_AS_ROOT_CLI && { _truthy "$c_ui_root" && UI_AS_ROOT=true || UI_AS_ROOT=false; }
   ok "Restored install choices from $CONF_FILE (mode=$MODE tier=$TIER)"
 }
 
@@ -364,12 +368,16 @@ IS_DESKTOP=false   # MODE==desktop → build the UI but launch a winit window, n
 MODE_CLI=false; TIER_CLI=false
 NO_UI_CLI=false; NO_CEREBRO_API_CLI=false; NO_SENSOR_CLI=false; NO_VOICE_CLI=false
 NO_OCCIPITAL_CLI=false; IMAGINARIUM_CLI=false; SONUS_CLI=false
+# Kiosk DRM fallback (SA-13). Default is User=apexos-ui; persist via install.conf.
+UI_AS_ROOT=false; UI_AS_ROOT_CLI=false
 
 for arg in "$@"; do
   case "$arg" in
     -y|--yes)              YES=true ;;
     --tui)                 TUI_FORCE=true ;;
     --no-ui)               NO_UI=true; NO_UI_CLI=true ;;
+    --ui-as-root)          UI_AS_ROOT=true;  UI_AS_ROOT_CLI=true ;;
+    --ui-unpriv)           UI_AS_ROOT=false; UI_AS_ROOT_CLI=true ;;
     --no-cerebro-api)      NO_CEREBRO_API=true; NO_CEREBRO_API_CLI=true ;;
     --no-sensor)           NO_SENSOR=true; NO_SENSOR_CLI=true ;;
     --no-occipital)        NO_OCCIPITAL=true; NO_OCCIPITAL_CLI=true ;;
@@ -625,7 +633,7 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
   [[ -n "$MODE_CHOICE" ]] && MODE="$MODE_CHOICE"
 fi
 # Headless = no local UI. Desktop = build the UI but run it as a winit window in the
-# user's session (app-menu + autostart launcher), NOT the root KMS/DRM kiosk service.
+# user's session (app-menu + autostart launcher), NOT the KMS/DRM kiosk service.
 # Slice-3e auth means it shows a login screen → no token plumbing needed in the launcher.
 [[ "$MODE" == "headless" ]] && NO_UI=true
 [[ "$MODE" == "desktop"  ]] && IS_DESKTOP=true
@@ -928,6 +936,17 @@ if ! $NO_UI; then
   done
 fi
 
+# Kiosk UI account (SA-13) — dedicated, nologin. Desktop/headless skip the unit.
+if ! $NO_UI && ! $IS_DESKTOP; then
+  getent group apexos-ui >/dev/null || groupadd -r apexos-ui
+  id apexos-ui &>/dev/null \
+    || useradd -r -s /sbin/nologin -d /var/lib/apexos-ui -g apexos-ui apexos-ui
+  install -d -o apexos-ui -g apexos-ui -m 750 /var/lib/apexos-ui
+  for grp in video render input tty; do
+    getent group "$grp" &>/dev/null && usermod -aG "$grp" apexos-ui || true
+  done
+fi
+
 mkdir -p /etc/agentd /var/lib/agentd/{workspace,events,ui,cerebro/models,update}
 chown -R agentd:agentd /var/lib/agentd
 # Self-update: the watchdog consumes ONLY /var/lib/agentd/update/agentd.staged
@@ -1089,7 +1108,7 @@ if ! $NO_UI; then
   ok "apexos-rs-ui → /usr/local/bin/apexos-rs-ui"
   if $IS_DESKTOP; then
     # Desktop mode: a winit window in the user's session (app menu + autostart),
-    # NOT the root KMS kiosk service. The same binary, launched differently. Both
+    # NOT the KMS kiosk service. The same binary, launched differently. Both
     # launcher writes are best-effort — the binary is already installed, so a
     # launcher hiccup shouldn't abort the whole install.
     install -Dm 644 "$REPO_DIR/deploy/apexos-rs-ui.desktop" /usr/share/applications/apexos-rs-ui.desktop \
@@ -1810,6 +1829,7 @@ write_install_conf() {
     echo "APEXOS_VOICE=$( $NO_VOICE && echo false || echo true )"
     echo "APEXOS_IMAGINARIUM=$( $NO_IMAGINARIUM && echo false || echo true )"
     echo "APEXOS_SONUS=$( $NO_SONUS && echo false || echo true )"
+    echo "APEXOS_UI_AS_ROOT=$UI_AS_ROOT"
   } > "$tmp"
   chmod 644 "$tmp"; chown root:root "$tmp"
   mv "$tmp" "$CONF_FILE"
@@ -1901,7 +1921,8 @@ fi
 
 # Imaginarium reach for agentd-side consumers: the node URL + LAN token (NEVER the
 # xAI key) mirror into this file so the MCP proxy plugin (env inherited from agentd)
-# and the kiosk UI (EnvironmentFile) both authenticate to the local daemon.
+# authenticates to the local daemon. The kiosk UI does NOT load this file (SA-13);
+# it fetches reach via token-gated GET /api/imaginarium after connecting.
 # Seed-if-absent — a rotated token in /etc/imaginarium/env must be updated here too
 # (or delete both lines and re-run apexos-update).
 if $IMAGINARIUM_INSTALLED; then
@@ -1932,6 +1953,37 @@ fi
 
 ok "Config written"
 
+# Kiosk credential split (SA-13): /etc/agentd/ui.env carries ONLY AGENTD_TOKEN +
+# AGENTD_WS. Rewritten every run so a rotated gateway token propagates. The full
+# /etc/agentd/env (provider keys, mesh/sensor tokens) stays 0600 root and is
+# InaccessiblePaths in the unit.
+write_ui_env() {
+  local dest=/etc/agentd/ui.env
+  local tok ws tmp
+  tok=$(_envval "$ENV_FILE" AGENTD_TOKEN)
+  ws=$(_envval "$ENV_FILE" AGENTD_WS)
+  [[ -z "$ws" ]] && ws="ws://localhost:8787/ws"
+  tmp=$(mktemp "${dest}.XXXXXX")
+  {
+    echo "# ApexOS-RS kiosk UI credentials — minted by install.sh (SA-13)."
+    echo "# ONLY the gateway token + WS URL. Never copy /etc/agentd/env here."
+    echo "AGENTD_WS=${ws}"
+    [[ -n "$tok" ]] && echo "AGENTD_TOKEN=${tok}"
+  } > "$tmp"
+  chmod 0640 "$tmp"
+  if id apexos-ui &>/dev/null; then
+    chown root:apexos-ui "$tmp"
+  else
+    chown root:root "$tmp"
+  fi
+  mv "$tmp" "$dest"
+}
+
+if ! $NO_UI && ! $IS_DESKTOP; then
+  write_ui_env
+  ok "Kiosk UI env → /etc/agentd/ui.env (token + WS only)"
+fi
+
 # ── Systemd services ───────────────────────────────────────────────────────────
 hdr "Systemd services"
 
@@ -1945,12 +1997,41 @@ install_svc() {
   ok "Service: $name.service installed"
 }
 
+# DRM-master escape hatch: a drop-in flips User=root + restores the two caps
+# drmSetMaster/VT ioctls need. The token-only EnvironmentFile and ProtectSystem
+# stay on the main unit. Cleared when APEXOS_UI_AS_ROOT is false.
+apply_kiosk_ui_identity() {
+  local dir=/etc/systemd/system/apexos-rs-ui.service.d
+  local dropin="$dir/as-root.conf"
+  if $UI_AS_ROOT; then
+    install -d -m 755 "$dir"
+    cat > "$dropin" << 'EOF'
+# DRM-master escape hatch (SA-13). Written by install.sh when
+# APEXOS_UI_AS_ROOT=true (operator flag or auto-fallback after a failed
+# unprivileged start). The unit still loads only /etc/agentd/ui.env.
+[Service]
+User=root
+Group=root
+# uid 0 with an empty bounding set cannot drmSetMaster (capable() fails).
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_TTY_CONFIG
+EOF
+    chmod 644 "$dropin"
+    ok "Kiosk UI identity: root (APEXOS_UI_AS_ROOT — DRM fallback)"
+  else
+    rm -f "$dropin"
+    rmdir "$dir" 2>/dev/null || true
+  fi
+}
+
 install_svc agentd
 install_svc apex-sensor-bridge
 ! $NO_CEREBRO_API && install_svc cerebro-api   || true
-# The root KMS/DRM kiosk service is kiosk-mode only; desktop mode launches the UI
+# The KMS/DRM kiosk service is kiosk-mode only; desktop mode launches the UI
 # as a user-session winit window (the .desktop launcher above), never this service.
-! $NO_UI && ! $IS_DESKTOP && install_svc apexos-rs-ui  || true
+if ! $NO_UI && ! $IS_DESKTOP; then
+  install_svc apexos-rs-ui
+  apply_kiosk_ui_identity
+fi
 # apex-tts only when voice provisioned (binary + model present) — else the service
 # would crash-loop on a missing model.
 $VOICE_INSTALLED && install_svc apex-tts || true
@@ -2059,7 +2140,23 @@ $IMAGINARIUM_ACTIVE && { svc_start imaginarium "imaginarium" || true; }
 svc_start agentd            "agentd"
 $NO_SENSOR || svc_start apex-sensor-bridge "sensor-bridge"
 $NO_CEREBRO_API || svc_start cerebro-api   "cerebro-api"
-{ $NO_UI || $IS_DESKTOP; } || svc_start apexos-rs-ui  "apexos-rs-ui"
+if ! $NO_UI && ! $IS_DESKTOP; then
+  if svc_start apexos-rs-ui "apexos-rs-ui"; then
+    :
+  elif $UI_AS_ROOT; then
+    warn "kiosk UI failed even as root — journalctl -u apexos-rs-ui -n 40"
+  else
+    # Seatless linuxkms could not take DRM master as apexos-ui. Fall back once,
+    # persist so the next apexos-update does not flap, keep token-only env.
+    warn "kiosk UI failed as apexos-ui — retrying as root (APEXOS_UI_AS_ROOT)"
+    UI_AS_ROOT=true
+    apply_kiosk_ui_identity
+    write_install_conf
+    systemctl daemon-reload
+    svc_start apexos-rs-ui "apexos-rs-ui (root DRM fallback)" \
+      || warn "kiosk UI still down — journalctl -u apexos-rs-ui -n 40"
+  fi
+fi
 
 # ── Health check ──────────────────────────────────────────────────────────────
 hdr "Health check"
