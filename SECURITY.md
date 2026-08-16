@@ -32,7 +32,7 @@ The full trust-boundary table lives in [`docs/post-mk1.md` §2](docs/post-mk1.md
 - **Policy/approval gate** — in the default (suggest) mode, destructive tools require human approval and a tool with no policy rule defaults to *ask*, never *allow*. Yolo/autonomy is opt-in, per node or per goal — never the default.
 - **systemd sandboxing** on every service: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices` where hardware isn't needed.
 - **Token-gated network surface** — shared node token or minted session tokens (24 h, in-memory), constant-time comparison; a non-loopback bind refuses to start without a token.
-- **SSRF guard** on `http_fetch` — loopback/link-local/RFC1918/unspecified blocked, including **encoded-IPv4** (hex/octal/decimal, normalized by the URL parser) and **IPv6 literals** (`[::1]`, v4-mapped, `fe80::/fc00::`), re-checked on every redirect hop, 4 MB streaming cap.
+- **SSRF guard** on `http_fetch` — loopback/link-local/RFC1918/unspecified blocked, including **encoded-IPv4** (hex/octal/decimal, normalized by the URL parser) and **IPv6 literals** (`[::1]`, v4-mapped, `fe80::/fc00::`), re-checked (policy allowlist + SSRF) on every redirect hop; DNS goes through the same public-only resolver so a rebind cannot land on a private address after the pre-check. 4 MB streaming cap.
 - **Self-update privilege separation** — adversarial review of the source diff, then an isolated `--locked` build (no caller `test_cmd`), then a *request file*; only the root watchdog touches `/usr/local/bin`, with health-gated rollback and a probation window.
 - **Mesh trust** — pairing-code token exchange, per-peer bearer tokens, `x-mesh-hops` guard against spawn recursion, per-peer circuit breakers; federated recall serves **shared-visibility memories only**, and imports are provenance-stamped by the *receiver* (a peer can't forge origin).
 
@@ -40,7 +40,6 @@ The full trust-boundary table lives in [`docs/post-mk1.md` §2](docs/post-mk1.md
 
 We prefer an honest list over a clean-looking one:
 
-- **`http_fetch` DNS-rebind TOCTOU** — the SSRF guard resolves the host, then the HTTP client resolves it again; a malicious DNS server could swap answers between the two. Fix requires a pinned-IP connector.
 - **`run_command`'s denylist is best-effort by design** — it's a heuristic, trivially bypassable; the approval gate + systemd sandbox are the real controls, and the tool description says so.
 - **Plaintext LAN transport** — WS/HTTP carry bearer tokens over `ws://`/`http://`. This is LAN-scoped by design. **Never port-forward a node to the internet**; if you need remote access, use a VPN/overlay (WireGuard, Tailscale).
 - **The tools worker is not namespace-jailed** — it is path-confined and systemd-sandboxed, but shares the network namespace (several tools legitimately use sockets: `http_fetch`, the loopback screenshot mirror, node bootstrap). A net/no-net worker split is on the post-beta hardening track, with capability caps and input-normalization filters.
