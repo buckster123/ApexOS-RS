@@ -24,7 +24,8 @@
 > Wave 20 (PR #374): SA-11.
 > Wave 21 (PR #375): finding 12, SA-1.
 > Wave 22 (PR #376): SA-14.
-> Wave 23 (this tree): SA-2.
+> Wave 23 (PR #377): SA-2.
+> Wave 24 (this tree): SA-4.
 
 ## Ranked findings
 
@@ -288,6 +289,11 @@ dropping them.
 - **Minimal fix:** Reduce origin to a validated single component and bind each
   manifest/receipt to an immutable shipment ID, stick, origin, destination, and
   exact loaded outbox entry.
+- **Fixed (Wave 24):** `safe_origin` refuses traversal / multi-component
+  origins before `incoming/<origin>/` is created. Each outbox row stamps
+  `shipment_id = {dest}:{id}` onto the manifest and receipt. Matching requires
+  that id + dest (+ stick when `loaded_on` is set). A pre-SA-4 receipt with an
+  empty shipment id never closes a row.
 
 ### SA-5. High — model-controlled Cerebro aliases bypass the caller identity stamp
 

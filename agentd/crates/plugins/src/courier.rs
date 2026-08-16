@@ -275,6 +275,10 @@ pub struct ManifestEntry {
     pub dest: String,
     pub epoch: u32,
     pub created_at: String,
+    /// Immutable shipment key (`{dest}:{outbox_id}`). Empty on pre-SA-4
+    /// sealed manifests — those cannot close a later outbox row.
+    #[serde(default)]
+    pub shipment_id: String,
 }
 
 /// One ingest receipt. `accepted: false` = the cargo failed verification at
@@ -285,6 +289,8 @@ pub struct Receipt {
     pub node: String,
     pub accepted: bool,
     pub at: String,
+    #[serde(default)]
+    pub shipment_id: String,
 }
 
 fn read_sealed_list<T: serde::de::DeserializeOwned>(
@@ -390,6 +396,9 @@ pub struct OutboxEntry {
     /// Delivery confirmed (receipt heard via gossip or read off a stick).
     #[serde(default)]
     pub receipted_at: Option<String>,
+    /// Immutable id stamped at queue time. Receipts must echo it.
+    #[serde(default)]
+    pub shipment_id: String,
 }
 
 pub fn outbox_path(log_dir: &Path) -> PathBuf {
@@ -448,8 +457,9 @@ pub fn queue_artifact(
     {
         return Ok(existing.clone());
     }
+    let id = entries.iter().map(|e| e.id).max().unwrap_or(0) + 1;
     let entry = OutboxEntry {
-        id: entries.iter().map(|e| e.id).max().unwrap_or(0) + 1,
+        id,
         dest: dest_node.to_string(),
         path: abs_path.to_string_lossy().into_owned(),
         name: name.to_string(),
@@ -458,6 +468,7 @@ pub fn queue_artifact(
         created_at: now_iso(),
         loaded_on: None,
         receipted_at: None,
+        shipment_id: shipment_id_for(dest_node, id),
     };
     entries.push(entry.clone());
     outbox_save(log_dir, &entries)?;
@@ -587,6 +598,8 @@ pub struct HeardManifest {
     #[serde(default)]
     pub name: String,
     pub heard_at: String,
+    #[serde(default)]
+    pub shipment_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -596,6 +609,8 @@ pub struct HeardReceipt {
     pub node: String,
     pub accepted: bool,
     pub heard_at: String,
+    #[serde(default)]
+    pub shipment_id: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -631,7 +646,12 @@ pub fn ledger_hear_manifest(log_dir: &Path, m: HeardManifest) -> bool {
     if ledger
         .manifests
         .iter()
-        .any(|x| x.stick == m.stick && x.root == m.root && x.dest == m.dest)
+        .any(|x| {
+            x.stick == m.stick
+                && x.root == m.root
+                && x.dest == m.dest
+                && x.shipment_id == m.shipment_id
+        })
     {
         return false;
     }
@@ -648,7 +668,12 @@ pub fn ledger_hear_receipt(log_dir: &Path, r: HeardReceipt) -> (bool, Option<Str
     let news = !ledger
         .receipts
         .iter()
-        .any(|x| x.stick == r.stick && x.root == r.root && x.node == r.node);
+        .any(|x| {
+            x.stick == r.stick
+                && x.root == r.root
+                && x.node == r.node
+                && x.shipment_id == r.shipment_id
+        });
     if news {
         ledger.receipts.push(r.clone());
         let _ = ledger_save(log_dir, &ledger);
@@ -658,7 +683,7 @@ pub fn ledger_hear_receipt(log_dir: &Path, r: HeardReceipt) -> (bool, Option<Str
         let mut entries = outbox_load(log_dir);
         let mut changed = false;
         for e in entries.iter_mut() {
-            if e.root == r.root && e.dest == r.node && e.receipted_at.is_none() {
+            if receipt_closes_outbox(e, &r.shipment_id, &r.node, &r.stick, &r.root) {
                 e.receipted_at = Some(r.heard_at.clone());
                 delivered = Some(e.name.clone());
                 changed = true;
@@ -713,6 +738,66 @@ pub struct PlugReport {
 pub struct PlugOutcome {
     pub report: PlugReport,
     pub gossip: Vec<Gossip>,
+}
+
+/// Immutable shipment key. Unique per origin outbox; receipts must echo it.
+pub fn shipment_id_for(dest: &str, id: u64) -> String {
+    format!("{dest}:{id}")
+}
+
+/// `origin` is a directory name under `courier/incoming/`. One component,
+/// no traversal — a sealed manifest is authenticated, not trusted.
+pub fn safe_origin(origin: &str) -> Result<String, String> {
+    let s = origin.trim();
+    if s.is_empty() {
+        return Err("origin is empty".into());
+    }
+    if s == "." || s == ".." || s.contains('/') || s.contains('\\') {
+        return Err("origin must be a single path component".into());
+    }
+    if s.starts_with('.') {
+        return Err("origin must not be hidden or relative".into());
+    }
+    if s.len() > 64 {
+        return Err("origin is too long".into());
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err("origin has illegal characters".into());
+    }
+    Ok(s.to_string())
+}
+
+/// A receipt closes one outbox row only: shipment id + dest, and the stick
+/// it was loaded on when we know it. Root is defence-in-depth. A missing
+/// shipment id (pre-SA-4) never closes a row.
+pub fn receipt_closes_outbox(
+    e: &OutboxEntry,
+    shipment_id: &str,
+    dest: &str,
+    stick: &str,
+    root: &str,
+) -> bool {
+    if e.receipted_at.is_some() {
+        return false;
+    }
+    if e.dest != dest {
+        return false;
+    }
+    if e.shipment_id.is_empty() || shipment_id.is_empty() || e.shipment_id != shipment_id {
+        return false;
+    }
+    if !root.is_empty() && e.root != root {
+        return false;
+    }
+    if let Some(on) = &e.loaded_on {
+        if !stick.is_empty() && on != stick {
+            return false;
+        }
+    }
+    true
 }
 
 /// Sanitize a manifest-supplied filename for the incoming dir: last path
@@ -792,32 +877,37 @@ pub fn process_plug(
     //    and gossiped home). Tamper fails closed, with an accepted:false
     //    receipt so the origin learns the carry failed.
     for entry in manifest.iter().filter(|e| e.dest == node_id) {
-        if receipts
-            .iter()
-            .any(|r| r.root == entry.root && r.node == node_id && r.accepted)
-        {
+        if receipts.iter().any(|r| {
+            r.node == node_id
+                && r.accepted
+                && if !r.shipment_id.is_empty() && !entry.shipment_id.is_empty() {
+                    r.shipment_id == entry.shipment_id
+                } else {
+                    r.root == entry.root
+                }
+        }) {
             report.already += 1;
             continue;
         }
-        if ledger
-            .manifests
-            .iter()
-            .any(|m| m.stick == stick_id && m.root == entry.root)
-        {
+        if ledger.manifests.iter().any(|m| {
+            m.stick == stick_id
+                && m.root == entry.root
+                && (m.shipment_id.is_empty()
+                    || entry.shipment_id.is_empty()
+                    || m.shipment_id == entry.shipment_id)
+        }) {
             report.announced_matched += 1;
         } else {
             report.unannounced += 1;
         }
         let cargo_path = mount.join(COURIER_DIR).join(CARGO_DIR).join(&entry.root);
         let verdict: Result<(), String> = (|| {
+            let origin = safe_origin(&entry.origin)?;
             let bytes = std::fs::read(&cargo_path).map_err(|e| format!("cargo read: {e}"))?;
             if hex32(&blob_root(&bytes)) != entry.root {
                 return Err("blake3 mismatch — cargo does not match its announced root".into());
             }
-            let dir = workspace
-                .join("courier")
-                .join("incoming")
-                .join(&entry.origin);
+            let dir = workspace.join("courier").join("incoming").join(&origin);
             std::fs::create_dir_all(&dir).map_err(|e| format!("incoming mkdir: {e}"))?;
             std::fs::write(dir.join(safe_name(&entry.name, &entry.root)), &bytes)
                 .map_err(|e| format!("incoming write: {e}"))?;
@@ -835,17 +925,21 @@ pub fn process_plug(
             node: node_id.to_string(),
             accepted,
             at: now_iso(),
+            shipment_id: entry.shipment_id.clone(),
         };
         receipts.push(receipt.clone());
         receipts_dirty = true;
-        gossip.push(Gossip {
-            kind: "receipt",
-            target: entry.origin.clone(),
-            body: serde_json::json!({
-                "stick": stick_id, "root": receipt.root,
-                "node": node_id, "accepted": accepted,
-            }),
-        });
+        if let Ok(origin) = safe_origin(&entry.origin) {
+            gossip.push(Gossip {
+                kind: "receipt",
+                target: origin,
+                body: serde_json::json!({
+                    "stick": stick_id, "root": receipt.root,
+                    "node": node_id, "accepted": accepted,
+                    "shipment_id": receipt.shipment_id,
+                }),
+            });
+        }
     }
 
     report.in_transit = manifest
@@ -859,7 +953,7 @@ pub fn process_plug(
         let mut outbox_dirty = false;
         for r in receipts.iter().filter(|r| r.accepted) {
             for e in outbox.iter_mut() {
-                if e.root == r.root && e.dest == r.node && e.receipted_at.is_none() {
+                if receipt_closes_outbox(e, &r.shipment_id, &r.node, &stick_id, &r.root) {
                     e.receipted_at = Some(r.at.clone());
                     report.receipts_matched += 1;
                     outbox_dirty = true;
@@ -900,10 +994,17 @@ pub fn process_plug(
                     std::fs::write(&cargo_path, &bytes)
                         .map_err(|err| format!("cargo write: {err}"))?;
                 }
-                if !manifest
-                    .iter()
-                    .any(|m| m.root == e.root && m.dest == e.dest)
-                {
+                if e.shipment_id.is_empty() {
+                    e.shipment_id = shipment_id_for(&e.dest, e.id);
+                    outbox_dirty = true;
+                }
+                if !manifest.iter().any(|m| {
+                    if !m.shipment_id.is_empty() && !e.shipment_id.is_empty() {
+                        m.shipment_id == e.shipment_id
+                    } else {
+                        m.root == e.root && m.dest == e.dest
+                    }
+                }) {
                     manifest.push(ManifestEntry {
                         root: e.root.clone(),
                         len: e.len,
@@ -913,6 +1014,7 @@ pub fn process_plug(
                         dest: e.dest.clone(),
                         epoch: epoch_today(),
                         created_at: now_iso(),
+                        shipment_id: e.shipment_id.clone(),
                     });
                     manifest_dirty = true;
                 }
@@ -930,7 +1032,7 @@ pub fn process_plug(
                             body: serde_json::json!({
                                 "stick": stick_id, "root": e.root, "origin": node_id,
                                 "dest": e.dest, "len": e.len, "epoch": epoch_today(),
-                                "name": e.name,
+                                "name": e.name, "shipment_id": e.shipment_id,
                             }),
                         });
                     }
@@ -1346,6 +1448,7 @@ mod tests {
                 node: "apex2".into(),
                 accepted: true,
                 heard_at: "2026-08-07T00:00:00Z".into(),
+                shipment_id: e.shipment_id.clone(),
             },
         );
         assert!(news);
@@ -1360,6 +1463,7 @@ mod tests {
                 node: "apex2".into(),
                 accepted: true,
                 heard_at: "2026-08-07T00:00:01Z".into(),
+                shipment_id: e.shipment_id,
             },
         );
         assert!(!news2);
@@ -1436,6 +1540,125 @@ mod tests {
         assert!(outbox_cancel(d.path(), e3.id)
             .unwrap_err()
             .contains("already delivered"));
+    }
+
+    #[test]
+    fn safe_origin_is_a_single_component() {
+        assert_eq!(safe_origin("apex-a").unwrap(), "apex-a");
+        assert_eq!(safe_origin("ApexOS-2").unwrap(), "ApexOS-2");
+        assert_eq!(safe_origin("andre-laptop").unwrap(), "andre-laptop");
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../etc",
+            "../../etc/passwd",
+            "a/b",
+            "a\\b",
+            ".hidden",
+            "has space",
+            "evil;id",
+        ] {
+            assert!(safe_origin(bad).is_err(), "must refuse {bad:?}");
+        }
+    }
+
+    #[test]
+    fn hostile_origin_does_not_escape_incoming() {
+        let stick = tmp();
+        let a_log = tmp();
+        let a_ws = tmp();
+        let b_log = tmp();
+        let b_ws = tmp();
+        let k = psk();
+        write_marker_v1(stick.path(), "work");
+        let src = a_ws.path().join("note.txt");
+        std::fs::write(&src, b"secret").unwrap();
+        queue_artifact(a_log.path(), &src, "apex-b", "note.txt").unwrap();
+        process_plug(stick.path(), "apex-a", a_ws.path(), a_log.path(), Some(&k));
+
+        // Rewrite the sealed manifest origin to a traversal after load.
+        let stick_id = ensure_stick_id(stick.path(), "apex-a").unwrap();
+        let mut entries = read_manifest(stick.path(), &k, &stick_id).unwrap();
+        entries[0].origin = "../../escaped".into();
+        write_manifest(stick.path(), &k, &stick_id, &entries).unwrap();
+
+        let out_b = process_plug(stick.path(), "apex-b", b_ws.path(), b_log.path(), Some(&k));
+        assert!(out_b.report.verified.is_empty());
+        assert!(out_b.report.failed.iter().any(|(_, r)| r.contains("origin")));
+        assert!(!b_ws.path().join("escaped").exists());
+        assert!(!b_ws.path().join("courier/incoming/../../escaped").exists());
+        let incoming = b_ws.path().join("courier").join("incoming");
+        if incoming.exists() {
+            for ent in std::fs::read_dir(&incoming).unwrap() {
+                let name = ent.unwrap().file_name();
+                assert_ne!(name, "..");
+                assert!(!name.to_string_lossy().contains('/'));
+            }
+        }
+    }
+
+    #[test]
+    fn receipt_for_one_shipment_does_not_close_the_next() {
+        let log = tmp();
+        let src = log.path().join("same.txt");
+        std::fs::write(&src, b"identical bytes").unwrap();
+        let first = queue_artifact(log.path(), &src, "apex2", "same.txt").unwrap();
+        // First shipment delivered.
+        let _ = ledger_hear_receipt(
+            log.path(),
+            HeardReceipt {
+                stick: "stick-a".into(),
+                root: first.root.clone(),
+                node: "apex2".into(),
+                accepted: true,
+                heard_at: "2026-08-16T00:00:00Z".into(),
+                shipment_id: first.shipment_id.clone(),
+            },
+        );
+        assert!(outbox_load(log.path())[0].receipted_at.is_some());
+
+        // Same bytes queued again after delivery is a new shipment.
+        let second = queue_artifact(log.path(), &src, "apex2", "same.txt").unwrap();
+        assert_ne!(first.shipment_id, second.shipment_id);
+        assert!(second.receipted_at.is_none());
+
+        // A replay of the first receipt must not close the second.
+        let (_news, delivered) = ledger_hear_receipt(
+            log.path(),
+            HeardReceipt {
+                stick: "stick-a".into(),
+                root: first.root.clone(),
+                node: "apex2".into(),
+                accepted: true,
+                heard_at: "2026-08-16T00:00:01Z".into(),
+                shipment_id: first.shipment_id.clone(),
+            },
+        );
+        assert!(delivered.is_none());
+        let rows = outbox_load(log.path());
+        let again = rows.iter().find(|e| e.id == second.id).unwrap();
+        assert!(again.receipted_at.is_none());
+
+        // A pre-SA-4 receipt (empty shipment_id) also must not close it.
+        let (_news, delivered) = ledger_hear_receipt(
+            log.path(),
+            HeardReceipt {
+                stick: "stick-a".into(),
+                root: second.root.clone(),
+                node: "apex2".into(),
+                accepted: true,
+                heard_at: "2026-08-16T00:00:02Z".into(),
+                shipment_id: String::new(),
+            },
+        );
+        assert!(delivered.is_none());
+        assert!(outbox_load(log.path())
+            .iter()
+            .find(|e| e.id == second.id)
+            .unwrap()
+            .receipted_at
+            .is_none());
     }
 
     #[test]

@@ -4620,6 +4620,7 @@ async fn courier_manifest_handler(
         epoch: body["epoch"].as_u64().unwrap_or(0) as u32,
         name: body["name"].as_str().unwrap_or("").to_string(),
         heard_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        shipment_id: body["shipment_id"].as_str().unwrap_or("").to_string(),
     };
     let for_me = heard.dest == *state.node_id;
     let (origin, name, len) = (heard.origin.clone(), heard.name.clone(), heard.len);
@@ -4661,6 +4662,7 @@ async fn courier_receipt_handler(
         node: body["node"].as_str().unwrap_or(&from).to_string(),
         accepted: body["accepted"].as_bool().unwrap_or(false),
         heard_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        shipment_id: body["shipment_id"].as_str().unwrap_or("").to_string(),
     };
     if heard.stick.is_empty() || heard.root.is_empty() {
         return Json(serde_json::json!({ "ok": false, "error": "missing stick/root" }));
