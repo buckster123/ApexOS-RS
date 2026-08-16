@@ -4893,9 +4893,9 @@ async fn json_get(client: &reqwest::Client, url: String) -> Value {
 // ── Imagine (🖼) — the Imaginarium studio window (docs/imaginarium.md) ────────
 // ui-slint is a thin HTTP client of the node-local Imaginarium daemon. Base URL
 // and LAN token ride the SAME env vars the agentd MCP proxy uses
-// (IMAGINARIUM_URL / IMAGINARIUM_TOKEN — /etc/agentd/env reaches both the
-// daemon-side plugin and this UI's service unit), so one config wires both
-// surfaces. The xAI key never appears here — that's the whole seam.
+// (IMAGINARIUM_URL / IMAGINARIUM_TOKEN — agentd's env reaches the MCP proxy;
+// the kiosk unit loads only ui.env, so this UI fetches reach via
+// GET /api/imaginarium). The xAI key never appears here — that's the whole seam.
 
 fn imagine_base_url() -> String {
     std::env::var("IMAGINARIUM_URL")
@@ -6048,9 +6048,10 @@ fn imagine_player_tick(ui: &AppWindow) {
 
 /// Ask agentd for the node's Imaginarium reach (`GET /api/imaginarium`, gated —
 /// works with the admin token AND a minted login session) and store it. This is
-/// the DESKTOP path: the winit UI can't read the 0600 /etc/agentd/env, agentd
-/// can — and serves the systemd-parsed values, immune to shell-quoting/dup-line
-/// footguns. Called only when the env token is absent; per-var env still wins.
+/// the no-env-token path: desktop never sees 0600 /etc/agentd/env, and the
+/// kiosk unit only loads ui.env (SA-13). agentd serves the systemd-parsed
+/// values, immune to shell-quoting/dup-line footguns. Called only when the
+/// env token is absent; per-var env still wins.
 /// Returns true when a non-empty token landed.
 async fn imagine_fetch_reach(client: &reqwest::Client, http_base: &str) -> bool {
     let v = json_get(client, format!("{http_base}/api/imaginarium")).await;
@@ -7729,7 +7730,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Imagine (🖼): the Imaginarium studio (docs/imaginarium.md) ────────────
     // The reach (base URL + LAN token) is process-global and re-read on EVERY
     // call: env seeds it, and on a desktop node — where the winit window never
-    // sees /etc/agentd/env — agentd's `GET /api/imaginarium` fills it in after
+    // sees /etc/agentd/env (kiosk: token-only ui.env) — `GET /api/imaginarium` fills it in after
     // login. No baked default-header client: a token that arrives late still
     // reaches the next request. The xAI key never appears UI-side.
     {

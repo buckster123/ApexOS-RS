@@ -120,12 +120,11 @@ design undone in one line.
   follow-along auto-reveal, `imagine_save`.
 
   **How the app gets its reach** (base URL + LAN token): env
-  (`IMAGINARIUM_URL`/`IMAGINARIUM_TOKEN`) wins when set — the kiosk unit reads
-  `/etc/agentd/env` and dev shells can export. When the env token is absent —
-  the **desktop** case: the winit window runs in the user's session and cannot
-  read the 0600 root env file — the UI asks agentd via the token-gated
-  `GET /api/imaginarium` (works with the admin token or a minted login
-  session), which serves the systemd-parsed values from agentd's own env.
+  (`IMAGINARIUM_URL`/`IMAGINARIUM_TOKEN`) wins when set — dev shells can export.
+  The kiosk unit does **not** load `/etc/agentd/env` (SA-13, token-only
+  `ui.env`), so it uses the same path as desktop: the UI asks agentd via the
+  token-gated `GET /api/imaginarium` (works with the admin token or a minted
+  login session), which serves the systemd-parsed values from agentd's own env.
   Boot fetch + retry on ⟳, so login → open Imagine just works. The route never
   serves the xAI key.
 
@@ -134,7 +133,7 @@ design undone in one line.
 | File | Holds | Read by |
 |------|-------|---------|
 | `/etc/imaginarium/env` | `XAI_API_KEY` (the only copy) + `IMAGINARIUM_TOKEN` | `imaginarium.service` |
-| `/etc/agentd/env` | `IMAGINARIUM_URL` (`http://127.0.0.1:8791`) + `IMAGINARIUM_TOKEN` (mirror) | agentd → MCP proxy child; `apexos-rs-ui.service` |
+| `/etc/agentd/env` | `IMAGINARIUM_URL` (`http://127.0.0.1:8791`) + `IMAGINARIUM_TOKEN` (mirror) | agentd → MCP proxy child (kiosk UI fetches via `GET /api/imaginarium`) |
 
 Rotating the token = update **both** files (the agentd side is seed-if-absent),
 then restart `imaginarium` and `agentd`. **The two files must agree** — the

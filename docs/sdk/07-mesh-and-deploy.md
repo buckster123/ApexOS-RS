@@ -166,7 +166,7 @@ Modes gate which binaries install. The logic is in `install.sh` (the `MODE` auto
    the UI build, `install_svc`, and `systemctl enable` sites). `desktop` installs a **real UI**:
    `IS_DESKTOP=true` keeps `NO_UI=false`, builds + installs `/usr/local/bin/apexos-rs-ui` plus a
    `.desktop` launcher (app menu + the install user's `~/.config/autostart`, launching with
-   `SLINT_BACKEND=winit`), and skips **only** the root KMS kiosk systemd service (the
+   `SLINT_BACKEND=winit`), and skips **only** the KMS kiosk systemd service (the
    `! $NO_UI && ! $IS_DESKTOP` gate at `install_svc`/enable/start). Add your mode's gating here.
    Other gates: `NO_SENSOR` (sensor bridge), `NO_CEREBRO_API` (REST dashboard).
 3. A mode is just a label that flips these booleans. agentd itself is mode-agnostic — it is a
@@ -472,7 +472,7 @@ see "Add a new hardware tier").
 
 | Mode | Auto-detect | Installs `apexos-rs-ui`? | Interface | `SLINT_BACKEND` |
 |------|-------------|--------------------------|-----------|-----------------|
-| `kiosk` | Lite-OS Pi (`multi-user.target`, no session) | yes, as the root KMS systemd service | local HDMI display | `linuxkms` (or `linuxkms-femtovg` on Pi Zero) |
+| `kiosk` | Lite-OS Pi (`multi-user.target`, no session) | yes, as the `apexos-ui` KMS systemd service (token-only `ui.env`; `APEXOS_UI_AS_ROOT` if DRM needs it) | local HDMI display | `linuxkms` (or `linuxkms-femtovg` on Pi Zero) |
 | `headless` | non-Pi | no (`NO_UI=true`) — the only mode that skips the UI | browser / PWA | — |
 | `desktop` | desktop-OS Pi (`graphical.target` or live session env), or manual | yes, as a winit window (`.desktop` launcher + autostart; **no** kiosk service) | native window | `winit` |
 

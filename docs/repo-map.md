@@ -225,7 +225,7 @@ On a headless dev machine, exclude the UI (needs fontconfig): `--exclude ui-slin
 | Binary | Source | Run as |
 |--------|--------|--------|
 | `agentd` | `agentd/crates/agentd/src/main.rs` | daemon (systemd); loads soul + keys, binds gateway (default `127.0.0.1:8787`) |
-| `ui-slint` (`apexos-rs-ui`) | `ui-slint/src/main.rs` | kiosk UI (systemd, root for DRM master) or `cargo run` on desktop |
+| `ui-slint` (`apexos-rs-ui`) | `ui-slint/src/main.rs` | kiosk UI (systemd, `User=apexos-ui`, token-only `ui.env`) or `cargo run` on desktop |
 | `cerebro-mcp` | `cerebro/crates/cerebro-mcp/src/main.rs` | spawned by agentd as stdio MCP plugin (not run directly) |
 | `apexos-tools` | `tools/crates/apexos-tools/src/main.rs` | spawned by agentd as stdio MCP plugin (not run directly) |
 | `cerebro-api` | `cerebro/crates/cerebro-api/src/main.rs` | optional REST/dashboard service |
@@ -253,4 +253,4 @@ doesn't recompile, `touch ui-slint/build.rs`.
 + **additive policy-rule sync** (`sync_policy_rules` — new default rules reach already-deployed nodes without clobbering
 self-evolved ones) + a `600 root:root` env file with a generated `AGENTD_TOKEN` → copy `web/` → `/var/lib/agentd/ui`
 (every node) → install + enable systemd units (`deploy/`) → fastembed prewarm → health-check.
-agentd runs as a jailed `agentd` system user; `apexos-rs-ui` runs as root (DRM master on a seatless Pi).
+agentd runs as a jailed `agentd` system user; `apexos-rs-ui` runs as `apexos-ui` (token-only env; DRM-master root only via `APEXOS_UI_AS_ROOT`).

@@ -9,28 +9,61 @@ After=agentd.service network.target
 Wants=agentd.service
 
 [Service]
-User=root
-Group=root
+# Dedicated kiosk account (SA-13). Not root: compromise of Slint/GL must not yield
+# uid 0 or the full /etc/agentd/env secret set (provider keys, mesh/sensor tokens,
+# colony PSK path). DRM master: ExecStartPre unbinds fbcon so linuxkms can take
+# the card as first opener without CAP_SYS_ADMIN. If a board still cannot modeset,
+# install.sh writes a User=root drop-in (APEXOS_UI_AS_ROOT) — token-only env and
+# the rest of this sandbox stay in place.
+User=apexos-ui
+Group=apexos-ui
+SupplementaryGroups=video render input tty
 TTYPath=/dev/tty7
 PAMName=login
 StandardInput=tty
 # Direct KMS/DRM rendering — no Wayland, no cage
 Environment=SLINT_BACKEND=linuxkms
-# agentd WS endpoint — override if port differs
 Environment=AGENTD_WS=ws://localhost:8787/ws
-EnvironmentFile=-/etc/agentd/env
+# Persona / geometry / fontconfig cache — ProtectHome hides ~root.
+Environment=HOME=/var/lib/apexos-ui
+Environment=XDG_CONFIG_HOME=/var/lib/apexos-ui/config
+Environment=XDG_CACHE_HOME=/var/lib/apexos-ui/cache
+StateDirectory=apexos-ui
+# Token-only credential. systemd (root) parses this; the process never needs
+# filesystem access to it. Never EnvironmentFile=/etc/agentd/env.
+EnvironmentFile=-/etc/agentd/ui.env
 ExecStart=/usr/local/bin/apexos-rs-ui
+# + prefix: unsandboxed root. Drop the framebuffer console's DRM master so the
+# unprivileged linuxkms process can become master on open (seatless Pi).
+ExecStartPre=+/bin/sh -c 'for b in /sys/class/vtconsole/vtcon*/bind; do [ -w "$b" ] && echo 0 > "$b" || true; done'
 StandardOutput=journal
 StandardError=journal
 Restart=on-failure
 RestartSec=3
-# Hardening — limit blast radius while still allowing KMS/DRM rendering
+UMask=0077
+
+# Hardening — KMS/DRM + loopback WS/HTTP (agentd :8787, snapshot :8788).
 NoNewPrivileges=yes
+ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+ReadOnlyPaths=/etc
+InaccessiblePaths=-/etc/agentd/env -/etc/agentd/apexnet.psk -/etc/imaginarium -/etc/sonus
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
 DevicePolicy=closed
 DeviceAllow=/dev/dri/* rw
 DeviceAllow=/dev/tty7 rw
+DeviceAllow=/dev/tty0 rw
 DeviceAllow=/dev/input/* rw
 
 [Install]

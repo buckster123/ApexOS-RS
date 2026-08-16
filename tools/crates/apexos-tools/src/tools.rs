@@ -911,6 +911,7 @@ fn read_roots() -> Vec<PathBuf> {
 fn is_secret_path(canon: &Path) -> bool {
     let s = canon.to_string_lossy();
     s.starts_with("/etc/agentd/env")                       // AGENTD_TOKEN + provider keys
+        || s.starts_with("/etc/agentd/ui.env")             // kiosk token-only credential (SA-13)
         || s == "/etc/shadow" || s == "/etc/gshadow"
         || s.contains("/.ssh/") || s.ends_with("/.ssh")
         || s.ends_with(".api_key") || s.ends_with(".oai_api_key")
@@ -3560,6 +3561,12 @@ mod tests {
         assert!(confine("/etc/hostname", false).is_ok());
         std::env::remove_var("AGENTD_READ_ROOTS");
 
+        // SA-13: widening /etc/agentd must not expose the kiosk token file.
+        std::env::set_var("AGENTD_READ_ROOTS", "/etc/agentd");
+        assert!(confine("/etc/agentd/env", false).is_err());
+        assert!(confine("/etc/agentd/ui.env", false).is_err());
+        std::env::remove_var("AGENTD_READ_ROOTS");
+
         std::env::remove_var("AGENTD_WORKSPACE");
     }
 
@@ -4245,6 +4252,40 @@ mod tests {
             serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(body["action"], "reflex_remove");
         assert_eq!(body["app"], "event-log");
+    }
+
+    #[test]
+    fn kiosk_ui_env_is_secret() {
+        assert!(is_secret_path(Path::new("/etc/agentd/env")));
+        assert!(is_secret_path(Path::new("/etc/agentd/ui.env")));
+        assert!(is_secret_path(Path::new("/etc/agentd/ui.env.bak")));
+        assert!(!is_secret_path(Path::new("/etc/agentd/soul.md")));
+        assert!(!is_secret_path(Path::new("/etc/agentd/parts/inventory.toml")));
+    }
+
+    #[test]
+    fn kiosk_unit_loads_token_only_env() {
+        // SA-13 contract: the shipped unit must not EnvironmentFile the full
+        // agentd secret set, must drop uid 0 by default, and must sandbox FS.
+        let unit = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../deploy/apexos-rs-ui.service"),
+        )
+        .expect("deploy/apexos-rs-ui.service");
+        assert!(
+            unit.contains("EnvironmentFile=-/etc/agentd/ui.env"),
+            "kiosk unit must load the token-only ui.env"
+        );
+        assert!(
+            !unit.contains("EnvironmentFile=-/etc/agentd/env"),
+            "kiosk unit must not load the full agentd env"
+        );
+        assert!(unit.contains("User=apexos-ui"));
+        assert!(unit.contains("ProtectSystem=strict"));
+        assert!(
+            unit.lines().any(|l| l.trim() == "CapabilityBoundingSet="),
+            "empty capability set (uid-0-equivalent caps must not ride along)"
+        );
     }
 }
 
