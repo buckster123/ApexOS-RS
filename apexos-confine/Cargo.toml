@@ -15,3 +15,8 @@ libc = "0.2"
 name = "landlock_apply"
 path = "tests/landlock_apply.rs"
 harness = false
+
+[[test]]
+name = "netns_apply"
+path = "tests/netns_apply.rs"
+harness = false

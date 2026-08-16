@@ -242,9 +242,9 @@ fn stamp_agent_id(args: &mut serde_json::Value, agent_id: &str) {
     }
 }
 
-/// Stamp the caller's per-agent workspace root onto an apexos-tools call's args,
-/// overriding any model-supplied value. apexos-tools is ONE process shared by
-/// every agent, so its FS confinement can't key off a process-global env var —
+/// Stamp the caller's per-agent workspace root onto a tools-family call's args,
+/// overriding any model-supplied value. The fs and net workers are each ONE
+/// process shared by every agent, so FS confinement can't key off a process-global env var —
 /// the root travels per call as `__workspace`. Like [`stamp_agent_id`], the
 /// insert overwrites whatever the model typed, so a model can never widen or
 /// redirect its own confinement boundary. APEX/unbound resolves to the node base

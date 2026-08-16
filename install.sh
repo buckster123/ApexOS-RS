@@ -1563,6 +1563,49 @@ if [[ ! -f /etc/agentd/plugins.toml ]]; then
   fi
 fi
 
+# Finding 11 net/no-net split: pin the shell worker to --class=fs and register
+# the net sibling. Idempotent. Live nodes seed-if-absent'd the old empty-args
+# stanza — without this, http_fetch would vanish once the binary defaults to fs
+# *or* both processes would advertise the net tools (first claim wins).
+ensure_tools_net_split() {
+  local f=/etc/agentd/plugins.toml
+  [[ -f "$f" ]] || return 0
+  local tmp; tmp=$(mktemp "${f}.XXXXXX")
+  awk '
+    BEGIN { in_tools=0; pinned=0 }
+    /^\[\[plugin\]\]/ { in_tools=0 }
+    /^id[[:space:]]*=[[:space:]]*"apexos-tools"/ { in_tools=1 }
+    in_tools && /--class/ { pinned=1 }
+    in_tools && /^args[[:space:]]*=/ && !pinned {
+      print "args    = [\"--class\", \"fs\"]"
+      pinned=1
+      next
+    }
+    { print }
+  ' "$f" > "$tmp"
+  if ! cmp -s "$f" "$tmp"; then
+    chmod --reference="$f" "$tmp" 2>/dev/null || chmod 644 "$tmp"
+    chown --reference="$f" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$f"
+    ok "apexos-tools pinned to --class=fs (finding 11 net split)"
+  else
+    rm -f "$tmp"
+  fi
+  if ! grep -qE '^[[:space:]]*id[[:space:]]*=[[:space:]]*"apexos-net"' "$f"; then
+    {
+      echo ""
+      echo "# Finding 11: net-class worker (http_fetch / screenshot / notify / ui_query)."
+      echo "[[plugin]]"
+      echo 'id      = "apexos-net"'
+      echo 'cmd     = "/usr/local/bin/apexos-tools"'
+      echo 'args    = ["--class", "net"]'
+      echo 'restart = "always"'
+    } >> "$f"
+    ok "apexos-net plugin registered (finding 11 net/no-net split)"
+  fi
+}
+ensure_tools_net_split
+
 # Enable the Occipital plugin only when occipital-mcp actually installed — the
 # template ships the block COMMENTED so agentd is never pointed at a missing binary.
 # Additive + idempotent: the grep is anchored to an UNcommented `id = "occipital"`,

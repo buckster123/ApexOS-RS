@@ -17,6 +17,9 @@ pub enum NameOwner {
     Virtual,
     /// Only this plugin id may register the name.
     Plugin(&'static str),
+    /// Finding 11: fs/shell (`apexos-tools`) and net (`apexos-net`) share
+    /// the reserved names; each process advertises its own class.
+    ToolsFamily,
 }
 
 /// Why a claim was refused.
@@ -43,6 +46,10 @@ impl std::fmt::Display for ClaimError {
     }
 }
 
+pub fn is_tools_family(plugin_id: &str) -> bool {
+    plugin_id == "apexos-tools" || plugin_id == "apexos-net"
+}
+
 /// Owner of a well-known name, if any.
 pub fn name_owner(name: &str) -> Option<NameOwner> {
     if VIRTUAL.contains(&name) {
@@ -52,7 +59,7 @@ pub fn name_owner(name: &str) -> Option<NameOwner> {
         return Some(NameOwner::Plugin("cerebro"));
     }
     if APEXOS_TOOLS.contains(&name) {
-        return Some(NameOwner::Plugin("apexos-tools"));
+        return Some(NameOwner::ToolsFamily);
     }
     if OCCIPITAL.contains(&name) {
         return Some(NameOwner::Plugin("occipital"));
@@ -77,7 +84,12 @@ pub fn claim_tool_name(
         Some(NameOwner::Plugin(expected)) if claimant != expected => {
             return Err(ClaimError::Reserved { expected });
         }
-        Some(NameOwner::Plugin(_)) | None => {}
+        Some(NameOwner::ToolsFamily) if !is_tools_family(claimant) => {
+            return Err(ClaimError::Reserved {
+                expected: "apexos-tools|apexos-net",
+            });
+        }
+        Some(NameOwner::Plugin(_)) | Some(NameOwner::ToolsFamily) | None => {}
     }
     if let Some(owner) = registry.get(name) {
         if owner.0 != claimant {
@@ -93,11 +105,11 @@ pub fn stamps_agent_id(plugin_id: &str, tool: &str) -> bool {
     plugin_id == "cerebro" || matches!(name_owner(tool), Some(NameOwner::Plugin("cerebro")))
 }
 
-/// Workspace stamp applies to apexos-tools-owned names and to any call whose
-/// live owner is that plugin.
+/// Workspace stamp applies to the tools family (fs + net workers) and to
+/// any call whose reserved owner is that family.
 pub fn stamps_workspace(plugin_id: &str, tool: &str) -> bool {
-    plugin_id == "apexos-tools"
-        || matches!(name_owner(tool), Some(NameOwner::Plugin("apexos-tools")))
+    is_tools_family(plugin_id)
+        || matches!(name_owner(tool), Some(NameOwner::ToolsFamily))
 }
 
 /// True when a reserved name is being invoked by someone other than its owner.
@@ -108,6 +120,10 @@ pub fn stolen_allowlist(tool: &str, plugin: Option<&str>) -> bool {
         Some(NameOwner::Virtual) => plugin.is_some(),
         Some(NameOwner::Plugin(expected)) => match plugin {
             Some(p) => p != expected,
+            None => false,
+        },
+        Some(NameOwner::ToolsFamily) => match plugin {
+            Some(p) => !is_tools_family(p),
             None => false,
         },
         None => false,
@@ -339,10 +355,11 @@ mod tests {
     fn canonical_names_only_match_their_plugin() {
         assert!(claim_tool_name("read_file", "apexos-tools", &empty()).is_ok());
         assert!(claim_tool_name("remember", "cerebro", &empty()).is_ok());
+        assert!(claim_tool_name("http_fetch", "apexos-net", &empty()).is_ok());
         assert_eq!(
             claim_tool_name("read_file", "evil", &empty()),
             Err(ClaimError::Reserved {
-                expected: "apexos-tools"
+                expected: "apexos-tools|apexos-net"
             })
         );
         assert_eq!(
@@ -370,6 +387,8 @@ mod tests {
     fn stolen_allowlist_blocks_wrong_owner() {
         assert!(stolen_allowlist("read_file", Some("evil")));
         assert!(!stolen_allowlist("read_file", Some("apexos-tools")));
+        assert!(!stolen_allowlist("http_fetch", Some("apexos-net")));
+        assert!(stolen_allowlist("http_fetch", Some("evil")));
         assert!(!stolen_allowlist("read_file", None));
         assert!(!stolen_allowlist("propose_evolution", None));
         assert!(stolen_allowlist("propose_evolution", Some("evil")));
@@ -379,6 +398,7 @@ mod tests {
     #[test]
     fn stamps_follow_the_name_not_just_the_id_string() {
         assert!(stamps_workspace("apexos-tools", "read_file"));
+        assert!(stamps_workspace("apexos-net", "http_fetch"));
         assert!(stamps_workspace("evil", "read_file"));
         assert!(!stamps_workspace("evil", "custom_tool"));
         assert!(stamps_agent_id("cerebro", "remember"));

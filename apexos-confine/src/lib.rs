@@ -24,6 +24,7 @@
 //!
 //! The tools worker additionally calls [`restrict_tools_worker`] (Landlock LSM)
 //! so a same-uid `run_command` cannot open daemon secrets that DAC would allow.
+//! The fs/shell class then calls [`isolate_network`] so that process has no WAN.
 
 #[cfg(target_os = "linux")]
 mod openat;
@@ -32,9 +33,12 @@ pub use openat::{confine_beneath, io_denied, relative_under, Beneath, DirEnt, St
 
 mod landlock;
 pub use landlock::{
-    is_forbidden_landlock_root, restrict, restrict_tools_worker, tools_worker_rules, FsRules,
-    LandlockStatus,
+    is_forbidden_landlock_root, restrict, restrict_tools_worker, restrict_tools_worker_for,
+    tools_worker_rules, tools_worker_rules_for, FsRules, LandlockStatus,
 };
+
+mod netns;
+pub use netns::{isolate_network, NetnsStatus};
 
 use std::path::{Component, Path, PathBuf};
 
