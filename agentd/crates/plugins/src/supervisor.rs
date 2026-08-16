@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use std::path::PathBuf;
-use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::process::Command;
 use std::process::Stdio;
 use apexos_core::{ActionId, BusHandle, Event, EvolutionId, EvolutionProposal, PluginId, SessionId, ToolCall, ToolOutput};
@@ -446,7 +446,7 @@ impl Supervisor {
     pub async fn run(
         mut self,
         plugin_configs: Vec<PluginConfig>,
-        mut bus_rx: broadcast::Receiver<Event>,
+        mut bus_rx: mpsc::Receiver<Event>,
     ) {
         let mut sv_rx = self.sv_rx.take().expect("run() called twice");
 
@@ -460,7 +460,7 @@ impl Supervisor {
         loop {
             tokio::select! {
                 result = bus_rx.recv() => match result {
-                    Ok(Event::ToolRequested { session, mut call }) => {
+                    Some(Event::ToolRequested { session, mut call }) => {
                         // Inspect every path-typed arg, not just `path`, so a
                         // workspace-rule tool can't smuggle a write past the gate
                         // via `output_path`/`dest`/etc. Most-restrictive wins:
@@ -606,7 +606,7 @@ impl Supervisor {
                         }
                     }
 
-                    Ok(Event::UserApproval { session, action, granted, nonce }) => {
+                    Some(Event::UserApproval { session, action, granted, nonce }) => {
                         if let Some(pending) =
                             take_matching_approval(&mut self.pending_approvals, session, action, nonce)
                         {
@@ -644,22 +644,21 @@ impl Supervisor {
                         }
                     }
 
-                    Ok(Event::UserCancel { session }) => {
+                    Some(Event::UserCancel { session }) => {
                         purge_session_approvals(&mut self.pending_approvals, session);
                     }
 
-                    Ok(Event::TurnComplete { session }) => {
+                    Some(Event::TurnComplete { session }) => {
                         purge_session_approvals(&mut self.pending_approvals, session);
                     }
 
-                    Ok(Event::ToolResult { call, .. }) => {
+                    Some(Event::ToolResult { call, .. }) => {
                         // Timeout / external completion must not leave a live grant.
                         self.pending_approvals.remove(&call);
                     }
 
-                    Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => break,
+                    Some(_) => {}
+                    None => break,
                 },
 
                 Some(cmd) = sv_rx.recv() => {

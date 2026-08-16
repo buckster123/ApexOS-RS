@@ -125,7 +125,11 @@ fn load_oai_key_ring() -> apexos_agent::OaiKeyRing {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let (bus, handle, bcast) = Bus::new(SystemState::default());
+    let (mut bus, handle, bcast) = Bus::new(SystemState::default());
+    // Command lane (SA-6): prompts / tool calls / approvals cannot ride the
+    // lossy broadcast. Subscribe before run so the first event is not missed.
+    let supervisor_cmd = bus.subscribe_commands();
+    let router_cmd = bus.subscribe_commands();
     tokio::spawn(bus.run());
 
     // Shared API key + model — readable/writable from both the turn engine and browser UI
@@ -631,7 +635,7 @@ async fn main() -> anyhow::Result<()> {
         .filter(|p| p.restart == RestartPolicy::Always)
         .map(|p| PluginId(p.id.clone()))
         .collect();
-    tokio::spawn(supervisor.run(plugin_configs, bcast.subscribe()));
+    tokio::spawn(supervisor.run(plugin_configs, supervisor_cmd));
 
     // Agent turn engine — RoutingProvider dispatches per-call based on backend_arc
     let engine: Arc<TurnEngine> = Arc::new(TurnEngine::new(
@@ -879,7 +883,7 @@ async fn main() -> anyhow::Result<()> {
 
     // agent_rx was subscribed above, before the supervisor spawned, so the early
     // PluginUp events that populate tool_reg are captured (see the comment there).
-    spawn_agent_router(agent_rx, bcast.clone(), handle.clone(),
+    spawn_agent_router(agent_rx, router_cmd, bcast.clone(), handle.clone(),
                        tool_reg, histories, Arc::clone(&history_budget),
                        engine, max_depth, session_store, router_proxy,
                        Arc::clone(&session_bindings), Arc::clone(&persona_sessions),
@@ -1766,6 +1770,7 @@ async fn apply_evolution(
 #[allow(clippy::too_many_arguments)] // wires the shared turn/session orchestration state into the router loop, by design
 fn spawn_agent_router(
     mut rx:        broadcast::Receiver<Event>,
+    mut cmd_rx:    tokio::sync::mpsc::Receiver<Event>,
     bcast:         broadcast::Sender<Event>,
     bus:           apexos_core::BusHandle,
     tool_reg:      Arc<RwLock<HashMap<PluginId, Vec<ToolSpec>>>>,
@@ -1897,9 +1902,10 @@ fn spawn_agent_router(
             // run once after the select! so both paths share the spawn body.
             let mut to_run: Option<(SessionId, String, Vec<ImageSource>)> = None;
             tokio::select! {
-                ev = rx.recv() => match ev {
-                // ── new root turn (serialized per session) ───────────────────
-                Ok(Event::UserPrompt { session, text, images }) => {
+                // SA-6: prompts / spawn / cancel arrive on the reliable command
+                // lane. The broadcast copy of the same event is ignored below.
+                ev = cmd_rx.recv() => match ev {
+                Some(Event::UserPrompt { session, text, images }) => {
                     // Parked-worker revive edge (Fabrica W1b, PB-3): a worker session
                     // with JSONL truth on disk but no memory residency is Parked, and
                     // a send is the ONLY Parked→Running edge — hydrate through
@@ -1944,24 +1950,8 @@ fn spawn_agent_router(
                     }
                 }
 
-                // ── worker parked → evict its history from RAM ───────────────
-                // (Fabrica W1b) The worker driver decides WHEN to park (TTL) but
-                // never touches `histories` — the eviction rides the state event,
-                // so the router stays the sole owner of history residency. The
-                // JSONL on disk is truth; the revive edge above reloads it.
-                // W2 guard: REMOTE worker mirrors ride the same event with
-                // `session: SessionId(0)` (the sentinel — their real session
-                // lives on the peer), so only worker-RANGE sessions may evict;
-                // without this, a remote "parked" mirror would evict root 0.
-                Ok(Event::WorkerStateChanged { session, state: apexos_core::WorkerState::Parked, .. })
-                    if apexos_core::is_worker_session(session.0) => {
-                    if histories.lock().await.remove(&session).is_some() {
-                        eprintln!("[worker] session {} evicted from RAM (parked)", session.0);
-                    }
-                }
-
                 // ── sub-agent spawn ──────────────────────────────────────────
-                Ok(Event::SpawnAgent { parent, call_id, prompt, system }) => {
+                Some(Event::SpawnAgent { parent, call_id, prompt, system }) => {
                     let parent_depth = *session_depths.lock().await
                         .get(&parent).unwrap_or(&0);
 
@@ -2014,14 +2004,14 @@ fn spawn_agent_router(
                 }
 
                 // ── agent-to-agent message routing ───────────────────────────
-                Ok(Event::AgentMessage { from, to, body, msg_id }) => {
+                Some(Event::AgentMessage { from, to, body, msg_id }) => {
                     let text = format!("[Agent {}]: {}", from.0, body);
                     bus.emit(Event::UserPrompt { session: to, text, images: vec![] }).await;
                     bus.emit(Event::AgentMessageAck { msg_id, from }).await;
                 }
 
                 // ── cancellation ─────────────────────────────────────────────
-                Ok(Event::UserCancel { session }) => {
+                Some(Event::UserCancel { session }) => {
                     cascade_cancel(session, &session_children, &abort_handles).await;
                     // Drop any prompts queued behind the cancelled turn — "stop"
                     // means stop. The in-flight turn's slot guard still fires on
@@ -2058,6 +2048,29 @@ fn spawn_agent_router(
                         // a detached spawn here can interleave with the next
                         // prompt's user-message append.
                         session_store.append(session, &m).await;
+                    }
+                }
+
+                Some(_) => {}
+                None => break,
+                },
+
+                ev = rx.recv() => match ev {
+                Ok(ev) if apexos_core::is_command(&ev) => {}
+
+                // ── worker parked → evict its history from RAM ───────────────
+                // (Fabrica W1b) The worker driver decides WHEN to park (TTL) but
+                // never touches `histories` — the eviction rides the state event,
+                // so the router stays the sole owner of history residency. The
+                // JSONL on disk is truth; the revive edge above reloads it.
+                // W2 guard: REMOTE worker mirrors ride the same event with
+                // `session: SessionId(0)` (the sentinel — their real session
+                // lives on the peer), so only worker-RANGE sessions may evict;
+                // without this, a remote "parked" mirror would evict root 0.
+                Ok(Event::WorkerStateChanged { session, state: apexos_core::WorkerState::Parked, .. })
+                    if apexos_core::is_worker_session(session.0) => {
+                    if histories.lock().await.remove(&session).is_some() {
+                        eprintln!("[worker] session {} evicted from RAM (parked)", session.0);
                     }
                 }
 

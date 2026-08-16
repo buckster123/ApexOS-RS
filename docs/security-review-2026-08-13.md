@@ -25,7 +25,8 @@
 > Wave 21 (PR #375): finding 12, SA-1.
 > Wave 22 (PR #376): SA-14.
 > Wave 23 (PR #377): SA-2.
-> Wave 24 (this tree): SA-4.
+> Wave 24 (PR #379): SA-4.
+> Wave 25 (this tree): SA-6.
 
 ## Ranked findings
 
@@ -321,6 +322,11 @@ dropping them.
   timeout.
 - **Minimal fix:** Put commands on reliable mpsc queues, or add sequence IDs,
   acknowledgement/replay, and an explicit terminal failure when lag occurs.
+- **Fixed (Wave 25):** `is_command` events (`UserPrompt`, `ToolRequested`,
+  `UserApproval`, `UserCancel`, `ToolResult`, `SpawnAgent`, `AgentMessage`,
+  `TurnComplete`) fan out on a dedicated mpsc per subscriber. The router and
+  supervisor consume that lane. A lagged broadcast no longer drops a prompt or
+  a tool call; a full command channel backpressures `emit`.
 
 ### SA-7. High — rollback targets the requester and consumes undo before commit
 

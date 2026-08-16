@@ -13,7 +13,7 @@ pub mod vision;
 // `crate::types::*`) so every existing import keeps resolving unchanged.
 pub use apexos_protocol as types;
 pub use apexos_protocol::*;
-pub use bus::{Bus, BusHandle};
+pub use bus::{is_command, Bus, BusHandle};
 pub use identity::*;
 pub use persona::{persona_style, resolve_persona_style, PersonaSessions};
 pub use state::SystemState;
