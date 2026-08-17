@@ -1,5 +1,6 @@
 pub mod config;
 pub mod courier;
+pub mod wifi_lan;
 pub mod mcp;
 pub mod plugin_env;
 pub mod policy;

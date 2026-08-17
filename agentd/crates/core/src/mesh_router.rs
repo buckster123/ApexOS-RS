@@ -300,13 +300,33 @@ impl Router {
             sent: Vec::new(),
             failed: Vec::new(),
         };
-        for id in lanes {
-            let Some(t) = self.transports.iter().find(|t| t.id() == id) else {
+        for id in &lanes {
+            let Some(t) = self.transports.iter().find(|t| t.id() == *id) else {
                 continue;
             };
             match t.send(frame).await {
                 Ok(receipt) => outcome.sent.push(receipt),
-                Err(e) => outcome.failed.push((id, e)),
+                Err(e) => outcome.failed.push((*id, e)),
+            }
+        }
+        // Gossip/Digest pick one cheapest lane. If that lane just died
+        // (Wi-Fi yanked mid-session) try the next usable one — otherwise
+        // "a2a continues over BLE" never happens while WifiLan still looks Up.
+        if outcome.sent.is_empty() && matches!(class, MeshClass::Gossip | MeshClass::Digest) {
+            for t in &self.transports {
+                if lanes.contains(&t.id()) {
+                    continue;
+                }
+                if !t.health().usable() || frame_len > t.mtu() {
+                    continue;
+                }
+                match t.send(frame).await {
+                    Ok(receipt) => {
+                        outcome.sent.push(receipt);
+                        break;
+                    }
+                    Err(e) => outcome.failed.push((t.id(), e)),
+                }
             }
         }
         outcome
@@ -572,6 +592,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gossip_falls_through_when_the_cheap_lane_fails() {
+        // WifiLan is Up so route() picks it; it then fails. BLE must take the
+        // frame or "kill Wi-Fi mid-session" never continues over the radio.
+        let (ble, ble_sent) = MockTransport::up(TransportId::BleGossip, 4096);
+        let mut router = Router::new(
+            vec![
+                MockTransport::with(TransportId::WifiLan, 4096, TransportHealth::Up, true),
+                ble,
+            ],
+            64,
+        );
+        let outcome = router.send(MeshClass::Gossip, &frame(7, 1, 16)).await;
+        assert!(outcome.delivered());
+        assert_eq!(ble_sent.load(Ordering::SeqCst), 1);
+        assert_eq!(outcome.sent[0].via, TransportId::BleGossip);
+        assert_eq!(outcome.failed[0].0, TransportId::WifiLan);
+    }
+
+    #[tokio::test]
     async fn a_send_with_nowhere_to_go_is_not_delivered() {
         let mut router = Router::new(
             vec![MockTransport::with(
@@ -584,7 +623,10 @@ mod tests {
         );
         let outcome = router.send(MeshClass::Gossip, &frame(7, 1, 64)).await;
         assert!(!outcome.delivered());
-        assert!(outcome.failed.is_empty(), "refused before trying, not after");
+        assert!(
+            outcome.failed.is_empty(),
+            "refused before trying, not after"
+        );
     }
 
     #[test]

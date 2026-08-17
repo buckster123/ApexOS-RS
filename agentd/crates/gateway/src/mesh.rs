@@ -41,6 +41,10 @@ pub struct PeerRecord {
     /// `token` so a stolen outbound secret cannot impersonate us to ourselves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound_token: Option<String>,
+    /// ApexNET radio id of this peer's brainstem (P5d). Optional: BLE
+    /// fallback for a2a needs it; WifiLan uses `node_id` + `ws_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radio_id: Option<u16>,
 }
 
 fn online() -> String { "online".into() }
@@ -124,6 +128,9 @@ impl PeerRegistry {
             }
             if let Some(ref tok) = p.inbound_token {
                 out.push_str(&format!("inbound_token = {:?}\n", tok));
+            }
+            if let Some(id) = p.radio_id {
+                out.push_str(&format!("radio_id = {id}\n"));
             }
         }
         // Atomic write (temp + rename) when the dir is writable; fall back to an
@@ -437,6 +444,7 @@ mod tests {
             status:  "online".into(),
             token:   None,
             inbound_token: None,
+            radio_id: None,
         });
 
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap(); // restore for cleanup
@@ -465,6 +473,7 @@ mod tests {
             status:  "online".into(),
             token:   Some("deadbeef-secret".into()),
             inbound_token: Some(inbound.clone()),
+            radio_id: Some(7),
         }).unwrap();
 
         let loaded = PeerRegistry::load(&path);
@@ -475,6 +484,7 @@ mod tests {
                    "inbound_token must round-trip");
         assert_eq!(loaded.peer_id_for_inbound_token(&inbound).as_deref(), Some("ApexOS-RS"));
         assert_eq!(loaded.peer_id_for_inbound_token("nope"), None);
+        assert_eq!(loaded.peers[0].radio_id, Some(7), "radio_id must round-trip");
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "peers.toml holds secrets — must be owner-only");

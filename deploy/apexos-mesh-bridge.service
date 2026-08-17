@@ -1,0 +1,29 @@
+[Unit]
+Description=ApexOS mesh-bridge (ApexNET radio UART)
+Documentation=file:///usr/local/share/doc/apexos/gotchas.md
+After=agentd.service
+Wants=agentd.service
+
+[Service]
+Type=simple
+User=agentd
+Group=agentd
+SupplementaryGroups=dialout
+EnvironmentFile=-/etc/agentd/env
+Environment=AGENTD_MESH_WS=ws://127.0.0.1:8787/mesh-bridge
+ExecStart=/usr/local/bin/apexos-mesh-bridge
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# The UART is the point of this process — do not PrivateDevices.
+DevicePolicy=closed
+DeviceAllow=/dev/ttyACM* rw
+DeviceAllow=/dev/ttyUSB* rw
+DeviceAllow=/dev/ttyS* rw
+
+[Install]
+WantedBy=multi-user.target

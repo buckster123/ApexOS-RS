@@ -4486,23 +4486,26 @@ async fn ping_handler(State(state): State<GatewayState>) -> impl IntoResponse {
 /// endpoint already does, and a peer deciding how to reach us needs it before
 /// it holds a token.
 async fn connectivity_handler(State(state): State<GatewayState>) -> impl IntoResponse {
-    use apexos_core::mesh_router::{MeshTransport, TransportHealth};
+    use apexos_core::mesh_router::TransportHealth;
     let tier = apexos_core::connectivity::current();
-    let ble = mesh_link::BleGossipTransport::new(state.mesh_link.clone());
     let health = |h: TransportHealth| match h {
         TransportHealth::Up => "up",
         TransportHealth::Flaky => "flaky",
         TransportHealth::Down => "down",
     };
+    let transports: Vec<serde_json::Value> = apexos_core::mesh_lanes::health()
+        .await
+        .into_iter()
+        .map(|(id, h)| {
+            serde_json::json!({
+                "id": id.as_str(),
+                "health": health(h),
+            })
+        })
+        .collect();
     Json(serde_json::json!({
         "state": tier.as_str(),
-        "transports": [
-            {
-                "id": ble.id().as_str(),
-                "health": health(ble.health()),
-                "mtu": ble.mtu(),
-            }
-        ],
+        "transports": transports,
         "mesh_link": state.mesh_link.stats(),
     }))
 }
@@ -4523,7 +4526,7 @@ async fn mesh_gossip_handler(
     State(state): State<GatewayState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    use apexos_core::mesh_router::{MeshTransport, SendError};
+    use apexos_core::mesh_router::SendError;
     use apexos_mesh_proto::{MeshClass, Payload, PlainPacket, DEFAULT_HOP_LIMIT, WIRE_VERSION};
     use crate::mesh_link::GossipRefuse;
 
@@ -4560,23 +4563,32 @@ async fn mesh_gossip_handler(
         ct,
     };
 
-    let ble = mesh_link::BleGossipTransport::new(state.mesh_link.clone());
-    match ble.send(&frame).await {
-        Ok(receipt) => Json(serde_json::json!({
+    let outcome = apexos_core::mesh_lanes::send(MeshClass::Gossip, &frame).await;
+    if let Some(receipt) = outcome.sent.first() {
+        return Json(serde_json::json!({
             "handed_to": receipt.via.as_str(),
             "bytes": receipt.bytes,
-            "note": "queued by the brainstem; delivery happens when the peer is on the air",
-        })).into_response(),
-        // No bridge connected is not a server error — it is the honest state
-        // of a node with no radio attached, and the caller should queue or
-        // say so rather than retry.
-        Err(SendError::Unavailable) => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
-            "error": "no radio lane — is apexos-mesh-bridge running?",
-        }))).into_response(),
-        Err(SendError::Failed(e)) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-            "error": e,
-        }))).into_response(),
+            "note": "routed by class; radio delivery happens when the peer is on the air",
+        })).into_response();
     }
+    let radio_down = outcome.failed.iter().any(|(id, e)| {
+        *id == apexos_core::mesh_router::TransportId::BleGossip
+            && matches!(e, SendError::Unavailable)
+    });
+    if radio_down && outcome.sent.is_empty() {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+            "error": "no radio lane — is apexos-mesh-bridge running?",
+        }))).into_response();
+    }
+    let err = outcome
+        .failed
+        .into_iter()
+        .map(|(id, e)| format!("{}: {e:?}", id.as_str()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+        "error": if err.is_empty() { "no lane accepted the frame".into() } else { err },
+    }))).into_response()
 }
 
 /// Shared kill switch for the courier's proactive session-0 notices (charter
@@ -4931,7 +4943,7 @@ async fn mesh_peers_post_handler(
             .find(|p| p.node_id == node_id).and_then(|p| p.token.clone()));
         let inbound_token = registry.peers.iter()
             .find(|p| p.node_id == node_id).and_then(|p| p.inbound_token.clone());
-        let record = PeerRecord { node_id: node_id.clone(), ws_url: ws_url.clone(), role, status: "online".into(), token, inbound_token };
+        let record = PeerRecord { node_id: node_id.clone(), ws_url: ws_url.clone(), role, status: "online".into(), token, inbound_token, radio_id: None };
         registry.add(record)
     };
 
@@ -5496,6 +5508,7 @@ async fn pair_claim_handler(
             status: "online".into(),
             token: Some(outbound),
             inbound_token: Some(inbound.clone()),
+            radio_id: None,
         });
     }
     (StatusCode::OK, Json(serde_json::json!({
@@ -5539,6 +5552,11 @@ async fn pair_confirm_handler(
         let outbound = registry.peers.iter()
             .find(|p| p.node_id == peer_node)
             .and_then(|p| p.token.clone());
+        let radio_id = registry
+            .peers
+            .iter()
+            .find(|p| p.node_id == peer_node)
+            .and_then(|p| p.radio_id);
         let _ = registry.add(PeerRecord {
             node_id: peer_node,
             ws_url: peer_url,
@@ -5546,6 +5564,7 @@ async fn pair_confirm_handler(
             status: "online".into(),
             token: outbound,
             inbound_token: Some(inbound.clone()),
+            radio_id,
         });
     }
     (StatusCode::OK, Json(serde_json::json!({ "ok": true, "token": inbound })))
@@ -5617,11 +5636,17 @@ async fn pair_redeem_handler(
                 let inbound = registry.peers.iter()
                     .find(|p| p.node_id == node)
                     .and_then(|p| p.inbound_token.clone());
+                let radio_id = registry
+                    .peers
+                    .iter()
+                    .find(|p| p.node_id == node)
+                    .and_then(|p| p.radio_id);
                 let _ = registry.add(PeerRecord {
                     node_id: node.clone(), ws_url: url, role: PeerRole::Full,
                     status: "online".into(),
                     token: Some(tok),
                     inbound_token: inbound,
+                    radio_id,
                 });
             }
             Json(serde_json::json!({ "ok": true, "node_id": node }))

@@ -233,10 +233,10 @@ Next: **P5c — register real lanes**.
    `POST /api/mesh/gossip`. **Proven end to end**: HTTP → agentd → lane →
    bridge → UART → brainstem outbox → sealed radio → peer (`tx_frames=1`,
    `neighbors=1`); with no bridge the send is an honest **503**, not a 500.
-   Residual → **P5d**: register `WifiLan` (today's HTTP mesh paths) and
-   `Courier` (the outbox) with the router, and route a2a by class rather than
-   per-tool; plus a systemd unit + install.sh wiring for the bridge (it is
-   still run by hand).
+   Residual → **P5d SHIPPED** — `WifiLan` + `Courier` registered, a2a routed
+   by class (`send_to_agent` floor = `minimal` so BLE continues when LAN
+   dies), mesh-bridge systemd unit + install.sh (idles without
+   `MESH_BRIDGE_DEV`). Next: P6 LoRa + digests.
 
       **P5b SHIPPED (2026-08-09) — the policy router.** `apexos-core::mesh_router`:
    the `MeshTransport` trait, `TransportId` cost ranking, and a router that

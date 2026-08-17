@@ -33,11 +33,16 @@ fn main() {
     let dev = match std::env::var("MESH_BRIDGE_DEV") {
         Ok(d) if !d.is_empty() => d,
         _ => {
+            // P5d: the unit is always enabled. A node with no board must
+            // not crash-loop — idle until an operator sets MESH_BRIDGE_DEV
+            // and restarts. Lane stays down (no cortex WS), which is honest.
             eprintln!(
-                "[apexos-mesh-bridge] MESH_BRIDGE_DEV is not set — nothing to bridge.\n\
-                 Point it at the brainstem UART (P4) or a PTY from apexos-brainstem-sim / socat."
+                "[apexos-mesh-bridge] MESH_BRIDGE_DEV is not set — idle.\n\
+                 Set it to the brainstem UART (e.g. /dev/ttyACM0) and restart."
             );
-            std::process::exit(2);
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
         }
     };
     let baud: u32 = std::env::var("MESH_BRIDGE_BAUD")

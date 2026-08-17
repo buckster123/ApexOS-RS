@@ -16,6 +16,8 @@ apexos-confine    = { path = "../../../apexos-confine" }
 # The courier lane (courier.rs) reuses the ApexNET wire crate's crypto
 # envelope + blake3 content addressing — one implementation, both transports.
 apexos-mesh-proto = { path = "../../../apexos-mesh-proto" }
+async-trait       = "0.1"
+postcard          = { version = "1.1.3", features = ["alloc"] }
 # Optional: EE tool gate (see [features].enterprise). In-tree shim is
 # API-compatible with private ApexOS-Enterprise/crates/apexos-ee-dispatch.
 apexos-ee-dispatch = { path = "../apexos-ee-dispatch", optional = true }

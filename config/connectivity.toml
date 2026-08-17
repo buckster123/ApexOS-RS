@@ -45,7 +45,7 @@
 "web_submit"                = "full"
 
 # ── Mesh/LAN-dependent: survive WAN loss, die when the LAN does ────────────
-"send_to_agent"        = "degraded"
+"send_to_agent"        = "minimal"   # P5d: a2a continues over BLE when LAN dies
 "mesh_file_send"       = "degraded"
 "mesh_memory_send"     = "degraded"
 "mesh_procedure_send"  = "degraded"
