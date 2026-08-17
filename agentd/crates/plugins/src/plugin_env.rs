@@ -14,7 +14,9 @@
 //!   4. Same-uid file access (`/var/lib/agentd/.api_key`) is closed by
 //!      Landlock. The shell worker's WAN is closed by an empty netns
 //!      (`isolate_network` on `--class=fs` and `--class=dev`).
-//!      Camera/gpio live in `apexos-dev`. agentd cannot setuid.
+//!      Camera/gpio live in `apexos-dev`. On a node those three are
+//!      sibling units (different uids); this map still applies to
+//!      stdio-spawned children (`cargo run` / `APEXOS_TOOLS_SPAWN=stdio`).
 
 use std::collections::{BTreeMap, HashMap};
 

@@ -1,7 +1,7 @@
 [Unit]
 Description=Agent OS daemon (agentd)
-After=network-online.target
-Wants=network-online.target
+After=network-online.target apexos-tools-fs.service apexos-net.service apexos-dev.service
+Wants=network-online.target apexos-tools-fs.service apexos-net.service apexos-dev.service
 # Self-update probation (slice 5): if agentd crash-loops (5 restarts within 5 min),
 # systemd stops thrashing + enters failed → OnFailure fires the probation rollback,
 # which restores agentd.prev ONLY if a recent self-update confirmed (else it no-ops
@@ -19,6 +19,7 @@ RestartSec=2
 
 User=agentd
 Group=agentd
+SupplementaryGroups=apexos-workspace
 
 # Root the daemon (and its file tools' relative paths) in APEX's workspace.
 WorkingDirectory=/var/lib/agentd/workspace

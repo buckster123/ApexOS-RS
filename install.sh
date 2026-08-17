@@ -921,6 +921,21 @@ hdr "User and permissions"
 
 id agentd &>/dev/null || useradd -r -s /sbin/nologin -d /var/lib/agentd agentd
 
+# Finding 11 uid split: tools workers are sibling units, not children of agentd.
+# Shared group for workspace + /run/apexos sockets. Distinct uids so video
+# does not leak onto run_command.
+getent group apexos-workspace >/dev/null || groupadd -r apexos-workspace
+for tu in apexos-tools apexos-net apexos-dev; do
+  id "$tu" &>/dev/null \
+    || useradd -r -s /sbin/nologin -d /var/lib/agentd/workspace "$tu"
+  usermod -aG apexos-workspace "$tu" || true
+done
+usermod -aG apexos-workspace agentd || true
+getent group video >/dev/null && usermod -aG video apexos-dev || true
+getent group input >/dev/null && usermod -aG input apexos-dev || true
+getent group gpio  >/dev/null && usermod -aG gpio  apexos-dev || true
+getent group i2c   >/dev/null && usermod -aG i2c   apexos-dev || true
+
 # audio: TTS (/api/speak) + Sonus playback (/api/sonus/play) open the ALSA device
 # directly. video: camera eyes (camera_capture tool + /api/snapshot) read /dev/video*
 # and the Pi CSI camera. Both are display-independent — a headless laptop/USB-cam node
@@ -949,6 +964,18 @@ fi
 
 mkdir -p /etc/agentd /var/lib/agentd/{workspace,events,ui,cerebro/models,update}
 chown -R agentd:agentd /var/lib/agentd
+# Workspace is the only tree the tools users may write (2770 setgid).
+# Do not chown media/ — USB helpers require a root-owned mountpoint.
+chown agentd:apexos-workspace /var/lib/agentd/workspace
+chmod 2770 /var/lib/agentd/workspace
+install -d -o agentd -g apexos-workspace -m 2770 /var/lib/agentd/usb-eject /var/lib/agentd/usb-prep
+touch /var/lib/agentd/notifications.jsonl
+chown agentd:apexos-workspace /var/lib/agentd/notifications.jsonl
+chmod 660 /var/lib/agentd/notifications.jsonl
+# Existing workspace files keep owner; flip group so the fs worker can write.
+if [[ -d /var/lib/agentd/workspace ]]; then
+  find /var/lib/agentd/workspace -mindepth 1 \( -path '/var/lib/agentd/workspace/media' -o -path '/var/lib/agentd/workspace/media/*' \) -prune -o -exec chgrp apexos-workspace {} + 2>/dev/null || true
+fi
 # Self-update: the watchdog consumes ONLY /var/lib/agentd/update/agentd.staged
 # (hard-coded). request.json must never carry a staged path.
 chmod 750 /var/lib/agentd
@@ -1596,10 +1623,12 @@ ensure_tools_net_split() {
       echo ""
       echo "# Finding 11: net-class worker (http_fetch / screenshot / notify / ui_query)."
       echo "[[plugin]]"
-      echo 'id      = "apexos-net"'
-      echo 'cmd     = "/usr/local/bin/apexos-tools"'
-      echo 'args    = ["--class", "net"]'
-      echo 'restart = "always"'
+      echo 'id        = "apexos-net"'
+      echo 'cmd       = "/usr/local/bin/apexos-tools"'
+      echo 'args      = ["--class", "net"]'
+      echo 'transport = "unix"'
+      echo 'socket    = "/run/apexos/tools-net.sock"'
+      echo 'restart   = "always"'
     } >> "$f"
     ok "apexos-net plugin registered (finding 11 net/no-net split)"
   fi
@@ -1608,15 +1637,72 @@ ensure_tools_net_split() {
       echo ""
       echo "# Finding 11: device-class worker (camera_capture + gpio_*)."
       echo "[[plugin]]"
-      echo 'id      = "apexos-dev"'
-      echo 'cmd     = "/usr/local/bin/apexos-tools"'
-      echo 'args    = ["--class", "dev"]'
-      echo 'restart = "always"'
+      echo 'id        = "apexos-dev"'
+      echo 'cmd       = "/usr/local/bin/apexos-tools"'
+      echo 'args      = ["--class", "dev"]'
+      echo 'transport = "unix"'
+      echo 'socket    = "/run/apexos/tools-dev.sock"'
+      echo 'restart   = "always"'
     } >> "$f"
     ok "apexos-dev plugin registered (finding 11 device split)"
   fi
 }
+ensure_tools_uid_split() {
+  local f=/etc/agentd/plugins.toml
+  [[ -f "$f" ]] || return 0
+  python3 - "$f" <<'PY'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+sockets = {
+    "apexos-tools": "/run/apexos/tools-fs.sock",
+    "apexos-net": "/run/apexos/tools-net.sock",
+    "apexos-dev": "/run/apexos/tools-dev.sock",
+}
+parts = re.split(r"(?=^\[\[plugin\]\])", text, flags=re.M)
+out, changed = [], False
+for block in parts:
+    m = re.search(r'^id\s*=\s*"(apexos-tools|apexos-net|apexos-dev)"', block, re.M)
+    if not m:
+        out.append(block)
+        continue
+    sock = sockets[m.group(1)]
+    new = block
+    if re.search(r"^transport\s*=", new, re.M):
+        new = re.sub(r'^transport\s*=\s*".*"', 'transport = "unix"', new, count=1, flags=re.M)
+    else:
+        insert = 'transport = "unix"\n'
+        if re.search(r"^args\s*=", new, re.M):
+            new = re.sub(r"^(args\s*=.*\n)", r"\1" + insert, new, count=1, flags=re.M)
+        else:
+            new = new.rstrip() + "\n" + insert
+    if re.search(r"^socket\s*=", new, re.M):
+        new = re.sub(r'^socket\s*=\s*".*"', f'socket    = "{sock}"', new, count=1, flags=re.M)
+    else:
+        new = re.sub(
+            r'^(transport\s*=\s*"unix"\n)',
+            r"\1" + f'socket    = "{sock}"\n',
+            new,
+            count=1,
+            flags=re.M,
+        )
+    if new != block:
+        changed = True
+    out.append(new)
+if changed:
+    path.write_text("".join(out))
+    sys.exit(10)
+sys.exit(0)
+PY
+  local rc=$?
+  if [[ $rc -eq 10 ]]; then
+    ok "plugins.toml pinned to unix tools sockets (finding 11 uid split)"
+  elif [[ $rc -ne 0 ]]; then
+    warn "ensure_tools_uid_split: python failed (rc=$rc) — check /etc/agentd/plugins.toml"
+  fi
+}
 ensure_tools_net_split
+ensure_tools_uid_split
 
 # Enable the Occipital plugin only when occipital-mcp actually installed — the
 # template ships the block COMMENTED so agentd is never pointed at a missing binary.
@@ -2039,6 +2125,56 @@ if ! $NO_UI && ! $IS_DESKTOP; then
   ok "Kiosk UI env → /etc/agentd/ui.env (token + WS only)"
 fi
 
+# Finding 11 uid split: non-secret knobs for the sibling tools units.
+# Never copy AGENTD_TOKEN / PSK / provider keys. Notify tokens go only to
+# tools-net.env (0640 root:apexos-net).
+write_tools_env() {
+  local dest=/etc/agentd/tools.env
+  local tmp
+  tmp=$(mktemp "${dest}.XXXXXX")
+  {
+    echo "# ApexOS-RS tools workers — non-secret knobs. Never copy /etc/agentd/env."
+    echo "AGENTD_WORKSPACE=/var/lib/agentd/workspace"
+    echo "AGENTD_LOG=/var/lib/agentd/events"
+    echo "AGENTD_USB_EJECT_DIR=/var/lib/agentd/usb-eject"
+    echo "AGENTD_USB_PREP_DIR=/var/lib/agentd/usb-prep"
+    echo "RUST_LOG=warn"
+    local k
+    for k in AGENTD_READ_ROOTS AGENTD_GIT_ROOTS APEXOS_CAMERA_DEVICE APEXOS_CAMERA_CMD \
+             APEX_GPIO_RESERVED APEXOS_UI_SNAPSHOT_URL APEXOS_UI_STATE_URL \
+             AGENTD_HTTP_FETCH_MODE AGENTD_HTTP_FETCH_ALLOWLIST AGENTD_EE_CONNECTORS \
+             APEXOS_LANDLOCK; do
+      local v
+      v=$(_envval "$ENV_FILE" "$k")
+      [[ -n "$v" ]] && echo "${k}=${v}"
+    done
+  } > "$tmp"
+  chmod 0640 "$tmp"
+  chown root:apexos-workspace "$tmp"
+  mv "$tmp" "$dest"
+
+  dest=/etc/agentd/tools-net.env
+  tmp=$(mktemp "${dest}.XXXXXX")
+  {
+    echo "# Notify keys for apexos-net only. Never AGENTD_TOKEN."
+    local k
+    for k in TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID NTFY_TOPIC PIPER_MODEL; do
+      local v
+      v=$(_envval "$ENV_FILE" "$k")
+      [[ -n "$v" ]] && echo "${k}=${v}"
+    done
+  } > "$tmp"
+  chmod 0640 "$tmp"
+  if id apexos-net &>/dev/null; then
+    chown root:apexos-net "$tmp"
+  else
+    chown root:apexos-workspace "$tmp"
+  fi
+  mv "$tmp" "$dest"
+}
+write_tools_env
+ok "Tools worker env → /etc/agentd/tools.env (+ tools-net.env)"
+
 # ── Systemd services ───────────────────────────────────────────────────────────
 hdr "Systemd services"
 
@@ -2078,7 +2214,13 @@ EOF
   fi
 }
 
+install -D -m 644 "$REPO_DIR/deploy/tmpfiles.d/apexos.conf" /usr/lib/tmpfiles.d/apexos.conf
+systemd-tmpfiles --create /usr/lib/tmpfiles.d/apexos.conf >/dev/null 2>&1 || true
+
 install_svc agentd
+install_svc apexos-tools-fs
+install_svc apexos-net
+install_svc apexos-dev
 install_svc apex-sensor-bridge
 ! $NO_CEREBRO_API && install_svc cerebro-api   || true
 # The KMS/DRM kiosk service is kiosk-mode only; desktop mode launches the UI
@@ -2097,6 +2239,7 @@ $IMAGINARIUM_INSTALLED && install_svc imaginarium || true
 
 systemctl daemon-reload
 
+systemctl enable --now apexos-tools-fs apexos-net apexos-dev >/dev/null 2>&1 || true
 systemctl enable agentd apex-sensor-bridge
 ! $NO_CEREBRO_API && systemctl enable cerebro-api  || true
 ! $NO_UI && ! $IS_DESKTOP && systemctl enable apexos-rs-ui || true

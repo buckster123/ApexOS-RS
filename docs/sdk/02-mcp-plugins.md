@@ -431,25 +431,23 @@ the supervisor checks policy before it ever calls you (`supervisor.rs:384-403`).
   filesystem, use one of those keys so the workspace rule can see it. *Caveat:*
   there is **no workspace rooting on reads** in the stock policy — "allowed" is
   not "sandboxed."
-- **The real confinement is the systemd sandbox, not the tool layer.** Your plugin is
-  a child of `agentd`, which runs as the unprivileged `agentd` user under
-  `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, and a
-  `ReadWritePaths` allowlist (`deploy/agentd.service`). Your tool can do anything that
-  user can do and nothing more. Do not rely on the policy denylist as a security
-  boundary — apexos-tools' `run_command` denylist is a soft substring heuristic,
-  trivially bypassable. Treat the sandbox as the perimeter; if your tool needs more
-  access (a device node, a writable path), that is a deliberate sandbox change, not a
-  plugin detail.
+- **The real confinement is the systemd sandbox, not the tool layer.** Stock
+  `apexos-tools` / `apexos-net` / `apexos-dev` on a node are **sibling units**
+  with their own uids (finding 11 Wave 30), not children of `agentd`. Other MCP
+  plugins you register are still children of `agentd` (`User=agentd`,
+  `NoNewPrivileges`, `ProtectSystem=strict`). Do not rely on the policy denylist
+  as a security boundary — `run_command`'s denylist is a soft substring
+  heuristic. Treat the sandbox as the perimeter; extra devices or paths are a
+  unit change, not a plugin detail.
 - **Secrets.** Pass API keys via `[plugin.env]`, not `args`. The env block is in
   `/etc/agentd/plugins.toml`, which is `agentd`-readable but not world-readable; args
   are logged to the event log (`run_log_writer`) and visible in the UI tool card.
-  `spawn_plugin` **`env_clear`s** the child and rebuilds a non-secret allowlist
+  `spawn_plugin` **`env_clear`s** a stdio child and rebuilds a non-secret allowlist
   (`plugin_child_env`) plus this overlay. `[plugin.env]` cannot inject `AGENTD_TOKEN`
-  / mesh / sensor / PSK keys. Do not rely on inheriting agentd's full environment.
-  `apexos-tools` also Landlocks itself (finding 11 part 2) so same-uid
-  `run_command` cannot open `/var/lib/agentd/.api_key`. The shell worker
-  (`--class=fs`) is in an empty netns and has no `/dev`; `http_fetch` lives
-  in `apexos-net`; camera/gpio live in `apexos-dev`.
+  / mesh / sensor / PSK keys. The stock tools family on a node uses
+  `transport=unix` and `/etc/agentd/tools.env` (never `/etc/agentd/env`).
+  Landlock still applies inside the worker so `run_command` cannot open
+  `/var/lib/agentd/.api_key`.
 
 ### For agents self-extending at runtime
 

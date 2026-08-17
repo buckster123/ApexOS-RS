@@ -9,8 +9,9 @@
 #
 #   usb-mount <kernel-dev>        e.g. usb-mount sdb1
 #
-# Safety: mounts noexec,nosuid,nodev; FAT/exFAT get uid/gid=agentd (portable across
-# nodes). Media root + unmounted mountpoints are root-owned; helpers lstat and
+# Safety: mounts noexec,nosuid,nodev; FAT/exFAT get uid=agentd,gid=apexos-workspace
+# (portable; the fs tools worker is a different uid). Media root + unmounted
+# mountpoints are root-owned; helpers lstat and
 # refuse symlinks; mountinfo TARGET + SOURCE are checked immediately before and
 # after mount. See usb-confine.sh.
 set -euo pipefail
@@ -54,7 +55,10 @@ assert_root_owned_dir "$MNT" "mountpoint" || exit 1
 assert_canonical_mnt "$MNT" "$(realpath -e "$MEDIA_ROOT")/${SAFE_LABEL}" || exit 1
 
 AGENT_UID="$(id -u agentd 2>/dev/null || echo 0)"
-AGENT_GID="$(id -g agentd 2>/dev/null || echo 0)"
+# Group must be apexos-workspace so the fs tools worker (different uid) can
+# write the stick. Fall back to agentd's primary gid on a pre-split node.
+AGENT_GID="$(getent group apexos-workspace 2>/dev/null | cut -d: -f3 || true)"
+[[ -n "$AGENT_GID" ]] || AGENT_GID="$(id -g agentd 2>/dev/null || echo 0)"
 
 case "$FSTYPE" in
   vfat|exfat|msdos)

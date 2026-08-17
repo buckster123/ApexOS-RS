@@ -1,0 +1,56 @@
+[Unit]
+Description=ApexOS tools worker (devices)
+Documentation=file:///usr/local/share/doc/apexos/gotchas.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=apexos-dev
+Group=apexos-workspace
+SupplementaryGroups=video input
+WorkingDirectory=/var/lib/agentd/workspace
+UMask=0007
+# Non-secret knobs only. Never EnvironmentFile=/etc/agentd/env.
+EnvironmentFile=-/etc/agentd/tools.env
+Environment=APEXOS_TOOLS_CLASS=dev
+Environment=APEXOS_NETNS=0
+ExecStart=/usr/local/bin/apexos-tools --class dev --listen /run/apexos/tools-dev.sock
+Restart=on-failure
+RestartSec=2
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectProc=invisible
+ProcSubset=pid
+ReadWritePaths=/var/lib/agentd/workspace
+ReadOnlyPaths=/var/lib/agentd/events
+InaccessiblePaths=-/etc/agentd/env -/etc/agentd/ui.env -/etc/agentd/apexnet.psk -/etc/imaginarium -/etc/sonus
+CapabilityBoundingSet=
+AmbientCapabilities=
+# udev/gpio/camera enumerate over netlink (same lesson as kiosk #385).
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+BindReadOnlyPaths=/run/udev
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+DevicePolicy=closed
+DeviceAllow=/dev/null rw
+DeviceAllow=/dev/zero rw
+DeviceAllow=/dev/urandom r
+DeviceAllow=/dev/random r
+DeviceAllow=/dev/video* rw
+DeviceAllow=/dev/gpiochip* rw
+DeviceAllow=/dev/i2c-* rw
+DeviceAllow=/dev/dri/* rw
+
+[Install]
+WantedBy=multi-user.target

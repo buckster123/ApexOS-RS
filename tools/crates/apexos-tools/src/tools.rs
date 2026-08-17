@@ -4372,6 +4372,49 @@ mod tests {
     }
 
     #[test]
+    fn tools_units_are_not_agentd() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let cases = [
+            (
+                "deploy/apexos-tools-fs.service",
+                "User=apexos-tools",
+                true,
+                false,
+            ),
+            ("deploy/apexos-net.service", "User=apexos-net", false, false),
+            ("deploy/apexos-dev.service", "User=apexos-dev", true, true),
+        ];
+        for (rel, user, private_net, netlink) in cases {
+            let unit = std::fs::read_to_string(root.join(rel)).unwrap_or_else(|_| panic!("{rel}"));
+            assert!(unit.contains(user), "{rel} {user}");
+            assert!(!unit.contains("User=agentd"), "{rel} must not be agentd");
+            assert!(
+                !unit.contains("EnvironmentFile=-/etc/agentd/env"),
+                "{rel} must not load the full agentd env"
+            );
+            assert!(
+                unit.contains("EnvironmentFile=-/etc/agentd/tools.env"),
+                "{rel} loads the non-secret tools.env"
+            );
+            assert_eq!(
+                unit.contains("PrivateNetwork=yes"),
+                private_net,
+                "{rel} PrivateNetwork"
+            );
+            assert_eq!(unit.contains("AF_NETLINK"), netlink, "{rel} AF_NETLINK");
+            assert!(
+                unit.lines().any(|l| l.trim() == "CapabilityBoundingSet="),
+                "{rel} empty capability set"
+            );
+        }
+        let agentd =
+            std::fs::read_to_string(root.join("deploy/agentd.service")).expect("agentd.service");
+        assert!(agentd.contains("Wants=") && agentd.contains("apexos-tools-fs.service"));
+        assert!(agentd.contains("SupplementaryGroups=apexos-workspace"));
+        assert!(!agentd.contains("Requires=apexos-tools-fs.service"));
+    }
+
+    #[test]
     fn every_advertised_tool_has_a_class() {
         let all = list();
         let names: Vec<&str> = all

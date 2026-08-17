@@ -24,6 +24,8 @@
 | `APEXOS_NETNS` | on | `0`/`false`/`off` skips the fs-class empty netns (finding 11 Wave 28). Inherited. Leave unset on a live node |
 | `APEXOS_TOOLS_CLASS` | unset (all tools, no netns) | `fs` / `net` / `dev` / `all`. Prefer `--class` on the plugin args (install.sh pins this). Unset keeps a single-process compat node working |
 | `APEXOS_TOOLS_SPAWN` | unset | `stdio` / `child` / `1` forces the supervisor to spawn `cmd` even when `plugins.toml` says `transport = "unix"`. Dev/laptop only. A live node with unix transport **must not** fall back to spawning as `agentd` — that reopens the same-uid hole |
+| *(tools unit env)* | `/etc/agentd/tools.env` | Non-secret knobs for the sibling tools units (workspace, log, USB dirs, camera/gpio, HTTP-fetch/EE flags). install.sh rewrites it. Never put `AGENTD_TOKEN` here |
+| *(tools-net unit env)* | `/etc/agentd/tools-net.env` | Optional `TELEGRAM_*` / `NTFY_TOPIC` / `PIPER_MODEL` for `apexos-net` only (0640 `root:apexos-net`) |
 
 ## Auth, bind & core paths
 

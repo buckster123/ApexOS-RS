@@ -30,7 +30,8 @@
 > Wave 26 (PR #381): SA-13.
 > Wave 27 (PR #382): finding 11 part 2 (same-uid `/var/lib/agentd`).
 > Wave 28 (PR #383): finding 11 net/no-net worker split.
-> Wave 29 (this tree): finding 11 device-class worker.
+> Wave 29 (PR #384): finding 11 device-class worker.
+> Wave 30 (this tree): finding 11 dedicated tools users + unix units.
 
 ## Ranked findings
 
@@ -196,6 +197,12 @@
   `run_command` cannot open the camera. Residual: same uid; the device
   worker still uses the `agentd` `video`/`input` groups (DAC, not a
   second uid). `APEXOS_NETNS=0` skips the netns.
+- **Fixed (Wave 30):** sibling systemd units `User=apexos-tools` /
+  `apexos-net` / `apexos-dev`. agentd connects over AF_UNIX
+  (`transport=unix`). `PrivateNetwork` on fs/dev replaces homemade
+  netns on the unit path. Workspace is `2770 agentd:apexos-workspace`.
+  Residual: cerebro/occipital MCP children still share the `agentd`
+  uid. `APEXOS_TOOLS_SPAWN=stdio` is the explicit laptop override.
 
 ### 12. High — radio replay state is volatile and attacker-evictable
 
