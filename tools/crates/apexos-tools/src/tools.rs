@@ -4362,6 +4362,10 @@ mod tests {
         assert!(unit.contains("User=apexos-ui"));
         assert!(unit.contains("ProtectSystem=strict"));
         assert!(
+            unit.contains("AF_NETLINK"),
+            "linuxkms/libinput need udev netlink — omitting it is silent exit 101"
+        );
+        assert!(
             unit.lines().any(|l| l.trim() == "CapabilityBoundingSet="),
             "empty capability set (uid-0-equivalent caps must not ride along)"
         );
