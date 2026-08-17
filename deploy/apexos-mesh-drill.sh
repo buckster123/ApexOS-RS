@@ -112,8 +112,23 @@ say "drill passed"
 info "the node degraded honestly and recovered on its own."
 cat <<'EOS'
 
-  Not yet covered, because the lanes do not exist yet (docs/apexnet.md §6.1):
-    · a2a continuing over BLE while Tier 1 is down
-    · a heavy artifact landing in the outbox and draining on recovery
-  Those arms light up when real transports are registered with the router.
+  P5d outbound (field-proven 2026-08-17, apex1 → apex2) — do NOT cut Wi-Fi
+  if the node has no local LLM; that also drops the API. Cut only the peer:
+
+    # on apex1 (nftables-less images have no iptables):
+    sudo ip route replace blackhole 192.168.0.146
+    # prove WAN still answers:  curl -sS -m 4 -o /dev/null -w '%{http_code}\n' https://1.1.1.1/
+    # prove peer is gone:       curl -sS -m 3 http://192.168.0.146:8787/api/ping
+    # then send_to_agent + mesh_file_send to that peer (APEX or a session inject)
+    # expect:  send_to_agent via=["ble-gossip"]
+    #          mesh_file_send via=courier  (outbox row)
+    sudo ip route del blackhole 192.168.0.146
+    # restore: peer /api/ping works; drain the outbox over HTTP if the
+    # connectivity latch stayed Full (auto-drain only fires on a tier flip).
+
+  Still open (next slice, not this drill):
+    · inbound BLE A2A JSON envelope → named-peer session
+      (deliver_radio_a2a exists; it does not parse the P5d envelope, and a
+      radio_inbox.jsonl miss means the frame may not have reached the cortex)
+    · outbox auto-drain when WifiLan recovers without a Full/Degraded flip
 EOS

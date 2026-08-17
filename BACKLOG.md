@@ -223,7 +223,7 @@ summary + workspace) stays as the fallback in `docs/fabrica-skill.md`.
    here, all now laws in `docs/apexnet.md` §10 + `docs/gotchas.md`: a missing
    antenna, the scan duplicate filter, and connectable advertising silently
    terminating on connection.
-Next: **P5c — register real lanes**.
+Next: **P6 LoRa + digests** (hw). P5d leftover: inbound BLE envelope → named session; outbox auto-drain when WifiLan recovers without a tier flip.
 
    **P5c SHIPPED (2026-08-09) — agentd meets the radio.** `/mesh-bridge` WS
    (the bridge dials agentd, sensor-bridge pattern; own token), inbound frames
