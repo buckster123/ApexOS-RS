@@ -252,7 +252,10 @@ mod tests {
             !unit.contains("PrivateDevices=yes"),
             "PrivateDevices would hide the brainstem UART"
         );
-        assert!(unit.contains("DeviceAllow=/dev/ttyACM*"));
+        assert!(
+            !unit.contains("DevicePolicy=closed"),
+            "DeviceAllow=/dev/ttyACM* is literal under closed — ttyACM0 EPERM"
+        );
         assert!(unit.contains("EnvironmentFile=-/etc/agentd/env"));
         assert!(!unit.contains("EnvironmentFile=-/etc/agentd/ui.env"));
     }

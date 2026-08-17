@@ -19,11 +19,10 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-# The UART is the point of this process — do not PrivateDevices.
-DevicePolicy=closed
-DeviceAllow=/dev/ttyACM* rw
-DeviceAllow=/dev/ttyUSB* rw
-DeviceAllow=/dev/ttyS* rw
+# UART: do not PrivateDevices. Do not DevicePolicy=closed + DeviceAllow=/dev/ttyACM*
+# — systemd treats that glob as a literal path, so ttyACM0 is EPERM while
+# `sudo -u agentd` succeeds. dialout DAC is the access control
+# (field: apex1/apex2 2026-08-17).
 
 [Install]
 WantedBy=multi-user.target
