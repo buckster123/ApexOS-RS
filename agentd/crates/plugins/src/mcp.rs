@@ -6,7 +6,7 @@ use std::sync::{
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     process::Child,
     sync::{oneshot, Mutex},
 };
@@ -32,14 +32,22 @@ impl McpClient {
     pub async fn attach(child: &mut Child) -> Result<Self> {
         let stdin  = child.stdin .take().ok_or_else(|| anyhow!("child has no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("child has no stdout"))?;
+        let (client, _closed) = Self::attach_io(stdout, stdin).await?;
+        Ok(client)
+    }
 
+    /// Attach to any async read/write pair (child stdio or a Unix stream).
+    /// The returned receiver fires when the reader hits EOF (peer gone).
+    pub async fn attach_io<R, W>(stdout: R, mut stdin: W) -> Result<(Self, oneshot::Receiver<()>)>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<String>(64);
 
-        // Writer task: forward serialized messages to the child's stdin.
-        let mut stdin = stdin;
         tokio::spawn(async move {
             while let Some(msg) = write_rx.recv().await {
                 if stdin.write_all(msg.as_bytes()).await.is_err() {
@@ -48,7 +56,7 @@ impl McpClient {
             }
         });
 
-        // Reader task: parse response lines and dispatch to pending senders.
+        let (closed_tx, closed_rx) = oneshot::channel();
         let pending_clone = pending.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
@@ -61,21 +69,23 @@ impl McpClient {
                     Ok(v)  => v,
                     Err(_) => continue,
                 };
-                // Messages with an id are responses; dispatch to pending.
                 if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
                     if let Some(tx) = pending_clone.lock().await.remove(&id) {
                         let _ = tx.send(msg);
                     }
                 }
-                // Messages without id are server notifications — ignore for now.
             }
+            let _ = closed_tx.send(());
         });
 
-        Ok(Self {
-            write_tx,
-            pending,
-            next_id: Arc::new(AtomicU64::new(1)),
-        })
+        Ok((
+            Self {
+                write_tx,
+                pending,
+                next_id: Arc::new(AtomicU64::new(1)),
+            },
+            closed_rx,
+        ))
     }
 
     /// Perform the MCP initialize handshake.
@@ -218,5 +228,39 @@ mod tests {
         assert_eq!(tool_output_json(&json!("{\"id\":\"mem_3\"}")).unwrap()["id"], "mem_3");
         assert!(tool_output_json(&json!([{ "type": "text", "text": "not json" }])).is_none());
         assert!(tool_output_json(&json!(42)).is_none());
+    }
+
+    #[tokio::test]
+    async fn attach_io_handshakes_over_duplex() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex};
+        let (client_end, server_end) = duplex(4096);
+        let (server_r, mut server_w) = tokio::io::split(server_end);
+        let (client_r, client_w) = tokio::io::split(client_end);
+
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(server_r).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let msg: Value = serde_json::from_str(&line).unwrap();
+                let method = msg["method"].as_str().unwrap_or("");
+                if method == "notifications/initialized" {
+                    break;
+                }
+                if method == "initialize" {
+                    let id = msg["id"].clone();
+                    let resp = json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "protocolVersion": "2024-11-05", "capabilities": {} }
+                    });
+                    server_w
+                        .write_all(format!("{resp}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+
+        let (client, _closed) = McpClient::attach_io(client_r, client_w).await.unwrap();
+        client.initialize().await.unwrap();
     }
 }

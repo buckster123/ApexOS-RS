@@ -23,6 +23,7 @@
 | `APEXOS_LANDLOCK` | on | `0`/`false`/`off` skips the tools-worker Landlock allowlist (finding 11 part 2). Inherited by `apexos-tools` via `plugin_child_env`. Leave unset on a live node |
 | `APEXOS_NETNS` | on | `0`/`false`/`off` skips the fs-class empty netns (finding 11 Wave 28). Inherited. Leave unset on a live node |
 | `APEXOS_TOOLS_CLASS` | unset (all tools, no netns) | `fs` / `net` / `dev` / `all`. Prefer `--class` on the plugin args (install.sh pins this). Unset keeps a single-process compat node working |
+| `APEXOS_TOOLS_SPAWN` | unset | `stdio` / `child` / `1` forces the supervisor to spawn `cmd` even when `plugins.toml` says `transport = "unix"`. Dev/laptop only. A live node with unix transport **must not** fall back to spawning as `agentd` — that reopens the same-uid hole |
 
 ## Auth, bind & core paths
 

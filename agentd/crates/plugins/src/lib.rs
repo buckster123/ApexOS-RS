@@ -7,7 +7,7 @@ pub mod supervisor;
 pub mod tool_claim;
 pub mod vast;
 
-pub use config::{load, PluginConfig, RestartPolicy};
+pub use config::{load, PluginConfig, PluginTransport, RestartPolicy};
 pub use mcp::{tool_output_json, McpClient};
 pub use policy::{
     apply_yolo_grant, policy_toml_set_mode, requests_yolo_elevation, yolo_grant_present, Decision,

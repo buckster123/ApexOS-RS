@@ -1705,6 +1705,8 @@ async fn apply_evolution(
                 env:     if env.is_empty() { None } else { Some(env) },
                 cwd:     None,
                 restart: RestartPolicy::Always,
+                transport: Default::default(),
+                socket:    None,
             };
             sv_cmd_tx.send(SupervisorCmd::SpawnPlugin { config }).await
                 .map_err(|_| anyhow::anyhow!("supervisor channel closed"))?;

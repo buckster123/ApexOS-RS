@@ -12,6 +12,19 @@ pub struct PluginConfig {
     pub restart: RestartPolicy,
     pub cwd:     Option<String>,
     pub env:     Option<HashMap<String, String>>,
+    /// `stdio` (default — spawn `cmd`) or `unix` (connect to `socket`).
+    #[serde(default)]
+    pub transport: PluginTransport,
+    /// Required when `transport = "unix"`.
+    pub socket: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginTransport {
+    #[default]
+    Stdio,
+    Unix,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
@@ -80,5 +93,23 @@ FOO = "bar"
         assert_eq!(p.args, vec!["-m", "mymod"]);
         assert_eq!(p.cwd.as_deref(), Some("/opt/mymod"));
         assert_eq!(p.env.as_ref().unwrap()["FOO"], "bar");
+        assert_eq!(p.transport, PluginTransport::Stdio);
+        assert!(p.socket.is_none());
+    }
+
+    #[test]
+    fn parses_unix_transport() {
+        let toml = r#"
+[[plugin]]
+id        = "apexos-tools"
+cmd       = "/usr/local/bin/apexos-tools"
+args      = ["--class", "fs"]
+transport = "unix"
+socket    = "/run/apexos/tools-fs.sock"
+"#;
+        let file: PluginsFile = toml::from_str(toml).unwrap();
+        let p = &file.plugin[0];
+        assert_eq!(p.transport, PluginTransport::Unix);
+        assert_eq!(p.socket.as_deref(), Some("/run/apexos/tools-fs.sock"));
     }
 }

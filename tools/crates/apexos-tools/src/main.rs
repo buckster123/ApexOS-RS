@@ -7,37 +7,67 @@ use std::io::{self, BufRead, Write};
 
 mod tools;
 
-fn resolve_class() -> Result<Option<tools::ToolClass>, String> {
+struct ToolsArgs {
+    class: Option<tools::ToolClass>,
+    listen: Option<std::path::PathBuf>,
+}
+
+fn parse_args() -> Result<ToolsArgs, String> {
+    let mut class = None;
+    let mut listen = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if let Some(v) = a.strip_prefix("--class=") {
-            return tools::parse_class(v);
+            class = tools::parse_class(v)?;
+            continue;
         }
         if a == "--class" {
-            if let Some(v) = args.next() {
-                return tools::parse_class(&v);
-            }
-            return Err("--class needs a value (fs, net, dev, or all)".into());
+            let v = args
+                .next()
+                .ok_or_else(|| "--class needs a value (fs, net, dev, or all)".to_string())?;
+            class = tools::parse_class(&v)?;
+            continue;
         }
+        if let Some(v) = a.strip_prefix("--listen=") {
+            listen = Some(std::path::PathBuf::from(v));
+            continue;
+        }
+        if a == "--listen" {
+            let v = args
+                .next()
+                .ok_or_else(|| "--listen needs a socket path".to_string())?;
+            listen = Some(std::path::PathBuf::from(v));
+            continue;
+        }
+        return Err(format!("unknown argument: {a}"));
     }
-    match std::env::var("APEXOS_TOOLS_CLASS") {
-        Ok(v) => tools::parse_class(&v),
-        Err(_) => Ok(None),
+    if class.is_none() {
+        class = match std::env::var("APEXOS_TOOLS_CLASS") {
+            Ok(v) => tools::parse_class(&v)?,
+            Err(_) => None,
+        };
     }
+    Ok(ToolsArgs { class, listen })
 }
 
 fn main() {
-    let class = match resolve_class() {
-        Ok(c) => c,
+    let ToolsArgs { class, listen } = match parse_args() {
+        Ok(a) => a,
         Err(e) => {
             eprintln!("[apexos-tools] {e}");
             std::process::exit(2);
         }
     };
 
+    // Bind before Landlock so --listen on /run/apexos (PR 2) keeps its fd.
+    let listener = listen.map(|path| bind_listen(&path));
+
     // Finding 11: fs and dev workers drop into an empty netns. The net worker
     // keeps the host network. Compat (no --class) stays on the host net.
-    if matches!(class, Some(tools::ToolClass::Fs) | Some(tools::ToolClass::Dev)) {
+    if matches!(
+        class,
+        Some(tools::ToolClass::Fs) | Some(tools::ToolClass::Dev)
+    ) {
         match apexos_confine::isolate_network() {
             apexos_confine::NetnsStatus::Isolated => {
                 eprintln!("[apexos-tools] netns isolated");
@@ -46,10 +76,14 @@ fn main() {
                 eprintln!("[apexos-tools] netns disabled (APEXOS_NETNS)");
             }
             apexos_confine::NetnsStatus::Unsupported => {
-                eprintln!("[apexos-tools] netns unsupported — this worker still shares the host net");
+                eprintln!(
+                    "[apexos-tools] netns unsupported — this worker still shares the host net"
+                );
             }
             apexos_confine::NetnsStatus::Error(e) => {
-                eprintln!("[apexos-tools] netns failed ({e}) — this worker still shares the host net");
+                eprintln!(
+                    "[apexos-tools] netns failed ({e}) — this worker still shares the host net"
+                );
             }
         }
     }
@@ -73,11 +107,68 @@ fn main() {
         }
     }
 
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+    if let Some(listener) = listener {
+        eprintln!(
+            "[apexos-tools] listening on {}",
+            listener
+                .local_addr()
+                .map(|a| a
+                    .as_pathname()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "fd".into()))
+                .unwrap_or_else(|_| "?".into())
+        );
+        serve_listen(listener, class);
+    } else {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        serve_rpc(stdin.lock(), stdout.lock(), class);
+    }
+}
 
-    for line in stdin.lock().lines() {
+fn bind_listen(path: &std::path::Path) -> std::os::unix::net::UnixListener {
+    let _ = std::fs::remove_file(path);
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+    }
+    match std::os::unix::net::UnixListener::bind(path) {
+        Ok(l) => {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660));
+            l
+        }
+        Err(e) => {
+            eprintln!("[apexos-tools] listen {}: {e}", path.display());
+            std::process::exit(2);
+        }
+    }
+}
+
+fn serve_listen(listener: std::os::unix::net::UnixListener, class: Option<tools::ToolClass>) {
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let reader = match stream.try_clone() {
+                    Ok(s) => io::BufReader::new(s),
+                    Err(e) => {
+                        eprintln!("[apexos-tools] clone: {e}");
+                        continue;
+                    }
+                };
+                serve_rpc(reader, stream, class);
+            }
+            Err(e) => {
+                eprintln!("[apexos-tools] accept: {e}");
+                break;
+            }
+        }
+    }
+}
+
+fn serve_rpc<R: BufRead, W: Write>(input: R, mut out: W, class: Option<tools::ToolClass>) {
+    for line in input.lines() {
         let line = match line {
             Ok(l) if !l.trim().is_empty() => l,
             _ => continue,
