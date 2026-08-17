@@ -42,7 +42,7 @@ We prefer an honest list over a clean-looking one:
 
 - **`run_command`'s denylist is best-effort by design** — it's a heuristic, trivially bypassable; the approval gate + systemd sandbox are the real controls, and the tool description says so.
 - **Plaintext LAN transport** — WS/HTTP carry bearer tokens over `ws://`/`http://`. This is LAN-scoped by design. **Never port-forward a node to the internet**; if you need remote access, use a VPN/overlay (WireGuard, Tailscale).
-- **The tools worker is three classes, still the `agentd` uid** — fs/shell (`--class=fs`) is Landlocked, has no `/dev`, and sits in an empty netns. Net tools run in `apexos-net` on the host network. Camera/gpio run in `apexos-dev` (empty netns, `/dev` allowed). A second uid needs SETUID, which `NoNewPrivileges` blocks.
+- **The tools workers are three classes and three uids on a node** — sibling units `apexos-tools` / `apexos-net` / `apexos-dev`, AF_UNIX from agentd, Landlock still on. `cargo run` / `APEXOS_TOOLS_SPAWN=stdio` still spawn as the calling uid. Cerebro/occipital MCP children remain `agentd`.
 - **Some kiosks may still run `apexos-rs-ui` as root** — only via the persisted `APEXOS_UI_AS_ROOT` DRM fallback when seatless linuxkms cannot take the card as `apexos-ui`. That path still loads `/etc/agentd/ui.env` (gateway token + WS only), not `/etc/agentd/env`.
 
 ## Deployment guidance

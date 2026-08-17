@@ -1,0 +1,50 @@
+[Unit]
+Description=ApexOS tools worker (fs/shell)
+Documentation=file:///usr/local/share/doc/apexos/gotchas.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=apexos-tools
+Group=apexos-workspace
+WorkingDirectory=/var/lib/agentd/workspace
+UMask=0007
+# Non-secret knobs only. Never EnvironmentFile=/etc/agentd/env.
+EnvironmentFile=-/etc/agentd/tools.env
+Environment=APEXOS_TOOLS_CLASS=fs
+Environment=APEXOS_NETNS=0
+ExecStart=/usr/local/bin/apexos-tools --class fs --listen /run/apexos/tools-fs.sock
+Restart=on-failure
+RestartSec=2
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+DevicePolicy=closed
+DeviceAllow=/dev/null rw
+DeviceAllow=/dev/zero rw
+DeviceAllow=/dev/urandom r
+DeviceAllow=/dev/random r
+ProtectProc=invisible
+ProcSubset=pid
+ReadWritePaths=/var/lib/agentd/workspace /var/lib/agentd/usb-eject /var/lib/agentd/usb-prep /var/lib/agentd/notifications.jsonl
+ReadOnlyPaths=/var/lib/agentd/events /etc/agentd/parts
+InaccessiblePaths=-/etc/agentd/env -/etc/agentd/ui.env -/etc/agentd/apexnet.psk -/etc/imaginarium -/etc/sonus
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
