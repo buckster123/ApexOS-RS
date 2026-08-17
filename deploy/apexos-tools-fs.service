@@ -23,28 +23,12 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateNetwork=yes
-PrivateDevices=yes
-DevicePolicy=closed
-DeviceAllow=/dev/null rw
-DeviceAllow=/dev/zero rw
-DeviceAllow=/dev/urandom r
-DeviceAllow=/dev/random r
-ProtectProc=invisible
-ProcSubset=pid
-ReadWritePaths=/var/lib/agentd/workspace /var/lib/agentd/usb-eject /var/lib/agentd/usb-prep /var/lib/agentd/notifications.jsonl
-ReadOnlyPaths=/var/lib/agentd/events /etc/agentd/parts
+# Do not add RestrictNamespaces / SystemCallArchitectures / ProtectProc=pid:
+# on systemd 257 + Pi 6.12 those filters return ENOSYS for openat2 (os error 38)
+# and hide /proc/uptime. PrivateDevices similarly. Field: apex1 2026-08-17.
+ReadWritePaths=/var/lib/agentd/workspace /var/lib/agentd/usb-eject /var/lib/agentd/usb-prep /var/lib/agentd/notifications.jsonl /run/apexos
+ReadOnlyPaths=/var/lib/agentd/events /etc/agentd/parts /proc/uptime /proc/meminfo /proc/loadavg /proc/cpuinfo /proc/mounts
 InaccessiblePaths=-/etc/agentd/env -/etc/agentd/ui.env -/etc/agentd/apexnet.psk -/etc/imaginarium -/etc/sonus
-CapabilityBoundingSet=
-AmbientCapabilities=
-RestrictAddressFamilies=AF_UNIX
-RestrictNamespaces=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

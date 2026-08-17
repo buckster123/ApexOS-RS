@@ -975,7 +975,9 @@ chmod 660 /var/lib/agentd/notifications.jsonl
 # Existing workspace files keep owner; flip group so the fs worker can write.
 if [[ -d /var/lib/agentd/workspace ]]; then
   find /var/lib/agentd/workspace -mindepth 1 \( -path '/var/lib/agentd/workspace/media' -o -path '/var/lib/agentd/workspace/media/*' \) -prune -o -exec chgrp apexos-workspace {} + 2>/dev/null || true
+  find /var/lib/agentd/workspace -mindepth 1 \( -path '/var/lib/agentd/workspace/media' -o -path '/var/lib/agentd/workspace/media/*' \) -prune -o -exec chmod g+rwX {} + 2>/dev/null || true
 fi
+install -d -o agentd -g apexos-workspace -m 2770 /var/lib/agentd/workspace/notes
 # Self-update: the watchdog consumes ONLY /var/lib/agentd/update/agentd.staged
 # (hard-coded). request.json must never carry a staged path.
 # 751 = tools uids can traverse to workspace without listing .api_key (750 → CHDIR 200).

@@ -54,8 +54,8 @@ Gemini's framing of a "Nursery" — an immutable guardrail layer the evolving ag
 ### A1. Namespace-isolate the `apexos-tools` worker *(uid split shipped Wave 30)*
 The original premise — "the tools process does FS + GPIO only; it has **no legitimate reason to touch the network**" — was **wrong against the shipped tool set**: `http_fetch`, `screenshot_mirror`, `notify`, and `ui_query` legitimately open sockets. Wave 28 split fs/net; Wave 29 added `--class=dev`; Wave 30 moved the three classes to sibling units (`User=apexos-tools|apexos-net|apexos-dev`, `PrivateNetwork` on fs/dev, workspace group `apexos-workspace`). Leftover: cerebro/occipital still share the `agentd` uid.
 
-### A2. Capability caps on the systemd units *(small)*
-Add `CapabilityBoundingSet=` (drop `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, …) + `RestrictAddressFamilies=`/`SystemCallFilter=` to `agentd.service` and friends. We already ship `NoNewPrivileges` + `ProtectSystem=strict` + `PrivateDevices` — this tightens the residual.
+### A2. Capability caps on the systemd units *(parked — field, apex1 2026-08-17)*
+`#388` put `RestrictNamespaces=yes` / `SystemCallArchitectures=native` / `ProcSubset=pid` / empty `CapabilityBoundingSet` / `PrivateDevices` on the tools units. On systemd 257 + Pi 6.12 that stack returns **ENOSYS for `openat2`** (os error 38) and hides `/proc/uptime`. Native `read_file`/`write_file` look like a fake FS; `run_command` still hits the real workspace. **Don't put those filters back** until a unit allows `openat2` and still confines. Residual still wanted: `CapabilityBoundingSet=` + `RestrictAddressFamilies=` / `SystemCallFilter=` *with* `openat2` allowed.
 
 ### A3. Protocol-jail hardening *(we mostly have this)*
 `apexos-protocol` + `from_value::<Event>` already rejects unknown shapes — Gemini described our existing design as a future task. The residual: a bad frame is **silently dropped**; for a security posture, escalate a *malformed/unexpected-property* frame to an explicit reject + a logged event (and, on the gateway, optionally close the socket on repeated garbage). Cheap, turns a silent failure into a signal.
