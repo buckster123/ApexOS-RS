@@ -1,3 +1,7 @@
 venv/
 __pycache__/
 *.pyc
+
+# PAC-3 glyph-dialect experiment (parked until the open-model bench)
+PAC-3-Canon.md
+pac3.zip
