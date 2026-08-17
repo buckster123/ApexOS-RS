@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::process::Command;
 use std::process::Stdio;
 use apexos_core::{ActionId, BusHandle, Event, EvolutionId, EvolutionProposal, PluginId, SessionId, ToolCall, ToolOutput};
-use crate::config::{PluginConfig, RestartPolicy};
+use crate::config::{PluginConfig, PluginTransport, RestartPolicy};
 use crate::mcp::McpClient;
 use crate::plugin_env::plugin_child_env;
 use crate::policy::{
@@ -2385,36 +2385,14 @@ impl Supervisor {
         sv_tx: mpsc::Sender<SupervisorCmd>,
     ) -> anyhow::Result<()> {
         let plugin_id = PluginId(cfg.id.clone());
+        self.configs.insert(plugin_id.clone(), cfg.clone());
 
-        let mut cmd = Command::new(&cfg.cmd);
-        cmd.args(&cfg.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .env_clear();
+        let client = if use_unix_transport(cfg) {
+            self.attach_unix_plugin(cfg, &plugin_id, sv_tx.clone()).await?
+        } else {
+            self.attach_stdio_plugin(cfg, &plugin_id, sv_tx.clone()).await?
+        };
 
-        if let Some(cwd) = &cfg.cwd {
-            cmd.current_dir(cwd);
-        }
-        for (k, v) in plugin_child_env(&cfg.id, cfg.env.as_ref(), |key| std::env::var(key).ok()) {
-            cmd.env(k, v);
-        }
-
-        let mut child = cmd.spawn()?;
-
-        if let Some(stderr) = child.stderr.take() {
-            let id = plugin_id.clone();
-            tokio::spawn(async move {
-                use tokio::io::AsyncBufReadExt;
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    eprintln!("[plugin:{id}] {line}");
-                }
-            });
-        }
-
-        let client = Arc::new(McpClient::attach(&mut child).await?);
         client.initialize().await?;
         let tools = client.list_tools().await?;
         let advertised = tools.len();
@@ -2449,17 +2427,87 @@ impl Supervisor {
             })
             .await;
 
+        self.plugins.insert(plugin_id, Plugin { client });
+        Ok(())
+    }
+
+    async fn attach_stdio_plugin(
+        &self,
+        cfg: &PluginConfig,
+        plugin_id: &PluginId,
+        sv_tx: mpsc::Sender<SupervisorCmd>,
+    ) -> anyhow::Result<Arc<McpClient>> {
+        let mut cmd = Command::new(&cfg.cmd);
+        cmd.args(&cfg.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .env_clear();
+
+        if let Some(cwd) = &cfg.cwd {
+            cmd.current_dir(cwd);
+        }
+        for (k, v) in plugin_child_env(&cfg.id, cfg.env.as_ref(), |key| std::env::var(key).ok()) {
+            cmd.env(k, v);
+        }
+
+        let mut child = cmd.spawn()?;
+
+        if let Some(stderr) = child.stderr.take() {
+            let id = plugin_id.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    eprintln!("[plugin:{id}] {line}");
+                }
+            });
+        }
+
+        let client = Arc::new(McpClient::attach(&mut child).await?);
         let id_w = plugin_id.clone();
         tokio::spawn(async move {
-            // Clean exit (status 0) → success; a non-zero exit, a signal, or a
-            // wait() error → failure (so OnFailure restarts on a crash only).
             let success = child.wait().await.map(|s| s.success()).unwrap_or(false);
             let _ = sv_tx.send(SupervisorCmd::PluginDied { id: id_w, success }).await;
         });
+        Ok(client)
+    }
 
-        self.configs.insert(plugin_id.clone(), cfg.clone());
-        self.plugins.insert(plugin_id, Plugin { client });
-        Ok(())
+    async fn attach_unix_plugin(
+        &self,
+        cfg: &PluginConfig,
+        plugin_id: &PluginId,
+        sv_tx: mpsc::Sender<SupervisorCmd>,
+    ) -> anyhow::Result<Arc<McpClient>> {
+        let path = cfg.socket.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("plugin '{}': transport=unix requires socket=", cfg.id)
+        })?;
+        let stream = match connect_unix_retry(path).await {
+            Ok(s) => s,
+            Err(e) => {
+                let id_w = plugin_id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let _ = sv_tx.send(SupervisorCmd::PluginDied {
+                        id: id_w,
+                        success: false,
+                    }).await;
+                });
+                return Err(e);
+            }
+        };
+        let (read, write) = stream.into_split();
+        let (client, closed) = McpClient::attach_io(read, write).await?;
+        let id_w = plugin_id.clone();
+        tokio::spawn(async move {
+            let _ = closed.await;
+            let _ = sv_tx.send(SupervisorCmd::PluginDied {
+                id: id_w,
+                success: false,
+            }).await;
+        });
+        Ok(Arc::new(client))
     }
 
     async fn handle_died(&mut self, id: PluginId, success: bool, sv_tx: mpsc::Sender<SupervisorCmd>) {
@@ -2496,6 +2544,36 @@ impl Supervisor {
 /// whether it exited cleanly (status 0). `OnFailure` restarts on a crash but not
 /// a clean shutdown — which is why the watcher must carry the exit status through
 /// `PluginDied` (it was discarded before, so `OnFailure` silently never restarted).
+fn force_stdio_spawn() -> bool {
+    match std::env::var("APEXOS_TOOLS_SPAWN") {
+        Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "stdio" | "child" | "1"),
+        Err(_) => false,
+    }
+}
+
+fn use_unix_transport(cfg: &PluginConfig) -> bool {
+    cfg.transport == PluginTransport::Unix && !force_stdio_spawn()
+}
+
+async fn connect_unix_retry(path: &str) -> anyhow::Result<tokio::net::UnixStream> {
+    let mut last = None;
+    for attempt in 0..20 {
+        match tokio::net::UnixStream::connect(path).await {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                last = Some(e);
+                if attempt + 1 < 20 {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "unix plugin socket {path}: {} (no stdio fallback)",
+        last.unwrap()
+    ))
+}
+
 fn should_restart(policy: &RestartPolicy, exited_success: bool) -> bool {
     match policy {
         RestartPolicy::Always    => true,
