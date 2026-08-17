@@ -51,7 +51,10 @@ ReadOnlyPaths=/etc
 InaccessiblePaths=-/etc/agentd/env -/etc/agentd/apexnet.psk -/etc/imaginarium -/etc/sonus
 CapabilityBoundingSet=
 AmbientCapabilities=
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK is mandatory: libinput/libudev/DRM enumerate via udev netlink.
+# Without it linuxkms aborts in ~20ms with silent exit 101 (no rust log).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+BindReadOnlyPaths=/run/udev
 RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
