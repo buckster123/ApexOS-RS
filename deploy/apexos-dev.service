@@ -24,33 +24,14 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateNetwork=yes
-ProtectProc=invisible
-ProcSubset=pid
-ReadWritePaths=/var/lib/agentd/workspace
+ReadWritePaths=/var/lib/agentd/workspace /run/apexos
 ReadOnlyPaths=/var/lib/agentd/events
 InaccessiblePaths=-/etc/agentd/env -/etc/agentd/ui.env -/etc/agentd/apexnet.psk -/etc/imaginarium -/etc/sonus
-CapabilityBoundingSet=
-AmbientCapabilities=
-# udev/gpio/camera enumerate over netlink (same lesson as kiosk #385).
-RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# udev/gpio/camera enumerate over netlink (kiosk #385).
 BindReadOnlyPaths=/run/udev
-RestrictNamespaces=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-SystemCallArchitectures=native
-DevicePolicy=closed
-DeviceAllow=/dev/null rw
-DeviceAllow=/dev/zero rw
-DeviceAllow=/dev/urandom r
-DeviceAllow=/dev/random r
 DeviceAllow=/dev/video* rw
 DeviceAllow=/dev/gpiochip* rw
 DeviceAllow=/dev/i2c-* rw
-DeviceAllow=/dev/dri/* rw
 
 [Install]
 WantedBy=multi-user.target

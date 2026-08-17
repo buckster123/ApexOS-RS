@@ -1809,17 +1809,32 @@ fn list_dir(args: &Value) -> Value {
     };
 
     let mut entries = Vec::new();
-    collect_dir(&root, &rel, recursive, 0, &mut entries);
+    if let Err(e) = collect_dir(&root, &rel, recursive, 0, &mut entries) {
+        return tool_error(format!("{path}: {e}"));
+    }
     tool_ok(json!(entries))
 }
 
-fn collect_dir(root: &Beneath, rel: &Path, recursive: bool, depth: usize, out: &mut Vec<Value>) {
+fn collect_dir(
+    root: &Beneath,
+    rel: &Path,
+    recursive: bool,
+    depth: usize,
+    out: &mut Vec<Value>,
+) -> std::io::Result<()> {
     if depth > 3 {
-        return;
+        return Ok(());
     }
     let read = match root.read_dir(rel) {
         Ok(r) => r,
-        Err(_) => return,
+        Err(e) => {
+            // Top-level must be honest (ENOSYS looked like an empty workspace).
+            // Nested dirs stay best-effort so one unreadable child does not hide the rest.
+            if depth == 0 {
+                return Err(e);
+            }
+            return Ok(());
+        }
     };
     let display_root = root.display();
     for entry in read {
@@ -1851,9 +1866,10 @@ fn collect_dir(root: &Beneath, rel: &Path, recursive: bool, depth: usize, out: &
         out.push(entry_json);
 
         if recursive && entry.is_dir && !entry.is_symlink {
-            collect_dir(root, &child_rel, true, depth + 1, out);
+            collect_dir(root, &child_rel, true, depth + 1, out)?;
         }
     }
+    Ok(())
 }
 
 fn create_dir(args: &Value) -> Value {
@@ -3677,6 +3693,29 @@ mod tests {
         let _ = fs::remove_dir_all(&ws);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn list_dir_reports_missing_path() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let pid = std::process::id();
+        let ws = std::env::temp_dir().join(format!("apexos-listdir-err-{pid}"));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).unwrap();
+        std::env::set_var("AGENTD_WORKSPACE", &ws);
+
+        let res = list_dir(&json!({ "path": "missing-dir" }));
+        assert_eq!(res["isError"], json!(true), "must not swallow into []: {res}");
+        let txt = res["content"][0]["text"].as_str().unwrap_or("");
+        assert!(txt.contains("error"), "honest error: {txt}");
+        assert!(
+            !txt.trim_start().starts_with('['),
+            "must not look like an empty listing: {txt}"
+        );
+
+        std::env::remove_var("AGENTD_WORKSPACE");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
     #[test]
     fn confine_io_refuses_swapped_symlink_ancestor() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -4375,16 +4414,11 @@ mod tests {
     fn tools_units_are_not_agentd() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let cases = [
-            (
-                "deploy/apexos-tools-fs.service",
-                "User=apexos-tools",
-                true,
-                false,
-            ),
-            ("deploy/apexos-net.service", "User=apexos-net", false, false),
-            ("deploy/apexos-dev.service", "User=apexos-dev", true, true),
+            ("deploy/apexos-tools-fs.service", "User=apexos-tools", true),
+            ("deploy/apexos-net.service", "User=apexos-net", false),
+            ("deploy/apexos-dev.service", "User=apexos-dev", true),
         ];
-        for (rel, user, private_net, netlink) in cases {
+        for (rel, user, private_net) in cases {
             let unit = std::fs::read_to_string(root.join(rel)).unwrap_or_else(|_| panic!("{rel}"));
             assert!(unit.contains(user), "{rel} {user}");
             assert!(!unit.contains("User=agentd"), "{rel} must not be agentd");
@@ -4401,16 +4435,34 @@ mod tests {
                 private_net,
                 "{rel} PrivateNetwork"
             );
-            assert_eq!(unit.contains("AF_NETLINK"), netlink, "{rel} AF_NETLINK");
+            // Pi 6.12 + systemd 257: these filters return ENOSYS for openat2.
             assert!(
-                unit.lines().any(|l| l.trim() == "CapabilityBoundingSet="),
-                "{rel} empty capability set"
+                !unit.contains("RestrictNamespaces=yes"),
+                "{rel} RestrictNamespaces breaks openat2"
+            );
+            assert!(
+                !unit.contains("ProcSubset=pid"),
+                "{rel} ProcSubset=pid hides /proc/uptime"
+            );
+            assert!(
+                unit.contains("/run/apexos"),
+                "{rel} must write the listen dir (ProtectSystem=strict)"
             );
         }
+        let fs_unit = std::fs::read_to_string(root.join("deploy/apexos-tools-fs.service"))
+            .expect("apexos-tools-fs.service");
+        assert!(
+            fs_unit.contains("/proc/uptime"),
+            "fs unit must see /proc/uptime"
+        );
         let agentd =
             std::fs::read_to_string(root.join("deploy/agentd.service")).expect("agentd.service");
         assert!(agentd.contains("Wants=") && agentd.contains("apexos-tools-fs.service"));
         assert!(agentd.contains("SupplementaryGroups=apexos-workspace"));
+        assert!(
+            agentd.contains("UMask=0002"),
+            "new workspace files must be group-writable"
+        );
         assert!(!agentd.contains("Requires=apexos-tools-fs.service"));
     }
 

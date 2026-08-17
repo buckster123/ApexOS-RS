@@ -20,6 +20,8 @@ RestartSec=2
 User=agentd
 Group=agentd
 SupplementaryGroups=apexos-workspace
+# New workspace files must be group-writable (2770 setgid + 664).
+UMask=0002
 
 # Root the daemon (and its file tools' relative paths) in APEX's workspace.
 WorkingDirectory=/var/lib/agentd/workspace
