@@ -978,7 +978,8 @@ if [[ -d /var/lib/agentd/workspace ]]; then
 fi
 # Self-update: the watchdog consumes ONLY /var/lib/agentd/update/agentd.staged
 # (hard-coded). request.json must never carry a staged path.
-chmod 750 /var/lib/agentd
+# 751 = tools uids can traverse to workspace without listing .api_key (750 → CHDIR 200).
+chmod 751 /var/lib/agentd
 ok "User and directories ready"
 
 # ── polkit power rule ──────────────────────────────────────────────────────────
@@ -1650,7 +1651,11 @@ ensure_tools_net_split() {
 ensure_tools_uid_split() {
   local f=/etc/agentd/plugins.toml
   [[ -f "$f" ]] || return 0
-  python3 - "$f" <<'PY'
+  # Print "changed" on stdout; always exit 0. A non-zero python status under
+  # `set -e` aborted apexos-update on apex1 (2026-08-17) after rewriting
+  # plugins.toml and before the units were installed.
+  local out
+  out=$(python3 - "$f" <<'PY'
 import pathlib, re, sys
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
@@ -1691,14 +1696,11 @@ for block in parts:
     out.append(new)
 if changed:
     path.write_text("".join(out))
-    sys.exit(10)
-sys.exit(0)
+    print("changed")
 PY
-  local rc=$?
-  if [[ $rc -eq 10 ]]; then
+)
+  if [[ "$out" == *changed* ]]; then
     ok "plugins.toml pinned to unix tools sockets (finding 11 uid split)"
-  elif [[ $rc -ne 0 ]]; then
-    warn "ensure_tools_uid_split: python failed (rc=$rc) — check /etc/agentd/plugins.toml"
   fi
 }
 ensure_tools_net_split
