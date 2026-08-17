@@ -22,7 +22,7 @@
 | `RUST_LOG` | `info` (agentd) / `warn` (ui-slint, plugins) | tracing/log filter. Read by agentd, ui-slint, all three cerebro binaries, and seeded as `warn` into every `[plugin.env]` block by install.sh |
 | `APEXOS_LANDLOCK` | on | `0`/`false`/`off` skips the tools-worker Landlock allowlist (finding 11 part 2). Inherited by `apexos-tools` via `plugin_child_env`. Leave unset on a live node |
 | `APEXOS_NETNS` | on | `0`/`false`/`off` skips the fs-class empty netns (finding 11 Wave 28). Inherited. Leave unset on a live node |
-| `APEXOS_TOOLS_CLASS` | unset (all tools, no netns) | `fs` / `net` / `all`. Prefer `--class` on the plugin args (install.sh pins this). Unset keeps a single-process compat node working |
+| `APEXOS_TOOLS_CLASS` | unset (all tools, no netns) | `fs` / `net` / `dev` / `all`. Prefer `--class` on the plugin args (install.sh pins this). Unset keeps a single-process compat node working |
 
 ## Auth, bind & core paths
 

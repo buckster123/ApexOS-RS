@@ -29,7 +29,8 @@
 > Wave 25 (PR #380): SA-6.
 > Wave 26 (PR #381): SA-13.
 > Wave 27 (PR #382): finding 11 part 2 (same-uid `/var/lib/agentd`).
-> Wave 28 (this tree): finding 11 net/no-net worker split.
+> Wave 28 (PR #383): finding 11 net/no-net worker split.
+> Wave 29 (this tree): finding 11 device-class worker.
 
 ## Ranked findings
 
@@ -188,9 +189,13 @@
   --class=fs` enters `CLONE_NEWUSER|CLONE_NEWNET` (empty netns) before
   Landlock, so `run_command` cannot phone home. `apexos-net --class=net`
   keeps the host network for `http_fetch` / `screenshot_mirror` / `notify` /
-  `ui_query` and does not get a `/dev` Landlock parent. Device tools stay
-  on the no-net side. Residual: same uid; camera/gpio still share
-  `audio`/`video` groups with agentd; `APEXOS_NETNS=0` skips the netns.
+  `ui_query` and does not get a `/dev` Landlock parent. Device split is
+  Wave 29.
+- **Fixed (Wave 29):** `apexos-dev --class=dev` takes camera/gpio. It gets
+  `/dev` and an empty netns; the fs worker no longer gets `/dev`, so
+  `run_command` cannot open the camera. Residual: same uid; the device
+  worker still uses the `agentd` `video`/`input` groups (DAC, not a
+  second uid). `APEXOS_NETNS=0` skips the netns.
 
 ### 12. High — radio replay state is volatile and attacker-evictable
 
@@ -518,8 +523,8 @@ self-update/USB request consumers. Findings 5 and 7 closed the root-helper
 path/symlink holes; finding 11 closed the env leak (children no longer inherit
 `AGENTD_TOKEN` / provider keys) and the tools-worker Landlock allowlist
 (Wave 27) so a same-uid `cat /var/lib/agentd/.api_key` fails closed, and
-the Wave 28 net/no-net split so `run_command` has no WAN. Device groups
-remain shared with agentd; a device-class worker is the leftover.
+the Wave 28 net/no-net split so `run_command` has no WAN, and the Wave 29
+device worker so `run_command` has no `/dev`. Same uid remains.
 
 ## Verification
 

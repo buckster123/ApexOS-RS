@@ -17,7 +17,7 @@ fn resolve_class() -> Result<Option<tools::ToolClass>, String> {
             if let Some(v) = args.next() {
                 return tools::parse_class(&v);
             }
-            return Err("--class needs a value (fs, net, or all)".into());
+            return Err("--class needs a value (fs, net, dev, or all)".into());
         }
     }
     match std::env::var("APEXOS_TOOLS_CLASS") {
@@ -35,30 +35,29 @@ fn main() {
         }
     };
 
-    // Finding 11: the fs/shell worker drops into an empty netns so an approved
-    // run_command cannot phone home. The net worker keeps the host network.
-    // Compat (no --class) stays on the host net so a node that has not grown
-    // the apexos-net plugin still has http_fetch.
-    if class == Some(tools::ToolClass::Fs) {
+    // Finding 11: fs and dev workers drop into an empty netns. The net worker
+    // keeps the host network. Compat (no --class) stays on the host net.
+    if matches!(class, Some(tools::ToolClass::Fs) | Some(tools::ToolClass::Dev)) {
         match apexos_confine::isolate_network() {
             apexos_confine::NetnsStatus::Isolated => {
-                eprintln!("[apexos-tools] netns isolated (fs class)");
+                eprintln!("[apexos-tools] netns isolated");
             }
             apexos_confine::NetnsStatus::Disabled => {
                 eprintln!("[apexos-tools] netns disabled (APEXOS_NETNS)");
             }
             apexos_confine::NetnsStatus::Unsupported => {
-                eprintln!("[apexos-tools] netns unsupported — run_command still shares the host net");
+                eprintln!("[apexos-tools] netns unsupported — this worker still shares the host net");
             }
             apexos_confine::NetnsStatus::Error(e) => {
-                eprintln!("[apexos-tools] netns failed ({e}) — run_command still shares the host net");
+                eprintln!("[apexos-tools] netns failed ({e}) — this worker still shares the host net");
             }
         }
     }
 
     // Finding 11 part 2: same-uid DAC still sees /var/lib/agentd/.api_key.
-    // Landlock is inherited by run_command children. Net class does not get /dev.
-    let grant_devices = class != Some(tools::ToolClass::Net);
+    // Only the device worker (and the unclassed compat process) get /dev.
+    // The shell worker must not — run_command would inherit it.
+    let grant_devices = matches!(class, None | Some(tools::ToolClass::Dev));
     match apexos_confine::restrict_tools_worker_for(grant_devices) {
         apexos_confine::LandlockStatus::Restricted { abi } => {
             eprintln!("[apexos-tools] landlock restricted (abi {abi})");

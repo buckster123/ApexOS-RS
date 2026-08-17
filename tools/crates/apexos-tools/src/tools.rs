@@ -584,13 +584,13 @@ pub fn list() -> Value {
     ])
 }
 
-/// Finding 11 net/no-net split. The fs/shell worker (`--class=fs`) has an
-/// empty netns so `run_command` cannot phone home. Net tools live in a
-/// second process (`--class=net`) that keeps the host network.
+/// Finding 11 worker split. fs = empty netns, no `/dev`. net = host net, no
+/// `/dev`. dev = empty netns + `/dev` (camera/gpio), no `run_command`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolClass {
     Fs,
     Net,
+    Dev,
 }
 
 /// Tools that need a real network (or loopback HTTP to the UI).
@@ -601,23 +601,37 @@ pub const NET_TOOLS: &[&str] = &[
     "notify",
 ];
 
+/// Tools that need camera / GPIO device nodes.
+pub const DEV_TOOLS: &[&str] = &[
+    "camera_capture",
+    "gpio_info",
+    "gpio_read",
+    "gpio_write",
+    "gpio_pulse",
+    "gpio_pwm",
+    "gpio_servo",
+];
+
 pub fn tool_class(name: &str) -> ToolClass {
     if NET_TOOLS.contains(&name) {
         ToolClass::Net
+    } else if DEV_TOOLS.contains(&name) {
+        ToolClass::Dev
     } else {
         ToolClass::Fs
     }
 }
 
 /// Parse `--class` / `APEXOS_TOOLS_CLASS`. `Ok(None)` = advertise every tool
-/// (compat: a node that has not grown the net plugin yet).
+/// (compat: a node that has not grown the net/dev plugins yet).
 pub fn parse_class(s: &str) -> Result<Option<ToolClass>, String> {
     match s.trim().to_ascii_lowercase().as_str() {
         "" | "all" => Ok(None),
         "fs" | "shell" | "tools" => Ok(Some(ToolClass::Fs)),
         "net" | "network" => Ok(Some(ToolClass::Net)),
+        "dev" | "device" | "devices" => Ok(Some(ToolClass::Dev)),
         other => Err(format!(
-            "unknown tools class '{other}' (want fs, net, or all)"
+            "unknown tools class '{other}' (want fs, net, dev, or all)"
         )),
     }
 }
@@ -4364,11 +4378,13 @@ mod tests {
             .collect();
         assert!(names.contains(&"run_command"));
         assert!(names.contains(&"http_fetch"));
+        assert!(names.contains(&"camera_capture"));
         for name in &names {
             let _ = tool_class(name);
         }
         let fs = list_for(Some(ToolClass::Fs));
         let net = list_for(Some(ToolClass::Net));
+        let dev = list_for(Some(ToolClass::Dev));
         let fs_names: Vec<&str> = fs
             .as_array()
             .unwrap()
@@ -4381,14 +4397,24 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
+        let dev_names: Vec<&str> = dev
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert!(fs_names.contains(&"run_command"));
         assert!(!fs_names.contains(&"http_fetch"));
+        assert!(!fs_names.contains(&"camera_capture"));
         assert!(net_names.contains(&"http_fetch"));
-        assert!(net_names.contains(&"screenshot_mirror"));
-        assert!(net_names.contains(&"ui_query"));
-        assert!(net_names.contains(&"notify"));
         assert!(!net_names.contains(&"run_command"));
-        assert_eq!(fs_names.len() + net_names.len(), names.len());
+        assert!(dev_names.contains(&"camera_capture"));
+        assert!(dev_names.contains(&"gpio_write"));
+        assert!(!dev_names.contains(&"run_command"));
+        assert_eq!(
+            fs_names.len() + net_names.len() + dev_names.len(),
+            names.len()
+        );
     }
 
     #[test]
@@ -4397,12 +4423,17 @@ mod tests {
         assert_eq!(err["isError"], json!(true));
         let err = call_for("run_command", &json!({"cmd": "true"}), Some(ToolClass::Net));
         assert_eq!(err["isError"], json!(true));
+        let err = call_for("camera_capture", &json!({}), Some(ToolClass::Fs));
+        assert_eq!(err["isError"], json!(true));
+        let err = call_for("run_command", &json!({"cmd": "true"}), Some(ToolClass::Dev));
+        assert_eq!(err["isError"], json!(true));
     }
 
     #[test]
     fn parse_class_accepts_the_closed_vocab() {
         assert_eq!(parse_class("fs").unwrap(), Some(ToolClass::Fs));
         assert_eq!(parse_class("net").unwrap(), Some(ToolClass::Net));
+        assert_eq!(parse_class("dev").unwrap(), Some(ToolClass::Dev));
         assert_eq!(parse_class("all").unwrap(), None);
         assert!(parse_class("gpu").is_err());
     }

@@ -13,7 +13,8 @@
 //!   3. `[plugin.env]` overlays, but cannot inject a never-key.
 //!   4. Same-uid file access (`/var/lib/agentd/.api_key`) is closed by
 //!      Landlock. The shell worker's WAN is closed by an empty netns
-//!      (`isolate_network` on `--class=fs`). agentd cannot setuid.
+//!      (`isolate_network` on `--class=fs` and `--class=dev`).
+//!      Camera/gpio live in `apexos-dev`. agentd cannot setuid.
 
 use std::collections::{BTreeMap, HashMap};
 

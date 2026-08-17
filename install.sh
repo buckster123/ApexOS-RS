@@ -1603,6 +1603,18 @@ ensure_tools_net_split() {
     } >> "$f"
     ok "apexos-net plugin registered (finding 11 net/no-net split)"
   fi
+  if ! grep -qE '^[[:space:]]*id[[:space:]]*=[[:space:]]*"apexos-dev"' "$f"; then
+    {
+      echo ""
+      echo "# Finding 11: device-class worker (camera_capture + gpio_*)."
+      echo "[[plugin]]"
+      echo 'id      = "apexos-dev"'
+      echo 'cmd     = "/usr/local/bin/apexos-tools"'
+      echo 'args    = ["--class", "dev"]'
+      echo 'restart = "always"'
+    } >> "$f"
+    ok "apexos-dev plugin registered (finding 11 device split)"
+  fi
 }
 ensure_tools_net_split
 
