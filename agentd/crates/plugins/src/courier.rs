@@ -643,16 +643,9 @@ pub fn ledger_save(log_dir: &Path, ledger: &Ledger) -> Result<(), String> {
 pub fn ledger_hear_manifest(log_dir: &Path, m: HeardManifest) -> bool {
     let _g = lock();
     let mut ledger = ledger_load(log_dir);
-    if ledger
-        .manifests
-        .iter()
-        .any(|x| {
-            x.stick == m.stick
-                && x.root == m.root
-                && x.dest == m.dest
-                && x.shipment_id == m.shipment_id
-        })
-    {
+    if ledger.manifests.iter().any(|x| {
+        x.stick == m.stick && x.root == m.root && x.dest == m.dest && x.shipment_id == m.shipment_id
+    }) {
         return false;
     }
     ledger.manifests.push(m);
@@ -665,15 +658,9 @@ pub fn ledger_hear_manifest(log_dir: &Path, m: HeardManifest) -> bool {
 pub fn ledger_hear_receipt(log_dir: &Path, r: HeardReceipt) -> (bool, Option<String>) {
     let _g = lock();
     let mut ledger = ledger_load(log_dir);
-    let news = !ledger
-        .receipts
-        .iter()
-        .any(|x| {
-            x.stick == r.stick
-                && x.root == r.root
-                && x.node == r.node
-                && x.shipment_id == r.shipment_id
-        });
+    let news = !ledger.receipts.iter().any(|x| {
+        x.stick == r.stick && x.root == r.root && x.node == r.node && x.shipment_id == r.shipment_id
+    });
     if news {
         ledger.receipts.push(r.clone());
         let _ = ledger_save(log_dir, &ledger);
@@ -1177,6 +1164,126 @@ pub async fn dispatch_gossip(node_id: &str, gossip: Vec<Gossip>) -> Vec<String> 
     failures
 }
 
+/// Drain unrecepted outbox rows over HTTP now that WifiLan is back (P5d DoD:
+/// restore → drains). Stick-bound `loaded_on` rows stay for the courier loop;
+/// this only tries dests that are in peers.toml.
+pub async fn drain_outbox_over_lan() -> usize {
+    let log_dir = log_dir_env();
+    let entries = {
+        let _g = lock();
+        outbox_load(&log_dir)
+    };
+    let mut delivered = 0usize;
+    for entry in entries {
+        if entry.receipted_at.is_some() {
+            continue;
+        }
+        let Some(dest) = crate::wifi_lan::lookup_peer(&entry.dest) else {
+            continue;
+        };
+        let bytes = match std::fs::read(&entry.path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let http_base = dest
+            .ws_url
+            .replacen("ws://", "http://", 1)
+            .replacen("wss://", "https://", 1);
+        let mut req = reqwest::Client::new()
+            .post(format!("{http_base}/api/mesh/file"))
+            .header("x-dest", &entry.name)
+            .body(bytes)
+            .timeout(std::time::Duration::from_secs(30));
+        if let Some(t) = dest.token.as_deref() {
+            req = req.bearer_auth(t);
+        }
+        let ok = match req.send().await {
+            Ok(r) => {
+                let status = r.status();
+                let v = r.json::<serde_json::Value>().await.ok();
+                status.is_success() && v.as_ref().and_then(|b| b["ok"].as_bool()) == Some(true)
+            }
+            Err(_) => false,
+        };
+        if !ok {
+            continue;
+        }
+        let _g = lock();
+        let mut rows = outbox_load(&log_dir);
+        if let Some(e) = rows.iter_mut().find(|e| e.id == entry.id) {
+            e.receipted_at = Some(now_iso());
+        }
+        let _ = outbox_save(&log_dir, &rows);
+        delivered += 1;
+    }
+    if delivered > 0 {
+        eprintln!("[courier] drained {delivered} outbox row(s) over WifiLan");
+    }
+    delivered
+}
+
+/// Tier 4 as the router sees it: the outbox. Always Up — queueing is always
+/// possible. A stick in a pocket is not connectivity (see
+/// [`apexos_core::mesh_router::Router::implied_state`]).
+pub struct CourierTransport;
+
+#[async_trait::async_trait]
+impl apexos_core::mesh_router::MeshTransport for CourierTransport {
+    fn id(&self) -> apexos_core::mesh_router::TransportId {
+        apexos_core::mesh_router::TransportId::Courier
+    }
+
+    fn mtu(&self) -> usize {
+        MAX_ARTIFACT_BYTES as usize
+    }
+
+    fn latency_class(&self) -> apexos_core::mesh_router::LatencyClass {
+        apexos_core::mesh_router::LatencyClass::Overnight
+    }
+
+    fn health(&self) -> apexos_core::mesh_router::TransportHealth {
+        apexos_core::mesh_router::TransportHealth::Up
+    }
+
+    async fn send(
+        &self,
+        frame: &apexos_mesh_proto::MeshFrame,
+    ) -> Result<apexos_core::mesh_router::SendReceipt, apexos_core::mesh_router::SendError> {
+        use apexos_core::mesh_router::{SendError, SendReceipt, TransportId};
+        use apexos_mesh_proto::{Payload, PlainPacket};
+        let (packet, _): (PlainPacket, _) = postcard::take_from_bytes(&frame.ct)
+            .map_err(|_| SendError::Failed("courier: undecodable frame".into()))?;
+        let Payload::A2A { body } = packet.payload else {
+            return Err(SendError::Failed(
+                "courier: only A2A overflow rides this lane in P5d".into(),
+            ));
+        };
+        let env: crate::wifi_lan::A2aEnvelope = serde_json::from_slice(&body)
+            .map_err(|e| SendError::Failed(format!("courier: envelope: {e}")))?;
+        let ws = workspace_env().join("courier-pending");
+        let _ = std::fs::create_dir_all(&ws);
+        let name = format!("a2a-{}-{}.md", env.node, chrono::Utc::now().timestamp());
+        let path = ws.join(&name);
+        let text = format!(
+            "# queued a2a for {}\n\nfrom: {}\nsession: {}\n\n{}\n",
+            env.node, env.from, env.session_id, env.message
+        );
+        std::fs::write(&path, text.as_bytes())
+            .map_err(|e| SendError::Failed(format!("courier: write: {e}")))?;
+        let log_dir = log_dir_env();
+        let dest = env.node.clone();
+        let queued =
+            tokio::task::spawn_blocking(move || queue_artifact(&log_dir, &path, &dest, &name))
+                .await
+                .map_err(|e| SendError::Failed(format!("courier: join: {e}")))?
+                .map_err(SendError::Failed)?;
+        Ok(SendReceipt {
+            via: TransportId::Courier,
+            bytes: queued.len as usize,
+        })
+    }
+}
+
 /// Courier state for the status tool / API: the outbox, what's been heard,
 /// and whether crypto is available.
 pub fn status_json(log_dir: &Path, psk_present: bool, node_id: &str) -> serde_json::Value {
@@ -1585,7 +1692,11 @@ mod tests {
 
         let out_b = process_plug(stick.path(), "apex-b", b_ws.path(), b_log.path(), Some(&k));
         assert!(out_b.report.verified.is_empty());
-        assert!(out_b.report.failed.iter().any(|(_, r)| r.contains("origin")));
+        assert!(out_b
+            .report
+            .failed
+            .iter()
+            .any(|(_, r)| r.contains("origin")));
         assert!(!b_ws.path().join("escaped").exists());
         assert!(!b_ws.path().join("courier/incoming/../../escaped").exists());
         let incoming = b_ws.path().join("courier").join("incoming");

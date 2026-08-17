@@ -85,12 +85,19 @@ pub fn set_current(s: ConnectivityState) {
 
 /// Derive the candidate state from this probe round's facts (pure).
 /// `peers_total == 0` (a solo node) can never be "Degraded by mesh" — with
-/// no WAN it is simply Isolated; there is no mesh to degrade to.
-pub fn derive_state(wan_ok: bool, peers_alive: usize, peers_total: usize) -> ConnectivityState {
+/// no WAN it is Isolated unless a radio lane is up (P5d: radio-only = Minimal).
+pub fn derive_state(
+    wan_ok: bool,
+    peers_alive: usize,
+    peers_total: usize,
+    radio_up: bool,
+) -> ConnectivityState {
     if wan_ok {
         ConnectivityState::Full
     } else if peers_total > 0 && peers_alive > 0 {
         ConnectivityState::Degraded
+    } else if radio_up {
+        ConnectivityState::Minimal
     } else {
         ConnectivityState::Isolated
     }
@@ -224,12 +231,24 @@ mod tests {
 
     #[test]
     fn derivation_maps_the_one_transport_world() {
-        assert_eq!(derive_state(true, 0, 0), ConnectivityState::Full);
-        assert_eq!(derive_state(true, 3, 3), ConnectivityState::Full);
-        assert_eq!(derive_state(false, 2, 3), ConnectivityState::Degraded);
-        assert_eq!(derive_state(false, 0, 3), ConnectivityState::Isolated);
+        assert_eq!(derive_state(true, 0, 0, false), ConnectivityState::Full);
+        assert_eq!(derive_state(true, 3, 3, false), ConnectivityState::Full);
+        assert_eq!(
+            derive_state(false, 2, 3, false),
+            ConnectivityState::Degraded
+        );
+        assert_eq!(
+            derive_state(false, 0, 3, false),
+            ConnectivityState::Isolated
+        );
         // Solo node, no WAN: nothing to degrade to.
-        assert_eq!(derive_state(false, 0, 0), ConnectivityState::Isolated);
+        assert_eq!(
+            derive_state(false, 0, 0, false),
+            ConnectivityState::Isolated
+        );
+        // Radio-only (P5d): LAN gone, brainstem still on the air.
+        assert_eq!(derive_state(false, 0, 3, true), ConnectivityState::Minimal);
+        assert_eq!(derive_state(false, 0, 0, true), ConnectivityState::Minimal);
     }
 
     #[test]

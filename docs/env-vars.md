@@ -139,7 +139,8 @@
 | `APEXNET_CHECK_SECS` | `60` (floor 15) | connectivity check cadence |
 | `APEXNET_LATCH_CHECKS` | `3` (floor 1) | consecutive rounds a candidate state must hold before the latch flips (hysteresis — a flapping link must not churn the tool list / prompt-cache prefix) |
 | `APEXNET_CONNECTIVITY_CONFIG` | `/etc/agentd/connectivity.toml` | the §6.3 tool-gating side table (additively synced like policy). Absent/invalid → gating disabled, all tools available |
-| `MESH_BRIDGE_DEV` | unset (required) | `apexos-mesh-bridge` serial device — the brainstem UART (P4) or a PTY (`apexos-brainstem-sim`/socat bench). Absent → the daemon exits with usage, it never guesses a port |
+| `MESH_BRIDGE_DEV` | unset | `apexos-mesh-bridge` serial device — the brainstem UART (P4) or a PTY. **Never guessed.** Absent → the unit stays *idle* (no crash-loop); set it and restart. install.sh enables the unit on every node |
+| `APEXNET_RADIO_MAP` | unset | `NodeId=u16` pairs (`ApexOS-2=7,ApexOS-RS=3`) mapping mesh names to brainstem radio ids when `peers.toml` has no `radio_id`. BLE a2a fallback needs one or the other |
 | `MESH_BRIDGE_BAUD` | `115200` | UART baud rate |
 | `MESH_BRIDGE_STATS_SECS` | `30` (floor 5) | MUST-6 counter JSON line to stderr every N seconds |
 

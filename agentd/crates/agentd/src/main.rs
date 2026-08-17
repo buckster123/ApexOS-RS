@@ -527,7 +527,20 @@ async fn main() -> anyhow::Result<()> {
             }
             std::sync::Arc::new(t)
         },
-        mesh_link: apexos_gateway::mesh_link::MeshLink::new(),
+        mesh_link: {
+            let link = apexos_gateway::mesh_link::MeshLink::new();
+            // P5d: WifiLan + BleGossip + Courier registered once. Tools ask
+            // the hub which lane to use instead of each talking HTTP alone.
+            apexos_core::mesh_lanes::install(apexos_core::mesh_router::Router::new(
+                vec![
+                    Box::new(apexos_plugins::wifi_lan::WifiLanTransport::new()),
+                    Box::new(apexos_gateway::mesh_link::BleGossipTransport::new(link.clone())),
+                    Box::new(apexos_plugins::courier::CourierTransport),
+                ],
+                2048,
+            ));
+            link
+        },
         api_token:            Arc::clone(&api_token),
         soul_path:            soul_path.clone(),
         policy_arc:           Arc::clone(&policy_arc),
@@ -565,6 +578,7 @@ async fn main() -> anyhow::Result<()> {
     let gw_bind = std::env::var("AGENTD_BIND").unwrap_or_else(|_| "127.0.0.1:8787".into());
     let gw_addr: std::net::SocketAddr = gw_bind.parse()?;
     check_lan_bind_tokens(gw_addr, api_token.as_str(), sensor_bridge_token.as_str())?;
+    let mesh_link_watch = gw_state.mesh_link.clone();
     tokio::spawn(async move {
         if let Err(e) = serve(gw_state, gw_addr).await {
             eprintln!("[gateway] error: {e}");
@@ -956,7 +970,12 @@ async fn main() -> anyhow::Result<()> {
     // Mesh downtime beacon — active HTTP liveness on peers.toml; a node going dark
     // emits MeshNodeStatus + (default) a root-session alert so silence ≠ "all fine".
     apexos_gateway::spawn_beacon_loop(Arc::clone(&peer_registry), handle.clone(), Arc::clone(&mesh_liveness));
-    spawn_connectivity_watch(Arc::clone(&peer_registry), handle.clone(), Arc::clone(&mesh_liveness));
+    spawn_connectivity_watch(
+        Arc::clone(&peer_registry),
+        handle.clone(),
+        Arc::clone(&mesh_liveness),
+        mesh_link_watch,
+    );
 
     // Event log
     let health_log_dir = log_dir.clone();
@@ -2755,6 +2774,7 @@ fn spawn_connectivity_watch(
     peers: Arc<RwLock<PeerRegistry>>,
     bus: apexos_core::BusHandle,
     liveness: apexos_gateway::LivenessMap,
+    mesh_link: apexos_gateway::mesh_link::MeshLink,
 ) {
     use apexos_core::connectivity::{self, ConnectivityState};
 
@@ -2794,17 +2814,42 @@ fn spawn_connectivity_watch(
                 (alive, total)
             };
 
-            let observed = connectivity::derive_state(wan_ok, alive, total);
+            let radio_up = mesh_link.connected() > 0;
+            let wifi_up = wan_ok || alive > 0;
+            apexos_core::mesh_lanes::set_wifi_health(if wifi_up {
+                apexos_core::mesh_router::TransportHealth::Up
+            } else {
+                apexos_core::mesh_router::TransportHealth::Down
+            });
+            let observed = connectivity::derive_state(wan_ok, alive, total, radio_up);
             if let Some((from, to)) = latch.observe(observed) {
                 connectivity::set_current(to);
                 eprintln!(
-                    "[connectivity] {} → {} (wan_ok={wan_ok}, peers {alive}/{total} alive)",
+                    "[connectivity] {} → {} (wan_ok={wan_ok}, peers {alive}/{total} alive, radio={radio_up})",
                     from.as_str(), to.as_str()
                 );
+                if matches!(
+                    to,
+                    ConnectivityState::Full | ConnectivityState::Degraded
+                ) {
+                    tokio::spawn(async {
+                        let n = apexos_plugins::courier::drain_outbox_over_lan().await;
+                        if n > 0 {
+                            eprintln!("[connectivity] WifiLan restore drained {n} courier row(s)");
+                        }
+                    });
+                }
                 if notify {
                     let text = if to == ConnectivityState::Full {
                         "🌐 Connectivity restored: **full**. The WAN answers again — the \
                          complete tool set is back.".to_string()
+                    } else if to == ConnectivityState::Minimal {
+                        format!(
+                            "🌐 Connectivity changed: **{} → minimal**. LAN/WAN are gone; \
+                             the radio lane is up. send_to_agent continues over BLE when \
+                             the peer has a radio_id; artifacts land in the courier outbox.",
+                            from.as_str()
+                        )
                     } else {
                         format!(
                             "🌐 Connectivity changed: **{} → {}**. The WAN probe stopped \

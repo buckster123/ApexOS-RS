@@ -940,7 +940,7 @@ getent group i2c   >/dev/null && usermod -aG i2c   apexos-dev || true
 # directly. video: camera eyes (camera_capture tool + /api/snapshot) read /dev/video*
 # and the Pi CSI camera. Both are display-independent — a headless laptop/USB-cam node
 # needs them too — so they are NOT gated behind the UI.
-for grp in audio video; do
+for grp in audio video dialout; do
   getent group "$grp" &>/dev/null && usermod -aG "$grp" agentd || true
 done
 
@@ -1131,6 +1131,11 @@ install_bin cerebro-api
 install_bin cerebro
 install_bin apexos-tools
 install_bin apex-sensor-bridge
+install_bin apexos-mesh-bridge
+# Commissioning one-shot (PSK reader). Optional: the daemon is PSK-free.
+if [[ -x "$BIN_DIR/apexos-brainstem-provision" ]]; then
+  install_bin apexos-brainstem-provision
+fi
 
 if ! $NO_UI; then
   install_bin ui-slint
@@ -1915,6 +1920,14 @@ if [[ ! -f /etc/agentd/connectivity.toml ]]; then
   install -m 644 "$REPO_DIR/config/connectivity.toml" /etc/agentd/connectivity.toml
 else
   sync_policy_rules "$REPO_DIR/config/connectivity.toml" /etc/agentd/connectivity.toml tools
+  # P5d: a2a must survive radio-only (Minimal). Additive sync never overwrites
+  # an existing key, so bump the P5a "degraded" floor once.
+  if grep -qE '^[[:space:]]*"?send_to_agent"?[[:space:]]*=[[:space:]]*"degraded"' \
+      /etc/agentd/connectivity.toml 2>/dev/null; then
+    sed -i 's/\("send_to_agent"[[:space:]]*=[[:space:]]*\)"degraded"/\1"minimal"/' \
+      /etc/agentd/connectivity.toml
+    ok "connectivity: send_to_agent floor → minimal (BLE a2a when LAN dies)"
+  fi
 fi
 
 # soul.md — APEX's identity / system prompt (created from the default if missing).
@@ -2226,6 +2239,7 @@ install_svc apexos-tools-fs
 install_svc apexos-net
 install_svc apexos-dev
 install_svc apex-sensor-bridge
+install_svc apexos-mesh-bridge
 ! $NO_CEREBRO_API && install_svc cerebro-api   || true
 # The KMS/DRM kiosk service is kiosk-mode only; desktop mode launches the UI
 # as a user-session winit window (the .desktop launcher above), never this service.
@@ -2244,7 +2258,7 @@ $IMAGINARIUM_INSTALLED && install_svc imaginarium || true
 systemctl daemon-reload
 
 systemctl enable --now apexos-tools-fs apexos-net apexos-dev >/dev/null 2>&1 || true
-systemctl enable agentd apex-sensor-bridge
+systemctl enable agentd apex-sensor-bridge apexos-mesh-bridge
 ! $NO_CEREBRO_API && systemctl enable cerebro-api  || true
 ! $NO_UI && ! $IS_DESKTOP && systemctl enable apexos-rs-ui || true
 $VOICE_INSTALLED && systemctl enable --now apex-tts || true
@@ -2341,6 +2355,7 @@ svc_start() {
 $IMAGINARIUM_ACTIVE && { svc_start imaginarium "imaginarium" || true; }
 svc_start agentd            "agentd"
 $NO_SENSOR || svc_start apex-sensor-bridge "sensor-bridge"
+svc_start apexos-mesh-bridge "mesh-bridge" || true
 $NO_CEREBRO_API || svc_start cerebro-api   "cerebro-api"
 if ! $NO_UI && ! $IS_DESKTOP; then
   if svc_start apexos-rs-ui "apexos-rs-ui"; then
@@ -2400,6 +2415,10 @@ fi
 $NO_SENSOR      || { systemctl is-active apex-sensor-bridge &>/dev/null \
     && check "apex-sensor-bridge" "pass" \
     || check "apex-sensor-bridge" "not running"; }
+
+{ systemctl is-active apexos-mesh-bridge &>/dev/null \
+    && check "apexos-mesh-bridge" "pass" \
+    || check "apexos-mesh-bridge" "not running"; }
 
 $NO_CEREBRO_API || { systemctl is-active cerebro-api &>/dev/null \
     && check "cerebro-api on :8765" "pass" \

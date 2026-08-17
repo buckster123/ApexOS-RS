@@ -1251,99 +1251,90 @@ impl Supervisor {
             let msg_id   = call.id.0;
             let bus      = self.bus.clone();
 
-            // Cross-node: look up peer, proxy via HTTP.
+            // Cross-node: routed by class (P5d). WifiLan wraps today's HTTP
+            // POST; if that lane is down / fails, Gossip falls through to BLE
+            // (when the peer has a radio_id) or the courier outbox.
             if let Some(node_id) = node_arg {
                 let sid = to_id.unwrap_or(SessionId(0)).0;
+                let origin = if session.0 != 0 && !apexos_core::is_spawn_session(session.0) {
+                    Some(session.0)
+                } else {
+                    None
+                };
                 tokio::spawn(async move {
-                    match find_peer(&node_id).await {
-                        None => {
-                            bus.emit(Event::ToolResult {
-                                session, call: call_id,
-                                output: ToolOutput {
-                                    ok:      false,
-                                    content: serde_json::json!(format!("send_to_agent: peer '{node_id}' not found in peers.toml")),
-                                },
-                            }).await;
-                        }
-                        Some((ws_url, token)) => {
-                            let http_base = ws_url.replacen("ws://", "http://", 1)
-                                                  .replacen("wss://", "https://", 1);
-                            let url = format!("{http_base}/api/sessions/{sid}/message");
-                            // reqwest (not curl) so the peer's token rides in an Authorization
-                            // header rather than argv — never visible in `ps`. The peer's
-                            // /api/sessions/{id}/message is token-gated; without the credential
-                            // this 401s (the whole reason cross-node a2a needs the per-peer token).
-                            // Stamp our node_id as `from` so the receiver can route
-                            // this into our own per-peer thread on its side (not its
-                            // root session 0) and surface the provenance. Absent on a
-                            // generic external POST → the receiver falls back to s0.
-                            //
-                            // Also stamp the ASKING session (`origin_session`) —
-                            // system-stamped like `from`, never model-supplied — so
-                            // the receiver can bake a reply route into the inbound
-                            // prefix and the answer lands back in THIS conversation
-                            // instead of vanishing into our per-peer mesh thread.
-                            // Root (0) is deliberately not stamped (the mesh thread
-                            // is the right landing for root-originated asks — peers
-                            // stay out of the system funnel), and neither are
-                            // ephemeral spawn sessions (gone before a reply exists).
-                            let mut outbound = serde_json::json!({
-                                "message": body,
-                                "from":    apexos_core::node_id(),
-                            });
-                            if session.0 != 0 && !apexos_core::is_spawn_session(session.0) {
-                                outbound["origin_session"] = serde_json::json!(session.0);
-                            }
-                            let mut req = reqwest::Client::new()
-                                .post(&url)
-                                .json(&outbound)
-                                .timeout(std::time::Duration::from_secs(15));
-                            if let Some(tok) = token.as_deref() {
-                                req = req.bearer_auth(tok);
-                            }
-                            let resp = req.send().await;
-                            // The handler replies 200 with {ok:bool,…}; a
-                            // 200-with-{ok:false} (empty/rejected message) must
-                            // NOT read as a delivery — check the body, not just
-                            // the HTTP status. (Status-only is what let the old
-                            // field mismatch fail silently as a false "sent".)
-                            let (status, body_json) = match resp {
-                                Ok(r) => {
-                                    let s = r.status();
-                                    let b = r.json::<serde_json::Value>().await.ok();
-                                    (Some(s), b)
-                                }
-                                Err(_) => (None, None),
-                            };
-                            let body_ok = body_json.as_ref().and_then(|v| v["ok"].as_bool());
-                            // The peer reports where the message actually landed —
-                            // its per-node mesh thread when we defaulted session 0.
-                            // Report THAT, not the requested id (the old
-                            // `target_session: 0` read as "their root session",
-                            // which is exactly where it never lands).
-                            let landed = body_json.as_ref().and_then(|v| v["session_id"].as_u64());
-                            let ok = status.map(|s| s.is_success()).unwrap_or(false)
-                                && body_ok != Some(false);
-                            let detail = match (&token, status) {
-                                (None, _)                       => "no token stored for peer — set one to reach a token-gated node",
-                                (Some(_), Some(s)) if s == 401  => "peer rejected the token (401) — stale credential?",
-                                _                               => if ok { "sent" } else { "delivery failed" },
-                            };
-                            let mut content = serde_json::json!({
-                                "status": if ok { "sent" } else { "error" },
-                                "detail": detail,
-                                "node": node_id,
-                            });
-                            match landed {
-                                Some(s) => { content["landed_session"] = serde_json::json!(s); }
-                                None    => { content["target_session"] = serde_json::json!(sid); }
-                            }
-                            bus.emit(Event::ToolResult {
-                                session, call: call_id,
-                                output: ToolOutput { ok, content },
-                            }).await;
-                        }
+                    if crate::wifi_lan::lookup_peer(&node_id).is_none() {
+                        bus.emit(Event::ToolResult {
+                            session, call: call_id,
+                            output: ToolOutput {
+                                ok: false,
+                                content: serde_json::json!(format!(
+                                    "send_to_agent: peer '{node_id}' not found in peers.toml"
+                                )),
+                            },
+                        }).await;
+                        return;
                     }
+                    let env = crate::wifi_lan::A2aEnvelope {
+                        node: node_id.clone(),
+                        session_id: sid,
+                        message: body,
+                        from: apexos_core::node_id(),
+                        origin_session: origin,
+                    };
+                    let radio = crate::wifi_lan::radio_for_peer(&node_id).unwrap_or(0);
+                    let (ok, content) = if !apexos_core::mesh_lanes::installed() {
+                        match crate::wifi_lan::http_deliver_a2a(&env).await {
+                            Ok(c) => (true, c),
+                            Err(e) => (false, serde_json::json!({
+                                "status": "error", "detail": e, "node": node_id,
+                            })),
+                        }
+                    } else {
+                        match crate::wifi_lan::encode_a2a_frame(radio, &env) {
+                            Ok(frame) => {
+                                let outcome = apexos_core::mesh_lanes::send(
+                                    apexos_mesh_proto::MeshClass::Gossip,
+                                    &frame,
+                                )
+                                .await;
+                                let via: Vec<&str> = outcome
+                                    .sent
+                                    .iter()
+                                    .map(|r| r.via.as_str())
+                                    .collect();
+                                let ok = outcome.delivered();
+                                let detail = if ok {
+                                    "sent"
+                                } else if outcome.failed.iter().any(|(id, _)| {
+                                    *id == apexos_core::mesh_router::TransportId::BleGossip
+                                }) && radio == 0
+                                {
+                                    "no lane delivered — set radio_id on the peer (or APEXNET_RADIO_MAP) for BLE fallback"
+                                } else {
+                                    "delivery failed"
+                                };
+                                let mut c = serde_json::json!({
+                                    "status": if ok { "sent" } else { "error" },
+                                    "detail": detail,
+                                    "node": node_id,
+                                });
+                                if !via.is_empty() {
+                                    c["via"] = serde_json::json!(via);
+                                }
+                                if !ok {
+                                    c["target_session"] = serde_json::json!(sid);
+                                }
+                                (ok, c)
+                            }
+                            Err(e) => (false, serde_json::json!({
+                                "status": "error", "detail": e, "node": node_id,
+                            })),
+                        }
+                    };
+                    bus.emit(Event::ToolResult {
+                        session, call: call_id,
+                        output: ToolOutput { ok, content },
+                    }).await;
                 });
                 return;
             }
@@ -2722,15 +2713,7 @@ fn is_valid_host(s: &str) -> bool {
 /// Look up a peer's ws_url by node_id in peers.toml. Async because it reads a file.
 /// Look up a peer in peers.toml, returning its ws_url and (optional) a2a token.
 pub(crate) async fn find_peer(node_id: &str) -> Option<(String, Option<String>)> {
-    #[derive(serde::Deserialize)]
-    struct PeersFile { #[serde(default)] peer: Vec<PeerEntry> }
-    #[derive(serde::Deserialize)]
-    struct PeerEntry { node_id: String, ws_url: String, #[serde(default)] token: Option<String> }
-
-    let path = std::env::var("PEERS_TOML").unwrap_or_else(|_| "/etc/agentd/peers.toml".into());
-    let raw  = tokio::fs::read_to_string(&path).await.ok()?;
-    let file: PeersFile = toml::from_str(&raw).ok()?;
-    file.peer.into_iter().find(|p| p.node_id == node_id).map(|p| (p.ws_url, p.token))
+    crate::wifi_lan::lookup_peer(node_id).map(|p| (p.ws_url, p.token))
 }
 
 /// Confine a mesh-relay SOURCE path to `agent_id`'s workspace root. Rejects `..`
@@ -2806,17 +2789,59 @@ async fn mesh_file_send(node: Option<&str>, agent_id: &str, path: &str, dest: Op
     let filename = rel.file_name().and_then(|f| f.to_str()).unwrap_or("file").to_string();
     let remote = dest.filter(|d| !d.is_empty()).unwrap_or(&filename).to_string();
 
-    let (ws_url, token) = match find_peer(node).await {
+    let dest = match crate::wifi_lan::lookup_peer(node) {
         Some(p) => p,
-        None    => return err(format!("mesh_file_send: peer '{node}' not found in peers.toml")),
+        None => return err(format!("mesh_file_send: peer '{node}' not found in peers.toml")),
     };
-    let http_base = ws_url.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1);
+    let lanes = apexos_core::mesh_lanes::route(apexos_mesh_proto::MeshClass::Bulk, n).await;
+    let try_http = !apexos_core::mesh_lanes::installed()
+        || lanes
+            .iter()
+            .any(|l| *l == apexos_core::mesh_router::TransportId::WifiLan);
+
+    let queue = |why: String| {
+        let log_dir = crate::courier::log_dir_env();
+        let abs2 = root.display().join(&rel);
+        let node2 = node.to_string();
+        let name2 = filename.clone();
+        async move {
+            let queued = tokio::task::spawn_blocking(move || {
+                crate::courier::queue_artifact(&log_dir, &abs2, &node2, &name2)
+            })
+            .await
+            .unwrap_or_else(|je| Err(format!("join: {je}")));
+            match queued {
+                Ok(entry) => ToolOutput {
+                    ok: true,
+                    content: serde_json::json!({
+                        "status": "queued for the courier lane",
+                        "outbox_id": entry.id, "node": node, "name": entry.name, "bytes": n,
+                        "via": "courier",
+                        "note": format!(
+                            "{why}; delivery rides the next exo-workspace stick or \
+                             the next WifiLan window (courier_status tracks it)"
+                        ),
+                    }),
+                },
+                Err(qe) => err(format!("mesh_file_send: {why} (courier fallback failed too: {qe})")),
+            }
+        }
+    };
+
+    if !try_http {
+        return queue("WifiLan down — Bulk refused the LAN".into()).await;
+    }
+
+    let http_base = dest
+        .ws_url
+        .replacen("ws://", "http://", 1)
+        .replacen("wss://", "https://", 1);
     let mut req = reqwest::Client::new()
         .post(format!("{http_base}/api/mesh/file"))
         .header("x-dest", &remote)
         .body(bytes)
         .timeout(std::time::Duration::from_secs(30));
-    if let Some(t) = token.as_deref() {
+    if let Some(t) = dest.token.as_deref() {
         req = req.bearer_auth(t);
     }
     match req.send().await {
@@ -2827,44 +2852,15 @@ async fn mesh_file_send(node: Option<&str>, agent_id: &str, path: &str, dest: Op
             if ok {
                 ToolOutput { ok: true, content: serde_json::json!({
                     "status": "sent", "node": node, "bytes": n, "remote_path": remote,
+                    "via": "wifi-lan",
                 }) }
             } else {
                 let detail = v.as_ref().and_then(|b| b["error"].as_str())
-                    .unwrap_or(if token.is_none() { "no token stored for peer" } else { "delivery failed" });
-                err(format!("mesh_file_send: {detail} (status {status})"))
+                    .unwrap_or(if dest.token.is_none() { "no token stored for peer" } else { "delivery failed" });
+                queue(format!("{detail} (status {status})")).await
             }
         }
-        Err(e) => {
-            // ApexNET §6.5: while connectivity is degraded, a transport failure
-            // is the EXPECTED case — the artifact lands in the courier outbox
-            // instead of erroring (commitments run late, they don't evaporate).
-            if apexos_core::connectivity::current()
-                != apexos_core::connectivity::ConnectivityState::Full
-            {
-                let log_dir = crate::courier::log_dir_env();
-                let (abs2, node2, name2) = (root.display().join(&rel), node.to_string(), filename.clone());
-                let queued = tokio::task::spawn_blocking(move || {
-                    crate::courier::queue_artifact(&log_dir, &abs2, &node2, &name2)
-                })
-                .await
-                .unwrap_or_else(|je| Err(format!("join: {je}")));
-                return match queued {
-                    Ok(entry) => ToolOutput {
-                        ok: true,
-                        content: serde_json::json!({
-                            "status": "peer unreachable — queued for the courier lane",
-                            "outbox_id": entry.id, "node": node, "name": entry.name, "bytes": n,
-                            "note": "connectivity is degraded; delivery rides the next \
-                                     exo-workspace stick (courier_status tracks it)",
-                        }),
-                    },
-                    Err(qe) => err(format!(
-                        "mesh_file_send: {e} (courier fallback failed too: {qe})"
-                    )),
-                };
-            }
-            err(format!("mesh_file_send: {e}"))
-        }
+        Err(e) => queue(e.to_string()).await,
     }
 }
 

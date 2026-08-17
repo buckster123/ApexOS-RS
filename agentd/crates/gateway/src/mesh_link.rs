@@ -36,9 +36,7 @@ use std::time::{Duration, Instant};
 use apexos_core::mesh_router::{
     LatencyClass, MeshTransport, SendError, SendReceipt, TransportHealth, TransportId,
 };
-use apexos_mesh_proto::{
-    MeshClass, MeshFrame, Payload, PlainPacket, BROADCAST, WIRE_VERSION,
-};
+use apexos_mesh_proto::{MeshClass, MeshFrame, Payload, PlainPacket, BROADCAST, WIRE_VERSION};
 use tokio::sync::broadcast;
 
 /// What the brainstem last told us about its own radio. This is the only
@@ -203,7 +201,10 @@ pub fn validate_gossip_text(text: &str) -> Result<(), GossipRefuse> {
 }
 
 fn take_gossip_slot(hits: &mut VecDeque<Instant>, now: Instant) -> bool {
-    while hits.front().is_some_and(|t| now.duration_since(*t) >= GOSSIP_RATE_WINDOW) {
+    while hits
+        .front()
+        .is_some_and(|t| now.duration_since(*t) >= GOSSIP_RATE_WINDOW)
+    {
         hits.pop_front();
     }
     if hits.len() >= GOSSIP_RATE_MAX {
@@ -392,6 +393,13 @@ impl MeshTransport for BleGossipTransport {
     }
 
     async fn send(&self, frame: &MeshFrame) -> Result<SendReceipt, SendError> {
+        // P5d: WifiLan-only envelopes stamp target=0 (no radio_id in
+        // peers.toml). Never put those on the air — 0 is unprovisioned.
+        if let Ok((packet, _)) = postcard::take_from_bytes::<PlainPacket>(&frame.ct) {
+            if packet.target == 0 || packet.target == BROADCAST {
+                return Err(SendError::Unavailable);
+            }
+        }
         let bytes = apexos_mesh_proto::encode_datagram(frame)
             .map_err(|_| SendError::Failed("frame does not fit a datagram".into()))?;
         let len = bytes.len();
@@ -508,6 +516,30 @@ mod tests {
         assert_eq!(link.connected(), 0);
         link.link_up();
         assert_eq!(link.connected(), 1);
+    }
+
+    #[tokio::test]
+    async fn ble_refuses_an_unaddressed_frame() {
+        let link = MeshLink::new();
+        let t = BleGossipTransport::new(link.clone());
+        let _rx = link.subscribe();
+        link.link_up();
+        let packet = PlainPacket {
+            target: 0,
+            hop_limit: 1,
+            flags: 0,
+            payload: Payload::A2A {
+                body: b"x".to_vec(),
+            },
+        };
+        let frame = MeshFrame {
+            ver: WIRE_VERSION,
+            class: MeshClass::Gossip,
+            sender: 0,
+            ctr: 1,
+            ct: postcard::to_allocvec(&packet).unwrap(),
+        };
+        assert_eq!(t.send(&frame).await, Err(SendError::Unavailable));
     }
 
     #[tokio::test]
