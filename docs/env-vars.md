@@ -184,7 +184,7 @@ Notes: `GIT_COMMIT` is **compile-time** (`option_env!`, stamped by build.rs) —
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `SENSORHEAD_URL` | gateway `http://localhost:8080` · bridge unset (polling off) · UI `http://{agentd-host}:8080` | the external Python SensorHead. Three independent readers; the bridge only polls `<url>/api/environment` when set. Commented in the bridge unit — the operator adds it (install.sh prints a reminder) |
+| `SENSORHEAD_URL` | gateway `http://localhost:8080` · bridge (apex1) `http://127.0.0.1:8080` · UI `http://{agentd-host}:8080` | SensorHead-RS HTTP face. Three independent readers; the bridge polls `<url>/api/environment` + `<url>/api/thermal/data` when set. On apex1 thin S4 the operator drop-in is live. Without it the bridge forwards CPU temp only |
 | `SENSOR_BRIDGE_HOST` | `localhost:8787` | gateway host:port the bridge connects to (`ws://{host}/sensor-bridge` — scheme/path hardcoded) |
 | `SENSOR_BRIDGE_TOKEN` | **minted by install.sh** | Bearer token for `/sensor-bridge`, sent in the `Authorization` header (never the URL). agentd reads the same name. **Empty = no auth** (loopback bench only); a non-loopback `AGENTD_BIND` **refuses to start** if this is unset. The socket deserializes `sensor_reading` only — never the rest of the `Event` enum |
 | `SENSOR_NODE_ID` | hostname | node id stamped on every reading |
