@@ -160,8 +160,8 @@ fn trim_marker(dropped_total: usize) -> Message {
             text: format!(
                 "{TRIM_MARKER_PREFIX}{dropped_total} earlier messages were trimmed from your \
                  working window to fit the context budget. This is a hole in the transcript you \
-                 see, not in the record — the full history is preserved on disk for session \
-                 replay, and your memory covers the period. Recall rather than reconstruct.]"
+                 see, not in the record — the full history is on disk. Call `session_search` \
+                 (this session) to retrieve what slid out; do not reconstruct it.]"
             ),
         }],
     }
@@ -562,6 +562,12 @@ mod tests {
         assert_eq!(marker_dropped(&m), Some(7));
         // A normal user message is not a marker.
         assert_eq!(marker_dropped(&user("hello")), None);
+        let Message::User { content } = &m else { panic!("marker is a user message") };
+        let ContentBlock::Text { text } = &content[0] else { panic!("marker is text") };
+        assert!(
+            text.contains("`session_search`"),
+            "seam must name the retrieve tool, not Cerebro recall"
+        );
     }
 
     #[test]
