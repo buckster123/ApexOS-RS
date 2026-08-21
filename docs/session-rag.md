@@ -1,6 +1,6 @@
 # Session RAG — verbatim transcript retrieve (charter)
 
-> **Status**: LOCKED 2026-08-21 (André + GROK). S1 ships with this file.
+> **Status**: LOCKED 2026-08-21 (André + GROK). S1 shipped `#396`. S2 in flight.
 > **Not Cerebro.** Distilled memory stays in the cortex; this is the
 > retrieve path over the session JSONL we already keep.
 > Cold-pickup: this document is the law. Implementation receipts live in
@@ -71,8 +71,8 @@ Related surfaces that are **not** this:
     <id>.jsonl                   # append-only Message-per-line (truth)
     <id>.owner                   # human user_id sidecar (HTTP picker)
     archive/                     # hide-from-picker; S1 does not search here
-  (S2) sessions/index.sqlite     # FTS5 overlay — not in S1
-  (S3) *.jsonl.gz                # idle compress — not in S1
+  sessions/index.sqlite          # S2 FTS5 overlay (derived; JSONL is truth)
+  (S3) *.jsonl.gz                # idle compress — not yet
 ```
 
 `Message` has **no timestamps** (`apexos-protocol`). Do not add them for
@@ -156,8 +156,8 @@ covers the period.”
 
 | Slice | What | Status | Where |
 |---|---|---|---|
-| **S1** | `session_search` + `session_list`; keyword over live JSONL; identity gate; trim-marker + soul reword; policy allow; VIRTUAL names | **this PR** | pure: `agentd/crates/core/src/transcript.rs`; specs: `agentd/src/main.rs`; intercept: `supervisor.rs`; tests: `transcript.rs` + history marker test |
-| **S2** | FTS5 sidecar `sessions/index.sqlite`, incremental on `SessionStore::append`; gzip/archive files become searchable without a full scan | not built | index writer next to `session_store.rs`; search path prefers index, falls back to S1 scan |
+| **S1** | `session_search` + `session_list`; keyword over live JSONL; identity gate; trim-marker + soul reword; policy allow; VIRTUAL names | **shipped `#396`** | pure: `agentd/crates/core/src/transcript.rs`; specs: `agentd/src/main.rs`; intercept: `supervisor.rs`; tests: `transcript.rs` + history marker test |
+| **S2** | FTS5 sidecar `sessions/index.sqlite`, incremental on `SessionStore::append`; search prefers index, falls back to live then `archive/` JSONL | **this PR** | `agentd/crates/core/src/session_index.rs`; `SessionStore` insert/drop; boot catch-up; supervisor prefers index |
 | **S3** | Settings: idle-gzip TTL (week/month), never-delete default (already true). Do not gzip a file being appended. Env seed + file-wins like `history_config` | not built | `docs/env-vars.md` when the knobs exist |
 | **S4** | Root session `0` prefix rotation (the disk hog). Only with a field finding. Must not break resume, `load_all`, or the append path | not built | needs a rotation design; do not sneak it into S2/S3 |
 

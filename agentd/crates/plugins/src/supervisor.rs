@@ -290,6 +290,8 @@ pub struct Supervisor {
     /// Session JSONL dir (`<log>/sessions`) so session_search / session_list
     /// can read transcripts (`docs/session-rag.md`).
     sessions_dir:      Option<PathBuf>,
+    /// Derived FTS5 overlay (S2). Search prefers this; JSONL scan is fallback.
+    session_index:     Option<apexos_core::SessionIndex>,
     /// Vast.ai instance/tunnel state — shared with gateway for API routes.
     vast_state:        Option<VastState>,
     /// Per-session agent bindings (multi-agent runtime). The Cerebro stamp
@@ -345,6 +347,7 @@ impl Supervisor {
             goal_yolo:         None,
             events_dir:        None,
             sessions_dir:      None,
+            session_index:     None,
             vast_state:        None,
             session_bindings,
             mesh_hops,
@@ -444,6 +447,10 @@ impl Supervisor {
 
     pub fn set_sessions_dir(&mut self, dir: PathBuf) {
         self.sessions_dir = Some(dir);
+    }
+
+    pub fn set_session_index(&mut self, index: apexos_core::SessionIndex) {
+        self.session_index = Some(index);
     }
 
     pub fn set_vast_state(&mut self, state: VastState) {
@@ -1258,6 +1265,7 @@ impl Supervisor {
             let args = call.args.clone();
             let bus = self.bus.clone();
             let sessions_dir = self.sessions_dir.clone();
+            let session_index = self.session_index.clone();
             let bindings = self.session_bindings.clone();
             tokio::spawn(async move {
                 let Some(dir) = sessions_dir else {
@@ -1272,7 +1280,7 @@ impl Supervisor {
                 let result = if tool == "session_list" {
                     handle_session_list(&dir, session.0, caller_is_node).await
                 } else {
-                    handle_session_search(&dir, session.0, caller_is_node, &args).await
+                    handle_session_search(&dir, session_index.as_ref(), session.0, caller_is_node, &args).await
                 };
                 let (ok, text) = match result {
                     Ok(t) => (true, t),
@@ -2620,6 +2628,7 @@ fn should_restart(policy: &RestartPolicy, exited_success: bool) -> bool {
 
 async fn handle_session_search(
     dir: &PathBuf,
+    index: Option<&apexos_core::SessionIndex>,
     caller: u64,
     caller_is_node: bool,
     args: &serde_json::Value,
@@ -2632,13 +2641,27 @@ async fn handle_session_search(
     apexos_core::transcript::target_allowed(caller, target, caller_is_node)
         .map_err(|e| e.to_string())?;
     let max = apexos_core::transcript::clamp_max(args["max"].as_u64());
-    let path = dir.join(format!("{target}.jsonl"));
     let q = query.to_string();
+    let live = dir.join(format!("{target}.jsonl"));
+    let archived = dir.join("archive").join(format!("{target}.jsonl"));
+    let idx = index.cloned();
     let hits = tokio::task::spawn_blocking(move || {
+        if let Some(idx) = idx.as_ref() {
+            if idx.has_session(target) {
+                return idx.search(target, &q, max);
+            }
+        }
+        let path = if live.exists() {
+            live
+        } else if archived.exists() {
+            archived
+        } else {
+            return Err(format!("session {target} not found"));
+        };
         let file = std::fs::File::open(&path)
             .map_err(|e| format!("session {target} not found ({e})"))?;
         let reader = std::io::BufReader::new(file);
-        Ok::<_, String>(apexos_core::transcript::search_transcript(reader, &q, max))
+        Ok(apexos_core::transcript::search_transcript(reader, &q, max))
     })
     .await
     .map_err(|e| format!("session_search join: {e}"))??;

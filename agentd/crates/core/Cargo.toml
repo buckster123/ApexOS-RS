@@ -19,3 +19,5 @@ toml       = "0.8"
 sha2       = { workspace = true }
 subtle     = { workspace = true }
 rand       = { workspace = true }
+# Session-RAG S2: FTS5 overlay on sessions/<id>.jsonl (docs/session-rag.md).
+rusqlite   = { workspace = true }
