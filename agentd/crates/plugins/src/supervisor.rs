@@ -2651,16 +2651,9 @@ async fn handle_session_search(
                 return idx.search(target, &q, max);
             }
         }
-        let path = if live.exists() {
-            live
-        } else if archived.exists() {
-            archived
-        } else {
-            return Err(format!("session {target} not found"));
-        };
-        let file = std::fs::File::open(&path)
-            .map_err(|e| format!("session {target} not found ({e})"))?;
-        let reader = std::io::BufReader::new(file);
+        let reader = apexos_core::session_gzip::open_jsonl_or_gz(&live)
+            .or_else(|_| apexos_core::session_gzip::open_jsonl_or_gz(&archived))
+            .map_err(|_| format!("session {target} not found"))?;
         Ok(apexos_core::transcript::search_transcript(reader, &q, max))
     })
     .await
@@ -2679,14 +2672,8 @@ async fn handle_session_list(
         .map_err(|e| format!("sessions dir: {e}"))?;
     while let Ok(Some(entry)) = rd.next_entry().await {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Some(id) = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.parse().ok())
-        else {
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
+        let Some(id) = apexos_core::session_gzip::session_id_from_filename(name) else {
             continue;
         };
         if apexos_core::transcript::target_allowed(caller, id, caller_is_node).is_ok() {
@@ -2698,11 +2685,8 @@ async fn handle_session_list(
     for id in ids {
         let path = dir.join(format!("{id}.jsonl"));
         let (count, preview) = tokio::task::spawn_blocking(move || {
-            match std::fs::File::open(&path) {
-                Ok(f) => apexos_core::transcript::jsonl_count_and_preview(
-                    std::io::BufReader::new(f),
-                    80,
-                ),
+            match apexos_core::session_gzip::open_jsonl_or_gz(&path) {
+                Ok(r) => apexos_core::transcript::jsonl_count_and_preview(r, 80),
                 Err(_) => (0, String::new()),
             }
         })

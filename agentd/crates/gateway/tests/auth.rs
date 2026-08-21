@@ -35,6 +35,8 @@ fn make_state(
         histories:            Arc::new(Mutex::new(HashMap::new())),
         next_session_id:      Arc::new(AtomicU64::new(1)),
         history_budget:       Arc::new(std::sync::atomic::AtomicUsize::new(120_000)),
+        session_idle_gzip_days: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        session_never_delete:   Arc::new(std::sync::atomic::AtomicBool::new(true)),
         mesh_bridge_token: std::sync::Arc::new(String::new()),
         mesh_link: apexos_gateway::mesh_link::MeshLink::new(),
         sensor_bridge_token:  Arc::new(String::new()),
