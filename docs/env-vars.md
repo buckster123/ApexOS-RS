@@ -296,6 +296,7 @@ udev note: `ID_FS_LABEL` (only `APEX-*` sticks are claimed), `UDISKS_IGNORE`, an
 | `APEXOS_VOICE` | off | `1` provisions Kokoro TTS + Whisper STT |
 | `APEXOS_IMAGINARIUM` | off | `1` provisions the Imaginarium node (needs an `XAI_API_KEY` for ACTIVE) |
 | `APEXOS_SONUS` | off | `1` provisions Sonus-RS — boot/USB file, install.conf, or `--sonus`, same provenance precedence as the other add-on flags (USB-parse gap closed `#326`) |
+| `APEXOS_ADITUS` | off | `1` provisions Aditus-RS (`aditus-mcp` + `aditus` CLI) — boot/USB, install.conf, or `--aditus`. Does **not** mint `/etc/aditus/token` |
 | `APEXOS_UI_AS_ROOT` | `false` | kiosk DRM fallback (SA-13). Default unit is `User=apexos-ui`. `true` (or `--ui-as-root`) installs a systemd drop-in that runs the UI as root with `CAP_SYS_ADMIN`+`CAP_SYS_TTY_CONFIG` only — still loads `/etc/agentd/ui.env`, never `/etc/agentd/env`. install.sh auto-sets this if the unprivileged start fails. `--ui-unpriv` clears it |
 | `CARGO_BUILD_JOBS` (+ `CARGO_PROFILE_RELEASE_{OPT_LEVEL,LTO,CODEGEN_UNITS}`) | low-RAM only | the OOM build guard: ≤4 GiB nodes build with jobs 1, opt-level 2, LTO off, 16 codegen units — installer-set for the build only, never persisted |
 | `KOKORO_MODEL_URL` / `KOKORO_VOICES_URL` / `WHISPER_GGML_URL` | upstream releases | model download overrides (mirrors / air-gapped installs) |

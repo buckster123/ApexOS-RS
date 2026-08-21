@@ -31,7 +31,7 @@
 # re-verified on a key-less re-run.
 #   APEXOS_MODE=kiosk|headless|desktop      APEXOS_TIER=nano|micro|standard|pro
 #   APEXOS_NO_UI=1   APEXOS_NO_SENSOR=0   APEXOS_NO_CEREBRO_API=0   APEXOS_VOICE=1
-#   APEXOS_IMAGINARIUM=1
+#   APEXOS_IMAGINARIUM=1   APEXOS_SONUS=1   APEXOS_ADITUS=1
 #
 # Idempotency: the resolved choices are saved to /etc/agentd/install.conf and
 # restored on every re-run, so `apexos-update` (a flag-forwarding, no-USB re-run) keeps the
@@ -48,6 +48,7 @@
 #   --no-occipital          Skip the Occipital web cortex (clone + build of the sibling repo)
 #   --imaginarium           Install the Imaginarium image/video-gen node (xAI Imagine, BYOK — opt-in)
 #   --sonus                 Install Sonus-RS music generation (Suno via sunoapi.org, BYOK — opt-in)
+#   --aditus                Install Aditus-RS third-party MCP/OpenAPI/skill airlock (opt-in)
 #   --no-voice              Skip whisper + piper wake-word
 #   --api-key=KEY           Set ANTHROPIC_API_KEY non-interactively
 #   --openrouter-key=KEY    Set OPENROUTER_API_KEY
@@ -112,7 +113,7 @@ KEYFILE_NAMES=(apexos.env apexos.conf apexos-rs.env agentd.env apex.env apexos.t
 FOUND_ANTHROPIC=""; FOUND_OPENROUTER=""; FOUND_KEY_SRC=""
 FOUND_MODE=""; FOUND_TIER=""; FOUND_NO_UI=""; FOUND_NO_SENSOR=""
 FOUND_NO_CEREBRO_API=""; FOUND_VOICE=""; FOUND_NO_OCCIPITAL=""; FOUND_IMAGINARIUM=""
-FOUND_SONUS=""
+FOUND_SONUS=""; FOUND_ADITUS=""
 
 # Resolved-choices record: written at the end of a successful install and restored
 # on every re-run (load_persisted_config) so `apexos-update` keeps the same
@@ -215,7 +216,8 @@ _parse_key_file() {
   FOUND_NO_OCCIPITAL=$(_envval "$f" APEXOS_NO_OCCIPITAL)
   FOUND_IMAGINARIUM=$(_envval "$f" APEXOS_IMAGINARIUM)
   FOUND_SONUS=$(_envval "$f" APEXOS_SONUS)
-  [[ -n "${FOUND_ANTHROPIC}${FOUND_OPENROUTER}${FOUND_MODE}${FOUND_TIER}${FOUND_NO_UI}${FOUND_NO_SENSOR}${FOUND_NO_CEREBRO_API}${FOUND_VOICE}${FOUND_NO_OCCIPITAL}${FOUND_IMAGINARIUM}${FOUND_SONUS}" ]]
+  FOUND_ADITUS=$(_envval "$f" APEXOS_ADITUS)
+  [[ -n "${FOUND_ANTHROPIC}${FOUND_OPENROUTER}${FOUND_MODE}${FOUND_TIER}${FOUND_NO_UI}${FOUND_NO_SENSOR}${FOUND_NO_CEREBRO_API}${FOUND_VOICE}${FOUND_NO_OCCIPITAL}${FOUND_IMAGINARIUM}${FOUND_SONUS}${FOUND_ADITUS}" ]]
 }
 
 # Scan mounted media + the SD boot partition, then probe UNmounted removable
@@ -286,6 +288,7 @@ load_boot_provisioning() {
   [[ -n "$FOUND_VOICE"          ]] && ! $NO_VOICE_CLI       && { _truthy "$FOUND_VOICE"          && NO_VOICE=false      || NO_VOICE=true; }
   [[ -n "$FOUND_IMAGINARIUM"    ]] && ! $IMAGINARIUM_CLI    && { _truthy "$FOUND_IMAGINARIUM"    && NO_IMAGINARIUM=false || NO_IMAGINARIUM=true; }
   [[ -n "$FOUND_SONUS"          ]] && ! $SONUS_CLI          && { _truthy "$FOUND_SONUS"          && NO_SONUS=false      || NO_SONUS=true; }
+  [[ -n "$FOUND_ADITUS"         ]] && ! $ADITUS_CLI         && { _truthy "$FOUND_ADITUS"         && NO_ADITUS=false     || NO_ADITUS=true; }
   local what="settings"; [[ -n "$FOUND_ANTHROPIC" ]] && what="key + settings"
   ok "Provisioned from ${FOUND_KEY_SRC} ($what)"
 }
@@ -311,7 +314,7 @@ load_persisted_config() {
     fi
     return 0
   fi
-  local c_mode c_tier c_no_ui c_no_sensor c_no_api c_voice c_no_occipital c_imaginarium c_sonus c_ui_root
+  local c_mode c_tier c_no_ui c_no_sensor c_no_api c_voice c_no_occipital c_imaginarium c_sonus c_aditus c_ui_root
   c_mode=$(_envval "$CONF_FILE" APEXOS_MODE)
   c_tier=$(_envval "$CONF_FILE" APEXOS_TIER)
   c_no_ui=$(_envval "$CONF_FILE" APEXOS_NO_UI)
@@ -321,6 +324,7 @@ load_persisted_config() {
   c_no_occipital=$(_envval "$CONF_FILE" APEXOS_NO_OCCIPITAL)
   c_imaginarium=$(_envval "$CONF_FILE" APEXOS_IMAGINARIUM)
   c_sonus=$(_envval "$CONF_FILE" APEXOS_SONUS)
+  c_aditus=$(_envval "$CONF_FILE" APEXOS_ADITUS)
   c_ui_root=$(_envval "$CONF_FILE" APEXOS_UI_AS_ROOT)
   [[ -n "$c_mode" ]] && ! $MODE_CLI && MODE="$c_mode"
   [[ -n "$c_tier" ]] && ! $TIER_CLI && TIER="$c_tier"
@@ -331,6 +335,7 @@ load_persisted_config() {
   [[ -n "$c_voice"     ]] && ! $NO_VOICE_CLI       && { _truthy "$c_voice"     && NO_VOICE=false      || NO_VOICE=true; }
   [[ -n "$c_imaginarium" ]] && ! $IMAGINARIUM_CLI  && { _truthy "$c_imaginarium" && NO_IMAGINARIUM=false || NO_IMAGINARIUM=true; }
   [[ -n "$c_sonus" ]] && ! $SONUS_CLI && { _truthy "$c_sonus" && NO_SONUS=false || NO_SONUS=true; }
+  [[ -n "$c_aditus" ]] && ! $ADITUS_CLI && { _truthy "$c_aditus" && NO_ADITUS=false || NO_ADITUS=true; }
   [[ -n "$c_ui_root" ]] && ! $UI_AS_ROOT_CLI && { _truthy "$c_ui_root" && UI_AS_ROOT=true || UI_AS_ROOT=false; }
   ok "Restored install choices from $CONF_FILE (mode=$MODE tier=$TIER)"
 }
@@ -358,6 +363,13 @@ IMAG_ENV=/etc/imaginarium/env
 # SELF-LOADS SONUS_ENV (root:agentd 0640) — the key stays out of every agentd env.
 NO_SONUS=true; SONUS_INSTALLED=false; SONUS_ACTIVE=false
 SONUS_ENV=/etc/sonus/env
+# Aditus (third-party MCP/OpenAPI/skill airlock, Aditus-RS) defaults OFF — opt-in
+# like sonus: --aditus / TUI add-on / APEXOS_ADITUS=1. INSTALLED = binary+dirs+knobs
+# env; the plugin registers on install even with an empty catalog (search/inspect
+# still work). INSTALLED ≠ ACTIVE is PER CATALOG ENTRY (operator allow then enable).
+# HTTP token is NOT minted here. ADITUS_ENV is knobs only (0640 root:agentd).
+NO_ADITUS=true; ADITUS_INSTALLED=false
+ADITUS_ENV=/etc/aditus/env
 API_KEY=""; OPENROUTER_KEY=""; API_KEY_SRC=""
 TIER="auto"; MODE="auto"; REPO_DIR=""
 IS_DESKTOP=false   # MODE==desktop → build the UI but launch a winit window, not the kiosk service
@@ -367,7 +379,7 @@ IS_DESKTOP=false   # MODE==desktop → build the UI but launch a winit window, n
 # user did NOT pass. (Precedence: CLI > USB file > install.conf > auto-detect.)
 MODE_CLI=false; TIER_CLI=false
 NO_UI_CLI=false; NO_CEREBRO_API_CLI=false; NO_SENSOR_CLI=false; NO_VOICE_CLI=false
-NO_OCCIPITAL_CLI=false; IMAGINARIUM_CLI=false; SONUS_CLI=false
+NO_OCCIPITAL_CLI=false; IMAGINARIUM_CLI=false; SONUS_CLI=false; ADITUS_CLI=false
 # Kiosk DRM fallback (SA-13). Default is User=apexos-ui; persist via install.conf.
 UI_AS_ROOT=false; UI_AS_ROOT_CLI=false
 
@@ -385,6 +397,8 @@ for arg in "$@"; do
     --no-imaginarium)      NO_IMAGINARIUM=true;  IMAGINARIUM_CLI=true ;;
     --sonus)               NO_SONUS=false; SONUS_CLI=true ;;
     --no-sonus)            NO_SONUS=true;  SONUS_CLI=true ;;
+    --aditus)              NO_ADITUS=false; ADITUS_CLI=true ;;
+    --no-aditus)           NO_ADITUS=true;  ADITUS_CLI=true ;;
     --no-voice)            NO_VOICE=true;  NO_VOICE_CLI=true ;;
     --voice)               NO_VOICE=false; NO_VOICE_CLI=true ;;
     --api-key=*)           API_KEY="${arg#*=}"; API_KEY_SRC="--api-key flag" ;;
@@ -647,6 +661,7 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
   OCC_STATE="ON";    $NO_OCCIPITAL && OCC_STATE="OFF"
   IMAG_STATE="OFF";  $NO_IMAGINARIUM || IMAG_STATE="ON"
   SONUS_STATE="OFF"; $NO_SONUS || SONUS_STATE="ON"
+  ADITUS_STATE="OFF"; $NO_ADITUS || ADITUS_STATE="ON"
 
   ADDONS=$(tui_checklist "Components" \
     "Select the components to install:\n(Space to toggle, Enter to confirm)" \
@@ -655,6 +670,7 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
     "occipital"   "Web Cortex       web_search/fetch + semantic recall"         "$OCC_STATE" \
     "imaginarium" "Imaginarium      xAI Imagine image/video gen (paid key)"     "$IMAG_STATE" \
     "sonus"       "Sonus            Suno music generation (paid key)"           "$SONUS_STATE" \
+    "aditus"      "Aditus           Third-party MCP/OpenAPI/skill airlock"      "$ADITUS_STATE" \
     "sensor"      "Sensor Head      BME688 air quality + MLX90640 thermal cam"  "$SENSOR_STATE" \
     "voice"       "Voice            Wake-word + whisper transcription"          "OFF")
 
@@ -664,6 +680,7 @@ if ! $YES && [[ "$STYLE" == "manual" ]]; then
   echo "$ADDONS" | grep -q '"occipital"'   && NO_OCCIPITAL=false || NO_OCCIPITAL=true
   echo "$ADDONS" | grep -q '"imaginarium"' && NO_IMAGINARIUM=false || NO_IMAGINARIUM=true
   echo "$ADDONS" | grep -q '"sonus"'       && NO_SONUS=false || NO_SONUS=true
+  echo "$ADDONS" | grep -q '"aditus"'      && NO_ADITUS=false || NO_ADITUS=true
   echo "$ADDONS" | grep -q '"sensor"'      && NO_SENSOR=false || NO_SENSOR=true
   echo "$ADDONS" | grep -q '"voice"'       && NO_VOICE=false  || NO_VOICE=true
 fi
@@ -753,6 +770,7 @@ if ! $YES; then
   ! $NO_OCCIPITAL   && ADDONS_LIST+="  ✓ occipital     (web cortex — $OCC_RECALL)\n"
   ! $NO_IMAGINARIUM && ADDONS_LIST+="  ✓ imaginarium   (xAI Imagine image/video gen)\n"
   ! $NO_SONUS       && ADDONS_LIST+="  ✓ sonus         (Suno music generation)\n"
+  ! $NO_ADITUS      && ADDONS_LIST+="  ✓ aditus        (third-party MCP/OpenAPI/skill airlock)\n"
   ! $NO_SENSOR      && ADDONS_LIST+="  ✓ sensor-head   (BME688 + MLX90640)\n"
   ! $NO_VOICE       && ADDONS_LIST+="  ✓ voice         (whisper transcription)\n"
   [[ -n "$API_KEY" ]]        && KEY_STATUS="Anthropic key: set" \
@@ -1571,6 +1589,71 @@ if ! $NO_SONUS; then
   fi
 fi
 
+# ── Aditus (third-party MCP/OpenAPI/skill airlock) ────────────────────────────
+# Standalone sibling (github.com/buckster123/Aditus-RS). One stdio plugin; the
+# agent never talks to third-party origins. Opt-in; best-effort clone/build.
+# INSTALLED ≠ ACTIVE is PER CATALOG ENTRY (operator allow then enable) — so we
+# register the plugin as soon as the binary is installed, even with an empty
+# catalog (search/inspect still useful). Do NOT mint /etc/aditus/token here
+# (first `aditus serve` mints it 0600 as the serve uid; agentd must not open it).
+if ! $NO_ADITUS; then
+  hdr "Aditus (third-party MCP/OpenAPI/skill airlock)"
+  ADITUS_DIR="$(dirname "$REPO_DIR")/Aditus-RS"
+
+  aditus_provision() {
+    ensure_bootstrap_deps
+    if [[ -d "$ADITUS_DIR/.git" ]]; then
+      [[ "$BUILD_USER" != "root" ]] && chown -R "$BUILD_USER:" "$ADITUS_DIR"
+      info "Updating Aditus-RS clone at $ADITUS_DIR …"
+      local GIT_ADITUS=(git -C "$ADITUS_DIR")
+      [[ "$BUILD_USER" != "root" ]] && GIT_ADITUS=(sudo -u "$BUILD_USER" git -C "$ADITUS_DIR")
+      "${GIT_ADITUS[@]}" checkout -- Cargo.lock 2>/dev/null || true
+      "${GIT_ADITUS[@]}" pull --ff-only
+    else
+      info "Cloning Aditus-RS …"
+      git clone --depth=1 https://github.com/buckster123/Aditus-RS "$ADITUS_DIR"
+      [[ "$BUILD_USER" != "root" ]] && chown -R "$BUILD_USER:" "$ADITUS_DIR"
+    fi
+    info "Building aditus-mcp + aditus CLI …"
+    sudo -u "$BUILD_USER" "$CARGO" build --release -p aditus-mcp -p aditus-cli \
+      --manifest-path "$ADITUS_DIR/Cargo.toml" 2>&1 \
+      | grep --line-buffered -E "(^[[:space:]]*Compiling aditus|Finished|^error)" || true
+    [[ -x "$ADITUS_DIR/target/release/aditus-mcp" ]] \
+      || { warn "aditus-mcp build produced no binary"; return 1; }
+    install -m 755 "$ADITUS_DIR/target/release/aditus-mcp" /usr/local/bin/aditus-mcp
+    [[ -x "$ADITUS_DIR/target/release/aditus" ]] \
+      && install -m 755 "$ADITUS_DIR/target/release/aditus" /usr/local/bin/aditus \
+      || warn "aditus CLI binary missing — MCP plugin still usable"
+
+    install -d -o agentd -g agentd /var/lib/aditus
+    install -d -o agentd -g agentd /var/lib/aditus/store
+    install -d -o agentd -g agentd -m 700 /var/lib/aditus/secrets
+
+    install -d /etc/aditus
+    if [[ ! -f "$ADITUS_ENV" ]]; then
+      {
+        echo "# Aditus knobs — NEVER put ADITUS_TOKEN here."
+        echo "# HTTP Bearer lives in /etc/aditus/token (0600, serve uid), minted by"
+        echo "# first \`aditus serve\`. MCP self-loads this file and skips ADITUS_TOKEN."
+        echo "# ADITUS_ALLOW_PRIVATE=0"
+        echo "# ADITUS_ALLOW_SPEND=0"
+        echo "# ADITUS_SKILLSPECTOR=auto"
+      } > "$ADITUS_ENV"
+      ok "Aditus env seeded → $ADITUS_ENV (knobs only; no token)"
+    fi
+    chmod 640 "$ADITUS_ENV"; chown root:agentd "$ADITUS_ENV"
+    # Explicitly do not create /etc/aditus/token.
+    ok "aditus-mcp → /usr/local/bin/aditus-mcp (data: /var/lib/aditus)"
+    return 0
+  }
+
+  if aditus_provision; then
+    ADITUS_INSTALLED=true
+  else
+    warn "Aditus not installed — node runs without the third-party airlock; apexos-update retries"
+  fi
+fi
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 hdr "Configuration"
 
@@ -1785,6 +1868,27 @@ if $SONUS_ACTIVE && [[ -f /etc/agentd/plugins.toml ]] \
   ok "Sonus plugin registered in /etc/agentd/plugins.toml"
 fi
 
+# Enable the Aditus MCP plugin when the binary installed. Empty catalog is OK
+# (INSTALLED ≠ ACTIVE is per catalog *entry*). Same anchored-grep idempotency.
+# Never put ADITUS_TOKEN in this stanza.
+if $ADITUS_INSTALLED && [[ -f /etc/agentd/plugins.toml ]] \
+   && ! grep -qE '^[[:space:]]*id[[:space:]]*=[[:space:]]*"aditus"' /etc/agentd/plugins.toml; then
+  {
+    echo ""
+    echo "[[plugin]]"
+    echo 'id      = "aditus"'
+    echo 'cmd     = "/usr/local/bin/aditus-mcp"'
+    echo "args    = []"
+    echo 'restart = "always"'
+    echo "[plugin.env]"
+    echo 'ADITUS_DB       = "/var/lib/aditus/aditus.db"'
+    echo 'ADITUS_STORE    = "/var/lib/aditus/store"'
+    echo 'ADITUS_ENV_FILE = "/etc/aditus/env"'
+    echo 'RUST_LOG        = "warn"'
+  } >> /etc/agentd/plugins.toml
+  ok "Aditus plugin registered in /etc/agentd/plugins.toml"
+fi
+
 # ── policy-sync ───────────────────────────────────────────────────────────────
 # policy.toml is seed-if-absent (self-evolved rules must survive updates), which
 # meant a rule shipped AFTER a node's first install never reached it — the tool
@@ -1987,6 +2091,7 @@ write_install_conf() {
     echo "APEXOS_VOICE=$( $NO_VOICE && echo false || echo true )"
     echo "APEXOS_IMAGINARIUM=$( $NO_IMAGINARIUM && echo false || echo true )"
     echo "APEXOS_SONUS=$( $NO_SONUS && echo false || echo true )"
+    echo "APEXOS_ADITUS=$( $NO_ADITUS && echo false || echo true )"
     echo "APEXOS_UI_AS_ROOT=$UI_AS_ROOT"
   } > "$tmp"
   chmod 644 "$tmp"; chown root:root "$tmp"

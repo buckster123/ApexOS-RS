@@ -71,6 +71,9 @@ pub fn name_owner(name: &str) -> Option<NameOwner> {
     if SONUS.contains(&name) {
         return Some(NameOwner::Plugin("sonus"));
     }
+    if name.starts_with("aditus_") {
+        return Some(NameOwner::Plugin("aditus"));
+    }
     None
 }
 
@@ -94,7 +97,9 @@ pub fn claim_tool_name(
     }
     if let Some(owner) = registry.get(name) {
         if owner.0 != claimant {
-            return Err(ClaimError::Duplicate { owner: owner.0.clone() });
+            return Err(ClaimError::Duplicate {
+                owner: owner.0.clone(),
+            });
         }
     }
     Ok(())
@@ -109,8 +114,7 @@ pub fn stamps_agent_id(plugin_id: &str, tool: &str) -> bool {
 /// Workspace stamp applies to the tools family (fs + net + dev workers) and
 /// to any call whose reserved owner is that family.
 pub fn stamps_workspace(plugin_id: &str, tool: &str) -> bool {
-    is_tools_family(plugin_id)
-        || matches!(name_owner(tool), Some(NameOwner::ToolsFamily))
+    is_tools_family(plugin_id) || matches!(name_owner(tool), Some(NameOwner::ToolsFamily))
 }
 
 /// True when a reserved name is being invoked by someone other than its owner.
@@ -328,11 +332,7 @@ const IMAGINARIUM: &[&str] = &[
     "imaginarium_video_generate",
 ];
 
-const SONUS: &[&str] = &[
-    "check_status",
-    "download_track",
-    "generate_song",
-];
+const SONUS: &[&str] = &["check_status", "download_track", "generate_song"];
 
 #[cfg(test)]
 mod tests {
@@ -371,6 +371,12 @@ mod tests {
             Err(ClaimError::Reserved {
                 expected: "cerebro"
             })
+        );
+        assert!(claim_tool_name("aditus_search", "aditus", &empty()).is_ok());
+        assert!(claim_tool_name("aditus_call", "aditus", &empty()).is_ok());
+        assert_eq!(
+            claim_tool_name("aditus_search", "evil", &empty()),
+            Err(ClaimError::Reserved { expected: "aditus" })
         );
     }
 
