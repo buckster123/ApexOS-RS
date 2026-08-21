@@ -104,3 +104,23 @@ restart   = "always"
 # restart = "always"
 # [plugin.env]
 # RUST_LOG = "warn"
+
+# Aditus — third-party MCP/OpenAPI/skill airlock (github.com/buckster123/Aditus-RS)
+# OPT-IN (--aditus / TUI add-on / APEXOS_ADITUS=1). INSTALLED ≠ ACTIVE per catalog
+# entry: the plugin may register with an empty catalog (search/inspect still work);
+# an origin is not callable until the operator `allow`s then `enable`s it.
+# Knobs: /etc/aditus/env (0640 root:agentd). Upstream secrets: /var/lib/aditus/secrets.
+# HTTP token: /etc/aditus/token (0600, serve uid, NOT agentd-readable). Not here,
+# not in /etc/agentd/env, not extra_inherit. MCP self-loads the knobs file and
+# skips ADITUS_TOKEN even if stuffed. See docs/aditus.md.
+#
+# [[plugin]]
+# id      = "aditus"
+# cmd     = "/usr/local/bin/aditus-mcp"
+# args    = []
+# restart = "always"
+# [plugin.env]
+# ADITUS_DB       = "/var/lib/aditus/aditus.db"
+# ADITUS_STORE    = "/var/lib/aditus/store"
+# ADITUS_ENV_FILE = "/etc/aditus/env"
+# RUST_LOG        = "warn"

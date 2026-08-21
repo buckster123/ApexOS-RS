@@ -28,6 +28,7 @@ const NEVER: &[&str] = &[
     "APEXNET_PSK",
     "APEXNET_PSK_FILE",
     "EE_AGENTD_TOKEN",
+    "ADITUS_TOKEN",
 ];
 
 /// Non-secret keys every plugin may inherit from the parent if set.
@@ -229,6 +230,29 @@ mod tests {
         let env = plugin_child_env("weather", Some(&overlay), parent(&[]));
         assert!(!env.contains_key("AGENTD_TOKEN"));
         assert_eq!(env.get("WEATHER_API_KEY").map(String::as_str), Some("ok"));
+    }
+
+    #[test]
+    fn aditus_does_not_inherit_token_or_anthropic() {
+        let mut overlay = HashMap::new();
+        overlay.insert("ADITUS_TOKEN".into(), "stolen".into());
+        overlay.insert("ADITUS_DB".into(), "/var/lib/aditus/aditus.db".into());
+        let env = plugin_child_env(
+            "aditus",
+            Some(&overlay),
+            parent(&[
+                ("ADITUS_TOKEN", "from-parent"),
+                ("ANTHROPIC_API_KEY", "sk-ant"),
+                ("AGENTD_TOKEN", "node-secret"),
+            ]),
+        );
+        assert!(!env.contains_key("ADITUS_TOKEN"));
+        assert!(!env.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!env.contains_key("AGENTD_TOKEN"));
+        assert_eq!(
+            env.get("ADITUS_DB").map(String::as_str),
+            Some("/var/lib/aditus/aditus.db")
+        );
     }
 
     #[test]

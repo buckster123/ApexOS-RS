@@ -234,6 +234,7 @@ Load only the relevant doc when entering a subsystem.
 | `docs/imaginarium.md` | Image/video-gen node — provisioning, MCP proxy, key isolation |
 | `docs/xai-provider.md` | xAI/Grok as LLM backend — OAI path, keys vs imaginarium, reasoning_effort |
 | `docs/sonus.md` | Music-gen sibling — provisioning, no-daemon key isolation, python cutover |
+| `docs/aditus.md` | Third-party MCP/OpenAPI/skill airlock — opt-in plugin, two-phase allow/enable |
 | `docs/fabrica.md` | **Fabrica charter** — workboard→Fabrica, worker tier, Mandala Mode, code regime (LOCKED) |
 | `docs/fabrica-skill.md` | Conducting craft — batches, mandalas, the doctrine; the living-skill seed (M1a) |
 | `docs/imagine-studio.md` | Studio arc charter — video player, craft engine, slice ledger |

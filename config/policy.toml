@@ -254,6 +254,24 @@ mode = "suggest"
 "clone_voice_validate"    = "ask"
 "clone_voice_create"      = "ask"
 
+# Aditus (third-party MCP/OpenAPI/skill airlock, Aditus-RS sibling) -----------
+# One plugin, ten tools. Reads of the local catalog are allow. aditus_call is
+# allow so already-enabled catalog use does not prompt every call — Aditus
+# still denies unless allowed+enabled+!frozen, and OpenAPI mutating ops need
+# CLI `writes_enabled`. Mutating catalog tools stay ask even under suggest
+# (unknown→ask is the fallback; seed them so a future default-allow mode
+# cannot inherit silent adds). MCP has no allow tool. See docs/aditus.md.
+"aditus_search"    = "allow"
+"aditus_inspect"   = "allow"
+"aditus_list"      = "allow"
+"aditus_skill_get" = "allow"
+"aditus_call"      = "allow"
+"aditus_add"       = "ask"
+"aditus_scan"      = "ask"
+"aditus_enable"    = "ask"
+"aditus_disable"   = "ask"
+"aditus_revoke"    = "ask"
+
 # Cerebro plugin tools --------------------------------------------------------
 "remember"     = "allow"
 "recall"       = "allow"
