@@ -2,6 +2,7 @@ pub mod bus;
 pub mod connectivity;
 pub mod history;
 pub mod identity;
+pub mod session_gzip;
 pub mod session_index;
 pub mod transcript;
 pub use session_index::SessionIndex;

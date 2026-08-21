@@ -11,6 +11,7 @@ use axum::{
 };
 pub mod backend_config;
 pub mod history_config;
+pub mod session_rag_config;
 
 pub mod compute;
 
@@ -146,6 +147,10 @@ pub struct GatewayState {
     /// Per-session history window budget (rough tokens; 0 = trimming off) —
     /// live-tunable from Settings via /api/history, read by the router per turn.
     pub history_budget:        Arc<std::sync::atomic::AtomicUsize>,
+    /// Idle JSONL gzip TTL in days (`0` = off). Live-tunable via `/api/session-rag`.
+    pub session_idle_gzip_days: Arc<std::sync::atomic::AtomicU32>,
+    /// Vacuum must not auto-delete when true (`docs/session-rag.md` S3).
+    pub session_never_delete:   Arc<std::sync::atomic::AtomicBool>,
     /// Shared secret for /sensor-bridge WS connections. Empty = no auth
     /// (loopback bench only). A non-loopback bind refuses to start if empty.
     pub sensor_bridge_token:   Arc<String>,
@@ -443,6 +448,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/models",      get(get_models_handler))
         .route("/api/cache",       get(get_cache_handler))
         .route("/api/history",     get(get_history_handler))
+        .route("/api/session-rag", get(get_session_rag_handler))
         .route("/api/usage",       get(get_usage_handler))
         .route("/api/thermal/frame", get(thermal_frame_handler))
         .route("/api/backend",     get(get_backend_handler))
@@ -517,6 +523,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/api/model",       post(set_model_handler))
         .route("/api/cache",       post(set_cache_handler))
         .route("/api/history",     post(set_history_handler))
+        .route("/api/session-rag", post(set_session_rag_handler))
         .route("/api/backend",     post(set_backend_handler))
         .route("/api/compute/discover", get(compute_discover_handler))
         .route("/api/policy",         post(set_policy_handler))
@@ -1803,6 +1810,39 @@ async fn set_history_handler(
     state.history_budget.store(budget, Ordering::Relaxed);
     let persisted = history_config::persist(&history_config::HistoryConfig { budget });
     Json(serde_json::json!({ "ok": true, "budget": budget, "persisted": persisted }))
+}
+
+async fn get_session_rag_handler(State(state): State<GatewayState>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "idle_gzip_days": state.session_idle_gzip_days.load(Ordering::Relaxed),
+        "never_delete":   state.session_never_delete.load(Ordering::Relaxed),
+    }))
+}
+
+/// Live-tune + persist idle-gzip days and never-delete. Partial body is ok.
+async fn set_session_rag_handler(
+    State(state): State<GatewayState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Some(raw) = body["idle_gzip_days"].as_u64() {
+        state
+            .session_idle_gzip_days
+            .store(session_rag_config::sanitize_days(raw), Ordering::Relaxed);
+    }
+    if let Some(nd) = body["never_delete"].as_bool() {
+        state.session_never_delete.store(nd, Ordering::Relaxed);
+    }
+    let cfg = session_rag_config::SessionRagConfig {
+        idle_gzip_days: state.session_idle_gzip_days.load(Ordering::Relaxed),
+        never_delete:   state.session_never_delete.load(Ordering::Relaxed),
+    };
+    let persisted = session_rag_config::persist(&cfg);
+    Json(serde_json::json!({
+        "ok": true,
+        "idle_gzip_days": cfg.idle_gzip_days,
+        "never_delete": cfg.never_delete,
+        "persisted": persisted,
+    }))
 }
 
 /// Approximate Anthropic input/output price in $ per million tokens, by model family.

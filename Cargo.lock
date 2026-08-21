@@ -356,6 +356,7 @@ dependencies = [
  "apexos-protocol",
  "async-trait",
  "base64 0.22.1",
+ "flate2",
  "image",
  "rand 0.8.6",
  "rusqlite",

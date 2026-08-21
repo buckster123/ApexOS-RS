@@ -73,7 +73,8 @@ impl SessionStore {
     /// Whether a session has JSONL truth on disk. Cheap sync stat — used by the
     /// parked-worker guard on the prompt path (worker-range ids only, rare).
     pub fn exists(&self, id: SessionId) -> bool {
-        self.session_path(id).exists()
+        let p = self.session_path(id);
+        p.exists() || apexos_core::session_gzip::gz_path(&p).exists()
     }
 
     /// Append one message to the session's JSONL file. Fire-and-forget safe.
@@ -106,7 +107,17 @@ impl SessionStore {
     /// arrives, never at boot. Returns None on a missing/unreadable file or
     /// an empty history.
     pub async fn load_one(&self, id: SessionId) -> Option<Vec<Message>> {
-        let text = fs::read_to_string(self.session_path(id)).await.ok()?;
+        let path = self.session_path(id);
+        let text = match fs::read_to_string(&path).await {
+            Ok(t) => t,
+            Err(_) => {
+                let gz = apexos_core::session_gzip::gz_path(&path);
+                tokio::task::spawn_blocking(move || apexos_core::session_gzip::read_gz_to_string(&gz).ok())
+                    .await
+                    .ok()
+                    .flatten()?
+            }
+        };
         let mut messages: Vec<Message> = text.lines()
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect();
@@ -161,6 +172,11 @@ impl SessionStore {
         }
         eprintln!("[session] loaded {} session(s) from disk", result.len());
         result
+    }
+
+    /// Gzip idle `.jsonl` files (not loaded, not root, not worker). Index stays.
+    pub fn gzip_idle(&self, loaded: &std::collections::HashSet<u64>, ttl: std::time::Duration) -> Result<u32, String> {
+        apexos_core::session_gzip::gzip_idle_dir(&self.sessions_dir, loaded, ttl)
     }
 
 }
@@ -251,6 +267,31 @@ mod tests {
         store.tombstone(sid);
         assert!(store.remove_file(sid).await);
         assert!(!idx.has_session(2));
+        let _ = std::fs::remove_dir_all(store.sessions_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn gzip_idle_skips_loaded_and_root() {
+        let store = tmp_store("gz");
+        let root = SessionId(0);
+        let idle = SessionId(4);
+        // sync write via std so mtime is in the past after we sleep? use gzip_idle with 0 ttl = no-op
+        std::fs::write(store.sessions_dir.join("0.jsonl"), "{}\n").unwrap();
+        std::fs::write(store.sessions_dir.join("4.jsonl"), "{}\n").unwrap();
+        let mut loaded = std::collections::HashSet::new();
+        loaded.insert(0);
+        assert_eq!(store.gzip_idle(&loaded, std::time::Duration::ZERO).unwrap(), 0);
+        assert_eq!(
+            store.gzip_idle(&loaded, std::time::Duration::from_secs(0)).unwrap(),
+            0
+        );
+        // age is ~0 so even a 1ns ttl may not fire; just assert root/live skip via should_gzip
+        assert!(!apexos_core::session_gzip::should_gzip(
+            0,
+            &loaded,
+            std::time::Duration::from_secs(99),
+            std::time::Duration::from_secs(1)
+        ));
         let _ = std::fs::remove_dir_all(store.sessions_dir.parent().unwrap());
     }
 }

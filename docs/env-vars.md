@@ -79,6 +79,9 @@
 | `AGENTD_TOOL_RESULT_TIMEOUT_SECS` | `1800` | ceiling on waiting for a tool result — read independently by the turn engine and the MCP transport (one knob, two clocks) |
 | `AGENTD_HISTORY_TOKEN_BUDGET` | `120000` | per-session in-memory history window (rough tokens, per-block-type calibrated ±20%). Soft ceiling with hysteresis: trim fires past 1.2×, cuts to 0.75×, oldest whole turns drop with an honest trim marker at the seam (`session_search` retrieves them from the on-disk JSONL — `docs/session-rag.md`). `0` disables trimming. Lower it for small-context local models. **Seed-only since `#328`** — the Settings HISTORY WINDOW control / `POST /api/history` persists a choice that wins on restart |
 | `AGENTD_HISTORY_CONFIG` | `/var/lib/agentd/history_config.json` | the persisted history-budget selection (file-wins-on-restart; delete to return to env control). `GET /api/history` also reports per-session "window in use" estimates |
+| `AGENTD_SESSION_IDLE_GZIP_DAYS` | `0` | days of mtime-idle before a **non-loaded** session JSONL is gzipped (`docs/session-rag.md` S3). `0` = off. Root session 0, workers, and live windows are never gzipped. **Seed-only** — `GET`/`POST /api/session-rag` persists a choice that wins on restart |
+| `AGENTD_SESSION_NEVER_DELETE` | `1` | vacuum must not auto-delete transcripts. Gzip is not deletion. File-wins via `/api/session-rag` `{never_delete}` |
+| `AGENTD_SESSION_RAG_CONFIG` | `/var/lib/agentd/session_rag_config.json` | persisted idle-gzip / never-delete selection |
 | `AGENTD_AMBIENT_GAP_SECS` | `600` | idle gap before the live clock (Now + uptime) is re-injected into a turn — temporal grounding without per-message noise |
 | `VISION_MAX_EDGE` | `1024` | longest-edge px cap for images entering model context (the token-bomb shim), hard-clamped 128–4096 |
 

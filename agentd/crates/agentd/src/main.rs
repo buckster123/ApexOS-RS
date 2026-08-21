@@ -508,6 +508,15 @@ async fn main() -> anyhow::Result<()> {
             apexos_gateway::history_config::load_persisted().as_ref(),
         ),
     ));
+    let rag_boot = apexos_gateway::session_rag_config::resolve_boot(
+        apexos_gateway::session_rag_config::SessionRagConfig {
+            idle_gzip_days: apexos_gateway::session_rag_config::env_days(),
+            never_delete: apexos_gateway::session_rag_config::env_never_delete(),
+        },
+        apexos_gateway::session_rag_config::load_persisted().as_ref(),
+    );
+    let session_idle_gzip_days = Arc::new(std::sync::atomic::AtomicU32::new(rag_boot.idle_gzip_days));
+    let session_never_delete = Arc::new(std::sync::atomic::AtomicBool::new(rag_boot.never_delete));
 
     eprintln!("[agentd] serving UI from {}", ui_dir.display());
     let gw_state = GatewayState {
@@ -527,6 +536,8 @@ async fn main() -> anyhow::Result<()> {
         histories:            Arc::clone(&histories),
         next_session_id:      Arc::clone(&next_session_id),
         history_budget:       Arc::clone(&history_budget),
+        session_idle_gzip_days: Arc::clone(&session_idle_gzip_days),
+        session_never_delete:   Arc::clone(&session_never_delete),
         sensor_bridge_token:  Arc::clone(&sensor_bridge_token),
         // ApexNET P5c: the radio lane's seam. Its own token, like the sensor
         // bridge — a bridge that can inject mesh frames is a different trust
@@ -603,6 +614,32 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("[gateway] error: {e}");
         }
     });
+    {
+        let days = Arc::clone(&session_idle_gzip_days);
+        let hist = Arc::clone(&histories);
+        let store = Arc::clone(&session_store);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                let d = days.load(Ordering::Relaxed);
+                if d == 0 {
+                    continue;
+                }
+                let loaded: std::collections::HashSet<u64> = {
+                    let g = hist.lock().await;
+                    g.keys().map(|s| s.0).collect()
+                };
+                let ttl = std::time::Duration::from_secs(d as u64 * 86_400);
+                let store = Arc::clone(&store);
+                match tokio::task::spawn_blocking(move || store.gzip_idle(&loaded, ttl)).await {
+                    Ok(Ok(n)) if n > 0 => eprintln!("[session] gzipped {n} idle transcript(s)"),
+                    Ok(Err(e)) => eprintln!("[session] idle gzip: {e}"),
+                    _ => {}
+                }
+            }
+        });
+    }
 
     // Plugin configs
     let plugins_path = PathBuf::from(
