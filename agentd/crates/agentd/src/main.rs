@@ -629,6 +629,7 @@ async fn main() -> anyhow::Result<()> {
     supervisor.set_worker_tx(worker_tx);
     supervisor.set_goal_yolo_sessions(goal_yolo.clone());
     supervisor.set_events_dir(log_dir.clone());
+    supervisor.set_sessions_dir(log_dir.join("sessions"));
     supervisor.set_vast_state(vast_state.clone());
     // Per-agent souls (3b-2): read_soul_md resolves a bound agent's own soul_file.
     supervisor.set_identities(Arc::clone(&identities));
@@ -2743,6 +2744,8 @@ async fn gather_tools(
     tools.push(mesh_recall_spec());
     tools.push(mesh_capabilities_spec());
     tools.push(query_event_log_spec());
+    tools.push(session_search_spec());
+    tools.push(session_list_spec());
     tools.push(list_mesh_peers_spec());
     tools.push(bootstrap_node_spec());
     tools.push(vast_list_recipes_spec());
@@ -3700,6 +3703,48 @@ fn convene_council_spec() -> ToolSpec {
             },
             "required": ["topic", "agents"]
         }),
+    }
+}
+
+fn session_search_spec() -> ToolSpec {
+    ToolSpec {
+        name: "session_search".into(),
+        description: "Search a session's FULL on-disk transcript (not just the trimmed \
+                      working window). Keyword AND, case-insensitive. Default session_id is \
+                      THIS session — that is how you retrieve turns the context-window notice \
+                      dropped. Pass session_id to search another visible thread (node agent \
+                      only; guests can only search their own). Returns the most recent matching \
+                      snippets. This is verbatim retrieve, not Cerebro memory — use recall / \
+                      session_recall for distilled knowledge.".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keywords to find (whitespace-separated; all terms must match)."
+                },
+                "session_id": {
+                    "type": "integer",
+                    "description": "Transcript to search. Omit for this session."
+                },
+                "max": {
+                    "type": "integer",
+                    "description": "Max hits (default 20, max 50). Most recent last."
+                }
+            },
+            "required": ["query"]
+        }),
+    }
+}
+
+fn session_list_spec() -> ToolSpec {
+    ToolSpec {
+        name: "session_list".into(),
+        description: "List on-disk chat sessions you may search with session_search \
+                      (id, message count, preview). The node agent sees every normal \
+                      session; a bound guest sees only this session. Does not list \
+                      workers, spawns, or archived transcripts.".into(),
+        input_schema: serde_json::json!({ "type": "object", "properties": {} }),
     }
 }
 

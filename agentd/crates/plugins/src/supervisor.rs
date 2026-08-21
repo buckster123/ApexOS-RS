@@ -287,6 +287,9 @@ pub struct Supervisor {
     soul_arc:          Option<Arc<RwLock<String>>>,
     /// Path to the events log directory so query_event_log can read JSONL files.
     events_dir:        Option<PathBuf>,
+    /// Session JSONL dir (`<log>/sessions`) so session_search / session_list
+    /// can read transcripts (`docs/session-rag.md`).
+    sessions_dir:      Option<PathBuf>,
     /// Vast.ai instance/tunnel state — shared with gateway for API routes.
     vast_state:        Option<VastState>,
     /// Per-session agent bindings (multi-agent runtime). The Cerebro stamp
@@ -341,6 +344,7 @@ impl Supervisor {
             worker_tx:         None,
             goal_yolo:         None,
             events_dir:        None,
+            sessions_dir:      None,
             vast_state:        None,
             session_bindings,
             mesh_hops,
@@ -436,6 +440,10 @@ impl Supervisor {
 
     pub fn set_events_dir(&mut self, dir: PathBuf) {
         self.events_dir = Some(dir);
+    }
+
+    pub fn set_sessions_dir(&mut self, dir: PathBuf) {
+        self.sessions_dir = Some(dir);
     }
 
     pub fn set_vast_state(&mut self, state: VastState) {
@@ -1236,6 +1244,43 @@ impl Supervisor {
                 bus.emit(Event::ToolResult {
                     session, call: call_id,
                     output: ToolOutput { ok: true, content: serde_json::json!(text) },
+                }).await;
+            });
+            return;
+        }
+
+        // Virtual tools: session_search / session_list — keyword retrieve over
+        // on-disk session JSONL (docs/session-rag.md S1). The RAM window is
+        // trimmed; this is the agent's path into the file that still holds it.
+        if matches!(call.tool.as_str(), "session_search" | "session_list") {
+            let call_id = call.id;
+            let tool = call.tool.clone();
+            let args = call.args.clone();
+            let bus = self.bus.clone();
+            let sessions_dir = self.sessions_dir.clone();
+            let bindings = self.session_bindings.clone();
+            tokio::spawn(async move {
+                let Some(dir) = sessions_dir else {
+                    bus.emit(Event::ToolResult {
+                        session, call: call_id,
+                        output: ToolOutput { ok: false, content: serde_json::json!("sessions_dir not configured") },
+                    }).await;
+                    return;
+                };
+                let caller_is_node = apexos_core::resolve_agent_id(&bindings, session)
+                    == apexos_core::node_agent_id();
+                let result = if tool == "session_list" {
+                    handle_session_list(&dir, session.0, caller_is_node).await
+                } else {
+                    handle_session_search(&dir, session.0, caller_is_node, &args).await
+                };
+                let (ok, text) = match result {
+                    Ok(t) => (true, t),
+                    Err(e) => (false, e),
+                };
+                bus.emit(Event::ToolResult {
+                    session, call: call_id,
+                    output: ToolOutput { ok, content: serde_json::json!(text) },
                 }).await;
             });
             return;
@@ -2571,6 +2616,81 @@ fn should_restart(policy: &RestartPolicy, exited_success: bool) -> bool {
         RestartPolicy::OnFailure => !exited_success,
         RestartPolicy::Never     => false,
     }
+}
+
+async fn handle_session_search(
+    dir: &PathBuf,
+    caller: u64,
+    caller_is_node: bool,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let query = args["query"].as_str().unwrap_or("").trim();
+    if query.is_empty() {
+        return Err("session_search: `query` is required".into());
+    }
+    let target = args["session_id"].as_u64().unwrap_or(caller);
+    apexos_core::transcript::target_allowed(caller, target, caller_is_node)
+        .map_err(|e| e.to_string())?;
+    let max = apexos_core::transcript::clamp_max(args["max"].as_u64());
+    let path = dir.join(format!("{target}.jsonl"));
+    let q = query.to_string();
+    let hits = tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&path)
+            .map_err(|e| format!("session {target} not found ({e})"))?;
+        let reader = std::io::BufReader::new(file);
+        Ok::<_, String>(apexos_core::transcript::search_transcript(reader, &q, max))
+    })
+    .await
+    .map_err(|e| format!("session_search join: {e}"))??;
+    Ok(apexos_core::transcript::format_hits(target, &hits, query))
+}
+
+async fn handle_session_list(
+    dir: &PathBuf,
+    caller: u64,
+    caller_is_node: bool,
+) -> Result<String, String> {
+    let mut ids: Vec<u64> = Vec::new();
+    let mut rd = tokio::fs::read_dir(dir)
+        .await
+        .map_err(|e| format!("sessions dir: {e}"))?;
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(id) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse().ok())
+        else {
+            continue;
+        };
+        if apexos_core::transcript::target_allowed(caller, id, caller_is_node).is_ok() {
+            ids.push(id);
+        }
+    }
+    ids.sort_unstable();
+    let mut rows = Vec::new();
+    for id in ids {
+        let path = dir.join(format!("{id}.jsonl"));
+        let (count, preview) = tokio::task::spawn_blocking(move || {
+            match std::fs::File::open(&path) {
+                Ok(f) => apexos_core::transcript::jsonl_count_and_preview(
+                    std::io::BufReader::new(f),
+                    80,
+                ),
+                Err(_) => (0, String::new()),
+            }
+        })
+        .await
+        .unwrap_or((0, String::new()));
+        if count == 0 {
+            continue;
+        }
+        rows.push((id, count, preview));
+    }
+    Ok(apexos_core::transcript::format_list(&rows))
 }
 
 /// Convert a raw event JSON object into a concise human-readable sentence.

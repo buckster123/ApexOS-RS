@@ -165,6 +165,8 @@ const VIRTUAL: &[&str] = &[
     "schedule_task",
     "schedule_wakeup",
     "send_to_agent",
+    "session_list",
+    "session_search",
     "soul_rehearse",
     "task_fanout",
     "vast_destroy",

@@ -277,6 +277,11 @@ mode = "suggest"
 # flow on an approval that never resolves. read_soul_md is the agent's documented
 # pre-flight before any soul edit, so it MUST be allow. propose/rollback are real
 # self-modifies → ask in suggest mode (the soul: "in suggest mode, André reviews").
+# Session RAG (docs/session-rag.md S1) — verbatim retrieve over on-disk JSONL.
+# The trim seam names session_search; unknown→Ask would hide the retrieve path
+# the marker points at. Read-only, identity-gated in the supervisor.
+"session_search"     = "allow"
+"session_list"       = "allow"
 "read_soul_md"       = "allow"
 "propose_evolution"  = "ask"
 "rollback_evolution" = "ask"
