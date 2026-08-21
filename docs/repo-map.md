@@ -197,7 +197,7 @@ supervisor's worker channel), evolution-applier, store writer, scheduler/council
 | Edit the **browser / PWA UI** | `web/` (app.js, index.html, style.css, sw.js) — a NEW asset filename must also be added to the gateway `static_handler` whitelist (`gateway/src/lib.rs:799`) |
 | Change **session history persistence** | `agentd/crates/agentd/src/session_store.rs` (root sessions) |
 | Change **history trimming / the window budget** | trim algorithm in `agentd/crates/core/src/history.rs` (`trim_history` :100); the persisted budget knob (`/api/history`, Settings) in `agentd/crates/gateway/src/history_config.rs` |
-| Change **session transcript search** (`session_search` / `session_list`) | pure matcher + identity gate in `agentd/crates/core/src/transcript.rs`; specs in `agentd/src/main.rs`; intercept in `supervisor.rs`; charter `docs/session-rag.md` |
+| Change **session transcript search** (`session_search` / `session_list`) | matcher + identity gate in `agentd/crates/core/src/transcript.rs`; FTS5 overlay in `session_index.rs`; `SessionStore` appends into the index; specs in `agentd/src/main.rs`; intercept in `supervisor.rs`; charter `docs/session-rag.md` |
 | Change the **event log** format | `agentd/crates/store/src/lib.rs` (`run_log_writer`) |
 | Edit the **chat view** | `ui-slint/src/ui/components/chat_view.slint` |
 | Edit a **tool card / approval UI** | `ui-slint/src/ui/components/tool_card.slint` |

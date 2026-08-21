@@ -246,6 +246,25 @@ async fn main() -> anyhow::Result<()> {
     // Session store — init early so histories and next_session_id are ready for GatewayState.
     let session_store = Arc::new(SessionStore::new(&log_dir));
     session_store.init().await?;
+    let session_index = match apexos_core::SessionIndex::open(
+        session_store.sessions_dir.join("index.sqlite"),
+    ) {
+        Ok(idx) => {
+            session_store.set_index(idx.clone());
+            let dir = session_store.sessions_dir.clone();
+            let idx2 = idx.clone();
+            match tokio::task::spawn_blocking(move || idx2.catch_up_dir(&dir)).await {
+                Ok(Ok(n)) => eprintln!("[session] FTS5 catch-up indexed {n} messages"),
+                Ok(Err(e)) => eprintln!("[session] FTS5 catch-up failed: {e} — session_search will scan JSONL"),
+                Err(e) => eprintln!("[session] FTS5 catch-up join: {e}"),
+            }
+            Some(idx)
+        }
+        Err(e) => {
+            eprintln!("[session] FTS5 index open failed ({e}) — session_search will scan JSONL");
+            None
+        }
+    };
     let initial_histories = session_store.load_all().await;
 
     // Mesh a2a per-peer session map (peer node_id → SessionId on this node).
@@ -630,6 +649,9 @@ async fn main() -> anyhow::Result<()> {
     supervisor.set_goal_yolo_sessions(goal_yolo.clone());
     supervisor.set_events_dir(log_dir.clone());
     supervisor.set_sessions_dir(log_dir.join("sessions"));
+    if let Some(idx) = session_index {
+        supervisor.set_session_index(idx);
+    }
     supervisor.set_vast_state(vast_state.clone());
     // Per-agent souls (3b-2): read_soul_md resolves a bound agent's own soul_file.
     supervisor.set_identities(Arc::clone(&identities));

@@ -84,6 +84,32 @@ pub fn search_transcript<R: BufRead>(
     hits.into_iter().collect()
 }
 
+/// FTS5 MATCH string: each term quoted so operators in the query are literals.
+/// Empty / whitespace-only → `None` (do not MATCH).
+pub fn fts_match_query(query: &str) -> Option<String> {
+    let terms = query_terms(query);
+    if terms.is_empty() {
+        return None;
+    }
+    Some(
+        terms
+            .into_iter()
+            .map(|w| format!("\"{}\"", w.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// Role + searchable body for a message (images/thinking omitted).
+pub fn searchable_text(msg: &Message) -> (&'static str, String) {
+    searchable(msg)
+}
+
+/// Clip `haystack` around the first query term for a hit snippet.
+pub fn clip_snippet(haystack: &str, terms: &[String]) -> String {
+    snippet(haystack, terms)
+}
+
 /// Lowercased non-empty whitespace tokens.
 pub fn query_terms(query: &str) -> Vec<String> {
     query
@@ -276,6 +302,15 @@ mod tests {
     fn empty_query_scans_nothing() {
         let hits = search_transcript(jsonl(&[user("hello")]), "   ", 20);
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn fts_match_query_quotes_each_term() {
+        assert_eq!(
+            fts_match_query("USB OR eject").as_deref(),
+            Some("\"usb\" \"or\" \"eject\"")
+        );
+        assert!(fts_match_query("\t").is_none());
     }
 
     #[test]

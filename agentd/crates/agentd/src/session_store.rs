@@ -1,4 +1,4 @@
-use apexos_core::{Message, SessionId};
+use apexos_core::{Message, SessionId, SessionIndex};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -9,6 +9,9 @@ pub struct SessionStore {
     /// Sessions retired by delete/archive (SA-8). In-memory: a late
     /// `append`/`histories.insert` must not recreate a removed JSONL.
     tombstones: std::sync::Mutex<HashSet<u64>>,
+    /// Derived FTS5 overlay (`docs/session-rag.md` S2). Best-effort: a failed
+    /// index write never blocks the JSONL append.
+    index: std::sync::Mutex<Option<SessionIndex>>,
 }
 
 impl SessionStore {
@@ -16,7 +19,16 @@ impl SessionStore {
         Self {
             sessions_dir: log_dir.join("sessions"),
             tombstones: std::sync::Mutex::new(HashSet::new()),
+            index: std::sync::Mutex::new(None),
         }
+    }
+
+    pub fn set_index(&self, index: SessionIndex) {
+        *self.index.lock().unwrap_or_else(|e| e.into_inner()) = Some(index);
+    }
+
+    fn index(&self) -> Option<SessionIndex> {
+        self.index.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Mark `id` retired. Subsequent [`append`] is a no-op; callers must also
@@ -31,7 +43,13 @@ impl SessionStore {
 
     /// Delete the live JSONL. Missing file → false (same as today's handler).
     pub async fn remove_file(&self, id: SessionId) -> bool {
-        fs::remove_file(self.session_path(id)).await.is_ok()
+        let ok = fs::remove_file(self.session_path(id)).await.is_ok();
+        if ok {
+            if let Some(idx) = self.index() {
+                let _ = idx.drop_session(id.0);
+            }
+        }
+        ok
     }
 
     /// Move the live JSONL into `sessions/archive/`. Recoverable.
@@ -71,7 +89,13 @@ impl SessionStore {
         if let Ok(mut file) = fs::OpenOptions::new()
             .create(true).append(true).open(self.session_path(session_id)).await
         {
-            let _ = file.write_all(line.as_bytes()).await;
+            if file.write_all(line.as_bytes()).await.is_ok() {
+                if let Some(idx) = self.index() {
+                    let msg = msg.clone();
+                    let sid = session_id.0;
+                    let _ = tokio::task::spawn_blocking(move || idx.insert(sid, &msg)).await;
+                }
+            }
         }
     }
 
@@ -210,6 +234,23 @@ mod tests {
         store.append(sid, &user_msg("late")).await;
         assert!(!store.exists(sid));
         assert!(store.sessions_dir.join("archive").join("3.jsonl").exists());
+        let _ = std::fs::remove_dir_all(store.sessions_dir.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn append_feeds_fts5_and_delete_drops_it() {
+        let store = tmp_store("fts");
+        let idx = apexos_core::SessionIndex::open(store.sessions_dir.join("index.sqlite")).unwrap();
+        store.set_index(idx.clone());
+        let sid = SessionId(2);
+        store.append(sid, &user_msg("hello needle")).await;
+        store.append(sid, &user_msg("unrelated")).await;
+        let hits = idx.search(2, "needle", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].index, 0);
+        store.tombstone(sid);
+        assert!(store.remove_file(sid).await);
+        assert!(!idx.has_session(2));
         let _ = std::fs::remove_dir_all(store.sessions_dir.parent().unwrap());
     }
 }
